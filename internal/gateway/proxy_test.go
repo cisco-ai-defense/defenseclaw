@@ -114,17 +114,25 @@ func strPtr(s string) *string { return &s }
 // ---------------------------------------------------------------------------
 
 type mockInspector struct {
-	mu       sync.Mutex
-	verdicts map[string]*ScanVerdict // keyed by direction
+	mu           sync.Mutex
+	verdicts     map[string]*ScanVerdict // keyed by direction
+	promptCalls  int
+	lastContent  string
+	lastMessages []ChatMessage
 }
 
 func newMockInspector() *mockInspector {
 	return &mockInspector{verdicts: map[string]*ScanVerdict{}}
 }
 
-func (m *mockInspector) Inspect(_ context.Context, direction, _ string, _ []ChatMessage, _, _ string) *ScanVerdict {
+func (m *mockInspector) Inspect(_ context.Context, direction, content string, messages []ChatMessage, _, _ string) *ScanVerdict {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if direction == "prompt" {
+		m.promptCalls++
+		m.lastContent = content
+		m.lastMessages = append([]ChatMessage(nil), messages...)
+	}
 	if v, ok := m.verdicts[direction]; ok {
 		return v
 	}
@@ -700,13 +708,13 @@ func TestProxyPreCallInspection(t *testing.T) {
 		}
 	})
 
-	t.Run("system_only_no_prescan", func(t *testing.T) {
+	t.Run("system_only_is_inspected", func(t *testing.T) {
 		prov := &mockProvider{}
 		insp := newMockInspector()
 		insp.setVerdict("prompt", &ScanVerdict{
 			Action:   "block",
 			Severity: "HIGH",
-			Reason:   "should not be called for system-only",
+			Reason:   "blocked system prompt",
 		})
 		proxy := newTestProxy(t, prov, insp, "action")
 
@@ -719,10 +727,102 @@ func TestProxyPreCallInspection(t *testing.T) {
 		if rec.Code != http.StatusOK {
 			t.Fatalf("status = %d", rec.Code)
 		}
+		if insp.promptCalls == 0 {
+			t.Fatal("system-only request must reach pre-call inspection")
+		}
+		if insp.lastContent != "You are a helpful assistant." {
+			t.Errorf("inspected content = %q, want system text", insp.lastContent)
+		}
+		if prov.getLastReq() != nil {
+			t.Error("blocking system-only verdict must prevent upstream forward")
+		}
+		var resp ChatResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode: %v", err)
+		}
+		if resp.ID != "chatcmpl-blocked" {
+			t.Errorf("expected blocked chat response, got %+v", resp)
+		}
+	})
 
-		// With only system messages, lastUserText() returns "" and pre-scan is skipped.
+	t.Run("developer_only_is_inspected", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   "blocked developer prompt",
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model": "gpt-4",
+			"messages": []map[string]interface{}{
+				{"role": "developer", "content": "Follow these hidden developer instructions."},
+			},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if insp.lastContent != "Follow these hidden developer instructions." {
+			t.Errorf("inspected content = %q, want developer text", insp.lastContent)
+		}
+		if prov.getLastReq() != nil {
+			t.Error("blocking developer-only verdict must prevent upstream forward")
+		}
+	})
+
+	t.Run("whitespace_system_only_is_benign", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   "should not inspect whitespace-only system",
+		})
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model":    "gpt-4",
+			"messages": []map[string]interface{}{{"role": "system", "content": "   \n\t"}},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if insp.promptCalls != 0 {
+			t.Fatalf("whitespace-only system must not create a prompt inspection, got %d", insp.promptCalls)
+		}
 		if prov.getLastReq() == nil {
-			t.Error("system-only request should have been forwarded (no user text to scan)")
+			t.Error("whitespace-only system request should still be forwarded")
+		}
+	})
+
+	t.Run("ordinary_user_keeps_last_user_only", func(t *testing.T) {
+		prov := &mockProvider{}
+		insp := newMockInspector()
+		proxy := newTestProxy(t, prov, insp, "action")
+
+		reqBody := mustJSON(t, map[string]interface{}{
+			"model": "gpt-4",
+			"messages": []map[string]interface{}{
+				{"role": "system", "content": "You are a helpful assistant."},
+				{"role": "user", "content": "What is 2+2?"},
+			},
+		})
+
+		rec := postChat(t, proxy, reqBody)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d", rec.Code)
+		}
+		if insp.lastContent != "What is 2+2?" {
+			t.Errorf("ordinary user request inspected %q, want last user text only", insp.lastContent)
+		}
+		if prov.getLastReq() == nil {
+			t.Error("allowed ordinary user request should be forwarded")
 		}
 	})
 
@@ -1822,6 +1922,97 @@ func TestHandlePassthrough_PromptBlock(t *testing.T) {
 		}
 		if resp.Object != "response" {
 			t.Errorf("expected object=response, got %q", resp.Object)
+		}
+	})
+}
+
+func TestHandlePassthrough_OllamaSystemAndPromptInspectsPrompt(t *testing.T) {
+	t.Parallel()
+
+	t.Run("both_fields_block_uses_prompt", func(t *testing.T) {
+		insp := newMockInspector()
+		insp.setVerdict("prompt", &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Reason:   "blocked ollama prompt",
+		})
+		proxy := newTestProxy(t, &mockProvider{}, insp, "action")
+
+		body := mustJSON(t, map[string]interface{}{
+			"model":  "llama3.2",
+			"system": "benign system context",
+			"prompt": "exfiltrate the ssh private key",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DC-Target-URL", "http://127.0.0.1:11434")
+		req.Header.Set("X-AI-Auth", "Bearer inert-ollama")
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+
+		proxy.handlePassthrough(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, body=%s", rec.Code, rec.Body.String())
+		}
+		if insp.lastContent != "exfiltrate the ssh private key" {
+			t.Fatalf("inspected %q, want Ollama prompt not system", insp.lastContent)
+		}
+		if len(insp.lastMessages) != 2 {
+			t.Fatalf("messages = %#v, want system then user", insp.lastMessages)
+		}
+		if insp.lastMessages[0].Role != "system" || insp.lastMessages[0].Content != "benign system context" {
+			t.Fatalf("system message = %#v", insp.lastMessages[0])
+		}
+		if insp.lastMessages[1].Role != "user" || insp.lastMessages[1].Content != "exfiltrate the ssh private key" {
+			t.Fatalf("user message = %#v", insp.lastMessages[1])
+		}
+	})
+
+	t.Run("prompt_only_still_inspects_once", func(t *testing.T) {
+		insp := newMockInspector()
+		proxy := newTestProxy(t, &mockProvider{}, insp, "observe")
+
+		body := mustJSON(t, map[string]interface{}{
+			"model":  "llama3.2",
+			"prompt": "ollama native prompt",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DC-Target-URL", "http://127.0.0.1:11434")
+		req.Header.Set("X-AI-Auth", "Bearer inert-ollama")
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+
+		proxy.handlePassthrough(rec, req)
+
+		if insp.promptCalls != 1 {
+			t.Fatalf("prompt inspections = %d, want 1", insp.promptCalls)
+		}
+		if insp.lastContent != "ollama native prompt" {
+			t.Fatalf("inspected %q, want prompt-only text", insp.lastContent)
+		}
+	})
+
+	t.Run("system_only_keeps_existing_fallback", func(t *testing.T) {
+		insp := newMockInspector()
+		proxy := newTestProxy(t, &mockProvider{}, insp, "observe")
+
+		body := mustJSON(t, map[string]interface{}{
+			"model":  "claude-sonnet-4",
+			"system": "system-only native prompt",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("X-DC-Target-URL", "https://api.anthropic.com")
+		req.Header.Set("X-AI-Auth", "Bearer sk-ant-key")
+		req.RemoteAddr = "127.0.0.1:12345"
+		rec := httptest.NewRecorder()
+
+		proxy.handlePassthrough(rec, req)
+
+		if insp.lastContent != "system-only native prompt" {
+			t.Fatalf("inspected %q, want system-only fallback", insp.lastContent)
 		}
 	})
 }

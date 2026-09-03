@@ -2432,6 +2432,34 @@ func lastUserText(messages []ChatMessage) string {
 	return ""
 }
 
+// promptSideInstructionText joins non-whitespace system and developer
+// turns. Used only when lastUserText is empty so a structured
+// system-only or developer-only request still reaches pre-call
+// inspection. Assistant and tool turns are excluded so completion-side
+// history does not become a prompt scan.
+func promptSideInstructionText(messages []ChatMessage) string {
+	var parts []string
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system", "developer":
+			if strings.TrimSpace(msg.Content) == "" {
+				continue
+			}
+			parts = append(parts, msg.Content)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// promptInspectText is the pre-call inspection source: the latest user
+// turn when present, otherwise prompt-side system/developer text.
+func promptInspectText(messages []ChatMessage) string {
+	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
+		return text
+	}
+	return promptSideInstructionText(messages)
+}
+
 func promptInspectionText(userText string) string {
 	return stripOpenClawUntrustedEnvelope(userText)
 }
