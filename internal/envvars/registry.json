@@ -1062,7 +1062,8 @@
         {"location": "internal/managed/managed.go", "description": "Resolves the protected-target authorization path"},
         {"location": "internal/cli/enterprise_hooks.go", "description": "Privileged guardian writes successful protected targets"},
         {"location": "internal/gateway/sidecar.go", "description": "Managed health verifies connector coverage before advertising enforcement"},
-        {"location": "cli/defenseclaw/rotate_token_guardian.py", "description": "Managed rotate-token coordinator locates the current-attestation ledger"}
+        {"location": "cli/defenseclaw/rotate_token_guardian.py", "description": "Managed rotate-token coordinator locates the current-attestation ledger"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Passes the resolved authorization directory into guardian rotate children"}
       ],
       "since": "0.8.0",
       "security_note": "Privileged repair authorization — must remain root/admin-owned and non-writable by the DefenseClaw service account."
@@ -1070,13 +1071,14 @@
     {
       "name": "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST",
       "category": "runtime_path",
-      "purpose": "Select the administrator-owned hook-guardian targets.yaml used by managed Linux/macOS token rotation to bind the enabled target roster before stop(A).",
-      "default": "/etc/defenseclaw/hook-guardian/targets.yaml",
+      "purpose": "Select the administrator-owned hook-guardian targets.yaml used by managed Linux/macOS token rotation to bind the enabled target roster before stop(A). When unset, the coordinator uses the packaged platform layout rather than exporting this variable.",
+      "default": "Linux /etc/defenseclaw/hook-guardian/targets.yaml; macOS /opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml",
       "accepted_values": ["any-absolute-admin-owned-path", "unset"],
       "security_impact": "high",
       "surface_in_doctor": false,
       "consumers": [
-        {"location": "cli/defenseclaw/rotate_token_guardian.py", "description": "Managed rotate-token coordinator discovers the trusted enabled-target roster"}
+        {"location": "cli/defenseclaw/rotate_token_guardian.py", "description": "Managed rotate-token coordinator discovers the trusted enabled-target roster"},
+        {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Passes the bound manifest path into guardian rotate children"}
       ],
       "since": "0.8.0",
       "security_note": "Administrator-owned roster — the path must be an absolute regular file. A substituted or world-writable manifest would let an untrusted writer change which user homes receive generation B."

@@ -10,12 +10,15 @@ from types import SimpleNamespace
 from unittest import mock
 
 import click
-
 from defenseclaw.rotate_token_guardian import (
+    GUARDIAN_AUTH_DIR_ENV,
+    GUARDIAN_MANIFEST_ENV,
     GuardianRotationPlan,
     GuardianRotationTarget,
     assert_current_attestations,
+    assert_guardian_idle,
     bind_guardian_roster,
+    default_guardian_manifest_path,
     expected_fingerprints_payload,
     parse_guardian_rotate_response,
     require_guardian_participant,
@@ -35,7 +38,68 @@ def _plan() -> GuardianRotationPlan:
     )
 
 
+def _clear_guardian_env() -> None:
+    for name in (GUARDIAN_AUTH_DIR_ENV, GUARDIAN_MANIFEST_ENV):
+        os.environ.pop(name, None)
+
+
 class RequireGuardianParticipantTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._guardian_env = {
+            name: os.environ.get(name) for name in (GUARDIAN_AUTH_DIR_ENV, GUARDIAN_MANIFEST_ENV)
+        }
+        _clear_guardian_env()
+        self.addCleanup(self._restore_guardian_env)
+
+    def _restore_guardian_env(self) -> None:
+        for name, value in self._guardian_env.items():
+            if value is None:
+                os.environ.pop(name, None)
+            else:
+                os.environ[name] = value
+
+
+class DefaultManifestTests(RequireGuardianParticipantTests):
+    def test_uses_packaged_macos_layout(self) -> None:
+        self.assertEqual(
+            default_guardian_manifest_path("darwin"),
+            "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml",
+        )
+
+    def test_uses_linux_etc_layout(self) -> None:
+        self.assertEqual(
+            default_guardian_manifest_path("linux"),
+            "/etc/defenseclaw/hook-guardian/targets.yaml",
+        )
+
+
+class IdleJournalTests(RequireGuardianParticipantTests):
+    def test_retires_terminal_journal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            auth = Path(f"{td}-hook-guardian")
+            auth.mkdir()
+            journal = auth / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
+            assert_guardian_idle(td)
+            self.assertFalse(journal.exists())
+
+    def test_refuses_in_progress_journal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            auth = Path(f"{td}-hook-guardian")
+            auth.mkdir()
+            journal = auth / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
+            with self.assertRaises(click.ClickException) as raised:
+                assert_guardian_idle(td)
+            self.assertIn("already in progress", str(raised.exception))
+            self.assertTrue(journal.exists())
+
+
+class RequireGuardianParticipantBehaviorTests(RequireGuardianParticipantTests):
     def test_unmanaged_does_not_join(self) -> None:
         self.assertFalse(require_guardian_participant(SimpleNamespace(deployment_mode="unmanaged_byod")))
         self.assertFalse(require_guardian_participant(SimpleNamespace(deployment_mode="")))
@@ -51,7 +115,7 @@ class RequireGuardianParticipantTests(unittest.TestCase):
         self.assertTrue(require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise")))
 
 
-class BindGuardianRosterTests(unittest.TestCase):
+class BindGuardianRosterTests(RequireGuardianParticipantTests):
     def test_binds_enabled_multi_user_roster(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -79,7 +143,7 @@ class BindGuardianRosterTests(unittest.TestCase):
             )
             plan = bind_guardian_roster(
                 manifest_path=str(manifest),
-                rotatable_scopes={"codex", "claudecode"},
+                requested_scopes={"codex", "claudecode"},
                 operation_id="a" * 32,
                 generation="b" * 32,
             )
@@ -100,14 +164,32 @@ class BindGuardianRosterTests(unittest.TestCase):
             with self.assertRaises(click.ClickException) as raised:
                 bind_guardian_roster(
                     manifest_path=str(manifest),
-                    rotatable_scopes={"codex"},
+                    requested_scopes={"codex"},
+                    operation_id="a" * 32,
+                    generation="b" * 32,
+                )
+        self.assertIn("not in the service rotation roster", str(raised.exception))
+
+    def test_rotatable_but_unrequested_scope_fails_closed(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = Path(td, "targets.yaml")
+            manifest.write_text(
+                "version: 1\ntargets:\n  - user: alice\n    user_home: /home/alice\n    connector: gemini\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                bind_guardian_roster(
+                    manifest_path=str(manifest),
+                    requested_scopes={"codex", "claudecode"},
                     operation_id="a" * 32,
                     generation="b" * 32,
                 )
         self.assertIn("not in the service rotation roster", str(raised.exception))
 
 
-class CurrentAttestationTests(unittest.TestCase):
+class CurrentAttestationTests(RequireGuardianParticipantTests):
     def test_rejects_aggregate_count_without_per_target_proof(self) -> None:
         from tempfile import TemporaryDirectory
 
@@ -145,7 +227,7 @@ class CurrentAttestationTests(unittest.TestCase):
         self.assertIn("per-target readiness", str(raised.exception))
 
 
-class GuardianResponseTests(unittest.TestCase):
+class GuardianResponseTests(RequireGuardianParticipantTests):
     def test_accepts_exact_identity_and_roster_count(self) -> None:
         parse_guardian_rotate_response(
             json.dumps(
@@ -178,6 +260,39 @@ class GuardianResponseTests(unittest.TestCase):
                 action="prepare",
                 plan=_plan(),
             )
+
+    def test_rejects_bool_target_count(self) -> None:
+        with self.assertRaises(click.ClickException):
+            parse_guardian_rotate_response(
+                json.dumps(
+                    {
+                        "ok": True,
+                        "action": "prepare",
+                        "operation_id": "a" * 32,
+                        "generation": "b" * 32,
+                        "phase": "prepared",
+                        "targets": True,
+                    }
+                ),
+                action="prepare",
+                plan=_plan(),
+            )
+
+    def test_accepts_idle_rollback_when_prepare_never_published(self) -> None:
+        parse_guardian_rotate_response(
+            json.dumps(
+                {
+                    "ok": True,
+                    "action": "rollback",
+                    "operation_id": "",
+                    "generation": "",
+                    "phase": "",
+                    "targets": 0,
+                }
+            ),
+            action="rollback",
+            plan=_plan(),
+        )
 
     def test_expected_fingerprints_never_include_raw_values(self) -> None:
         payload = expected_fingerprints_payload(_plan(), {"codex": "c" * 64, "claudecode": "e" * 64})
