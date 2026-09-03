@@ -31,12 +31,16 @@ struct CommandPaletteView: View {
     @State private var parseError: String?
     @State private var pendingConfirmedRun = false
 
+    private var commands: [CommandDefinition] {
+        CommandRegistry.paletteCommands(supportedSetupCommands: appState.runtimeSetupCommands)
+    }
+
     private var categories: [String] {
-        ["all"] + Array(Set(CommandRegistry.all.map(\.category))).sorted()
+        ["all"] + Array(Set(commands.map(\.category))).sorted()
     }
 
     private var filtered: [CommandDefinition] {
-        CommandRegistry.all.filter { command in
+        commands.filter { command in
             let categoryMatches = category == "all" || command.category == category
             let searchMatches = search.isEmpty ||
                 "\(command.title) \(command.summary) \(command.category) \(command.usage)"
@@ -46,13 +50,13 @@ struct CommandPaletteView: View {
     }
 
     private var selected: CommandDefinition? {
-        CommandRegistry.all.first { $0.id == selectedID }
+        commands.first { $0.id == selectedID }
     }
 
     var body: some View {
         NavigationSplitView {
             VStack(spacing: 8) {
-                TextField("Search \(CommandRegistry.sourceCount) commands", text: $search)
+                TextField("Search \(commands.count) commands", text: $search)
                     .textFieldStyle(.roundedBorder)
                     .padding(.horizontal, 10)
                     .padding(.top, 10)
@@ -72,7 +76,7 @@ struct CommandPaletteView: View {
                     .tag(command.id)
                 }
                 .listStyle(.sidebar)
-                Text("\(filtered.count) of \(CommandRegistry.sourceCount) commands")
+                Text("\(filtered.count) of \(commands.count) commands")
                     .font(.caption2).foregroundStyle(.secondary).padding(.bottom, 8)
             }
             .navigationSplitViewColumnWidth(min: 250, ideal: 300)

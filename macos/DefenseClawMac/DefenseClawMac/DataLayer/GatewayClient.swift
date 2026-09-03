@@ -30,26 +30,31 @@ actor GatewayClient {
     private var mutationsAllowed: Bool
     private var mutationDenialReason: String
     private let session: URLSession
+    private let responseByteLimit: Int
 
     static let defaultTimeout: TimeInterval = 5
     static let pluginTimeout: TimeInterval = 90
     static let scanTimeout: TimeInterval = 120
+    static let maximumResponseBytes = 4 * 1024 * 1024
     private static let pathSegmentCharacters = CharacterSet.alphanumerics
         .union(CharacterSet(charactersIn: "-._~"))
 
     init(
         config: DefenseClawConfig = DefenseClawConfig(),
         mutationsAllowed: Bool = false,
-        mutationDenialReason: String = "This installation is read only."
+        mutationDenialReason: String = "This installation is read only.",
+        maximumResponseBytes: Int = GatewayClient.maximumResponseBytes,
+        session: URLSession? = nil
     ) {
         self.baseURL = config.baseURL
         self.token = config.gatewayToken
         self.mutationsAllowed = mutationsAllowed
         self.mutationDenialReason = mutationDenialReason
+        self.responseByteLimit = max(1, maximumResponseBytes)
         let conf = URLSessionConfiguration.ephemeral
         conf.timeoutIntervalForRequest = Self.defaultTimeout
         conf.waitsForConnectivity = false
-        self.session = URLSession(configuration: conf)
+        self.session = session ?? URLSession(configuration: conf)
     }
 
     func update(config: DefenseClawConfig) {
@@ -97,10 +102,45 @@ actor GatewayClient {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await session.data(for: req)
+            let (bytes, response) = try await session.bytes(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw GatewayError.badResponse("non-HTTP response")
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw GatewayError.unauthorized
+            }
+            let expectedLength = http.expectedContentLength
+            guard expectedLength < 0 || expectedLength <= Int64(responseByteLimit) else {
+                throw GatewayError.badResponse(
+                    "response exceeds the \(responseByteLimit)-byte limit"
+                )
+            }
+
+            var data = Data()
+            if expectedLength > 0 {
+                data.reserveCapacity(Int(expectedLength))
+            }
+            for try await byte in bytes {
+                guard data.count < responseByteLimit else {
+                    throw GatewayError.badResponse(
+                        "response exceeds the \(responseByteLimit)-byte limit"
+                    )
+                }
+                data.append(byte)
+            }
+
+            switch http.statusCode {
+            case 200..<300:
+                return data
+            default:
+                throw GatewayError.degraded(
+                    status: http.statusCode,
+                    body: String(data: data, encoding: .utf8) ?? ""
+                )
+            }
+        } catch let error as GatewayError {
+            throw error
         } catch let err as URLError {
             switch err.code {
             case .cannotConnectToHost, .networkConnectionLost, .cannotFindHost:
@@ -110,17 +150,6 @@ actor GatewayClient {
             default:
                 throw GatewayError.offline
             }
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw GatewayError.badResponse("non-HTTP response")
-        }
-        switch http.statusCode {
-        case 200..<300:
-            return data
-        case 401, 403:
-            throw GatewayError.unauthorized
-        default:
-            throw GatewayError.degraded(status: http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
         }
     }
 
