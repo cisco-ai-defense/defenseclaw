@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import threading
@@ -2001,7 +2002,16 @@ with locked_file_update(lock_base):
         self.assertNotIn(("start", False, old_token), events)
 
 
-def _guardian_plan(*connectors: str, users: tuple[str, ...] = ("alice", "bob")):
+def _passthrough_guardian_control_plane(path: str, label: str, *, directory: bool = False) -> os.stat_result:
+    info = os.lstat(path)
+    if directory and not stat.S_ISDIR(info.st_mode):
+        raise click.ClickException(f"{label} is not a trusted directory.")
+    if not directory and not stat.S_ISREG(info.st_mode):
+        raise click.ClickException(f"{label} is not a trusted regular file.")
+    return info
+
+
+def _guardian_plan(*connectors: str, td: str, users: tuple[str, ...] = ("alice", "bob")):
     from defenseclaw.rotate_token_guardian import GuardianRotationPlan, GuardianRotationTarget
 
     targets = []
@@ -2016,17 +2026,45 @@ def _guardian_plan(*connectors: str, users: tuple[str, ...] = ("alice", "bob")):
                     data_dir="",
                 )
             )
+    return _materialize_guardian_plan(
+        td,
+        GuardianRotationPlan(
+            operation_id="a" * 32,
+            generation="b" * 32,
+            manifest="/tmp/targets.yaml",
+            targets=tuple(targets),
+        ),
+    )
+
+
+def _materialize_guardian_plan(td: str, plan):
+    from defenseclaw.rotate_token_guardian import GuardianRotationPlan
+
+    path = Path(td, "targets.yaml")
+    rows = ["version: 1", "targets:"]
+    for target in plan.targets:
+        rows.extend(
+            [
+                f"  - user: {target.user}",
+                f"    user_home: {target.user_home}",
+                f"    connector: {target.connector}",
+            ]
+        )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
     return GuardianRotationPlan(
-        operation_id="a" * 32,
-        generation="b" * 32,
-        manifest="/tmp/targets.yaml",
-        targets=tuple(targets),
+        operation_id=plan.operation_id,
+        generation=plan.generation,
+        manifest=str(path.resolve()),
+        targets=plan.targets,
     )
 
 
 def _write_current_authorization(td: str, plan, fingerprints: dict[str, str], generation: str) -> None:
+    from defenseclaw.rotate_token_guardian import guardian_manifest_digest
+
     auth_dir = Path(f"{td.rstrip(os.sep)}-hook-guardian")
     auth_dir.mkdir(exist_ok=True)
+    digest = guardian_manifest_digest(plan.manifest)
     attestations = []
     for target in plan.targets:
         attestations.append(
@@ -2037,7 +2075,7 @@ def _write_current_authorization(td: str, plan, fingerprints: dict[str, str], ge
                 "ok": True,
                 "generation": generation,
                 "token_fingerprint": fingerprints[target.connector],
-                "manifest_sha256": "d" * 64,
+                "manifest_sha256": digest,
             }
         )
     payload = {
@@ -2045,7 +2083,7 @@ def _write_current_authorization(td: str, plan, fingerprints: dict[str, str], ge
         "current": {
             "ok": True,
             "generation": generation,
-            "manifest_sha256": "d" * 64,
+            "manifest_sha256": digest,
             "target_count": len(attestations),
             "success_count": len(attestations),
             "failure_count": 0,
@@ -2068,6 +2106,12 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
         }
         for name in (GUARDIAN_AUTH_DIR_ENV, GUARDIAN_MANIFEST_ENV):
             os.environ.pop(name, None)
+        custody = mock.patch(
+            "defenseclaw.rotate_token_guardian.assert_guardian_control_plane_path",
+            side_effect=_passthrough_guardian_control_plane,
+        )
+        custody.start()
+        self.addCleanup(custody.stop)
         self.addCleanup(self._restore_guardian_env)
 
     def _restore_guardian_env(self) -> None:
@@ -2103,7 +2147,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             app = _make_rotate_ctx(td, ["codex", "claudecode"])
             dotenv = os.path.join(td, ".env")
             Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
-            plan = _guardian_plan("codex", "claudecode")
+            plan = _guardian_plan("codex", "claudecode", td=td)
             _write_current_authorization(
                 td,
                 plan,
@@ -2170,7 +2214,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n"
             Path(dotenv).write_bytes(original)
             original_hook = Path(td, "hooks", ".hook-codex.token").read_bytes()
-            plan = _guardian_plan("codex", users=("alice", "bob"))
+            plan = _guardian_plan("codex", td=td, users=("alice", "bob"))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             events: list[str] = []
 
@@ -2234,7 +2278,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             app = _make_rotate_ctx(td, ["codex"])
             dotenv = os.path.join(td, ".env")
             Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             journal = Path(f"{td}-hook-guardian") / "rotation-transaction.json"
             journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
@@ -2259,7 +2303,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             new_token = "b" * 64
             original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + old_token.encode() + b"\r\n"
             Path(dotenv).write_bytes(original)
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             events: list[tuple[str, bool, str]] = []
 
@@ -2342,7 +2386,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
         from defenseclaw.rotate_token_guardian import GUARDIAN_AUTH_DIR_ENV, GUARDIAN_MANIFEST_ENV
 
         with TemporaryDirectory() as td:
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             auth_dir = os.path.join(td, "custom-auth")
             os.makedirs(auth_dir)
             captured: dict[str, object] = {}
@@ -2383,7 +2427,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             self.assertEqual(env[GUARDIAN_MANIFEST_ENV], plan.manifest)
             self.assertNotIn(cmd_setup._GATEWAY_TOKEN_ENV, env)
 
-    def test_audit_failure_rolls_back_before_commit(self) -> None:
+    def test_audit_failure_after_commit_keeps_generation_b(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
@@ -2392,7 +2436,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n"
             Path(dotenv).write_bytes(original)
             original_hook = Path(td, "hooks", ".hook-codex.token").read_bytes()
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             events: list[str] = []
 
@@ -2441,13 +2485,11 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
                     "service:stop:0",
                     "guardian:prepare",
                     "service:start:0",
-                    "service:stop:1",
-                    "guardian:rollback",
-                    "service:start:0",
+                    "guardian:commit",
                 ],
             )
-            self.assertEqual(Path(dotenv).read_bytes(), original)
-            self.assertEqual(Path(td, "hooks", ".hook-codex.token").read_bytes(), original_hook)
+            self.assertNotEqual(Path(dotenv).read_bytes(), original)
+            self.assertNotEqual(Path(td, "hooks", ".hook-codex.token").read_bytes(), original_hook)
 
     def test_prepare_timeout_still_rolls_back(self) -> None:
         from tempfile import TemporaryDirectory
@@ -2458,7 +2500,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n"
             Path(dotenv).write_bytes(original)
             original_hook = Path(td, "hooks", ".hook-codex.token").read_bytes()
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             events: list[str] = []
 
@@ -2515,7 +2557,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             app = _make_rotate_ctx(td, ["codex"])
             dotenv = os.path.join(td, ".env")
             Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
-            plan = _guardian_plan("codex", users=("alice",))
+            plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
             journal = Path(f"{td}-hook-guardian") / "rotation-transaction.json"
             journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")

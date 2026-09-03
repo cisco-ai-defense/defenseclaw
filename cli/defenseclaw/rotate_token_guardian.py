@@ -23,6 +23,7 @@ IDs, and canonical non-secret fingerprints.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
@@ -33,6 +34,12 @@ from typing import Any
 
 import click
 import yaml
+
+from defenseclaw.file_permissions import (
+    UnsafePathError,
+    darwin_acl_write_error,
+    open_regular_file_no_follow,
+)
 
 GUARDIAN_MANIFEST_ENV = "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST"
 GUARDIAN_AUTH_DIR_ENV = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
@@ -125,6 +132,59 @@ def guardian_manifest_path() -> str:
     return default_guardian_manifest_path()
 
 
+def assert_guardian_control_plane_path(
+    path: str,
+    label: str,
+    *,
+    directory: bool = False,
+) -> os.stat_result:
+    """Reject a control-plane path a standard user could replace or edit.
+
+    Matches the Go ``ValidateTrustedFilePath`` contract: absolute, no
+    symlinks, administrator-owned, and not group/other writable, including
+    every ancestor. Darwin write-capable ACLs are refused.
+    """
+
+    if not path or not os.path.isabs(path):
+        raise click.ClickException(f"{label} path is not an absolute trusted path.")
+    current = path
+    leaf = True
+    leaf_info: os.stat_result | None = None
+    while True:
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            raise click.ClickException(f"{label} is unavailable; no credentials were modified.") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise click.ClickException(f"{label} is not a trusted regular path.")
+        if leaf:
+            if directory and not stat.S_ISDIR(info.st_mode):
+                raise click.ClickException(f"{label} is not a trusted directory.")
+            if not directory and not stat.S_ISREG(info.st_mode):
+                raise click.ClickException(f"{label} is not a trusted regular file.")
+            leaf_info = info
+        elif not stat.S_ISDIR(info.st_mode):
+            raise click.ClickException(f"{label} ancestor is not a trusted directory.")
+        if stat.S_IMODE(info.st_mode) & 0o022:
+            raise click.ClickException(f"{label} is writable by another user; no credentials were modified.")
+        if int(getattr(info, "st_uid", -1)) != 0:
+            raise click.ClickException(f"{label} is not administrator-owned; no credentials were modified.")
+        if darwin_acl_write_error(current):
+            raise click.ClickException(f"{label} has a write-capable extended ACL; no credentials were modified.")
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        leaf = False
+    assert leaf_info is not None
+    return leaf_info
+
+
+def guardian_manifest_digest(manifest_path: str) -> str:
+    info = assert_guardian_control_plane_path(manifest_path, "guardian manifest")
+    return _sha256_regular_file(manifest_path, info, _MANIFEST_MAX_BYTES, "guardian manifest")
+
+
 def is_managed_enterprise(cfg: Any) -> bool:
     return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
 
@@ -143,12 +203,11 @@ def require_guardian_participant(cfg: Any) -> bool:
 
 
 def load_enabled_guardian_targets(manifest_path: str) -> tuple[GuardianRotationTarget, ...]:
-    path = _require_regular_file(manifest_path, "guardian manifest", _MANIFEST_MAX_BYTES)
-    with open(path, "rb") as handle:
-        raw = yaml.safe_load(handle) or {}
-    if not isinstance(raw, dict):
+    info = _require_regular_file_stat(manifest_path, "guardian manifest", _MANIFEST_MAX_BYTES)
+    payload = yaml.safe_load(_read_regular_file(manifest_path, info, _MANIFEST_MAX_BYTES, "guardian manifest")) or {}
+    if not isinstance(payload, dict):
         raise click.ClickException("Guardian manifest is malformed; token rotation did not start.")
-    rows = raw.get("targets")
+    rows = payload.get("targets")
     if rows is None:
         rows = []
     if not isinstance(rows, list):
@@ -206,7 +265,10 @@ def bind_guardian_roster(
 
 
 def assert_guardian_idle(data_dir: str) -> None:
-    journal_path = os.path.join(guardian_authorization_dir(data_dir), _JOURNAL_FILE)
+    auth_dir = guardian_authorization_dir(data_dir)
+    if os.path.lexists(auth_dir):
+        assert_guardian_control_plane_path(auth_dir, "guardian authorization directory", directory=True)
+    journal_path = os.path.join(auth_dir, _JOURNAL_FILE)
     if not os.path.lexists(journal_path):
         return
     payload = _load_bounded_json(journal_path, "guardian rotation journal")
@@ -245,9 +307,11 @@ def assert_current_attestations(
         raise click.ClickException(
             "Guardian current attestations are bound to a different generation; rotation did not commit."
         )
-    if str(current.get("manifest_sha256") or "").strip() == "":
+    expected_digest = guardian_manifest_digest(plan.manifest)
+    actual_digest = str(current.get("manifest_sha256") or "").strip()
+    if actual_digest != expected_digest:
         raise click.ClickException(
-            "Guardian current attestations omit the manifest digest; rotation did not commit."
+            "Guardian current attestations are not bound to the selected manifest; rotation did not commit."
         )
     rows = current.get("attestations")
     if not isinstance(rows, list):
@@ -377,11 +441,8 @@ def _load_current_readiness(data_dir: str) -> dict[str, Any]:
 
 
 def _load_bounded_json(path: str, label: str) -> dict[str, Any]:
-    regular = _require_regular_file(path, label, _STATE_MAX_BYTES)
-    with open(regular, "rb") as handle:
-        raw = handle.read(_STATE_MAX_BYTES + 1)
-    if len(raw) > _STATE_MAX_BYTES:
-        raise click.ClickException(f"{label} exceeded the trusted size bound.")
+    info = _require_regular_file_stat(path, label, _STATE_MAX_BYTES)
+    raw = _read_regular_file(path, info, _STATE_MAX_BYTES, label)
     try:
         payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
@@ -392,15 +453,33 @@ def _load_bounded_json(path: str, label: str) -> dict[str, Any]:
 
 
 def _require_regular_file(path: str, label: str, max_bytes: int) -> str:
-    if not path or not os.path.isabs(path):
-        raise click.ClickException(f"{label} path is not an absolute regular file.")
-    try:
-        info = os.lstat(path)
-    except OSError as exc:
-        raise click.ClickException(f"{label} is unavailable; no credentials were modified.") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode) or info.st_size > max_bytes:
-        raise click.ClickException(f"{label} is not a trusted regular file.")
+    _require_regular_file_stat(path, label, max_bytes)
     return path
+
+
+def _require_regular_file_stat(path: str, label: str, max_bytes: int) -> os.stat_result:
+    info = assert_guardian_control_plane_path(path, label)
+    if info.st_size > max_bytes:
+        raise click.ClickException(f"{label} exceeded the trusted size bound.")
+    return info
+
+
+def _read_regular_file(path: str, info: os.stat_result, max_bytes: int, label: str) -> bytes:
+    try:
+        fd = open_regular_file_no_follow(path, expected_stat=info)
+    except UnsafePathError as exc:
+        raise click.ClickException(f"{label} is not a trusted regular file.") from exc
+    try:
+        raw = os.read(fd, max_bytes + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > max_bytes:
+        raise click.ClickException(f"{label} exceeded the trusted size bound.")
+    return raw
+
+
+def _sha256_regular_file(path: str, info: os.stat_result, max_bytes: int, label: str) -> str:
+    return hashlib.sha256(_read_regular_file(path, info, max_bytes, label)).hexdigest()
 
 
 def _valid_rotation_hex(value: str) -> bool:

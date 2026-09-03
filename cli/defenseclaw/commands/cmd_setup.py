@@ -3850,6 +3850,7 @@ def _rotate_token_transaction(
         mutation_attempted = False
         guardian_prepare_attempted = False
         guardian_prepared = False
+        guardian_committed = False
         new_hook_values: dict[str, str] = {}
         try:
             try:
@@ -3936,6 +3937,14 @@ def _rotate_token_transaction(
                     new_hook_fingerprints,
                     generation=guardian_plan.generation,
                 )
+            if guardian_plan is not None:
+                _run_guardian_rotate(
+                    data_dir,
+                    "commit",
+                    config_file=config_file,
+                    plan=guardian_plan,
+                )
+                guardian_committed = True
             commit_audit = audit_details
             if guardian_plan is not None:
                 commit_audit = (
@@ -3948,14 +3957,9 @@ def _rotate_token_transaction(
                 commit_audit,
                 allow_offline=False,
             )
-            if guardian_plan is not None:
-                _run_guardian_rotate(
-                    data_dir,
-                    "commit",
-                    config_file=config_file,
-                    plan=guardian_plan,
-                )
         except BaseException as primary_error:
+            if guardian_committed:
+                raise
             if not old_stopped:
                 raise
 
