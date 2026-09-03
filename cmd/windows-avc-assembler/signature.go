@@ -287,13 +287,30 @@ func chainStatusIsOnlyPartialChain(flags []string) bool {
 const psVerifyScript = `$ErrorActionPreference = 'Stop'
 $p = $env:` + payloadPathEnvVar + `
 if ([string]::IsNullOrEmpty($p)) { throw '` + payloadPathEnvVar + ` not set' }
-$sig = Get-AuthenticodeSignature -FilePath $p
+# -LiteralPath, not -FilePath: -FilePath interprets '[' and ']' as
+# wildcards, which fails on CI paths that include job-id brackets
+# (e.g. C:\build\[job-1234]\payload\...). -LiteralPath treats the
+# string exactly as typed.
+$sig = Get-AuthenticodeSignature -LiteralPath $p
 $status = $sig.Status.ToString()
 $statusMsg = if ($sig.StatusMessage) { $sig.StatusMessage } else { '' }
 $fp = ''
 $chainFlags = New-Object System.Collections.Generic.List[string]
 if ($sig.SignerCertificate -ne $null) {
-    $fp = $sig.SignerCertificate.GetCertHashString([System.Security.Cryptography.HashAlgorithmName]::SHA256).ToLower()
+    # Hash SignerCertificate.RawData directly with SHA256.Create() —
+    # X509Certificate.GetCertHashString(HashAlgorithmName) only exists
+    # in .NET Core 2.0+/.NET Standard 2.1+, NOT in .NET Framework 4.x
+    # which is what Windows PowerShell 5.1 runs on. On WinPS 5.1 the
+    # typed overload throws MethodNotFound and the whole script dies
+    # with a signed-payload rejection that isn't actually a signature
+    # problem. RawData + SHA256.Create() is version-independent.
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash($sig.SignerCertificate.RawData)
+        $fp = ([System.BitConverter]::ToString($hashBytes)).Replace('-','').ToLower()
+    } finally {
+        $sha256.Dispose()
+    }
     $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
     $null = $chain.Build($sig.SignerCertificate)
     foreach ($cs in $chain.ChainStatus) {
@@ -314,12 +331,17 @@ $obj = [ordered]@{
 [System.Console]::Out.Write(($obj | ConvertTo-Json -Compress))`
 
 // runPowerShellVerify invokes psVerifyScript on the given payload
-// path and returns the parsed record. Errors are classified as
-// ioError (env fault: PS not on PATH, launch failure, timeout) or
-// signatureError (PS exited non-zero — script threw, e.g. because
-// Get-AuthenticodeSignature could not read the file). Callers should
-// return the error verbatim; the exit-code classifier in main.go
-// will map it correctly.
+// path and returns the parsed record. Errors are always classified
+// as ioError — every failure path in this helper is an environment
+// or host issue, not a payload signature rejection. Payload-level
+// verdicts (NotSigned, HashMismatch, wrong signer, etc.) surface
+// THROUGH the JSON as psSignatureRecord.Status, which classifyVerify
+// then turns into signatureError. A PS-side throw under
+// ErrorActionPreference=Stop (bad path, missing env var, filesystem
+// permission error, unavailable module) bypasses the JSON emit and
+// exits non-zero — that is a runner-side fault and belongs in the
+// I/O bucket per the exit-code contract (code 6, not code 4). Callers
+// return the error verbatim; the classifier in main.go maps it.
 func runPowerShellVerify(path string) (psSignatureRecord, error) {
 	var zero psSignatureRecord
 	ctx, cancel := context.WithTimeout(context.Background(), psVerifyTimeout)
@@ -354,9 +376,12 @@ func runPowerShellVerify(path string) (psSignatureRecord, error) {
 		rec.Thumbprint = strings.ToLower(strings.TrimSpace(rec.Thumbprint))
 		return rec, nil
 	}
-	// Distinguish env faults (missing PS, launch failure, timeout) from
-	// script-level failures (PS started but threw). Only the latter
-	// counts as a signature rejection.
+	// Every failure branch below is ioError. Rationale in the
+	// function's doc comment: real signature rejections surface as
+	// psSignatureRecord.Status through the JSON, not by non-zero exit.
+	// A PS throw under ErrorActionPreference=Stop is a runner-side
+	// fault (bad path, missing env var, permission error, module
+	// unavailable), which the exit-code contract puts in bucket 6.
 	var exitErr *exec.ExitError
 	stderr := ""
 	if errors.As(err, &exitErr) {
@@ -374,8 +399,8 @@ func runPowerShellVerify(path string) (psSignatureRecord, error) {
 			path, err,
 		)}
 	}
-	return zero, &signatureError{msg: fmt.Sprintf(
-		"powershell verify failed for %s: %s\n%s",
+	return zero, &ioError{msg: fmt.Sprintf(
+		"powershell verify script exited non-zero for %s: %s\n%s",
 		path, err, stderr,
 	)}
 }
