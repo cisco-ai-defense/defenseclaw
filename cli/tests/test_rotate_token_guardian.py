@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import stat
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,26 +17,42 @@ from defenseclaw.rotate_token_guardian import (
     GuardianRotationPlan,
     GuardianRotationTarget,
     assert_current_attestations,
+    assert_guardian_control_plane_path,
     assert_guardian_idle,
     bind_guardian_roster,
     default_guardian_manifest_path,
     expected_fingerprints_payload,
+    guardian_manifest_digest,
     parse_guardian_rotate_response,
     require_guardian_participant,
 )
 
 
-def _plan() -> GuardianRotationPlan:
+def _plan(manifest: str = "/etc/defenseclaw/hook-guardian/targets.yaml") -> GuardianRotationPlan:
     return GuardianRotationPlan(
         operation_id="a" * 32,
         generation="b" * 32,
-        manifest="/etc/defenseclaw/hook-guardian/targets.yaml",
+        manifest=manifest,
         targets=(
             GuardianRotationTarget("alice", "/home/alice", "", "codex", ""),
             GuardianRotationTarget("bob", "/home/bob", "", "codex", ""),
             GuardianRotationTarget("alice", "/home/alice", "", "claudecode", ""),
         ),
     )
+
+
+def _write_test_manifest(path: Path) -> str:
+    path.write_text("version: 1\ntargets: []\n", encoding="utf-8")
+    return str(path.resolve())
+
+
+def _passthrough_control_plane(path: str, label: str, *, directory: bool = False) -> os.stat_result:
+    info = os.lstat(path)
+    if directory and not stat.S_ISDIR(info.st_mode):
+        raise click.ClickException(f"{label} is not a trusted directory.")
+    if not directory and not stat.S_ISREG(info.st_mode):
+        raise click.ClickException(f"{label} is not a trusted regular file.")
+    return info
 
 
 def _clear_guardian_env() -> None:
@@ -49,6 +66,12 @@ class RequireGuardianParticipantTests(unittest.TestCase):
             name: os.environ.get(name) for name in (GUARDIAN_AUTH_DIR_ENV, GUARDIAN_MANIFEST_ENV)
         }
         _clear_guardian_env()
+        custody = mock.patch(
+            "defenseclaw.rotate_token_guardian.assert_guardian_control_plane_path",
+            side_effect=_passthrough_control_plane,
+        )
+        custody.start()
+        self.addCleanup(custody.stop)
         self.addCleanup(self._restore_guardian_env)
 
     def _restore_guardian_env(self) -> None:
@@ -193,8 +216,47 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
     def test_rejects_aggregate_count_without_per_target_proof(self) -> None:
         from tempfile import TemporaryDirectory
 
-        plan = _plan()
         with TemporaryDirectory() as td:
+            manifest = _write_test_manifest(Path(td, "targets.yaml"))
+            plan = _plan(manifest)
+            digest = guardian_manifest_digest(manifest)
+            auth = Path(f"{td}-hook-guardian")
+            auth.mkdir()
+            (auth / "protected_targets.json").write_text(
+                json.dumps(
+                    {
+                        "current": {
+                            "ok": True,
+                            "generation": "b" * 32,
+                            "manifest_sha256": digest,
+                            "target_count": 3,
+                            "success_count": 3,
+                            "attestations": [
+                                {
+                                    "user": "alice",
+                                    "user_home": "/home/alice",
+                                    "connector": "codex",
+                                    "ok": True,
+                                    "generation": "b" * 32,
+                                    "token_fingerprint": "c" * 64,
+                                    "manifest_sha256": digest,
+                                }
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
+        self.assertIn("per-target readiness", str(raised.exception))
+
+    def test_rejects_attestation_bound_to_a_different_manifest(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = _write_test_manifest(Path(td, "targets.yaml"))
+            plan = _plan(manifest)
             auth = Path(f"{td}-hook-guardian")
             auth.mkdir()
             (auth / "protected_targets.json").write_text(
@@ -208,14 +270,15 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
                             "success_count": 3,
                             "attestations": [
                                 {
-                                    "user": "alice",
-                                    "user_home": "/home/alice",
-                                    "connector": "codex",
+                                    "user": target.user,
+                                    "user_home": target.user_home,
+                                    "connector": target.connector,
                                     "ok": True,
                                     "generation": "b" * 32,
                                     "token_fingerprint": "c" * 64,
                                     "manifest_sha256": "d" * 64,
                                 }
+                                for target in plan.targets
                             ],
                         }
                     }
@@ -224,7 +287,7 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
             )
             with self.assertRaises(click.ClickException) as raised:
                 assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
-        self.assertIn("per-target readiness", str(raised.exception))
+        self.assertIn("not bound to the selected manifest", str(raised.exception))
 
 
 class GuardianResponseTests(RequireGuardianParticipantTests):
@@ -300,6 +363,35 @@ class GuardianResponseTests(RequireGuardianParticipantTests):
         self.assertIn("token_fingerprint", blob)
         self.assertNotIn("token=", blob)
         self.assertEqual(len(payload["targets"]), 3)
+
+
+class ControlPlaneCustodyTests(unittest.TestCase):
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root-owned fixtures cannot prove the non-root rejection")
+    def test_rejects_non_root_owner(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            path = Path(td, "targets.yaml")
+            path.write_text("version: 1\ntargets: []\n", encoding="utf-8")
+            with self.assertRaises(click.ClickException) as raised:
+                assert_guardian_control_plane_path(str(path.resolve()), "guardian manifest")
+        self.assertIn("administrator-owned", str(raised.exception))
+
+    def test_rejects_symlink(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            real = Path(td, "real.yaml")
+            real.write_text("version: 1\ntargets: []\n", encoding="utf-8")
+            link = Path(td, "targets.yaml")
+            link.symlink_to(real)
+            with mock.patch.object(os, "lstat", wraps=os.lstat) as wrapped:
+                info = os.lstat(str(link))
+                self.assertTrue(stat.S_ISLNK(info.st_mode))
+                wrapped.assert_called()
+            with self.assertRaises(click.ClickException) as raised:
+                assert_guardian_control_plane_path(str(link), "guardian manifest")
+        self.assertIn("not a trusted regular path", str(raised.exception))
 
 
 if __name__ == "__main__":
