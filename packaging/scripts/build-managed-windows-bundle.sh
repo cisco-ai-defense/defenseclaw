@@ -511,11 +511,13 @@ cat > "${KIT_DIR}/README-AVC.md" <<EOF
                                    Status = Valid on every payload.
        -SigningType DEV           — additionally accepts UnknownError only
                                    when StatusMessage matches the host-
-                                   localized CERT_E_CHAINING message AND
-                                   the fail-closed X509Chain check shows
-                                   only PartialChain (i.e. self-signed /
-                                   partial-chain DEV cert). Every other
-                                   status stays fatal in both modes.
+                                   localized CERT_E_CHAINING (0x800B010A)
+                                   message — i.e. Authenticode returned
+                                   "chain does not reach a trusted root"
+                                   for a DEV cert whose CA is not in the
+                                   runner's trust store. Every other
+                                   status message (revoked, expired,
+                                   HashMismatch, etc.) stays fatal.
        -ExpectedSignerSha256      — bare 64-char SHA-256 hex; colons and
                                    whitespace are tolerated and stripped.
                                    Compared byte-exact (case-insensitive)

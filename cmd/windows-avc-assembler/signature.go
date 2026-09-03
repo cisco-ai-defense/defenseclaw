@@ -110,18 +110,16 @@ type psSignatureRecord struct {
 	// (e.g. "A certificate chain could not be built to a trusted root
 	// authority."); on non-English hosts it is the localized form.
 	StatusMessage string `json:"StatusMessage"`
-	// Thumbprint is SignerCertificate.GetCertHashString(SHA256), lower-
-	// cased. Empty when the payload has no signer certificate.
+	// Thumbprint is SHA256(SignerCertificate.RawData), lower-cased.
+	// Empty when the payload has no signer certificate.
 	Thumbprint string `json:"Thumbprint"`
-	// ChainStatusFlags is the list of X509ChainStatusFlags names from
-	// building an X509Chain on the signer certificate (default policy,
-	// no explicit RevocationMode override — matches signtool's default
-	// with /pa). "NoError" means the chain built cleanly.
-	ChainStatusFlags []string `json:"ChainStatusFlags"`
 	// CertEChainingMatch is true when StatusMessage is byte-exact to
 	// the host-localized text of HRESULT CERT_E_CHAINING (0x800B010A),
 	// computed via [Win32Exception]::new(0x800B010A).Message. Locale-
-	// safe: both messages come from the same OS resource table.
+	// safe: both messages come from the same OS resource table. In
+	// DEV mode this is the sole additional gate (beyond fingerprint
+	// match) that distinguishes CERT_E_CHAINING from other UnknownError
+	// causes (CERT_E_REVOKED, CERT_E_EXPIRED, TRUST_E_SYSTEM_ERROR).
 	CertEChainingMatch bool `json:"CertEChainingMatch"`
 }
 
@@ -202,21 +200,31 @@ func classifyVerify(path string, sigType signingType, expectedThumbprint string,
 			)}
 		}
 		// DEV path: accept ONLY when the status message is exactly the
-		// host-localized CERT_E_CHAINING message AND the fail-closed
-		// X509Chain check saw PartialChain and nothing else. This
-		// guards against a future Windows or PowerShell version that
-		// surfaces the same UnknownError shape for a different chain
-		// fault (e.g. revoked, expired, other-untrusted-root).
+		// host-localized CERT_E_CHAINING message. The strong identity
+		// gate is the fingerprint match (checked above); the exact
+		// message match distinguishes CERT_E_CHAINING (0x800B010A —
+		// "chain doesn't reach a trusted root") from other HRESULTs
+		// that could surface as UnknownError (CERT_E_REVOKED,
+		// CERT_E_EXPIRED, TRUST_E_SYSTEM_ERROR, etc.) — each of those
+		// has a different localized StatusMessage, so an exact-message
+		// compare filters them out.
+		//
+		// NOTE: an earlier revision of this function also required
+		// X509Chain.ChainStatus == {PartialChain} only as a
+		// defense-in-depth check. That check turned out to be
+		// incompatible with air-gapped AVC CI runners: .NET's default
+		// RevocationMode = Online tries CRL/OCSP lookups, which fail
+		// on a closed network, producing PartialChain +
+		// RevocationStatusUnknown + OfflineRevocation instead of the
+		// bare PartialChain we required. Per AVC's spec, the
+		// Authenticode result + fingerprint pair is sufficient; the
+		// independent chain re-check was overkill and rejected valid
+		// DEV builds. See PR discussion on the fingerprint-signing
+		// branch.
 		if !rec.CertEChainingMatch {
 			return &signatureError{msg: fmt.Sprintf(
 				"%s: DEV accepts UnknownError only for CERT_E_CHAINING (0x800B010A); got StatusMessage=%q",
 				path, rec.StatusMessage,
-			)}
-		}
-		if !chainStatusIsOnlyPartialChain(rec.ChainStatusFlags) {
-			return &signatureError{msg: fmt.Sprintf(
-				"%s: DEV chain fail-closed rejected — expected only PartialChain, got %v",
-				path, rec.ChainStatusFlags,
 			)}
 		}
 		return nil
@@ -231,43 +239,13 @@ func classifyVerify(path string, sigType signingType, expectedThumbprint string,
 	}
 }
 
-// chainStatusIsOnlyPartialChain returns true when the flag set is
-// exactly {PartialChain} (with an optional NoError entry that .NET
-// sometimes appends when no other flag applies). Any other flag —
-// Revoked, NotTimeValid, OfflineRevocation, UntrustedRoot, etc. —
-// makes the check fail closed. An empty slice also fails: if there
-// is no chain to build, there is no PartialChain either.
-func chainStatusIsOnlyPartialChain(flags []string) bool {
-	seenPartial := false
-	for _, f := range flags {
-		switch f {
-		case "":
-			// Skip stray empty strings from the PS join.
-			continue
-		case "NoError":
-			// Ignore — some Windows builds emit NoError alongside a
-			// real flag. Presence of NoError alone doesn't identify
-			// PartialChain, so keep iterating.
-			continue
-		case "PartialChain":
-			seenPartial = true
-			continue
-		default:
-			// Any other flag disqualifies.
-			return false
-		}
-	}
-	return seenPartial
-}
-
 // psVerifyScript is the exact PowerShell body runPowerShellVerify
 // evaluates. It reads the payload path from the payloadPathEnvVar env
 // var (see comment on the constant for why), interrogates the file's
-// Authenticode signature via Get-AuthenticodeSignature + X509Chain,
-// and emits a single JSON object with the fields psSignatureRecord
-// decodes. JSON is used (rather than KEY=VALUE lines) because
-// StatusMessage may contain arbitrary punctuation and quoting escapes
-// would be fragile.
+// Authenticode signature via Get-AuthenticodeSignature, and emits a
+// single JSON object with the fields psSignatureRecord decodes. JSON
+// is used (rather than KEY=VALUE lines) because StatusMessage may
+// contain arbitrary punctuation and quoting escapes would be fragile.
 //
 // Notes on the design:
 //   - Set-StrictMode is left at the default so a missing property on a
@@ -276,10 +254,15 @@ func chainStatusIsOnlyPartialChain(flags []string) bool {
 //   - Console.Out.Write is used (not Write-Output) so PowerShell's
 //     default host-width truncation and trailing CRLF do not affect
 //     the stdout the Go side reads.
-//   - The X509Chain.Build call uses default policy (no explicit
-//     RevocationMode). AVC's spec: "AVC does not explicitly configure
-//     X509Chain.RevocationMode. RELEASE builds use standard
-//     Authenticode verification..."
+//   - No X509Chain build. An earlier revision built a chain to gate
+//     the DEV path on "PartialChain only", but that check was
+//     incompatible with air-gapped AVC CI runners: .NET's default
+//     RevocationMode = Online tries CRL/OCSP lookups, which fail on
+//     a closed network and add OfflineRevocation +
+//     RevocationStatusUnknown flags alongside PartialChain — the
+//     defense-in-depth check then rejected legitimate DEV builds.
+//     Per AVC's spec, Status + StatusMessage + fingerprint together
+//     are sufficient identity + integrity gates.
 //   - CertEChainingMatch is computed by resolving HRESULT 0x800B010A
 //     to its host-localized description via Win32Exception. Same OS
 //     resource table Get-AuthenticodeSignature.StatusMessage uses,
@@ -295,7 +278,6 @@ $sig = Get-AuthenticodeSignature -LiteralPath $p
 $status = $sig.Status.ToString()
 $statusMsg = if ($sig.StatusMessage) { $sig.StatusMessage } else { '' }
 $fp = ''
-$chainFlags = New-Object System.Collections.Generic.List[string]
 if ($sig.SignerCertificate -ne $null) {
     # Hash SignerCertificate.RawData directly with SHA256.Create() —
     # X509Certificate.GetCertHashString(HashAlgorithmName) only exists
@@ -311,13 +293,7 @@ if ($sig.SignerCertificate -ne $null) {
     } finally {
         $sha256.Dispose()
     }
-    $chain = New-Object System.Security.Cryptography.X509Certificates.X509Chain
-    $null = $chain.Build($sig.SignerCertificate)
-    foreach ($cs in $chain.ChainStatus) {
-        [void]$chainFlags.Add($cs.Status.ToString())
-    }
 }
-if ($chainFlags.Count -eq 0) { [void]$chainFlags.Add('NoError') }
 $certEChainingMsg = ''
 try { $certEChainingMsg = [System.ComponentModel.Win32Exception]::new([int]0x800B010A).Message } catch { $certEChainingMsg = '' }
 $isChainingMatch = ($certEChainingMsg -ne '') -and ($statusMsg -ceq $certEChainingMsg)
@@ -325,7 +301,6 @@ $obj = [ordered]@{
     Status = $status
     StatusMessage = $statusMsg
     Thumbprint = $fp
-    ChainStatusFlags = @($chainFlags)
     CertEChainingMatch = [bool]$isChainingMatch
 }
 [System.Console]::Out.Write(($obj | ConvertTo-Json -Compress))`

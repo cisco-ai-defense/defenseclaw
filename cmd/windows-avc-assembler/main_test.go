@@ -442,14 +442,14 @@ func TestClassifyVerify(t *testing.T) {
 			name:       "prod-valid-fp-match",
 			sigType:    signingTypeProd,
 			fp:         validThumbprint,
-			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint, ChainStatusFlags: []string{"NoError"}},
+			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint},
 			wantAccept: true,
 		},
 		{
 			name:       "dev-valid-fp-match",
 			sigType:    signingTypeDev,
 			fp:         validThumbprint,
-			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint, ChainStatusFlags: []string{"NoError"}},
+			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint},
 			wantAccept: true,
 		},
 
@@ -484,7 +484,6 @@ func TestClassifyVerify(t *testing.T) {
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
 				Thumbprint:         strings.Repeat("22", 32),
-				ChainStatusFlags:   []string{"PartialChain"},
 				CertEChainingMatch: true,
 			},
 			wantErrType: func(err error) bool {
@@ -501,7 +500,6 @@ func TestClassifyVerify(t *testing.T) {
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"PartialChain"},
 				CertEChainingMatch: true,
 			},
 			wantErrType: func(err error) bool {
@@ -532,27 +530,34 @@ func TestClassifyVerify(t *testing.T) {
 
 		// ---------------- DEV: accept CERT_E_CHAINING only ----------------
 		{
-			name:    "dev-unknown-error-cert-e-chaining-with-partial-chain",
+			// The AVC CI runner is air-gapped: X509Chain.Build would
+			// report PartialChain + RevocationStatusUnknown +
+			// OfflineRevocation there. This case pins that the DEV
+			// path accepts based on Status + StatusMessage +
+			// fingerprint alone (no X509Chain re-check).
+			name:    "dev-unknown-error-cert-e-chaining-air-gapped-ci",
 			sigType: signingTypeDev,
 			fp:      validThumbprint,
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
 				StatusMessage:      "A certificate chain could not be built to a trusted root authority.",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"PartialChain"},
 				CertEChainingMatch: true,
 			},
 			wantAccept: true,
 		},
 		{
-			name:    "dev-unknown-error-without-cert-e-chaining-message",
+			// Revocation-error message: different HRESULT / different
+			// localized StatusMessage. CertEChainingMatch=false because
+			// the message does not match the CERT_E_CHAINING text. DEV
+			// must reject this.
+			name:    "dev-unknown-error-revocation-message",
 			sigType: signingTypeDev,
 			fp:      validThumbprint,
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
 				StatusMessage:      "The revocation function was unable to check revocation for the certificate.",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"PartialChain"},
 				CertEChainingMatch: false,
 			},
 			wantErrType: func(err error) bool {
@@ -561,14 +566,19 @@ func TestClassifyVerify(t *testing.T) {
 			},
 		},
 		{
-			name:    "dev-cert-e-chaining-but-chain-has-revoked-flag",
+			// A revoked cert would surface CERT_E_REVOKED, which has
+			// its own localized message ("was explicitly revoked by
+			// its issuer"). CertEChainingMatch=false. DEV must still
+			// reject even though fingerprint matches and status is
+			// UnknownError.
+			name:    "dev-unknown-error-revoked-cert-message",
 			sigType: signingTypeDev,
 			fp:      validThumbprint,
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
+				StatusMessage:      "A certificate was explicitly revoked by its issuer.",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"PartialChain", "Revoked"},
-				CertEChainingMatch: true,
+				CertEChainingMatch: false,
 			},
 			wantErrType: func(err error) bool {
 				_, ok := err.(*signatureError)
@@ -576,14 +586,16 @@ func TestClassifyVerify(t *testing.T) {
 			},
 		},
 		{
-			name:    "dev-cert-e-chaining-but-chain-shows-not-time-valid",
+			// Expired cert would surface CERT_E_EXPIRED — different
+			// localized message. DEV rejects.
+			name:    "dev-unknown-error-expired-cert-message",
 			sigType: signingTypeDev,
 			fp:      validThumbprint,
 			rec: psSignatureRecord{
 				Status:             "UnknownError",
+				StatusMessage:      "A required certificate is not within its validity period.",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"NotTimeValid"},
-				CertEChainingMatch: true,
+				CertEChainingMatch: false,
 			},
 			wantErrType: func(err error) bool {
 				_, ok := err.(*signatureError)
@@ -597,7 +609,6 @@ func TestClassifyVerify(t *testing.T) {
 			rec: psSignatureRecord{
 				Status:             "NotTrusted",
 				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"PartialChain"},
 				CertEChainingMatch: false,
 			},
 			wantErrType: func(err error) bool {
@@ -610,23 +621,6 @@ func TestClassifyVerify(t *testing.T) {
 			sigType: signingTypeDev,
 			fp:      validThumbprint,
 			rec:     psSignatureRecord{Status: "HashMismatch", Thumbprint: validThumbprint},
-			wantErrType: func(err error) bool {
-				_, ok := err.(*signatureError)
-				return ok
-			},
-		},
-		{
-			name:    "dev-cert-e-chaining-flag-with-only-noerror",
-			sigType: signingTypeDev,
-			fp:      validThumbprint,
-			rec: psSignatureRecord{
-				Status:             "UnknownError",
-				Thumbprint:         validThumbprint,
-				ChainStatusFlags:   []string{"NoError"},
-				CertEChainingMatch: true,
-			},
-			// NoError alone means the chain built cleanly — but status
-			// says UnknownError. Something's inconsistent; reject.
 			wantErrType: func(err error) bool {
 				_, ok := err.(*signatureError)
 				return ok
@@ -650,41 +644,6 @@ func TestClassifyVerify(t *testing.T) {
 				t.Errorf("expected specific error type, got %T: %v", err, err)
 			}
 		})
-	}
-}
-
-// TestChainStatusIsOnlyPartialChain is a direct fixture for the fail-
-// closed helper — most cases are already covered by TestClassifyVerify,
-// but a couple of edge cases (empty slice, all-NoError) are cleaner as
-// standalone assertions.
-func TestChainStatusIsOnlyPartialChain(t *testing.T) {
-	ok := [][]string{
-		{"PartialChain"},
-		{"PartialChain", "NoError"},
-		{"NoError", "PartialChain"},
-		{"PartialChain", ""},
-	}
-	bad := [][]string{
-		{},                               // no chain built at all
-		{"NoError"},                      // clean chain — not the DEV shape
-		{""},                             // stray empty
-		{"NotTimeValid"},                 // expired
-		{"Revoked"},                      // revoked
-		{"PartialChain", "NotTimeValid"}, // co-occurring flag
-		{"PartialChain", "Revoked"},      // co-occurring flag
-		{"UntrustedRoot"},                // untrusted root — different HR
-		{"OfflineRevocation"},            // CRL/OCSP offline
-		{"PartialChain", "OfflineRevocation"},
-	}
-	for _, flags := range ok {
-		if !chainStatusIsOnlyPartialChain(flags) {
-			t.Errorf("chainStatusIsOnlyPartialChain(%v) = false, want true", flags)
-		}
-	}
-	for _, flags := range bad {
-		if chainStatusIsOnlyPartialChain(flags) {
-			t.Errorf("chainStatusIsOnlyPartialChain(%v) = true, want false", flags)
-		}
 	}
 }
 
