@@ -55,6 +55,7 @@ struct FirstRunView: View {
     @State private var checked = false
     @State private var connector = "codex"
     @State private var detectedConnectors: [String] = []
+    @State private var detectedProxyConnectors: [String] = []
     @State private var registeredConnectors: Set<String> = []
     @State private var actionConnectors: Set<String> = []
     @State private var discoveryRequested = false
@@ -70,6 +71,9 @@ struct FirstRunView: View {
     @State private var verify = true
     @State private var runID: UUID?
     @State private var exitCode: Int32?
+    @State private var installerRelease: RuntimeInstallerInfo?
+    @State private var installerMetadataLoading = false
+    @State private var installerMetadataError: String?
 
     private static let connectors = ConnectorDiscoverySelection.onboardingConnectors
     private static let installerURL = URL(
@@ -154,8 +158,8 @@ struct FirstRunView: View {
                     } label: {
                         Label(
                             runtimeInstallIsCancelling
-                                ? "Cancelling…"
-                                : (runtimeInstallIsFinishing ? "Finishing…" : "Cancel Install"),
+                                ? "Cancelling..."
+                                : (runtimeInstallIsFinishing ? "Finishing..." : "Cancel Install"),
                             systemImage: runtimeInstallIsFinishing ? "hourglass" : "stop.fill"
                         )
                     }
@@ -165,16 +169,30 @@ struct FirstRunView: View {
                         if let runID { appState.activity.cancel(runID) }
                     } label: {
                         Label(
-                            isCancelling ? "Cancelling…" : (isFinishing ? "Finishing…" : "Cancel"),
+                            isCancelling ? "Cancelling..." : (isFinishing ? "Finishing..." : "Cancel"),
                             systemImage: isFinishing ? "hourglass" : "stop.fill"
                         )
                     }
                     .disabled(isCancelling || isFinishing)
                 } else if cliFound {
-                    Button {
-                        initialize()
-                    } label: {
-                        Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
+                    if detectedConnectors.isEmpty, !detectedProxyConnectors.isEmpty {
+                        Button {
+                            appState.selectedPanel = .setup
+                            dismiss()
+                        } label: {
+                            Label("Open Proxy Connector Setup", systemImage: "cable.connector")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                    } else {
+                        Button {
+                            initialize()
+                        } label: {
+                            Label(exitCode == 0 ? "Run Setup Again" : "Initialize DefenseClaw", systemImage: "play.fill")
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(setupInvalid || !appState.installationMutationsAllowed)
                     }
                     .buttonStyle(.borderedProminent)
                     .keyboardShortcut(.defaultAction)
@@ -192,6 +210,9 @@ struct FirstRunView: View {
             // until a config exists — never exec other binaries without an
             // explicit user action.
             cliFound = await appState.cli.locateBinary() != nil
+            if !cliFound {
+                await loadInstallerRelease()
+            }
         }
     }
 
@@ -244,10 +265,20 @@ struct FirstRunView: View {
                         }
                     }
                 } else {
-                    Picker("Fallback hook connector", selection: $connector) {
-                        ForEach(Self.connectors, id: \.self) {
-                            Text(friendlyConnectorName($0)).tag($0)
+                    if detectedProxyConnectors.isEmpty {
+                        Picker("Fallback hook connector", selection: $connector) {
+                            ForEach(TUIWizards.hookConnectors, id: \.self) {
+                                Text(friendlyConnectorName($0)).tag($0)
+                            }
                         }
+                    } else {
+                        LabeledContent("Detected proxy connectors") {
+                            Text(detectedProxyConnectors.map(friendlyConnectorName).joined(separator: ", "))
+                                .multilineTextAlignment(.trailing)
+                        }
+                        Text("Proxy connectors require their dedicated Setup flow. Continue with Open Proxy Connector Setup below.")
+                            .font(.caption)
+                            .foregroundStyle(Cisco.orange)
                     }
                     HStack(spacing: 8) {
                         Button {
@@ -262,11 +293,13 @@ struct FirstRunView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    Text(discoveryRequested
-                         ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
-                         : "Choose a hook connector directly, or detect the agents installed on this Mac.")
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+                    if detectedProxyConnectors.isEmpty {
+                        Text(discoveryRequested
+                             ? "No installed hook connectors were returned by discovery. Setup will use this explicit hook connector fallback."
+                             : "Choose a hook connector directly, or detect the agents installed on this Mac.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
                     if let connectorDiscoveryError {
                         Label(connectorDiscoveryError, systemImage: "exclamationmark.triangle.fill")
                             .font(.caption)
@@ -368,15 +401,56 @@ struct FirstRunView: View {
 
     private var scriptInstaller: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Text("Download the installer, review its contents, then run it from Terminal. The Mac app does not execute a remote script automatically.")
+            Text("Download the release installer, verify its published SHA-256 digest, review the verified local file, then run it from Terminal. The Mac app does not execute a remote script automatically.")
                 .font(.callout).foregroundStyle(.secondary)
-            Link(destination: Self.installerURL) {
-                Label("Review Install Script", systemImage: "safari")
+            if installerMetadataLoading {
+                HStack(spacing: 6) {
+                    ProgressView().controlSize(.small)
+                    Text("Loading authenticated release metadata...")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            } else if let installerRelease {
+                Link(destination: installerRelease.releaseURL) {
+                    Label("Open DefenseClaw \(installerRelease.tag) Release", systemImage: "safari")
+                }
+                installCommandRow("1. Download and Verify", command: installerRelease.downloadCommand)
+                installCommandRow("2. Review Verified Local File", command: installerRelease.reviewCommand)
+                installCommandRow("3. Verify Again and Run", command: installerRelease.runCommand)
+                Text("Expected SHA-256: \(installerRelease.assetSHA256)")
+                    .font(.caption.monospaced())
+                    .foregroundStyle(.secondary)
+                    .textSelection(.enabled)
+            } else {
+                Label(
+                    installerMetadataError
+                        ?? "Authenticated installer metadata is unavailable. No shell command was generated.",
+                    systemImage: "exclamationmark.triangle.fill"
+                )
+                .font(.caption)
+                .foregroundStyle(Cisco.orange)
+                Link(
+                    "Open Official DefenseClaw Releases",
+                    destination: URL(
+                        string: "https://github.com/cisco-ai-defense/defenseclaw/releases"
+                    )!
+                )
             }
-            installCommandRow("1. Download", command: Self.downloadCommand)
-            installCommandRow("2. Run After Review", command: Self.runCommand)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    @MainActor
+    private func loadInstallerRelease() async {
+        guard !installerMetadataLoading else { return }
+        installerMetadataLoading = true
+        installerMetadataError = nil
+        defer { installerMetadataLoading = false }
+        guard let release = await appState.updater.latestRuntimeInstaller() else {
+            installerMetadataError = "The latest release has no digest-bound install.sh asset. Use the official release page and verify its published checksum manually."
+            return
+        }
+        installerRelease = release
     }
 
     private func execution(_ entry: CommandActivityEntry) -> some View {
@@ -460,6 +534,7 @@ struct FirstRunView: View {
         Task {
             cliFound = await appState.cli.locateBinary() != nil
             appState.installDetected = await appState.configStore.installPresent
+            if !cliFound { await loadInstallerRelease() }
             // Re-discover only after the user opted into discovery — Check
             // Again must not become a back door into exec'ing agent CLIs.
             if cliFound, discoveryRequested { await discoverConnectors() }
@@ -481,21 +556,23 @@ struct FirstRunView: View {
             arguments: ["agent", "discover", "--json", "--no-emit-otel", "--refresh"],
             mutation: true
         )
-        let detected = result.succeeded
+        let allDetected = result.succeeded
             ? ConnectorOnboarding.installedConnectors(from: result.output, supportedOrder: Self.connectors)
             : []
+        let detected = allDetected.filter { TUIWizards.hookConnectors.contains($0) }
         let selection = ConnectorDiscoverySelection.reconciling(
             previouslyDetected: detectedConnectors,
             detected: detected,
             registered: registeredConnectors,
             action: actionConnectors
         )
+        detectedProxyConnectors = allDetected.filter { TUIWizards.proxyConnectors.contains($0) }
         detectedConnectors = detected
         // Pre-check the first discovery and later additions, while preserving
         // explicit choices for connectors that remain installed.
         registeredConnectors = selection.registered
         actionConnectors = selection.action
-        if detected.isEmpty {
+        if allDetected.isEmpty {
             connectorDiscoveryError = result.succeeded
                 ? "Agent discovery completed but did not identify a supported connector."
                 : "Agent discovery failed (exit \(result.exitCode)); choose a fallback connector."

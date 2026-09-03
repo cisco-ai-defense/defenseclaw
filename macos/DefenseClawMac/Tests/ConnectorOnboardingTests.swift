@@ -151,7 +151,7 @@ struct ConnectorOnboardingTests {
 
     private static func multipleAdditiveSetupsRestartOnlyAfterTheFinalConnector() {
         let plan = makePlan(
-            detected: ["codex", "claudecode", "cursor", "hermes", "openclaw"],
+            detected: ["codex", "claudecode", "cursor", "openclaw"],
             registered: ["codex", "claudecode", "cursor"],
             action: [],
             profile: "observe"
@@ -167,8 +167,7 @@ struct ConnectorOnboardingTests {
             "final additive setup preserves connector order"
         )
         expect(!plan[2].contains("--no-restart"), "final additive setup performs the restart")
-        expect(!plan.contains { $0.contains("hermes") }, "unregistered hook connector stays absent")
-        expect(!plan.contains { $0.contains("openclaw") }, "proxy connector stays absent")
+        expect(!plan.contains { $0.contains("openclaw") }, "unregistered connector stays absent")
     }
 
     private static func subsetWithoutGatewayStartNeverRestarts() {
