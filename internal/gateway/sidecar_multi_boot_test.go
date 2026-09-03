@@ -2373,6 +2373,29 @@ func TestManagedGuardianCoverageAcceptsDeferredTargets(t *testing.T) {
 	if ok, reason := managedGuardianCoversConnectors("unused", []string{"codex"}); !ok {
 		t.Fatalf("deferred authorization coverage = false: %s", reason)
 	}
+
+	current.TargetCount = 5
+	inflated, err := json.Marshal(managedGuardianAuthorization{
+		Version:      2,
+		UpdatedAt:    fresh,
+		OK:           true,
+		TargetCount:  2,
+		SuccessCount: 1,
+		PendingCount: 1,
+		ProtectedTargets: []managedGuardianAuthorizationTarget{{
+			SID: "S-1-5-21-1-2-3-1001", User: "alice", UserHome: "/home/alice", Connector: "codex", OK: true,
+		}},
+		Current: &current,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, inflated, 0o644); err != nil {
+		t.Fatalf("write inflated current target count: %v", err)
+	}
+	if ok, _ := managedGuardianCoversConnectors("unused", []string{"codex"}); ok {
+		t.Fatal("deferred pending with inflated current TargetCount reported coverage")
+	}
 }
 
 func TestManagedGuardianCoverageAcceptsSerializedInstallResultContract(t *testing.T) {
