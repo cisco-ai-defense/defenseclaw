@@ -2001,5 +2001,298 @@ with locked_file_update(lock_base):
         self.assertNotIn(("start", False, old_token), events)
 
 
+def _guardian_plan(*connectors: str, users: tuple[str, ...] = ("alice", "bob")):
+    from defenseclaw.rotate_token_guardian import GuardianRotationPlan, GuardianRotationTarget
+
+    targets = []
+    for user in users:
+        for connector in connectors:
+            targets.append(
+                GuardianRotationTarget(
+                    user=user,
+                    user_home=f"/home/{user}",
+                    sid="",
+                    connector=connector,
+                    data_dir="",
+                )
+            )
+    return GuardianRotationPlan(
+        operation_id="a" * 32,
+        generation="b" * 32,
+        manifest="/tmp/targets.yaml",
+        targets=tuple(targets),
+    )
+
+
+def _write_current_authorization(td: str, plan, fingerprints: dict[str, str], generation: str) -> None:
+    auth_dir = Path(f"{td.rstrip(os.sep)}-hook-guardian")
+    auth_dir.mkdir(exist_ok=True)
+    attestations = []
+    for target in plan.targets:
+        attestations.append(
+            {
+                "user": target.user,
+                "user_home": target.user_home,
+                "connector": target.connector,
+                "ok": True,
+                "generation": generation,
+                "token_fingerprint": fingerprints[target.connector],
+                "manifest_sha256": "d" * 64,
+            }
+        )
+    payload = {
+        "ok": True,
+        "current": {
+            "ok": True,
+            "generation": generation,
+            "manifest_sha256": "d" * 64,
+            "target_count": len(attestations),
+            "success_count": len(attestations),
+            "failure_count": 0,
+            "attestations": attestations,
+        },
+    }
+    (auth_dir / "protected_targets.json").write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _fixture_hook_fingerprint(index: int) -> str:
+    return cmd_setup._rotate_token_hook_fingerprint(f"{index:064x}")
+
+
+class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
+    def test_unmanaged_rotation_never_invokes_the_guardian_participant(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
+            guardian = mock.Mock(side_effect=AssertionError("guardian must not join unmanaged rotation"))
+            with (
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle"),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate", guardian),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            guardian.assert_not_called()
+
+    def test_managed_success_prepares_starts_then_commits(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex", "claudecode"])
+            dotenv = os.path.join(td, ".env")
+            Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
+            plan = _guardian_plan("codex", "claudecode")
+            _write_current_authorization(
+                td,
+                plan,
+                {"codex": _fixture_hook_fingerprint(1), "claudecode": _fixture_hook_fingerprint(2)},
+                "a" * 32,
+            )
+            events: list[str] = []
+
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                events.append(f"service:{action}")
+
+            def guardian(
+                _data_dir: str,
+                action: str,
+                *,
+                config_file: str,
+                plan,
+                fingerprints_path: str | None = None,
+            ) -> None:
+                events.append(f"guardian:{action}")
+                if action == "prepare":
+                    new_fps = {
+                        connector: cmd_setup._rotate_token_hook_fingerprint(
+                            Path(td, "hooks", f".hook-{connector}.token").read_text(encoding="ascii").strip()
+                        )
+                        for connector in ("codex", "claudecode")
+                    }
+                    _write_current_authorization(td, plan, new_fps, plan.generation)
+
+            with (
+                mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate", side_effect=guardian),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(events, ["service:stop", "guardian:prepare", "service:start", "guardian:commit"])
+            self.assertNotIn(plan.operation_id.join(["secret", "token"]), result.output)
+
+    def test_target_attestation_failure_rolls_back_guardian_and_service(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\r\n"
+            Path(dotenv).write_bytes(original)
+            original_hook = Path(td, "hooks", ".hook-codex.token").read_bytes()
+            plan = _guardian_plan("codex", users=("alice", "bob"))
+            _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
+            events: list[str] = []
+
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                events.append(f"service:{action}:{int(cleanup)}")
+
+            def guardian(
+                _data_dir: str,
+                action: str,
+                *,
+                config_file: str,
+                plan,
+                fingerprints_path: str | None = None,
+            ) -> None:
+                events.append(f"guardian:{action}")
+                if action == "prepare":
+                    new_fp = cmd_setup._rotate_token_hook_fingerprint(
+                        Path(td, "hooks", ".hook-codex.token").read_text(encoding="ascii").strip()
+                    )
+                    _write_current_authorization(td, plan, {"codex": new_fp}, plan.generation)
+                    payload = json.loads((Path(f"{td}-hook-guardian") / "protected_targets.json").read_text())
+                    payload["current"]["attestations"][1]["ok"] = False
+                    payload["current"]["attestations"][1]["token_fingerprint"] = "e" * 64
+                    (Path(f"{td}-hook-guardian") / "protected_targets.json").write_text(json.dumps(payload))
+
+            with (
+                mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
+                mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate", side_effect=guardian),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            self.assertEqual(
+                events,
+                [
+                    "service:stop:0",
+                    "guardian:prepare",
+                    "service:start:0",
+                    "service:stop:1",
+                    "guardian:rollback",
+                    "service:start:0",
+                ],
+            )
+            self.assertEqual(Path(dotenv).read_bytes(), original)
+            self.assertEqual(Path(td, "hooks", ".hook-codex.token").read_bytes(), original_hook)
+            self.assertNotIn("a" * 64, result.output)
+
+    def test_busy_guardian_journal_fails_before_stop(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
+            plan = _guardian_plan("codex", users=("alice",))
+            _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
+            journal = Path(f"{td}-hook-guardian") / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
+            lifecycle = mock.Mock()
+            with (
+                mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", lifecycle),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate"),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            lifecycle.assert_not_called()
+            self.assertIn("already in progress", result.output)
+
+    def test_exposure_recovery_rolls_back_guardian_but_does_not_restart_a(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            old_token = "a" * 64
+            new_token = "b" * 64
+            original = b"KEEP=exact\r\nDEFENSECLAW_GATEWAY_TOKEN=" + old_token.encode() + b"\r\n"
+            Path(dotenv).write_bytes(original)
+            plan = _guardian_plan("codex", users=("alice",))
+            _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
+            events: list[tuple[str, bool, str]] = []
+
+            def lifecycle(
+                _data_dir: str,
+                action: str,
+                *,
+                token: str,
+                config_file: str,
+                connector_state: str | None = None,
+                cleanup: bool = False,
+            ) -> None:
+                events.append((action, cleanup, token))
+                if action == "start":
+                    raise cmd_setup._RotateTokenLifecycleError(
+                        "Gateway start failed during the token-rotation transaction."
+                    )
+
+            def guardian(
+                _data_dir: str,
+                action: str,
+                *,
+                config_file: str,
+                plan,
+                fingerprints_path: str | None = None,
+            ) -> None:
+                events.append((f"guardian:{action}", False, ""))
+                if action == "prepare":
+                    new_fp = cmd_setup._rotate_token_hook_fingerprint(
+                        Path(td, "hooks", ".hook-codex.token").read_text(encoding="ascii").strip()
+                    )
+                    _write_current_authorization(td, plan, {"codex": new_fp}, plan.generation)
+
+            with (
+                mock.patch.object(cmd_setup, "load_config", return_value=app.cfg),
+                mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
+                mock.patch.object(cmd_setup, "_is_pid_alive", return_value=True),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", side_effect=lifecycle),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate", side_effect=guardian),
+                self.assertRaises(cmd_setup._RotateTokenLifecycleError),
+            ):
+                cmd_setup._rotate_token_transaction(
+                    app,
+                    dotenv,
+                    new_token,
+                    "action=doctor-exposure-rotation restart=true",
+                    recover_previous_runtime=False,
+                    scoped_connectors=("codex",),
+                )
+
+            self.assertEqual(
+                events,
+                [
+                    ("stop", False, old_token),
+                    ("guardian:prepare", False, ""),
+                    ("start", False, new_token),
+                    ("stop", True, new_token),
+                    ("guardian:rollback", False, ""),
+                ],
+            )
+            self.assertEqual(Path(dotenv).read_bytes(), original)
+            self.assertNotIn(("start", False, old_token), events)
+
+
 if __name__ == "__main__":
     unittest.main()
