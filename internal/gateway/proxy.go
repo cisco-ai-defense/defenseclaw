@@ -1313,7 +1313,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] passthrough → %s\n", scrubURLSecrets(upstreamURL))
-	resp, err := providerHTTPClient.Do(upstreamReq)
+	resp, err := doProviderRequest(upstreamReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
@@ -2161,7 +2161,7 @@ func (p *GuardrailProxy) resolveConfiguredProvider(req *ChatRequest) LLMProvider
 	if instanceName != "" {
 		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: model=%q instance=%q\n", cfgModel, instanceName)
 	} else {
-		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q\n", cfgModel)
+		fmt.Fprintf(os.Stderr, "[guardrail] direct-provider mode: using configured model %q provider=%q base_url=%q\n", cfgModel, p.cfg.LLM.Provider, baseURL)
 	}
 
 	registry, _, _ := providerRegistrySnapshot()
@@ -2393,21 +2393,23 @@ func guardUpstreamTargetURL(w http.ResponseWriter, r *http.Request, targetURL st
 		writeOpenAIError(w, http.StatusBadRequest, "upstream target URL must use http or https")
 		return true
 	}
-	if host := u.Hostname(); host != "" && isPrivateHost(host) &&
-		!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
-		!passthroughAllowPrivateForTest {
-		emitEgress(r.Context(), gatewaylog.EgressPayload{
-			TargetHost:   host,
-			TargetPath:   r.URL.Path,
-			LooksLikeLLM: true,
-			Branch:       "chat",
-			Decision:     "block",
-			Reason:       "private-ip",
-			Source:       "go",
-		})
-		fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
-		writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
-		return true
+	if host := u.Hostname(); host != "" {
+		if isPrivateHost(host) &&
+			!isOllamaLoopback(targetURL+r.URL.Path, 0) &&
+			!passthroughAllowPrivateForTest {
+			emitEgress(r.Context(), gatewaylog.EgressPayload{
+				TargetHost:   host,
+				TargetPath:   r.URL.Path,
+				LooksLikeLLM: true,
+				Branch:       "chat",
+				Decision:     "block",
+				Reason:       "private-ip",
+				Source:       "go",
+			})
+			fmt.Fprintf(os.Stderr, "[guardrail] BLOCKED chat: private-host target %s\n", host)
+			writeOpenAIError(w, http.StatusForbidden, "target host resolves to a private address")
+			return true
+		}
 	}
 	return false
 }
@@ -2457,6 +2459,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		return
 	}
 	req.RawBody = body
+	req.ExtraParams = extractExtraParams(body)
 
 	// X-DC-Target-URL is set by the plugin's fetch interceptor and tells the
 	// proxy the real upstream URL the request was originally destined for.
@@ -5143,6 +5146,37 @@ func mergeToolCallChunks(existing json.RawMessage, chunk json.RawMessage) json.R
 	return out
 }
 
+// extractExtraParams pulls provider-specific fields from the request body
+// so bifrost can forward them to the upstream via MergeExtraParams.
+// Preserves extra_body as a top-level key so it appears verbatim in the
+// outbound request (chat-ai-stage expects extra_body.google.thinking_config,
+// NOT google.thinking_config at the top level).
+func extractExtraParams(body []byte) map[string]any {
+	var raw map[string]json.RawMessage
+	if json.Unmarshal(body, &raw) != nil {
+		return nil
+	}
+	extra := map[string]any{}
+	if eb, ok := raw["extra_body"]; ok {
+		var extraBody any
+		if json.Unmarshal(eb, &extraBody) == nil {
+			extra["extra_body"] = extraBody
+		}
+	}
+	for _, key := range []string{"google", "anthropic", "amazon"} {
+		if v, ok := raw[key]; ok {
+			var parsed any
+			if json.Unmarshal(v, &parsed) == nil {
+				extra[key] = parsed
+			}
+		}
+	}
+	if len(extra) == 0 {
+		return nil
+	}
+	return extra
+}
+
 func writeOpenAIError(w http.ResponseWriter, status int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
@@ -5294,7 +5328,7 @@ func (p *GuardrailProxy) rawForwardChatCompletion(w http.ResponseWriter, r *http
 	providerName := inferProviderFromURL(upstreamURL)
 	applyRawForwardRequestHeaders(upReq, r, providerName, req.TargetAPIKey)
 
-	resp, err := providerHTTPClient.Do(upReq)
+	resp, err := doProviderRequest(upReq)
 	if err != nil {
 		writeOpenAIError(w, http.StatusBadGateway, "upstream provider error: "+err.Error())
 		return

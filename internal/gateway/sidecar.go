@@ -655,6 +655,14 @@ func (s *Sidecar) Run(ctx context.Context) error {
 		fmt.Fprintf(os.Stderr, "[sidecar]          The proxy binds 127.0.0.1 only. Set guardrail.host to \"127.0.0.1\" to avoid silent connection failures.\n")
 	}
 
+	// Initialize private-upstream allowlist from config + env var.
+	// Always call SetAllowedPrivateIPs so config removals clear stale entries.
+	allowedIPs := netguard.ParseAllowedPrivateUpstreams(s.currentConfig().Guardrail.AllowPrivateUpstreams)
+	netguard.SetAllowedPrivateIPs(allowedIPs)
+	if len(allowedIPs) > 0 {
+		fmt.Fprintf(os.Stderr, "[sidecar] private-upstream allowlist: %d IPs configured\n", len(allowedIPs))
+	}
+
 	// Initialize OPA engine before goroutines so both the watcher and the
 	// API reload handler share the same instance.
 	if s.currentConfig().PolicyDir != "" {
@@ -1163,6 +1171,10 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	aiRestart := aiDiscoveryNeedsRestart(oldCfg, newCfg) || otelReload
 	rulePackReload := rulePackNeedsReload(oldCfg, newCfg)
 	judgeReload := judgeNeedsReload(oldCfg, newCfg)
+	privateUpstreamsReload := !reflect.DeepEqual(
+		oldCfg.Guardrail.AllowPrivateUpstreams,
+		newCfg.Guardrail.AllowPrivateUpstreams,
+	)
 
 	next := *newCfg
 	if next.Gateway.Token == "" && current.Gateway.Token != "" {
@@ -1255,6 +1267,13 @@ func (s *Sidecar) applyConfigReload(ctx context.Context, oldCfg, newCfg *config.
 	appliedCfg := current
 	if !onlyConfigReloadModeChanged(oldCfg, newCfg) {
 		appliedCfg = s.publishConfig(&next)
+	}
+	if privateUpstreamsReload {
+		// Replace, rather than merge, so removing the last entry takes effect.
+		// Drop pooled transports as well: an already-idle connection otherwise
+		// bypasses DialContext and could survive an allowlist revocation.
+		netguard.SetAllowedPrivateIPs(netguard.ParseAllowedPrivateUpstreams(appliedCfg.Guardrail.AllowPrivateUpstreams))
+		providerHTTPClient.CloseIdleConnections()
 	}
 
 	if otelReload {

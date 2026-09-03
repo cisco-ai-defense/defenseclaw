@@ -133,6 +133,15 @@ class IsActiveTests(unittest.TestCase):
         self.assertFalse(self.disable_redaction.is_active({"DEFENSECLAW_DISABLE_REDACTION": "false"}))
         self.assertFalse(self.disable_redaction.is_active({"DEFENSECLAW_DISABLE_REDACTION": "no"}))
 
+    def test_private_upstream_comma_list_is_active(self) -> None:
+        allowlist = load_registry().get("DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS")
+        assert allowlist is not None
+        self.assertTrue(
+            allowlist.is_active(
+                {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100,172.16.0.5"}
+            )
+        )
+
 
 class SchemaValidationInverseTests(unittest.TestCase):
     """``DEFENSECLAW_SCHEMA_VALIDATION`` is special: setting it to

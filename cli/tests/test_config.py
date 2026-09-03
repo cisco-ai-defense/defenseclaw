@@ -1610,6 +1610,13 @@ class TestGuardrailHostField(unittest.TestCase):
         gc = _merge_guardrail(None, "/tmp")
         self.assertEqual(gc.host, "localhost")
 
+    def test_merge_guardrail_private_upstreams(self):
+        gc = _merge_guardrail(
+            {"allow_private_upstreams": ["10.50.2.100", " 172.16.0.5 "]},
+            "/tmp",
+        )
+        self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
+
     def test_merge_guardrail_hilt_defaults_and_alias(self):
         default_gc = _merge_guardrail({}, "/tmp")
         self.assertFalse(default_gc.hilt.enabled)
