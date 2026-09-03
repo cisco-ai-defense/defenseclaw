@@ -39,11 +39,13 @@ import (
 const cursorAdapterHelperMode = "TEST_CURSOR_ADAPTER_MODE"
 const cursorAdapterPIDFileEnv = "TEST_CURSOR_ADAPTER_PID_FILE"
 const copilotAdapterHelperMode = "TEST_COPILOT_ADAPTER_MODE"
+const copilotAdapterPIDFileEnv = "TEST_COPILOT_ADAPTER_PID_FILE"
 const windsurfAdapterHelperMode = "TEST_WINDSURF_ADAPTER_MODE"
 const windsurfAdapterExitCodeEnv = "TEST_WINDSURF_ADAPTER_EXIT_CODE"
 
 func TestMain(m *testing.M) {
-	if os.Getenv(copilotAdapterHelperMode) == "result" {
+	switch os.Getenv(copilotAdapterHelperMode) {
+	case "result":
 		payload, err := io.ReadAll(os.Stdin)
 		if err != nil || string(payload) != `{"source":"copilot-adapter-probe"}` {
 			fmt.Fprintf(os.Stderr, "Copilot adapter helper received wrong stdin: %q\n", string(payload))
@@ -54,6 +56,12 @@ func TestMain(m *testing.M) {
 			os.Exit(5)
 		}
 		fmt.Print(`{"permissionDecision":"deny","permissionDecisionReason":"matched: test"}`)
+		os.Exit(0)
+	case "timeout":
+		if pidFile := os.Getenv(copilotAdapterPIDFileEnv); pidFile != "" {
+			_ = os.WriteFile(pidFile, []byte(strconv.Itoa(os.Getpid())), 0o600)
+		}
+		time.Sleep(30 * time.Second)
 		os.Exit(0)
 	}
 	switch os.Getenv(cursorAdapterHelperMode) {
@@ -193,6 +201,44 @@ func TestCopilotAdapterFailureUsesDocumentedFailOpenContract(t *testing.T) {
 	}
 	if !strings.Contains(stderr, "Copilot hook adapter failed open") {
 		t.Fatalf("stderr = %q, want adapter failure diagnostic", stderr)
+	}
+}
+
+func TestCopilotAdapterProductionDeadlineKillsChildAndFailsOpen(t *testing.T) {
+	executable, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	t.Setenv(copilotAdapterHelperMode, "timeout")
+	t.Setenv(copilotAdapterPIDFileEnv, pidFile)
+	adapter := renderCopilotAdapterForTest(t, executable, copilotWindowsHookAdapterTimeoutMS)
+	startedAt := time.Now()
+	stdout, stderr, code := runCopilotAdapterTest(
+		t, adapter, `{"source":"copilot-adapter-probe"}`,
+	)
+	if elapsed := time.Since(startedAt); elapsed > time.Duration(copilotWindowsHookContractTimeoutMS)*time.Millisecond {
+		t.Fatalf("adapter exceeded the Copilot command-hook deadline: %s", elapsed)
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want fail-open 0; stderr=%q", code, stderr)
+	}
+	if stdout != "" {
+		t.Fatalf("stdout = %q, want empty fail-open response", stdout)
+	}
+	if !strings.Contains(stderr, fmt.Sprintf("timed out after %dms", copilotWindowsHookAdapterTimeoutMS)) {
+		t.Fatalf("stderr = %q, want production timeout diagnostic", stderr)
+	}
+	rawPID, err := os.ReadFile(pidFile)
+	if err != nil {
+		t.Fatalf("read helper PID: %v", err)
+	}
+	pid, err := strconv.ParseUint(strings.TrimSpace(string(rawPID)), 10, 32)
+	if err != nil {
+		t.Fatalf("parse helper PID: %v", err)
+	}
+	if windowsProcessRunning(uint32(pid)) {
+		t.Fatalf("timed-out Copilot launcher process %d is still running", pid)
 	}
 }
 
