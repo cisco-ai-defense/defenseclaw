@@ -211,6 +211,25 @@ class BindGuardianRosterTests(RequireGuardianParticipantTests):
                 )
         self.assertIn("not in the service rotation roster", str(raised.exception))
 
+    def test_rejects_non_boolean_enabled_flag(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = Path(td, "targets.yaml")
+            manifest.write_text(
+                "version: 1\ntargets:\n  - user: alice\n    user_home: /home/alice\n"
+                "    connector: codex\n    enabled: 0\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                bind_guardian_roster(
+                    manifest_path=str(manifest),
+                    requested_scopes={"codex"},
+                    operation_id="a" * 32,
+                    generation="b" * 32,
+                )
+        self.assertIn("enabled flag must be a boolean", str(raised.exception))
+
 
 class CurrentAttestationTests(RequireGuardianParticipantTests):
     def test_rejects_aggregate_count_without_per_target_proof(self) -> None:
@@ -289,6 +308,45 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
                 assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
         self.assertIn("not bound to the selected manifest", str(raised.exception))
 
+    def test_rejects_row_attested_against_a_different_manifest(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = _write_test_manifest(Path(td, "targets.yaml"))
+            plan = _plan(manifest)
+            digest = guardian_manifest_digest(manifest)
+            auth = Path(f"{td}-hook-guardian")
+            auth.mkdir()
+            (auth / "protected_targets.json").write_text(
+                json.dumps(
+                    {
+                        "current": {
+                            "ok": True,
+                            "generation": "b" * 32,
+                            "manifest_sha256": digest,
+                            "target_count": 3,
+                            "success_count": 3,
+                            "attestations": [
+                                {
+                                    "user": target.user,
+                                    "user_home": target.user_home,
+                                    "connector": target.connector,
+                                    "ok": True,
+                                    "generation": "b" * 32,
+                                    "token_fingerprint": "c" * 64,
+                                    "manifest_sha256": digest if target.connector == "codex" else "d" * 64,
+                                }
+                                for target in plan.targets
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
+        self.assertIn("attested a different manifest", str(raised.exception))
+
 
 class GuardianResponseTests(RequireGuardianParticipantTests):
     def test_accepts_exact_identity_and_roster_count(self) -> None:
@@ -366,6 +424,7 @@ class GuardianResponseTests(RequireGuardianParticipantTests):
 
 
 class ControlPlaneCustodyTests(unittest.TestCase):
+    @unittest.skipIf(os.name == "nt", "uid-0 custody is a POSIX administrator check")
     @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root-owned fixtures cannot prove the non-root rejection")
     def test_rejects_non_root_owner(self) -> None:
         from tempfile import TemporaryDirectory
@@ -385,10 +444,7 @@ class ControlPlaneCustodyTests(unittest.TestCase):
             real.write_text("version: 1\ntargets: []\n", encoding="utf-8")
             link = Path(td, "targets.yaml")
             link.symlink_to(real)
-            with mock.patch.object(os, "lstat", wraps=os.lstat) as wrapped:
-                info = os.lstat(str(link))
-                self.assertTrue(stat.S_ISLNK(info.st_mode))
-                wrapped.assert_called()
+            self.assertTrue(stat.S_ISLNK(os.lstat(str(link)).st_mode))
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_control_plane_path(str(link), "guardian manifest")
         self.assertIn("not a trusted regular path", str(raised.exception))

@@ -218,6 +218,10 @@ def load_enabled_guardian_targets(manifest_path: str) -> tuple[GuardianRotationT
         if not isinstance(row, dict):
             raise click.ClickException("Guardian manifest contains a malformed target; token rotation did not start.")
         enabled = row.get("enabled")
+        if enabled is not None and type(enabled) is not bool:
+            raise click.ClickException(
+                "Guardian manifest target enabled flag must be a boolean; token rotation did not start."
+            )
         if enabled is False:
             continue
         target = GuardianRotationTarget(
@@ -355,6 +359,10 @@ def assert_current_attestations(
             raise click.ClickException(
                 "A selected guardian target attested a different generation; rotation did not commit."
             )
+        if str(row.get("manifest_sha256") or "").strip() != expected_digest:
+            raise click.ClickException(
+                "A selected guardian target attested a different manifest; rotation did not commit."
+            )
 
 
 def expected_fingerprints_payload(
@@ -450,11 +458,6 @@ def _load_bounded_json(path: str, label: str) -> dict[str, Any]:
     if not isinstance(payload, dict):
         raise click.ClickException(f"{label} is malformed.")
     return payload
-
-
-def _require_regular_file(path: str, label: str, max_bytes: int) -> str:
-    _require_regular_file_stat(path, label, max_bytes)
-    return path
 
 
 def _require_regular_file_stat(path: str, label: str, max_bytes: int) -> os.stat_result:
