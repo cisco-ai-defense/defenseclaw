@@ -451,8 +451,15 @@ export default function (api: DefenseClawPluginHost) {
         return isInspectVerdict(verdict)
           ? verdict
           : failClosedVerdict("sidecar returned invalid verdict");
-      } catch {
-        return failClosedVerdict("sidecar returned malformed verdict");
+      } catch (err) {
+        // Structurally unreadable JSON stays fail-closed. Abort/reset
+        // while reading the body is an availability failure and follows
+        // DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN.
+        if (err instanceof SyntaxError) {
+          return failClosedVerdict("sidecar returned malformed verdict");
+        }
+        const msg = err instanceof Error ? err.message : String(err);
+        return unavailableVerdict(`sidecar body unavailable: ${msg}`);
       }
     } catch (err) {
       const duration_ms = Math.round(performance.now() - started);
