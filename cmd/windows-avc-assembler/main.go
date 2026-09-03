@@ -72,6 +72,22 @@ type options struct {
 	Version          string
 	Out              string
 	AllowUnsigned    bool
+	// SigningType is DEV or PROD; required whenever -AllowUnsigned is
+	// not set. Drives the chain-trust policy applied to each payload
+	// signature. See signature.go signingType for the trust matrix.
+	SigningType string
+	// ExpectedSignerSha256 is the 64-char SHA-256 fingerprint of the
+	// signer certificate AVC's pipeline uses. Required whenever
+	// -AllowUnsigned is not set. Bare hex; colons and case are tolerated
+	// and normalized on the way in (see normalizeThumbprint).
+	ExpectedSignerSha256 string
+
+	// signingTypeParsed and expectedThumbprint are the validated
+	// interpretations of the corresponding string flags. Filled in by
+	// parseFlags after normalization; assemble() consumes these
+	// rather than the raw string fields.
+	signingTypeParsed  signingType
+	expectedThumbprint string
 }
 
 // usageError is emitted for CLI shape / value problems; the top-level
@@ -148,6 +164,8 @@ func parseFlags(args []string) (options, error) {
 	fs.StringVar(&opts.Version, "Version", "", "release semver, e.g. 0.8.6 (required)")
 	fs.StringVar(&opts.Out, "Out", "", "output directory for the assembled EXE + provenance.json (required)")
 	fs.BoolVar(&opts.AllowUnsigned, "AllowUnsigned", false, "skip Authenticode signature assertion; stamp unsigned=true in manifest+provenance")
+	fs.StringVar(&opts.SigningType, "SigningType", "", "DEV|PROD — chain-trust policy for payload verification (required unless -AllowUnsigned)")
+	fs.StringVar(&opts.ExpectedSignerSha256, "ExpectedSignerSha256", "", "64-char SHA-256 fingerprint of the payload signer certificate (required unless -AllowUnsigned)")
 
 	if err := fs.Parse(args); err != nil {
 		return opts, &usageError{msg: err.Error()}
@@ -175,6 +193,23 @@ func parseFlags(args []string) (options, error) {
 	if strings.TrimSpace(opts.Out) == "" {
 		missing = append(missing, "Out")
 	}
+	// -SigningType and -ExpectedSignerSha256 are required unless
+	// -AllowUnsigned skips signature verification entirely. Enforce
+	// mutual exclusion before required-flag checks so a caller who
+	// passes both sees the exclusion diagnostic first (more actionable).
+	sigTypeSet := strings.TrimSpace(opts.SigningType) != ""
+	fpSet := strings.TrimSpace(opts.ExpectedSignerSha256) != ""
+	if opts.AllowUnsigned && (sigTypeSet || fpSet) {
+		return opts, &usageError{msg: "-AllowUnsigned is mutually exclusive with -SigningType / -ExpectedSignerSha256"}
+	}
+	if !opts.AllowUnsigned {
+		if !sigTypeSet {
+			missing = append(missing, "SigningType")
+		}
+		if !fpSet {
+			missing = append(missing, "ExpectedSignerSha256")
+		}
+	}
 	if len(missing) > 0 {
 		return opts, &usageError{msg: fmt.Sprintf("missing required flag(s): -%s", strings.Join(missing, ", -"))}
 	}
@@ -183,6 +218,18 @@ func parseFlags(args []string) (options, error) {
 	}
 	if !versionPattern.MatchString(opts.Version) {
 		return opts, &usageError{msg: fmt.Sprintf("-Version must be semver like 0.8.6 or 0.8.6-dev (got: %q)", opts.Version)}
+	}
+	if !opts.AllowUnsigned {
+		st, err := parseSigningType(opts.SigningType)
+		if err != nil {
+			return opts, &usageError{msg: fmt.Sprintf("-SigningType %s", err)}
+		}
+		fp, err := normalizeThumbprint(opts.ExpectedSignerSha256)
+		if err != nil {
+			return opts, &usageError{msg: fmt.Sprintf("-ExpectedSignerSha256 %s", err)}
+		}
+		opts.signingTypeParsed = st
+		opts.expectedThumbprint = fp
 	}
 	return opts, nil
 }
@@ -238,8 +285,13 @@ func assemble(opts options, stdout io.Writer) error {
 	}
 
 	fmt.Fprintf(stdout, "==> DefenseClawAssembler %s\n", opts.Version)
-	fmt.Fprintf(stdout, "==> source-commit=%s allow-unsigned=%t\n",
-		opts.SourceCommit[:12]+"...", opts.AllowUnsigned)
+	if opts.AllowUnsigned {
+		fmt.Fprintf(stdout, "==> source-commit=%s allow-unsigned=true\n",
+			opts.SourceCommit[:12]+"...")
+	} else {
+		fmt.Fprintf(stdout, "==> source-commit=%s signing-type=%s signer-sha256=%s\n",
+			opts.SourceCommit[:12]+"...", opts.signingTypeParsed, opts.expectedThumbprint)
+	}
 
 	// Stage 1: pinned inventory. A stray file or a missing required
 	// name is a hard failure — silent trimming would let a malformed
@@ -255,7 +307,11 @@ func assemble(opts options, stdout io.Writer) error {
 	stage(2, "verify signatures")
 	if !opts.AllowUnsigned {
 		for _, name := range requiredPayloadFiles {
-			if err := verifyAuthenticode(filepath.Join(payloadDir, name)); err != nil {
+			if err := verifyAuthenticode(
+				filepath.Join(payloadDir, name),
+				opts.signingTypeParsed,
+				opts.expectedThumbprint,
+			); err != nil {
 				return err
 			}
 		}
