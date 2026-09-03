@@ -21,7 +21,10 @@
 #   2. Records the resolved upstream version per connector x os.
 #   3. On candidate-regression classified failures, builds a regression issue
 #      body and (when --open-issue is passed and gh is authenticated) opens or
-#      updates a GitHub issue labeled `connector-regression`.
+#      updates a GitHub issue labeled `connector-regression`. Callers must
+#      derive --open-issue from trusted workflow state (for example a GitHub
+#      job conclusion). classification.json is defense-in-depth for the issue
+#      body only and must not authorize the write.
 #   4. Exits non-zero when failures exist so the report job is red — but it
 #      NEVER edits validated_versions.json or hook_contracts.json. Bumping a
 #      validated/approved version is a deliberate human action.

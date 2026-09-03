@@ -8,6 +8,7 @@ import runpy
 import shutil
 import stat
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -339,3 +340,61 @@ def test_report_issue_rows_only_include_candidate_regressions(tmp_path: Path) ->
     assert failures == [
         ("codex", "macos", "candidate-upgrade:tool-block:enforced", "block verdict missing")
     ]
+
+
+def test_radar_workflow_does_not_authorize_issues_from_classification_artifacts() -> None:
+    workflow = Path(__file__).resolve().parents[2] / ".github/workflows/connector-version-radar.yml"
+    text = workflow.read_text(encoding="utf-8")
+    live_section = text.split("\n  live:", 1)[1].split("\n  report:", 1)[0]
+    report_section = text.split("\n  report:", 1)[1]
+
+    assert "issues: write" not in live_section
+    assert "contents: read" in live_section
+    assert "issues: write" in report_section
+    assert 'needs.live.result }}" = "failure"' in report_section
+    assert "--open-issue" in report_section
+    assert "find radar-results -name classification.json" not in report_section
+    assert "jq -e '.classification" not in report_section
+
+
+def test_report_without_open_issue_flag_does_not_mutate_issues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    report_module = runpy.run_path(str(REPORT))
+    candidate = tmp_path / "connector-version-radar-codex-0.144.1"
+    candidate.mkdir()
+    (candidate / "classification.json").write_text(
+        json.dumps({"classification": "candidate_regression"}),
+        encoding="utf-8",
+    )
+    (candidate / "results.jsonl").write_text(
+        json.dumps(
+            {
+                "connector": "codex",
+                "os": "macos",
+                "event": "candidate-upgrade:tool-block:enforced",
+                "status": "fail",
+                "version": "0.144.1",
+                "detail": "forged coherent regression",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("forged classification.json must not mutate issues without --open-issue")
+
+    report_module["open_or_update_issue"] = _forbidden
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "report.py",
+            "--results-dir",
+            str(tmp_path),
+            "--run-url",
+            "https://example.invalid/run",
+        ],
+    )
+    assert report_module["main"]() == 1
