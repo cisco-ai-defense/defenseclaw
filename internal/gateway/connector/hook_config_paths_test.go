@@ -765,7 +765,9 @@ func TestConfigFileReferencesHookAcceptsManagedCommandField(t *testing.T) {
 func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testing.T) {
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, hookBinary)
-	needle := nativeHookFlag + "copilot"
+	hookScript := filepath.Join(t.TempDir(), "hooks", "copilot-hook.sh")
+	canonical := copilotHookInvocationCommandForEvent("windows", "preToolUse", hookScript)
+	needle := canonical
 	path := filepath.Join(t.TempDir(), "defenseclaw.json")
 	write := func(command string) {
 		t.Helper()
@@ -785,7 +787,7 @@ func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testin
 		}
 	}
 
-	write(windowsCopilotPowerShellHookCommandForBinary(hookBinary))
+	write(canonical)
 	present, err := configFileReferencesHook(path, []string{needle})
 	if err != nil {
 		t.Fatalf("canonical configFileReferencesHook: %v", err)
@@ -794,13 +796,13 @@ func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testin
 		t.Fatal("canonical Copilot powershell hook was not detected")
 	}
 
-	write(legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary))
+	write(windowsCopilotPowerShellHookCommandForEvent("preToolUse", hookBinary))
 	present, err = configFileReferencesHook(path, []string{needle})
 	if err != nil {
 		t.Fatalf("legacy configFileReferencesHook: %v", err)
 	}
 	if present {
-		t.Fatal("broken legacy Copilot hook was considered healthy instead of requiring repair")
+		t.Fatal("legacy Start-Process Copilot hook was considered healthy instead of requiring repair")
 	}
 }
 

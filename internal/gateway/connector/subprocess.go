@@ -60,6 +60,9 @@ type templateData struct {
 	// Cursor's 30-second host contract must also cover the stable launcher's
 	// custody verification and the adapter's bounded child cleanup.
 	CursorHookTimeoutMS int
+	// Copilot has the same 30-second command-hook envelope and needs an
+	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
+	CopilotHookTimeoutMS int
 }
 
 // defaultHookFailMode is injected into every hook when the caller does not
@@ -85,9 +88,12 @@ const windowsHookAdapterTimeoutMS = 10_000
 // and the full hook's own bounded gateway request; those stages are serial and
 // therefore cannot share the old 10-second request-only deadline.
 const (
-	cursorWindowsHookContractTimeoutMS = 30_000
-	cursorWindowsHookCleanupBudgetMS   = 5_000
-	cursorWindowsHookAdapterTimeoutMS  = cursorWindowsHookContractTimeoutMS - cursorWindowsHookCleanupBudgetMS
+	cursorWindowsHookContractTimeoutMS  = 30_000
+	cursorWindowsHookCleanupBudgetMS    = 5_000
+	cursorWindowsHookAdapterTimeoutMS   = cursorWindowsHookContractTimeoutMS - cursorWindowsHookCleanupBudgetMS
+	copilotWindowsHookContractTimeoutMS = 30_000
+	copilotWindowsHookCleanupBudgetMS   = 5_000
+	copilotWindowsHookAdapterTimeoutMS  = copilotWindowsHookContractTimeoutMS - copilotWindowsHookCleanupBudgetMS
 )
 
 // cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
@@ -493,16 +499,17 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 	}
 
 	connectorData := templateData{
-		APIAddr:             apiAddr,
-		APIToken:            "",
-		FailMode:            normalizeHookFailMode(failMode),
-		Managed:             managed,
-		TokenFile:           tokenFile,
-		ScopedToken:         scopedToken,
-		ConnectorName:       strings.ToLower(strings.TrimSpace(connectorName)),
-		HookBinaryPS:        strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
-		HookTimeoutMS:       windowsHookAdapterTimeoutMS,
-		CursorHookTimeoutMS: cursorWindowsHookAdapterTimeoutMS,
+		APIAddr:              apiAddr,
+		APIToken:             "",
+		FailMode:             normalizeHookFailMode(failMode),
+		Managed:              managed,
+		TokenFile:            tokenFile,
+		ScopedToken:          scopedToken,
+		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
+		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
+		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
+		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
 	}
 	// The inspect-* family has one physical copy per data directory.  Its
 	// bytes must therefore depend only on install-wide inputs; connector mode,

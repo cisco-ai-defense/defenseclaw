@@ -186,14 +186,13 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 			if sh.connector == "copilot" {
 				// Exact native camelCase body: event identity is intentionally
 				// absent and comes only from the trusted registration header.
+				// The official CLI tutorial documents toolArgs as a JSON string.
 				requestPayload = map[string]interface{}{
 					"sessionId": "session-copilot",
 					"timestamp": float64(1),
 					"cwd":       `C:\workspace`,
 					"toolName":  sh.toolName,
-					"toolArgs": map[string]interface{}{
-						"command": `Remove-Item C:\ -Recurse:$true -Force:$true`,
-					},
+					"toolArgs":  `{"command":"Remove-Item C:\\ -Recurse:$true -Force:$true"}`,
 				}
 			}
 			body, err := json.Marshal(requestPayload)

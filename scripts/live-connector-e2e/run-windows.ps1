@@ -5410,14 +5410,15 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         throw "$Context does not contain the exact 14-event Copilot hook set"
     }
     $commands = [Collections.Generic.HashSet[string]]::new([StringComparer]::Ordinal)
-    $pattern = '(?i)^\$ErrorActionPreference=''Stop'';\s+\$env:NoDefaultCurrentDirectoryInExePath=''1'';\s+\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process\s+-FilePath\s+''(?:''''|[^''])*defenseclaw-hook\.exe''\s+-ArgumentList\s+@\(''hook'',''--connector'',''copilot'',''--event'',''(?<event>[a-zA-Z]+)''\)\s+-NoNewWindow\s+-Wait\s+-PassThru;\s+exit\s+\$hookProcess\.ExitCode$'
+    $adapters = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    $pattern = '(?i)^&\s+''(?<adapter>(?:''''|[^''])+copilot-hook\.ps1)''\s+-Event\s+''(?<event>[a-zA-Z]+)''$'
     foreach ($event in $events) {
         $property = $document.hooks.PSObject.Properties[$event]
         if ($null -eq $property) { throw "$Context is missing Copilot event $event" }
         $owned = @($property.Value | Where-Object {
-            $_.type -ceq 'command' -and [string]$_.powershell -match 'defenseclaw-hook\.exe'
+            $_.type -ceq 'command' -and [string]$_.powershell -match 'copilot-hook\.ps1'
         })
-        if ($owned.Count -ne 1) { throw "$Context event $event has $($owned.Count) native DefenseClaw handlers" }
+        if ($owned.Count -ne 1) { throw "$Context event $event has $($owned.Count) DefenseClaw adapter handlers" }
         $entry = $owned[0]
         if ([int]$entry.timeoutSec -ne 30 -or
             $null -ne $entry.PSObject.Properties['bash'] -or
@@ -5428,13 +5429,41 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         $match = [regex]::Match($command, $pattern)
         if (-not $match.Success -or
             $match.Groups['event'].Value -cne $event -or
-            $command -match '(?i)&\s+&|\$LASTEXITCODE') {
+            $command -match '(?i)&\s+&|\$LASTEXITCODE|Start-Process') {
             throw "$Context event $event does not use the exact synchronous Copilot PowerShell command"
         }
         [void]$commands.Add($command)
+        [void]$adapters.Add($match.Groups['adapter'].Value.Replace("''", "'"))
     }
     if ($commands.Count -ne $events.Count) {
         throw "$Context does not use one exact event-bound Copilot PowerShell command per event"
+    }
+    if ($adapters.Count -ne 1) { throw "$Context uses inconsistent Copilot adapters" }
+    $adapter = @($adapters)[0]
+    if (-not [IO.Path]::IsPathFullyQualified($adapter) -or
+        -not (Test-Path -LiteralPath $adapter -PathType Leaf)) {
+        throw "$Context Copilot adapter is missing: $adapter"
+    }
+    $adapterText = [IO.File]::ReadAllText($adapter)
+    foreach ($marker in @(
+        'defenseclaw-managed-hook v7',
+        'defenseclaw-hook.exe',
+        '[Console]::In.ReadToEnd()',
+        '$payload[0] -eq [char]0xFEFF',
+        'RedirectStandardInput = $true',
+        'RedirectStandardOutput = $true',
+        'RedirectStandardError = $true',
+        '[Console]::InputEncoding = $utf8NoBom',
+        '[Console]::OutputEncoding = $utf8NoBom',
+        '$timeoutMS = 25000',
+        '$process.StandardInput.AutoFlush = $true',
+        '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
+        'WaitForExit',
+        '[System.Environment]::Exit(0)'
+    )) {
+        if ($adapterText.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+            throw "$Context Copilot adapter is missing marker $marker"
+        }
     }
 }
 
@@ -6860,7 +6889,7 @@ function Assert-DoctorWindowsHookRegistration {
     $check = $checks[0]
     $expectedHealthyDetail = switch ($Connector) {
         'amp' { 'plugin-ready-timeout 30' }
-        'copilot' { 'healthy Windows-native Copilot PowerShell registration' }
+        'copilot' { 'healthy Windows-native Copilot PowerShell byte-stream registration' }
         'cursor' { 'configured runtime=' }
         'hermes' { 'on-disk Windows-native executable registration is valid' }
         'geminicli' { 'reachable at' }
@@ -6959,6 +6988,19 @@ function Assert-DoctorWindowsHookRegistration {
             }
         }
         $tamperedConfig = $cursorSettings | ConvertTo-Json -Depth 12
+    } elseif ($Connector -eq 'copilot') {
+        $missingCopilotAdapter = Join-Path $StateRoot 'doctor-tamper\copilot-hook.ps1'
+        $copilotSettings = $config | ConvertFrom-Json -ErrorAction Stop
+        foreach ($eventProperty in @($copilotSettings.hooks.PSObject.Properties)) {
+            foreach ($handler in @($eventProperty.Value)) {
+                if ([string]$handler.powershell -match '(?i)copilot-hook\.ps1') {
+                    $adapterLiteral = $missingCopilotAdapter.Replace("'", "''")
+                    $eventLiteral = ([string]$eventProperty.Name).Replace("'", "''")
+                    $handler.powershell = "& '$adapterLiteral' -Event '$eventLiteral'"
+                }
+            }
+        }
+        $tamperedConfig = $copilotSettings | ConvertTo-Json -Depth 12
     } elseif ($Connector -eq 'antigravity') {
         $encoded = [regex]::Match($config, '(?i)-EncodedCommand\s+(?<value>[A-Za-z0-9+/=]+)')
         if (-not $encoded.Success) { throw 'Antigravity tamper contract found no EncodedCommand' }
@@ -6994,12 +7036,7 @@ function Assert-DoctorWindowsHookRegistration {
             }
             'amp' { 'does not reference DefenseClaw' }
             'copilot' {
-                $missingGatewayLauncher = [regex]::Replace(
-                    (Get-StableHookRuntimeExecutable),
-                    '(?i)defenseclaw-hook\.exe$',
-                    'defenseclaw-gateway.exe'
-                )
-                "registered hook target cannot be resolved with PATHEXT: $missingGatewayLauncher"
+                "registered Copilot adapter cannot be resolved: $missingCopilotAdapter"
             }
             'cursor' { 'configured file has no DefenseClaw Cursor command entries' }
             'hermes' { 'does not use the direct native DefenseClaw executable' }

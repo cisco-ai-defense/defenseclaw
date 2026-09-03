@@ -4189,10 +4189,10 @@ function Get-WizardConnectorSpecification([string]$ConnectorName, [string]$UserP
             DoctorRuntimePattern = 'plugin-ready-timeout 30'
         }
         copilot = @{
-            HookScript = 'copilot-hook.sh'
+            HookScript = 'copilot-hook.ps1'
             ConfigPath = Join-Path $UserProfile '.copilot\hooks\defenseclaw.json'
             DoctorLabel = 'Copilot hooks'
-            DoctorRuntimePattern = 'healthy Windows-native Copilot PowerShell registration'
+            DoctorRuntimePattern = 'healthy Windows-native Copilot PowerShell byte-stream registration'
         }
         cursor = @{
             HookScript = 'cursor-hook.ps1'
@@ -4810,12 +4810,8 @@ function Assert-WizardHookRegistration(
         if (($registeredEvents -join "`0") -cne (($requiredEvents | Sort-Object) -join "`0")) {
             throw 'wizard-selected Copilot registration does not contain the exact required hook event set'
         }
-        $commandPattern = '^\$ErrorActionPreference=''Stop''; ' +
-            '\$env:NoDefaultCurrentDirectoryInExePath=''1''; ' +
-            '\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process ' +
-            '-FilePath ''(?<path>(?:[^'']|'''')+)'' ' +
-            '-ArgumentList @\(''hook'',''--connector'',''copilot'',''--event'',''(?<event>[^'']+)''\) ' +
-            '-NoNewWindow -Wait -PassThru; exit \$hookProcess\.ExitCode$'
+        $commandPattern = '(?i)^& ''(?<path>(?:''''|[^''])+copilot-hook\.ps1)'' ' +
+            '-Event ''(?<event>[a-zA-Z]+)''$'
         foreach ($eventName in $requiredEvents) {
             $entries = @($hookDocument.hooks.$eventName)
             if ($entries.Count -ne 1 -or [string]$entries[0].type -cne 'command' -or
@@ -4833,13 +4829,55 @@ function Assert-WizardHookRegistration(
                 $entries[0].PSObject.Properties.Name -contains 'command') {
                 throw "wizard-selected Copilot $eventName hook is not PowerShell-only"
             }
-            $runtimePath = $match.Groups['path'].Value.Replace("''", "'")
-            if (-not [IO.Path]::GetFullPath($runtimePath).Equals(
-                [IO.Path]::GetFullPath((Get-StableHookRuntimeExecutable)),
+            $adapterPath = $match.Groups['path'].Value.Replace("''", "'")
+            if (-not [IO.Path]::GetFullPath($adapterPath).Equals(
+                [IO.Path]::GetFullPath($expectedHook),
                 [StringComparison]::OrdinalIgnoreCase
             )) {
-                throw "wizard-selected Copilot $eventName hook targets an unexpected runtime"
+                throw "wizard-selected Copilot $eventName hook targets an unexpected adapter"
             }
+        }
+        $adapterText = [IO.File]::ReadAllText($expectedHook)
+        foreach ($marker in @(
+            'defenseclaw-managed-hook v7',
+            '[Console]::In.ReadToEnd()',
+            '$payload[0] -eq [char]0xFEFF',
+            'RedirectStandardInput = $true',
+            'RedirectStandardOutput = $true',
+            'RedirectStandardError = $true',
+            '[Console]::InputEncoding = $utf8NoBom',
+            '[Console]::OutputEncoding = $utf8NoBom',
+            '$timeoutMS = 25000',
+            '$process.StandardInput.AutoFlush = $true',
+            '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
+            '$process.WaitForExit($remainingMS)',
+            '[System.Environment]::Exit(0)'
+        )) {
+            if ($adapterText.IndexOf($marker, [StringComparison]::Ordinal) -lt 0) {
+                throw "wizard-selected Copilot adapter is missing byte-stream marker: $marker"
+            }
+        }
+        $timeoutMatches = [regex]::Matches(
+            $adapterText,
+            '(?m)^\$timeoutMS = (?<ms>\d+)\r?$'
+        )
+        if ($timeoutMatches.Count -ne 1 -or $timeoutMatches[0].Groups['ms'].Value -cne '25000') {
+            throw 'wizard-selected Copilot adapter must contain exactly one 25000ms timeout assignment'
+        }
+        $hookMatches = [regex]::Matches(
+            $adapterText,
+            '(?m)^\$hook = ''(?<path>(?:''''|[^''])+)''\r?$'
+        )
+        if ($hookMatches.Count -ne 1) {
+            throw 'wizard-selected Copilot adapter must contain exactly one bound hook executable'
+        }
+        $hookMatch = $hookMatches[0]
+        $runtimePath = $hookMatch.Groups['path'].Value.Replace("''", "'")
+        if (-not [IO.Path]::GetFullPath($runtimePath).Equals(
+            [IO.Path]::GetFullPath((Get-StableHookRuntimeExecutable)),
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+            throw 'wizard-selected Copilot adapter targets an unexpected runtime'
         }
     } elseif ($Specification.Connector -eq 'cursor') {
         try { $hooksDocument = $registration | ConvertFrom-Json -ErrorAction Stop }
@@ -5021,6 +5059,111 @@ function Set-WizardCodexLegacyNonWaitingHook([object]$Specification) {
         $updated,
         [Text.UTF8Encoding]::new($false)
     )
+}
+
+function Assert-CopilotAdapterConcurrentStdin {
+    $adapterTemplate = Join-Path $WorkspaceRoot 'internal\gateway\connector\hooks\copilot-hook.ps1'
+    if (-not (Test-Path -LiteralPath $adapterTemplate -PathType Leaf)) {
+        throw "Copilot adapter template is missing: $adapterTemplate"
+    }
+    $work = Join-Path ([IO.Path]::GetTempPath()) ('dc-copilot-adapter-' + [guid]::NewGuid().ToString('n'))
+    New-Item -ItemType Directory -Path $work | Out-Null
+    $started = New-Object 'System.Collections.Generic.List[System.Diagnostics.Process]'
+    try {
+        $helperSource = Join-Path $work 'probe.cs'
+        $helper = Join-Path $work 'defenseclaw-hook.exe'
+        [IO.File]::WriteAllText(
+            $helperSource,
+            @'
+using System;
+
+internal static class Program {
+    private static int Main() {
+        string payload = Console.In.ReadToEnd();
+        if (payload.IndexOf("\"source\":\"copilot-adapter-probe\"") < 0) {
+            Console.Error.WriteLine("helper received unexpected stdin");
+            return 6;
+        }
+        Console.Out.Write("{\"permissionDecision\":\"deny\",\"permissionDecisionReason\":\"matched: concurrent\"}");
+        return 0;
+    }
+}
+'@,
+            [Text.UTF8Encoding]::new($false)
+        )
+        $compiler = Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'
+        if (-not (Test-Path -LiteralPath $compiler -PathType Leaf)) {
+            throw "Windows C# compiler is missing: $compiler"
+        }
+        $compile = & $compiler /nologo /t:exe /out:$helper $helperSource
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $helper -PathType Leaf)) {
+            throw "failed to compile Copilot adapter stdin probe: $compile"
+        }
+        $adapter = Join-Path $work 'copilot-hook.ps1'
+        $rendered = [IO.File]::ReadAllText($adapterTemplate).Replace(
+            '{{.HookBinaryPS}}',
+            $helper.Replace("'", "''")
+        ).Replace('{{.CopilotHookTimeoutMS}}', '8000')
+        [IO.File]::WriteAllText($adapter, $rendered, [Text.UTF8Encoding]::new($false))
+        $payload = '{"source":"copilot-adapter-probe","padding":"' + ('x' * 65536) + '"}'
+        $shell = (Get-Command powershell.exe -CommandType Application).Source
+        $quotedAdapter = $adapter.Replace("'", "''")
+        $outputs = New-Object 'System.Collections.Generic.List[object]'
+        for ($index = 0; $index -lt 3; $index++) {
+            $startInfo = New-Object System.Diagnostics.ProcessStartInfo
+            $startInfo.FileName = $shell
+            $startInfo.Arguments = "-NoProfile -NonInteractive -Command `"& '$quotedAdapter' -Event 'preToolUse'`""
+            $startInfo.UseShellExecute = $false
+            $startInfo.CreateNoWindow = $true
+            $startInfo.RedirectStandardInput = $true
+            $startInfo.RedirectStandardOutput = $true
+            $startInfo.RedirectStandardError = $true
+            $process = New-Object System.Diagnostics.Process
+            $process.StartInfo = $startInfo
+            if (-not $process.Start()) {
+                throw 'Copilot adapter concurrent stdin probe did not start'
+            }
+            [void]$started.Add($process)
+            $process.StandardInput.Write($payload)
+            $process.StandardInput.Close()
+            $outputs.Add([pscustomobject]@{
+                Stdout = $process.StandardOutput
+                Stderr = $process.StandardError
+            })
+        }
+        $deadline = [DateTime]::UtcNow.AddSeconds(30)
+        $results = @()
+        for ($index = 0; $index -lt $started.Count; $index++) {
+            $process = $started[$index]
+            $remainingMS = [int]($deadline - [DateTime]::UtcNow).TotalMilliseconds
+            if ($remainingMS -le 0 -or -not $process.WaitForExit($remainingMS)) {
+                throw 'Copilot adapter concurrent stdin probe timed out'
+            }
+            $stdout = $outputs[$index].Stdout.ReadToEnd()
+            $stderr = $outputs[$index].Stderr.ReadToEnd()
+            if ($process.ExitCode -ne 0) {
+                throw "Copilot adapter concurrent stdin probe exited $($process.ExitCode): $stderr"
+            }
+            $results += $stdout
+        }
+        foreach ($stdout in $results) {
+            if ($stdout.IndexOf(
+                '{"permissionDecision":"deny","permissionDecisionReason":"matched: concurrent"}',
+                [StringComparison]::Ordinal
+            ) -lt 0) {
+                throw "Copilot adapter concurrent stdin probe returned unexpected stdout: $stdout"
+            }
+        }
+    }
+    finally {
+        foreach ($process in $started) {
+            if (-not $process.HasExited) {
+                try { $process.Kill() } catch { }
+            }
+            $process.Dispose()
+        }
+        Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
 
 function Assert-WizardCodexLegacyLauncherNeedsRepair(

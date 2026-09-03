@@ -266,14 +266,14 @@ _COPILOT_CONTRACT_EVENTS = {
 _COPILOT_REQUIRED_HOOKS = _COPILOT_CONTRACT_EVENTS["copilot-hooks-v2"]
 
 _COPILOT_POWERSHELL_COMMAND = re.compile(
-    r"^\$ErrorActionPreference='Stop'; "
-    r"\$env:NoDefaultCurrentDirectoryInExePath='1'; "
-    r"\$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process "
-    r"-FilePath '((?:[^']|'')+)' "
-    r"-ArgumentList @\('hook','--connector','copilot','--event','([^']+)'\) "
-    r"-NoNewWindow -Wait -PassThru; "
-    r"exit \$hookProcess\.ExitCode$"
+    r"^& '((?:[^']|'')+copilot-hook\.ps1)' -Event '([^']+)'$",
+    re.IGNORECASE,
 )
+_COPILOT_ADAPTER_HOOK_BINARY = re.compile(r"(?m)^\$hook = '((?:[^']|'')+)'\r?$")
+_COPILOT_ADAPTER_TIMEOUT_MS = 25_000
+_COPILOT_ADAPTER_TIMEOUT = re.compile(r"(?m)^\$timeoutMS = (\d+)\r?$")
+_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT = f"$timeoutMS = {_COPILOT_ADAPTER_TIMEOUT_MS}"
+_COPILOT_ADAPTER_MAX_BYTES = 128 * 1024
 
 _ANTIGRAVITY_REQUIRED_HOOKS: dict[str, bool] = {
     "PreInvocation": False,
@@ -3255,11 +3255,11 @@ def _copilot_powershell_binding(command: str) -> tuple[str, str] | None:
         if lowered.startswith("& "):
             raise _InspectionError(
                 "stale",
-                "Copilot PowerShell hook uses the legacy non-waiting call-operator launcher",
+                "Copilot PowerShell hook uses the legacy direct launcher",
             )
         raise _InspectionError(
-            "malformed",
-            "Copilot PowerShell hook does not implement the synchronous wait/stdin/stdout/exit contract",
+            "stale",
+            "Copilot PowerShell hook uses the legacy Start-Process form that drops redirected stdin/stdout",
         )
     return None
 
@@ -3384,15 +3384,76 @@ def validate_windows_copilot_hook_registration(
             )
         document = _read_config(config_path, "copilot")
         evidence, _runtime_version, contract_id = _contract_evidence(data_dir, "copilot", config_path)
-        command, raw_target, matrix_entries = _validate_copilot_hook_matrix(document, contract_id)
+        command, raw_adapter, matrix_entries = _validate_copilot_hook_matrix(document, contract_id)
+        resolved_adapter = _resolve_target(raw_adapter, "powershell", search_path=search_path, pathext=pathext)
+        if not resolved_adapter:
+            raise _InspectionError("missing", f"registered Copilot adapter cannot be resolved: {raw_adapter}")
+        expected_adapter = os.path.join(data_dir, "hooks", "copilot-hook.ps1")
+        if not _same_windows_path(resolved_adapter, expected_adapter):
+            raise _InspectionError(
+                "foreign",
+                f"registered Copilot adapter is outside the DefenseClaw runtime: {resolved_adapter}",
+            )
+        adapter_bytes = _stable_regular_file(
+            resolved_adapter,
+            data_dir,
+            read_limit=_COPILOT_ADAPTER_MAX_BYTES + 1,
+        )
+        if len(adapter_bytes) > _COPILOT_ADAPTER_MAX_BYTES:
+            raise _InspectionError("malformed", "registered Copilot adapter is too large")
+        try:
+            adapter = adapter_bytes.decode("utf-8-sig")
+        except UnicodeError as exc:
+            raise _InspectionError("malformed", f"registered Copilot adapter is not UTF-8: {exc}") from exc
+        for marker in (
+            "# defenseclaw-managed-hook v7",
+            "[Console]::In.ReadToEnd()",
+            "$payload[0] -eq [char]0xFEFF",
+            "$startInfo.RedirectStandardInput = $true",
+            "$startInfo.RedirectStandardOutput = $true",
+            "$startInfo.RedirectStandardError = $true",
+            "[Console]::InputEncoding = $utf8NoBom",
+            "[Console]::OutputEncoding = $utf8NoBom",
+            _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT,
+            "$process.StandardInput.AutoFlush = $true",
+            "[System.Threading.Tasks.TaskCreationOptions]::LongRunning",
+            "$process.WaitForExit($remainingMS)",
+            "hook --connector copilot --event ",
+            "[System.Environment]::Exit(0)",
+        ):
+            if marker not in adapter:
+                raise _InspectionError(
+                    "stale",
+                    f"registered Copilot adapter is missing byte-stream marker {marker!r}",
+                )
+        timeout_matches = list(_COPILOT_ADAPTER_TIMEOUT.finditer(adapter))
+        if len(timeout_matches) != 1:
+            raise _InspectionError(
+                "stale",
+                "registered Copilot adapter must contain exactly one bounded timeout assignment",
+            )
+        timeout_ms = int(timeout_matches[0].group(1))
+        if timeout_ms != _COPILOT_ADAPTER_TIMEOUT_MS:
+            raise _InspectionError(
+                "stale",
+                f"registered Copilot adapter timeout is {timeout_ms}ms; "
+                f"expected {_COPILOT_ADAPTER_TIMEOUT_MS}ms",
+            )
+        hook_matches = list(_COPILOT_ADAPTER_HOOK_BINARY.finditer(adapter))
+        if len(hook_matches) != 1:
+            raise _InspectionError(
+                "malformed",
+                "registered Copilot adapter must contain exactly one bound hook executable",
+            )
+        raw_target = hook_matches[0].group(1).replace("''", "'")
         resolved = _resolve_target(raw_target, "direct", search_path=search_path, pathext=pathext)
         if not resolved:
-            raise _InspectionError("missing", f"registered hook target cannot be resolved with PATHEXT: {raw_target}")
+            raise _InspectionError("missing", f"Copilot adapter hook executable cannot be resolved: {raw_target}")
         target = resolved
         if ntpath.basename(resolved).casefold() != "defenseclaw-hook.exe":
             raise _InspectionError(
                 "foreign",
-                f"registered hook target is not the DefenseClaw hook launcher: {resolved}",
+                f"Copilot adapter target is not the DefenseClaw hook launcher: {resolved}",
             )
         runtime_root = _windows_hook_runtime_root(resolved) or install_root
         if _stable_regular_file(resolved, runtime_root, read_limit=2) != b"MZ":
@@ -3404,8 +3465,8 @@ def validate_windows_copilot_hook_registration(
         )
         return WindowsHookCheck(
             "healthy",
-            f"healthy Windows-native Copilot PowerShell registration; entries={matrix_entries}; "
-            f"{mode_detail}target={resolved}; local settings verified; "
+            f"healthy Windows-native Copilot PowerShell byte-stream registration; entries={matrix_entries}; "
+            f"{mode_detail}adapter={resolved_adapter}; target={resolved}; local settings verified; "
             f"enterprise/managed policy unverified; {evidence}",
             command,
             resolved,
