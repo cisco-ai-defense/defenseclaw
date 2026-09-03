@@ -37,10 +37,6 @@ struct AlertsView: View {
         appState.unackedAlerts.filter { appState.connectorFilterAllows($0.connectorName) }
     }
 
-    private var connectorScopedAlerts: [AlertRow] {
-        appState.unackedAlerts.filter { appState.connectorFilterAllows($0.connectorName) }
-    }
-
     private var rows: [AlertRow] {
         connectorScopedAlerts.filter { row in
             if let severityFilter, row.severity != severityFilter { return false }

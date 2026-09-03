@@ -425,14 +425,6 @@ actor EventStreamReader {
         }
     }
 
-    /// Return only newline-terminated bytes. A writer may be midway through a
-    /// JSON/log line when the size is sampled; leaving that suffix unconsumed
-    /// makes the next poll re-read and complete it instead of dropping it.
-    private func completeLinePrefix(_ data: Data) -> Data? {
-        guard let newline = data.lastIndex(of: 0x0A) else { return nil }
-        return data.prefix(through: newline)
-    }
-
     private func plainLogRow(_ line: String, stream: LogStream) -> LogRow {
         plainLogCounter += 1
         let metadata = parsePlainLogMetadata(line, stream: stream)
