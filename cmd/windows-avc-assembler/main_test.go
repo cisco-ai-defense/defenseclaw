@@ -200,28 +200,41 @@ func TestMissingRequiredFlag(t *testing.T) {
 }
 
 func TestInvalidSourceCommit(t *testing.T) {
+	// Pass -AllowUnsigned to bypass the SigningType/ExpectedSignerSha256
+	// required-flag gate. The test targets the SourceCommit-pattern
+	// check specifically, which fires after required-flag validation.
 	_, err := parseFlags([]string{
 		"-PayloadDir", "/tmp/payload",
 		"-SetupExeUnsigned", "/tmp/setup.exe",
 		"-SourceCommit", "not-a-sha",
 		"-Version", "0.8.6",
 		"-Out", "/tmp/out",
+		"-AllowUnsigned",
 	})
 	if _, ok := err.(*usageError); !ok {
 		t.Fatalf("expected *usageError, got %T: %v", err, err)
 	}
+	if !strings.Contains(err.Error(), "SourceCommit") {
+		t.Errorf("error should call out SourceCommit; got: %s", err)
+	}
 }
 
 func TestInvalidVersion(t *testing.T) {
+	// Same rationale as TestInvalidSourceCommit — bypass the sig-policy
+	// gate so the Version-pattern check is what we hit.
 	_, err := parseFlags([]string{
 		"-PayloadDir", "/tmp/payload",
 		"-SetupExeUnsigned", "/tmp/setup.exe",
 		"-SourceCommit", "0123456789abcdef0123456789abcdef01234567",
 		"-Version", "not-semver",
 		"-Out", "/tmp/out",
+		"-AllowUnsigned",
 	})
 	if _, ok := err.(*usageError); !ok {
 		t.Fatalf("expected *usageError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "Version") {
+		t.Errorf("error should call out Version; got: %s", err)
 	}
 }
 
@@ -319,33 +332,390 @@ func sha256File(t *testing.T, path string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// TestAssertCNIsCisco pins the exact-equality contract that closes
-// signtool's /n substring-match gap. A subject that CONTAINS the
-// pinned CN but does not EQUAL it (e.g. an internal test cert) must
-// be rejected — /n alone would let it through, so the follow-up
-// exact check in verifyAuthenticode is the load-bearing gate.
-func TestAssertCNIsCisco(t *testing.T) {
-	exact := "Cisco Systems, Inc."
-	if err := assertCNIsCisco("payload/x.exe", exact); err != nil {
-		t.Errorf("exact CN unexpectedly rejected: %v", err)
+// validThumbprint is a 64-char hex SHA-256 fixture used by every
+// classifier / flag test that needs the "expected" fingerprint. Not a
+// real signer thumbprint — just something that passes normalizeThumbprint.
+const validThumbprint = "aabbccddeeff00112233445566778899aabbccddeeff00112233445566778899"
+
+// TestNormalizeThumbprint covers the input-shape tolerance CodeRabbit
+// asked for during design review: bare hex, colon-separated, spaced,
+// uppercase — all should normalize to the same lowercase-no-separators
+// canonical form. Anything not 64 hex bytes must fail.
+func TestNormalizeThumbprint(t *testing.T) {
+	canonical := validThumbprint
+
+	ok := []struct {
+		name  string
+		input string
+	}{
+		{"bare-hex-lower", canonical},
+		{"bare-hex-upper", strings.ToUpper(canonical)},
+		{"colon-separated-upper", "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99"},
+		{"space-separated-upper", "AA BB CC DD EE FF 00 11 22 33 44 55 66 77 88 99 AA BB CC DD EE FF 00 11 22 33 44 55 66 77 88 99"},
 	}
-	rejects := []string{
-		"Cisco Systems, Inc. (Test Root)", // suffix — trailing junk
-		"Not Cisco Systems, Inc.",         // prefix — masquerading
-		"Cisco Systems, Inc",              // missing period — near-match
-		"cisco systems, inc.",             // case difference — /n is case-insensitive but our contract is exact
-		"Cisco Systems Inc.",              // missing comma
-		"",                                // empty
-		" Cisco Systems, Inc. ",           // whitespace-padded
+	for _, tc := range ok {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := normalizeThumbprint(tc.input)
+			if err != nil {
+				t.Fatalf("normalizeThumbprint(%q): %v", tc.input, err)
+			}
+			if got != canonical {
+				t.Errorf("normalizeThumbprint(%q) = %q, want %q", tc.input, got, canonical)
+			}
+		})
 	}
-	for _, cn := range rejects {
-		err := assertCNIsCisco("payload/x.exe", cn)
-		if err == nil {
-			t.Errorf("subject %q was accepted, expected signatureError", cn)
+
+	bad := []struct {
+		name  string
+		input string
+	}{
+		{"empty", ""},
+		{"short", "aabbcc"},
+		{"non-hex", "zzzz" + strings.Repeat("a", 60)},
+		{"long", canonical + "aa"},
+		{"one-char-off", canonical + "z"},
+	}
+	for _, tc := range bad {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := normalizeThumbprint(tc.input); err == nil {
+				t.Errorf("normalizeThumbprint(%q) unexpectedly succeeded", tc.input)
+			}
+		})
+	}
+}
+
+func TestParseSigningType(t *testing.T) {
+	prod := []string{"PROD", "prod", "Prod", " PROD ", "\tPROD\n"}
+	dev := []string{"DEV", "dev", "Dev", " DEV "}
+	bad := []string{"", "PRODUCTION", "release", "test", "DEV,PROD"}
+
+	for _, s := range prod {
+		st, err := parseSigningType(s)
+		if err != nil {
+			t.Errorf("parseSigningType(%q): %v", s, err)
 			continue
 		}
-		if _, ok := err.(*signatureError); !ok {
-			t.Errorf("subject %q rejected with %T; expected *signatureError", cn, err)
+		if st != signingTypeProd {
+			t.Errorf("parseSigningType(%q) = %v, want signingTypeProd", s, st)
 		}
+	}
+	for _, s := range dev {
+		st, err := parseSigningType(s)
+		if err != nil {
+			t.Errorf("parseSigningType(%q): %v", s, err)
+			continue
+		}
+		if st != signingTypeDev {
+			t.Errorf("parseSigningType(%q) = %v, want signingTypeDev", s, st)
+		}
+	}
+	for _, s := range bad {
+		if _, err := parseSigningType(s); err == nil {
+			t.Errorf("parseSigningType(%q) unexpectedly succeeded", s)
+		}
+	}
+
+	// String() round-trip.
+	if signingTypeProd.String() != "PROD" || signingTypeDev.String() != "DEV" {
+		t.Errorf("signingType.String() incorrect: PROD=%q DEV=%q",
+			signingTypeProd.String(), signingTypeDev.String())
+	}
+}
+
+// TestClassifyVerify walks the trust matrix documented in
+// signature.go. Pure function, no exec / Windows dependency —
+// synthetic psSignatureRecord tuples exercise every accept / reject
+// branch. This is the primary safety net for the DEV / PROD contract
+// AVC handoff v2 pinned.
+func TestClassifyVerify(t *testing.T) {
+	cases := []struct {
+		name       string
+		sigType    signingType
+		fp         string
+		rec        psSignatureRecord
+		wantAccept bool
+		// wantErrType: only checked when wantAccept is false.
+		wantErrType func(error) bool
+	}{
+		// ---------------- accept-in-both ----------------
+		{
+			name:       "prod-valid-fp-match",
+			sigType:    signingTypeProd,
+			fp:         validThumbprint,
+			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint},
+			wantAccept: true,
+		},
+		{
+			name:       "dev-valid-fp-match",
+			sigType:    signingTypeDev,
+			fp:         validThumbprint,
+			rec:        psSignatureRecord{Status: "Valid", Thumbprint: validThumbprint},
+			wantAccept: true,
+		},
+
+		// ---------------- fp checks (fatal regardless of mode) ----------------
+		{
+			name:    "missing-signer-cert",
+			sigType: signingTypeProd,
+			fp:      validThumbprint,
+			rec:     psSignatureRecord{Status: "NotSigned", Thumbprint: ""},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "fp-mismatch-even-if-status-valid",
+			sigType: signingTypeProd,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:     "Valid",
+				Thumbprint: strings.Repeat("11", 32),
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "fp-mismatch-in-dev-cert-e-chaining",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				Thumbprint:         strings.Repeat("22", 32),
+				CertEChainingMatch: true,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+
+		// ---------------- PROD status gate ----------------
+		{
+			name:    "prod-unknown-error-even-with-cert-e-chaining",
+			sigType: signingTypeProd,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: true,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "prod-not-trusted",
+			sigType: signingTypeProd,
+			fp:      validThumbprint,
+			rec:     psSignatureRecord{Status: "NotTrusted", Thumbprint: validThumbprint},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "prod-hash-mismatch",
+			sigType: signingTypeProd,
+			fp:      validThumbprint,
+			rec:     psSignatureRecord{Status: "HashMismatch", Thumbprint: validThumbprint},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+
+		// ---------------- DEV: accept CERT_E_CHAINING only ----------------
+		{
+			// The AVC CI runner is air-gapped: X509Chain.Build would
+			// report PartialChain + RevocationStatusUnknown +
+			// OfflineRevocation there. This case pins that the DEV
+			// path accepts based on Status + StatusMessage +
+			// fingerprint alone (no X509Chain re-check).
+			name:    "dev-unknown-error-cert-e-chaining-air-gapped-ci",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				StatusMessage:      "A certificate chain could not be built to a trusted root authority.",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: true,
+			},
+			wantAccept: true,
+		},
+		{
+			// Revocation-error message: different HRESULT / different
+			// localized StatusMessage. CertEChainingMatch=false because
+			// the message does not match the CERT_E_CHAINING text. DEV
+			// must reject this.
+			name:    "dev-unknown-error-revocation-message",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				StatusMessage:      "The revocation function was unable to check revocation for the certificate.",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: false,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			// A revoked cert would surface CERT_E_REVOKED, which has
+			// its own localized message ("was explicitly revoked by
+			// its issuer"). CertEChainingMatch=false. DEV must still
+			// reject even though fingerprint matches and status is
+			// UnknownError.
+			name:    "dev-unknown-error-revoked-cert-message",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				StatusMessage:      "A certificate was explicitly revoked by its issuer.",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: false,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			// Expired cert would surface CERT_E_EXPIRED — different
+			// localized message. DEV rejects.
+			name:    "dev-unknown-error-expired-cert-message",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "UnknownError",
+				StatusMessage:      "A required certificate is not within its validity period.",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: false,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "dev-not-trusted-status-rejected",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec: psSignatureRecord{
+				Status:             "NotTrusted",
+				Thumbprint:         validThumbprint,
+				CertEChainingMatch: false,
+			},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+		{
+			name:    "dev-hash-mismatch-still-fatal",
+			sigType: signingTypeDev,
+			fp:      validThumbprint,
+			rec:     psSignatureRecord{Status: "HashMismatch", Thumbprint: validThumbprint},
+			wantErrType: func(err error) bool {
+				_, ok := err.(*signatureError)
+				return ok
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := classifyVerify("payload/x.exe", tc.sigType, tc.fp, tc.rec)
+			if tc.wantAccept {
+				if err != nil {
+					t.Errorf("expected accept, got %T: %v", err, err)
+				}
+				return
+			}
+			if err == nil {
+				t.Errorf("expected reject, got nil")
+				return
+			}
+			if tc.wantErrType != nil && !tc.wantErrType(err) {
+				t.Errorf("expected specific error type, got %T: %v", err, err)
+			}
+		})
+	}
+}
+
+// TestParseFlagsSigningPolicy pins the CLI mutual-exclusion + validation
+// contract. The three permitted shapes are: (a) -AllowUnsigned alone,
+// (b) -SigningType + -ExpectedSignerSha256, (c) neither (error).
+func TestParseFlagsSigningPolicy(t *testing.T) {
+	baseArgs := []string{
+		"-PayloadDir", "/tmp/payload",
+		"-SetupExeUnsigned", "/tmp/setup.exe",
+		"-SourceCommit", "0123456789abcdef0123456789abcdef01234567",
+		"-Version", "0.8.6",
+		"-Out", "/tmp/out",
+	}
+	withArgs := func(extra ...string) []string {
+		return append(append([]string(nil), baseArgs...), extra...)
+	}
+
+	// (a) -AllowUnsigned alone is fine.
+	if _, err := parseFlags(withArgs("-AllowUnsigned")); err != nil {
+		t.Errorf("-AllowUnsigned alone: %v", err)
+	}
+
+	// (b) -SigningType + -ExpectedSignerSha256 is fine.
+	opts, err := parseFlags(withArgs("-SigningType", "PROD", "-ExpectedSignerSha256", validThumbprint))
+	if err != nil {
+		t.Fatalf("prod + fingerprint: %v", err)
+	}
+	if opts.signingTypeParsed != signingTypeProd {
+		t.Errorf("signingTypeParsed = %v, want PROD", opts.signingTypeParsed)
+	}
+	if opts.expectedThumbprint != validThumbprint {
+		t.Errorf("expectedThumbprint = %q, want %q", opts.expectedThumbprint, validThumbprint)
+	}
+
+	// DEV also works.
+	opts, err = parseFlags(withArgs("-SigningType", "DEV", "-ExpectedSignerSha256", validThumbprint))
+	if err != nil {
+		t.Fatalf("dev + fingerprint: %v", err)
+	}
+	if opts.signingTypeParsed != signingTypeDev {
+		t.Errorf("signingTypeParsed = %v, want DEV", opts.signingTypeParsed)
+	}
+
+	// (c) missing SigningType/Fingerprint without AllowUnsigned fails.
+	_, err = parseFlags(baseArgs)
+	if _, ok := err.(*usageError); !ok {
+		t.Fatalf("missing sig-policy flags: expected *usageError, got %T: %v", err, err)
+	}
+	if !strings.Contains(err.Error(), "SigningType") || !strings.Contains(err.Error(), "ExpectedSignerSha256") {
+		t.Errorf("error should call out both missing flags; got: %s", err)
+	}
+
+	// Mutual exclusion: -AllowUnsigned with either sig-policy flag fails.
+	_, err = parseFlags(withArgs("-AllowUnsigned", "-SigningType", "PROD"))
+	if _, ok := err.(*usageError); !ok {
+		t.Fatalf("AllowUnsigned + SigningType: expected *usageError, got %T: %v", err, err)
+	}
+	_, err = parseFlags(withArgs("-AllowUnsigned", "-ExpectedSignerSha256", validThumbprint))
+	if _, ok := err.(*usageError); !ok {
+		t.Fatalf("AllowUnsigned + ExpectedSignerSha256: expected *usageError, got %T: %v", err, err)
+	}
+
+	// Malformed SigningType fails.
+	_, err = parseFlags(withArgs("-SigningType", "RELEASE", "-ExpectedSignerSha256", validThumbprint))
+	if _, ok := err.(*usageError); !ok {
+		t.Fatalf("bad SigningType: expected *usageError, got %T: %v", err, err)
+	}
+
+	// Malformed fingerprint fails.
+	_, err = parseFlags(withArgs("-SigningType", "PROD", "-ExpectedSignerSha256", "not-hex"))
+	if _, ok := err.(*usageError); !ok {
+		t.Fatalf("bad fingerprint: expected *usageError, got %T: %v", err, err)
 	}
 }
