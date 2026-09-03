@@ -4416,14 +4416,26 @@ func managedGuardianCoversConnectors(dataDir string, connectorNames []string) (b
 		)
 	}
 	current := authorization.Current
-	if current == nil || !current.OK ||
+	if current == nil ||
 		current.Version != 2 ||
 		current.FailureCount != 0 ||
 		current.SuccessCount != len(current.Attestations) ||
-		current.SuccessCount != current.TargetCount ||
 		current.SuccessCount == 0 ||
 		current.Generation == "" ||
 		current.Generation != current.ReconcileID {
+		return false, "hook guardian current attestations are missing or not ready"
+	}
+	// A deferred Windows target is pending in the current generation, not a
+	// historical success. The envelope may honestly report PendingCount > 0
+	// while current.OK is false and current.TargetCount counts the full roster.
+	// Still reject a current block whose TargetCount matches neither the
+	// attested subset nor attested+pending.
+	if authorization.PendingCount == 0 {
+		if !current.OK || current.SuccessCount != current.TargetCount {
+			return false, "hook guardian current attestations are missing or not ready"
+		}
+	} else if current.TargetCount != current.SuccessCount &&
+		current.TargetCount != current.SuccessCount+authorization.PendingCount {
 		return false, "hook guardian current attestations are missing or not ready"
 	}
 	if current.ManifestSHA256 == "" || current.ReconcileID == "" {
