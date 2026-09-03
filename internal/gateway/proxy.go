@@ -1042,12 +1042,18 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// Ollama /api/generate + legacy completion endpoints: top-level
 	// `prompt` is a single string. Inspect it like any user turn so
 	// direct Ollama clients are not a bypass route. When system and
-	// prompt coexist, keep both in Messages for message-aware inspectors.
+	// prompt coexist, keep both in Messages for message-aware inspectors
+	// and inspect both texts: regex_judge and other content scanners
+	// use the string, not Messages (#718).
+	ollamaSystemText := ""
 	if userText == "" && strings.TrimSpace(partial.Prompt) != "" {
 		userText = partial.Prompt
+		if strings.TrimSpace(partial.System) != "" {
+			ollamaSystemText = partial.System
+		}
 		if len(partial.Messages) == 0 {
-			if strings.TrimSpace(partial.System) != "" {
-				partial.Messages = append(partial.Messages, ChatMessage{Role: "system", Content: partial.System})
+			if ollamaSystemText != "" {
+				partial.Messages = append(partial.Messages, ChatMessage{Role: "system", Content: ollamaSystemText})
 			}
 			partial.Messages = append(partial.Messages, ChatMessage{Role: "user", Content: partial.Prompt})
 		}
@@ -1099,6 +1105,15 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		if inspectionText != userText {
 			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
+		}
+		if ollamaSystemText != "" {
+			systemInspect := promptInspectionText(ollamaSystemText)
+			systemVerdict := p.inspector.Inspect(r.Context(), "prompt", systemInspect, partial.Messages, label, mode)
+			verdict = mergePromptVerdicts(verdict, systemVerdict)
+			if systemInspect != ollamaSystemText {
+				rawSystem := p.inspector.Inspect(r.Context(), "prompt", ollamaSystemText, partial.Messages, label, mode)
+				verdict = mergePromptVerdicts(verdict, rawSystem)
+			}
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
 		if deferManagedPrompt {
