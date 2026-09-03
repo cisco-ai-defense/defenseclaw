@@ -2442,6 +2442,8 @@ class TestSeedLocalObservabilityStack(unittest.TestCase):
             encoding="utf-8",
         ) as handle:
             handle.write(self._NEW_BRIDGE)
+        with open(os.path.join(bin_dir, "shadowclaw-observer"), "w", encoding="utf-8") as handle:
+            handle.write("#!/bin/sh\nexec python3 -m defenseclaw.endpoint_observer \"$@\"\n")
 
         with open(os.path.join(self.bundle_dir, "run.sh"), "w", encoding="utf-8") as handle:
             handle.write(self._NEW_SHIM)
@@ -2479,6 +2481,14 @@ class TestSeedLocalObservabilityStack(unittest.TestCase):
 
         seeded_shim = os.path.join(self.tmp_dir, "observability-stack", "run.sh")
         self.assertTrue(os.access(seeded_shim, os.X_OK))
+        seeded_observer = os.path.join(
+            self.tmp_dir,
+            "observability-stack",
+            "bin",
+            "shadowclaw-observer",
+        )
+        self.assertTrue(os.path.isfile(seeded_observer))
+        self.assertTrue(os.access(seeded_observer, os.X_OK))
 
     @patch("defenseclaw.commands.cmd_init.bundled_local_observability_dir")
     def test_refreshes_stale_bridge_on_reinit(self, mock_bundled):
@@ -2519,6 +2529,10 @@ class TestSeedLocalObservabilityStack(unittest.TestCase):
         with open(stale_shim, encoding="utf-8") as handle:
             self.assertIn("refreshed run.sh", handle.read())
         self.assertTrue(os.access(stale_shim, os.X_OK))
+
+        refreshed_observer = os.path.join(dest, "bin", "shadowclaw-observer")
+        self.assertTrue(os.path.isfile(refreshed_observer))
+        self.assertTrue(os.access(refreshed_observer, os.X_OK))
 
         with open(operator_dashboard, encoding="utf-8") as handle:
             self.assertIn("operator-edited", handle.read())

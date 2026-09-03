@@ -8,7 +8,7 @@ keywords:
   - dashboard catalog
 ---
 
-DefenseClaw provisions 14 native Grafana dashboards plus one optional external
+DefenseClaw provisions 14 native Grafana dashboards plus one bundled
 endpoint-telemetry view. Each native board has one job: start broad,
 select a connector, agent, rule, or execution, and then move to the detail
 surface that owns that question. The catalog avoids duplicating the same
@@ -41,15 +41,15 @@ analysis across several boards.
 | **Scanners (Ops)** (`defenseclaw-scanners`) | Are scanner executions healthy and producing expected findings? | Detection engineer, SRE | Prometheus | Sparse-safe rolling scan counts, duration, errors, quarantine actions, and operational finding trends. Queue depth is omitted because scanners currently execute synchronously and do not emit a durable queue series. |
 | **Proxy & LLM Guard** (`defenseclaw-traffic`) | What is happening on proxy/router deployments? | Proxy operator, SRE | Prometheus, Loki, Tempo | HTTP, tool, guardrail, GenAI, and trace telemetry that only exists when proxy/router mode is active. |
 | **Runtime & Reliability** (`defenseclaw-runtime`) | Is the local process, database, exporter, or audit pipeline unhealthy? | SRE, operator | Prometheus, Loki | One truthful operations board for runtime, SQLite, exporter freshness/errors, audit delivery, and gateway errors. |
-| **Shadow AI Discovery Board** (`shadow-ai-discovery`) | What AI-provider and agent activity did the independent endpoint sensor observe? | SOC, endpoint security | Loki | Optional view over external OTLP records, including process, provider, risk, and host-plane evidence beside DefenseClaw discovery and findings. |
+| **Shadow AI Discovery Board** (`shadow-ai-discovery`) | What endpoint activity did the bundled Phase 1 observer see? | SOC, endpoint security | Loki + Prometheus | Observation-only view over bounded process identity, coverage, exporter health, and resource usage beside DefenseClaw telemetry. |
 
 ## Retain, consolidate, and remove decisions
 
 - **Retain the 14 native boards above.** Each owns a distinct operator question or a
   deliberate overview → detail drill-down; none is a renamed duplicate.
-- **The Shadow AI Discovery Board is an external producer view.** It is empty
-  unless a compatible endpoint sensor exports to the local Collector, and its
-  fields are not part of DefenseClaw's canonical v8 telemetry contract.
+- **The Shadow AI Discovery Board is a bundled producer view.** It is empty
+  until the endpoint observer exports to the local Collector, and its fields
+  are not part of DefenseClaw's canonical v8 telemetry contract.
 - **Runtime and Reliability stay consolidated.** The former standalone
   Reliability dashboard duplicated process/exporter panels and has been
   retired from both fresh installs and upgrades.

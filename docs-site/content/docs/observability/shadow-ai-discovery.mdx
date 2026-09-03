@@ -1,38 +1,35 @@
 ---
 title: Shadow AI discovery board
-description: View external endpoint detections sent through the bundled local OpenTelemetry Collector into the same Loki and Grafana as DefenseClaw telemetry.
+description: View minimum observation-only endpoint telemetry sent through the bundled local OpenTelemetry Collector into the same Loki and Grafana as DefenseClaw telemetry.
 keywords:
   - shadow AI discovery
   - endpoint telemetry
-  - external OTLP producer
+  - bundled OTLP producer
   - DefenseClaw Grafana
 ---
 
-The Shadow AI Discovery Board displays endpoint detections from a separately
-managed sensor beside DefenseClaw telemetry. Both producers contribute
-OpenTelemetry to the bundled local observability stack while keeping separate
-identities:
+The Shadow AI Discovery Board displays minimum endpoint observations beside
+DefenseClaw telemetry. The observer is packaged with DefenseClaw, contributes
+OpenTelemetry to the bundled local observability stack, and keeps a separate
+identity:
 
 ```text
 DefenseClaw gateway ── OTLP/gRPC ──┐
                                   ├─> DefenseClaw Collector ─> Loki ─> Grafana
-Endpoint sensor    ── OTLP/HTTP ───┘
+Bundled endpoint observer ─ OTLP/HTTP ─┘
 ```
 
 This is the Phase 1 integration boundary. It provides co-deployment, shared
-transport, and the bundled Shadow AI Discovery Board. It does not yet bind a
-DefenseClaw session or policy decision to an endpoint PID, and it does not let
-the endpoint sensor enforce DefenseClaw policy.
+transport, and the bundled Shadow AI Discovery Board. The observer reports
+bounded process identity, coverage, exporter health, and its own resource use.
+It does not yet bind a DefenseClaw session or policy decision to an endpoint
+PID, and it does not enforce DefenseClaw policy.
 
 ## Prerequisites
 
 - Install DefenseClaw and bring up its
   [local observability stack](/docs/observability/local-observability).
-- For the current producer profile, install ShadowClaw 1.4.1 or newer by
-  following the [ShadowClaw installation guide](https://gatekeeper454.github.io/ShadowClaw/get-started/install.html).
-- Run only DefenseClaw's Collector on `127.0.0.1:4317` and `127.0.0.1:4318`.
-  The endpoint sensor's optional standalone Collector uses the same ports and
-  must stay stopped for this integration.
+- No separate ShadowClaw installation is required for Phase 1.
 
 ## Start the shared stack
 
@@ -41,17 +38,9 @@ defenseclaw setup local-observability up
 defenseclaw setup local-observability status
 ```
 
-From the endpoint-sensor checkout, start it with the DefenseClaw profile:
-
-```bash
-sudo python3 -m shadowclaw \
-  --config config/shadowclaw.defenseclaw.json \
-  --dns-sniffer
-```
-
-The profile sends logs and metrics to `http://127.0.0.1:4318`. The Collector
-already accepts OTLP/HTTP there, so no DefenseClaw destination or Collector
-configuration needs to be added.
+The command starts DefenseClaw's local Collector and the bundled,
+observation-only endpoint observer. The observer sends logs and metrics to
+`http://127.0.0.1:4318`; no separate sensor checkout or Collector is needed.
 
 Open [Grafana](http://localhost:3000) and select **Shadow AI Discovery Board**.
 DefenseClaw provisions the dashboard with the rest of the local stack; a
@@ -60,7 +49,7 @@ separate Grafana import is not required.
 ## Verify both producers
 
 The Collector debug stream shows the raw OTLP envelopes received from both
-products:
+DefenseClaw components:
 
 ```bash
 defenseclaw setup local-observability logs \
@@ -76,8 +65,8 @@ curl -sG http://127.0.0.1:3100/loki/api/v1/query \
 ```
 
 A positive result proves that endpoint telemetry reached the shared Loki.
-DefenseClaw records remain under `service.namespace=defenseclaw`; external
-sensor records remain under `service.namespace=shadowclaw`. The Collector's
+DefenseClaw records remain under `service.namespace=defenseclaw`; observer
+records remain under `service.namespace=shadowclaw`. The Collector's
 resource processor uses `insert`, so it fills a missing namespace without
 overwriting an external producer's declared namespace.
 
@@ -87,16 +76,14 @@ The local Collector is unauthenticated and bound to loopback by default. Do not
 publish ports `4317` or `4318` beyond the host without adding an authentication
 and network access-control boundary.
 
-Endpoint telemetry can include process identity, executable paths, endpoints,
-and host activity evidence. DefenseClaw's outbound v8 redaction profiles do not
-rewrite records sent directly from an external producer to the Collector.
-Configure the sensor's own collection and export policy for the destination's
-trust boundary.
+Endpoint telemetry includes bounded process identity, executable identity, user,
+resource usage, and coverage state. The Phase 1 observer does not capture
+command lines, score findings, maintain a ShadowClaw ledger, correlate
+sessions, or enforce policy. It is observation-only.
 
 ## Stop the integration
 
-Press `Ctrl+C` in the endpoint-sensor terminal, then stop the optional
-DefenseClaw stack when it is no longer needed:
+Stop the observer and optional DefenseClaw stack when it is no longer needed:
 
 ```bash
 defenseclaw setup local-observability down

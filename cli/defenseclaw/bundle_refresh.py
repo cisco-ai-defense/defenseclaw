@@ -300,6 +300,7 @@ _NOFOLLOW_DIRECTORY_OPEN_FLAGS = (
 )
 _LOCAL_OBSERVABILITY_REQUIRED_FILES: tuple[str, ...] = (
     "bin/openclaw-observability-bridge",
+    "bin/shadowclaw-observer",
     "docker-compose.password.yml",
     "docker-compose.yml",
     "grafana/provisioning/dashboards/dashboards.yml",

@@ -62,23 +62,27 @@ def test_shadow_ai_discovery_board_has_generic_display_name_and_attribution() ->
     assert "SHADOWCLAW_LICENSE.md" in notice
 
 
-def test_shadow_ai_discovery_board_uses_the_provisioned_loki_datasource() -> None:
+def test_shadow_ai_discovery_board_uses_the_provisioned_datasources() -> None:
     dashboard = json.loads(DASHBOARD_PATH.read_text(encoding="utf-8"))
     serialized = json.dumps(dashboard)
     targets = [target for panel in _panels(dashboard) for target in panel.get("targets", [])]
 
-    assert len(targets) >= 40
+    assert len(targets) >= 8
     assert "${DS_LOKI}" not in serialized
     assert "by ()" not in serialized
-    assert all(target.get("datasource") == {"type": "loki", "uid": "defenseclaw-loki"} for target in targets)
+    assert all(
+        panel.get("datasource", {}).get("uid") in {"defenseclaw-loki", "defenseclaw-prometheus"}
+        for panel in _panels(dashboard)
+        if panel.get("targets")
+    )
 
-    finding_queries = [
+    observer_queries = [
         target["expr"]
         for target in targets
-        if 'service_name="shadowclaw"' in target.get("expr", "") and integration.EVENT_NAME in target.get("expr", "")
+        if 'service_name="shadowclaw"' in target.get("expr", "")
     ]
-    assert len(finding_queries) >= 10
-    for query in finding_queries:
+    assert len(observer_queries) == 2
+    for query in observer_queries:
         assert query.index("shadowclaw_event_name") < query.index("| json")
         assert '__error__=""' in query
 
@@ -136,12 +140,14 @@ def test_synthetic_payload_matches_the_shadowclaw_otlp_shape() -> None:
 
     assert resources["service.name"] == "shadowclaw"
     assert resources["service.namespace"] == "shadowclaw"
-    assert resources["shadowclaw.author"] == "Mike Storm"
-    assert resources["shadowclaw.attribution.intact"] is True
+    assert resources["shadowclaw.component"] == "endpoint-observer"
+    assert resources["shadowclaw.mode"] == "observation-only"
     assert attributes["shadowclaw.event_name"] == integration.EVENT_NAME
     assert attributes["process.pid"] == "4242"
     assert body["event_name"] == integration.EVENT_NAME
     assert body["integration_marker"] == "marker-123"
+    assert body["process"]["executable_identity"] == "/usr/bin/false"
+    assert body["observation_only"] is True
     assert body["synthetic"] is True
 
 
@@ -156,6 +162,7 @@ def test_loki_verification_requires_namespace_metadata_and_marker() -> None:
         "event_name": integration.EVENT_NAME,
         "integration_marker": marker,
         "synthetic": True,
+        "observation_only": True,
     }
     streams = [
         {

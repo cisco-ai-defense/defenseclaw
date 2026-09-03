@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify endpoint findings for the Shadow AI Discovery Board."""
+"""Verify bundled Phase 1 endpoint observations reach the local stack."""
 
 from __future__ import annotations
 
@@ -14,7 +14,7 @@ from typing import Any
 
 DEFAULT_OTLP_ENDPOINT = "http://127.0.0.1:4318"
 DEFAULT_LOKI_URL = "http://127.0.0.1:3100"
-EVENT_NAME = "shadowclaw.finding.recorded"
+EVENT_NAME = "shadowclaw.endpoint.snapshot"
 
 
 class IntegrationError(RuntimeError):
@@ -39,38 +39,25 @@ def build_payload(marker: str, *, timestamp_ns: int | None = None) -> dict[str, 
     stamp = str(timestamp_ns if timestamp_ns is not None else time.time_ns())
     body = {
         "event_name": EVENT_NAME,
-        "summary": "Synthetic Phase 1 integration finding",
-        "finding_id": marker,
-        "risk_score": 72,
-        "severity": "high",
-        "process_name": "defenseclaw-phase1-test",
-        "pid": 4242,
-        "user": "integration-test",
-        "exe_path": "/usr/bin/false",
-        "provider": "openai",
-        "provider_name": "OpenAI",
-        "endpoint": "api.openai.com",
-        "category": "catalog",
-        "attribution_source": "synthetic",
-        "confidence": 1.0,
-        "sanctioned": False,
-        "providers": "openai",
-        "endpoints": "api.openai.com",
-        "signals": "agent_kill_chain,network_egress",
-        "cpu_percent": 80.0,
-        "rss_mb": 512.0,
-        "egress_count": 1,
+        "observed_at": 123456789 if timestamp_ns else time.time(),
+        "process": {
+            "pid": 4242,
+            "parent_pid": 41,
+            "user": "integration-test",
+            "rss_kb": 512,
+            "cpu_percent": 80.0,
+            "start_time": "phase1-test-start",
+            "executable_identity": "/usr/bin/false",
+        },
         "integration_marker": marker,
         "synthetic": True,
+        "observation_only": True,
     }
     record_attributes = {
-        "shadowclaw.finding_id": marker,
-        "shadowclaw.risk_score": 72,
-        "shadowclaw.severity": "high",
         "shadowclaw.event_name": EVENT_NAME,
+        "shadowclaw.integration_marker": marker,
         "shadowclaw.integration.synthetic": True,
         "process.pid": 4242,
-        "process.executable.name": "defenseclaw-phase1-test",
         "process.executable.path": "/usr/bin/false",
     }
     resource_attributes = {
@@ -81,12 +68,8 @@ def build_payload(marker: str, *, timestamp_ns: int | None = None) -> dict[str, 
         "host.name": "defenseclaw-phase1-test",
         "os.type": "synthetic",
         "shadowclaw.product": "ShadowClaw",
-        "shadowclaw.author": "Mike Storm",
-        "shadowclaw.author.title": "Distinguished Engineer",
-        "shadowclaw.author.credential": "CCIE Security 13847",
-        "shadowclaw.author.attribution": ("Mike Storm, Distinguished Engineer, CCIE Security 13847"),
-        "shadowclaw.copyright": "Copyright (c) 2026 Mike Storm. All rights reserved.",
-        "shadowclaw.attribution.intact": True,
+        "shadowclaw.component": "endpoint-observer",
+        "shadowclaw.mode": "observation-only",
     }
     return {
         "resourceLogs": [
@@ -197,7 +180,7 @@ def matching_record(streams: list[dict[str, Any]], marker: str) -> dict[str, Any
                 continue
             if body.get("integration_marker") != marker:
                 continue
-            if body.get("event_name") != EVENT_NAME or body.get("synthetic") is not True:
+            if body.get("event_name") != EVENT_NAME or body.get("observation_only") is not True:
                 continue
             return body
     return None
@@ -224,7 +207,7 @@ def wait_for_record(
             last_error = exc
         if time.monotonic() >= deadline:
             detail = f": {last_error}" if last_error is not None else ""
-            raise IntegrationError(f"Endpoint finding did not reach Loki within {wait_seconds:g}s{detail}")
+            raise IntegrationError(f"Endpoint observation did not reach Loki within {wait_seconds:g}s{detail}")
         time.sleep(1)
 
 
@@ -255,7 +238,7 @@ def main() -> int:
     except IntegrationError as exc:
         print(f"Shadow AI discovery check failed: {exc}")
         return 1
-    print("Shadow AI discovery check passed: namespace and finding metadata preserved")
+    print("Shadow AI discovery check passed: namespace and observation metadata preserved")
     return 0
 
 
