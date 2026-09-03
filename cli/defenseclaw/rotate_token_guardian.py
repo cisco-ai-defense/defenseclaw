@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import Any
@@ -33,9 +34,10 @@ from typing import Any
 import click
 import yaml
 
-_GUARDIAN_MANIFEST_ENV = "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST"
-_GUARDIAN_AUTH_DIR_ENV = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
-_DEFAULT_MANIFEST = "/etc/defenseclaw/hook-guardian/targets.yaml"
+GUARDIAN_MANIFEST_ENV = "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST"
+GUARDIAN_AUTH_DIR_ENV = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
+_LINUX_DEFAULT_MANIFEST = "/etc/defenseclaw/hook-guardian/targets.yaml"
+_DARWIN_DEFAULT_MANIFEST = "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml"
 _JOURNAL_FILE = "rotation-transaction.json"
 _AUTHORIZATION_FILE = "protected_targets.json"
 _LOCK_BASE_NAME = "rotation-transaction"
@@ -43,10 +45,14 @@ _MANIFEST_MAX_BYTES = 4 << 20
 _STATE_MAX_BYTES = 1 << 20
 _PHASE_PREPARING = "preparing"
 _PHASE_PREPARED = "prepared"
+_PHASE_COMMITTED = "committed"
+_PHASE_ROLLED_BACK = "rolled_back"
+_ACTIVE_PHASES = {_PHASE_PREPARING, _PHASE_PREPARED}
+_TERMINAL_PHASES = {_PHASE_COMMITTED, _PHASE_ROLLED_BACK}
 _EXPECTED_PHASES = {
-    "prepare": "prepared",
-    "commit": "committed",
-    "rollback": "rolled_back",
+    "prepare": _PHASE_PREPARED,
+    "commit": _PHASE_COMMITTED,
+    "rollback": _PHASE_ROLLED_BACK,
 }
 
 
@@ -99,17 +105,24 @@ def guardian_lock_base(data_dir: str) -> str:
 
 
 def guardian_authorization_dir(data_dir: str) -> str:
-    configured = str(os.environ.get(_GUARDIAN_AUTH_DIR_ENV, "") or "").strip()
+    configured = str(os.environ.get(GUARDIAN_AUTH_DIR_ENV, "") or "").strip()
     if configured:
         return os.path.abspath(configured)
     return os.path.abspath(str(data_dir).rstrip(os.sep)) + "-hook-guardian"
 
 
+def default_guardian_manifest_path(platform: str | None = None) -> str:
+    resolved = (platform or sys.platform).strip().lower()
+    if resolved == "darwin":
+        return _DARWIN_DEFAULT_MANIFEST
+    return _LINUX_DEFAULT_MANIFEST
+
+
 def guardian_manifest_path() -> str:
-    configured = str(os.environ.get(_GUARDIAN_MANIFEST_ENV, "") or "").strip()
+    configured = str(os.environ.get(GUARDIAN_MANIFEST_ENV, "") or "").strip()
     if configured:
         return os.path.abspath(configured)
-    return _DEFAULT_MANIFEST
+    return default_guardian_manifest_path()
 
 
 def is_managed_enterprise(cfg: Any) -> bool:
@@ -169,14 +182,14 @@ def load_enabled_guardian_targets(manifest_path: str) -> tuple[GuardianRotationT
 def bind_guardian_roster(
     *,
     manifest_path: str,
-    rotatable_scopes: set[str],
+    requested_scopes: set[str],
     operation_id: str,
     generation: str,
 ) -> GuardianRotationPlan | None:
     targets = load_enabled_guardian_targets(manifest_path)
     if not targets:
         return None
-    missing = sorted({target.connector for target in targets} - set(rotatable_scopes))
+    missing = sorted({target.connector for target in targets} - set(requested_scopes))
     if missing:
         raise click.ClickException(
             "Guardian manifest includes a connector that is not in the service rotation roster; "
@@ -194,13 +207,24 @@ def bind_guardian_roster(
 
 def assert_guardian_idle(data_dir: str) -> None:
     journal_path = os.path.join(guardian_authorization_dir(data_dir), _JOURNAL_FILE)
-    if os.path.lexists(journal_path):
-        payload = _load_bounded_json(journal_path, "guardian rotation journal")
-        phase = str(payload.get("phase") or "").strip()
-        if phase in {_PHASE_PREPARING, _PHASE_PREPARED}:
-            raise click.ClickException(
-                "A guardian rotation transaction is already in progress; no credentials were modified."
-            )
+    if not os.path.lexists(journal_path):
+        return
+    payload = _load_bounded_json(journal_path, "guardian rotation journal")
+    phase = str(payload.get("phase") or "").strip()
+    if phase in _ACTIVE_PHASES:
+        raise click.ClickException(
+            "A guardian rotation transaction is already in progress; no credentials were modified."
+        )
+    if phase not in _TERMINAL_PHASES:
+        raise click.ClickException(
+            "Guardian rotation journal is in an unexpected phase; no credentials were modified."
+        )
+    try:
+        os.unlink(journal_path)
+    except OSError as exc:
+        raise click.ClickException(
+            "A completed guardian rotation journal could not be retired; no credentials were modified."
+        ) from exc
 
 
 def assert_current_attestations(
@@ -304,18 +328,31 @@ def parse_guardian_rotate_response(
         raise click.ClickException(f"Guardian rotation {action} failed.")
     if str(payload.get("action") or "").strip() != action:
         raise click.ClickException("Guardian rotation response action did not match the requested phase.")
+    if action == "rollback" and _is_idle_rollback_response(payload):
+        return
     if str(payload.get("operation_id") or "").strip() != plan.operation_id:
         raise click.ClickException("Guardian rotation response named a different operation.")
     if str(payload.get("generation") or "").strip() != plan.generation:
         raise click.ClickException("Guardian rotation response named a different generation.")
     if str(payload.get("phase") or "").strip() != _EXPECTED_PHASES[action]:
         raise click.ClickException("Guardian rotation response named an unexpected phase.")
-    try:
-        target_count = int(payload.get("targets"))
-    except (TypeError, ValueError) as exc:
-        raise click.ClickException("Guardian rotation response omitted the target count.") from exc
-    if target_count != len(plan.targets):
+    raw_targets = payload.get("targets")
+    if type(raw_targets) is not int:
+        raise click.ClickException("Guardian rotation response omitted the target count.")
+    if raw_targets != len(plan.targets):
         raise click.ClickException("Guardian rotation response did not cover the exact selected roster.")
+
+
+def _is_idle_rollback_response(payload: Mapping[str, Any]) -> bool:
+    """Accept rollback of a prepare that never published a journal."""
+
+    return (
+        str(payload.get("operation_id") or "").strip() == ""
+        and str(payload.get("generation") or "").strip() == ""
+        and str(payload.get("phase") or "").strip() == ""
+        and type(payload.get("targets")) is int
+        and payload.get("targets") == 0
+    )
 
 
 def _load_current_readiness(data_dir: str) -> dict[str, Any]:

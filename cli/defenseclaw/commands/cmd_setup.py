@@ -118,11 +118,14 @@ from defenseclaw.platform_support import (
     local_shell_stacks_supported,
 )
 from defenseclaw.rotate_token_guardian import (
+    GUARDIAN_AUTH_DIR_ENV,
+    GUARDIAN_MANIFEST_ENV,
     GuardianRotationPlan,
     assert_current_attestations,
     assert_guardian_idle,
     bind_guardian_roster,
     expected_fingerprints_payload,
+    guardian_authorization_dir,
     guardian_manifest_path,
     parse_guardian_rotate_response,
     require_guardian_participant,
@@ -228,6 +231,10 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     # same-user attacker is outside this boundary); unsafe modes are rejected.
     # Windows paths must pass the equivalent ACL write-access checks.
     "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+    # Preserve the validated guardian binding so the Go participant reads
+    # the same authorization ledger and manifest the coordinator preflighted.
+    GUARDIAN_AUTH_DIR_ENV,
+    GUARDIAN_MANIFEST_ENV,
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
@@ -3584,7 +3591,7 @@ class _RotateTokenGuardianError(click.ClickException):
 def _rotate_token_guardian_plan(
     authoritative_cfg: Any,
     *,
-    rotatable_scopes: set[str],
+    requested_scopes: set[str],
 ) -> GuardianRotationPlan | None:
     """Bind the trusted manifest roster before stop(A) or return None."""
 
@@ -3592,7 +3599,7 @@ def _rotate_token_guardian_plan(
         return None
     return bind_guardian_roster(
         manifest_path=guardian_manifest_path(),
-        rotatable_scopes=rotatable_scopes,
+        requested_scopes=requested_scopes,
         operation_id=secrets.token_hex(16),
         generation=secrets.token_hex(16),
     )
@@ -3648,6 +3655,8 @@ def _run_guardian_rotate(
         command.extend(["--expected-fingerprints", fingerprints_path])
     child_env = _rotate_token_child_environment(data_dir, config_file, "")
     child_env.pop(_GATEWAY_TOKEN_ENV, None)
+    child_env[GUARDIAN_AUTH_DIR_ENV] = guardian_authorization_dir(data_dir)
+    child_env[GUARDIAN_MANIFEST_ENV] = plan.manifest
     try:
         result = subprocess.run(
             command,
@@ -3828,7 +3837,7 @@ def _rotate_token_transaction(
         connector_state_a = _rotate_token_connector_state(authoritative_cfg, configured_old_hook_fingerprints)
         guardian_plan = _rotate_token_guardian_plan(
             authoritative_cfg,
-            rotatable_scopes=rotatable_scopes,
+            requested_scopes=set(requested_scopes),
         )
         if guardian_plan is not None:
             assert_guardian_idle(data_dir)
@@ -3839,6 +3848,7 @@ def _rotate_token_transaction(
             )
         old_stopped = False
         mutation_attempted = False
+        guardian_prepare_attempted = False
         guardian_prepared = False
         new_hook_values: dict[str, str] = {}
         try:
@@ -3893,6 +3903,7 @@ def _rotate_token_transaction(
                     new_hook_fingerprints,
                 )
                 try:
+                    guardian_prepare_attempted = True
                     _run_guardian_rotate(
                         data_dir,
                         "prepare",
@@ -3925,12 +3936,6 @@ def _rotate_token_transaction(
                     new_hook_fingerprints,
                     generation=guardian_plan.generation,
                 )
-                _run_guardian_rotate(
-                    data_dir,
-                    "commit",
-                    config_file=config_file,
-                    plan=guardian_plan,
-                )
             commit_audit = audit_details
             if guardian_plan is not None:
                 commit_audit = (
@@ -3943,6 +3948,13 @@ def _rotate_token_transaction(
                 commit_audit,
                 allow_offline=False,
             )
+            if guardian_plan is not None:
+                _run_guardian_rotate(
+                    data_dir,
+                    "commit",
+                    config_file=config_file,
+                    plan=guardian_plan,
+                )
         except BaseException as primary_error:
             if not old_stopped:
                 raise
@@ -3964,7 +3976,7 @@ def _rotate_token_transaction(
                         "safely stopped; token B was preserved on disk."
                     ) from primary_error
 
-            if guardian_prepared and guardian_plan is not None:
+            if guardian_plan is not None and (guardian_prepared or guardian_prepare_attempted):
                 try:
                     _run_guardian_rotate(
                         data_dir,
