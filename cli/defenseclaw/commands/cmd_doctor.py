@@ -58,6 +58,7 @@ except ModuleNotFoundError:  # pragma: no cover - exercised on Python 3.10
 
 from defenseclaw import credential_provenance, rulepack_validation, ux
 from defenseclaw.audit_actions import ACTION_DOCTOR
+from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
 from defenseclaw.connector_paths import (
     amp_config_home,
     amp_managed_settings_path,
@@ -75,7 +76,6 @@ from defenseclaw.connector_paths import (
     rule_paths,
 )
 from defenseclaw.context import AppContext, pass_ctx
-from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
 from defenseclaw.cursor_contract import validate_cursor_registration
 from defenseclaw.doctor_engine import (
     RepairDecision,
@@ -5763,7 +5763,8 @@ def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:
     _emit(
         "warn",
         "OpenClaw transport",
-        f"OpenClaw {version or 'unknown'} is ≥2026.6.8; confirm the OpenClaw interception check rather than the :4000 port alone",
+        f"OpenClaw {version or 'unknown'} is ≥2026.6.8; confirm the OpenClaw interception "
+        "check rather than the :4000 port alone",
         remediation="run doctor after the DefenseClaw plugin has loaded and look for 'OpenClaw interception'",
         r=r,
     )
