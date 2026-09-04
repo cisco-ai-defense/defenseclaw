@@ -628,6 +628,20 @@ func trustedActionSameCommandPathReadFeedsExternalEgress(
 				}
 			}
 		}
+		for _, source := range actionfacts.StaticCurlProxyUploadFileSources(command) {
+			if source.Path != candidate.Value {
+				continue
+			}
+			for _, network := range facts.Network {
+				if network.CommandID == command.ID &&
+					network.Action == actionfacts.NetworkConnect &&
+					isExternalNetwork(network) &&
+					strings.EqualFold(network.Scheme, source.Scheme) &&
+					network.Host == source.Host && network.Port == source.Port {
+					return true
+				}
+			}
+		}
 		return false
 	}
 	return false
@@ -721,13 +735,16 @@ func trustedActionCommandFeedsExternalUpload(
 				!trustedActionCurlStdinFeedsExternalUpload(facts, destination) {
 				continue
 			}
-			if hasExternalUpload(facts, destination.ID) &&
-				hasDataFlowFrom(
-					facts,
-					destination.ID,
-					actionfacts.DataStdin,
-					actionfacts.DataNetwork,
-				) {
+			if !hasDataFlowFrom(
+				facts,
+				destination.ID,
+				actionfacts.DataStdin,
+				actionfacts.DataNetwork,
+			) {
+				continue
+			}
+			if hasExternalUpload(facts, destination.ID) ||
+				trustedActionCurlStdinObservedByExternalSOCKS(facts, destination) {
 				return true
 			}
 		}
@@ -743,6 +760,27 @@ func trustedActionCurlStdinFeedsExternalUpload(
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
 				network.Action == actionfacts.NetworkUpload &&
+				isExternalNetwork(network) &&
+				strings.EqualFold(network.Scheme, target.Scheme) &&
+				network.Host == target.Host && network.Port == target.Port {
+				return true
+			}
+		}
+	}
+	return trustedActionCurlStdinObservedByExternalSOCKS(facts, command)
+}
+
+func trustedActionCurlStdinObservedByExternalSOCKS(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	if command.Program != "curl" && command.Program != "curl.exe" {
+		return false
+	}
+	for _, target := range actionfacts.StaticCurlProxyStdinUploadTargets(command) {
+		for _, network := range facts.Network {
+			if network.CommandID == command.ID &&
+				network.Action == actionfacts.NetworkConnect &&
 				isExternalNetwork(network) &&
 				strings.EqualFold(network.Scheme, target.Scheme) &&
 				network.Host == target.Host && network.Port == target.Port {
