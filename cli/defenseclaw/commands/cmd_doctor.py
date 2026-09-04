@@ -3970,7 +3970,11 @@ def _windows_system_powershell() -> tuple[str, str]:
 
 
 _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS = 30.0
-_CURSOR_WINDOWS_RUNTIME_PROCESS_OVERHEAD_SECONDS = 20.0
+# Hosted Windows PowerShell cold-starts EncodedCommand plus Add-Type before
+# the native 30-second hook deadline begins. The previous 20-second overhead
+# lost both bounded retries on loaded runners. Keep the hook contract at 30s
+# and give the host enough startup budget to finish the same probe.
+_CURSOR_WINDOWS_RUNTIME_PROCESS_OVERHEAD_SECONDS = 45.0
 _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS = (
     _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS + _CURSOR_WINDOWS_RUNTIME_PROCESS_OVERHEAD_SECONDS
 )
