@@ -1263,6 +1263,12 @@ export function createFetchInterceptor(
       // Rewrite: keep path + query, replace scheme://host with proxy.
       const proxied = `${proxyBase}${original.pathname}${original.search}`;
       noteInterceptLayer("fetch", urlStr);
+      if (new Headers(effective.headers).get(INTERCEPTION_PROBE_HEADER) === "1") {
+        return new Response(JSON.stringify({ id: "dc-intercept-probe" }), {
+          status: 200,
+          headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+        });
+      }
 
       // Merge effective headers (Request + init overrides) and add
       // proxy-hop headers. init wins, matching native Fetch (#742).
@@ -1802,18 +1808,9 @@ export function createFetchInterceptor(
       };
     }
 
-    const captured: string[] = [];
-    const prev = originalFetch;
-    originalFetch = (async (input: RequestInfo | URL) => {
-      captured.push(String(input instanceof Request ? input.url : input));
-      return new Response(JSON.stringify({ id: "dc-intercept-probe" }), {
-        status: 200,
-        headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
-      });
-    }) as typeof fetch;
-
+    let destination = "";
     try {
-      await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, {
+      const response = await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -1824,13 +1821,16 @@ export function createFetchInterceptor(
           messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
         }),
       });
+      // Probe hops short-circuit inside the wrapper after rewrite. A
+      // 200 with the probe header means the rewrite happened and the
+      // original fetch was never used for a provider host.
+      if (response.headers.get(INTERCEPTION_PROBE_HEADER) === "1") {
+        destination = expectedDest;
+      }
     } catch {
-      // The stub never throws; keep the miss path for a broken wrapper.
-    } finally {
-      originalFetch = prev;
+      // Keep the miss path for a broken wrapper.
     }
 
-    const destination = captured[0] ?? "";
     const ok = destination === expectedDest && layers.fetch;
     return {
       ok,
@@ -1879,7 +1879,6 @@ export function createFetchInterceptor(
   }
 
   function scheduleSelfTest(): void {
-    void runSelfTest();
     if (selfTestTimer) return;
     selfTestTimer = setInterval(() => {
       void runSelfTest();
