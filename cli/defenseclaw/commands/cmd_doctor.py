@@ -5690,7 +5690,9 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
-_PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+# ZeptoClaw rewrites api_base natively and does not run the fetch
+# interceptor or publish the OpenClaw self-test document.
+_PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw"})
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
