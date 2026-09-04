@@ -56,6 +56,11 @@ type Input struct {
 	// Parsers never derive it from action input.
 	ActiveAgentFilesUncertain bool
 	DialectHint               Dialect
+	// CurlCapabilities is trusted caller context for resolved curl executables.
+	// ActionFacts never discovers capabilities from GOOS, dialect, basename,
+	// PATH, or process state. Callers must authenticate and invalidate this
+	// evidence before supplying it.
+	CurlCapabilities []CurlCapability `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
@@ -184,6 +189,7 @@ type CommandFact struct {
 	Operations      []OperationKind
 	Redirects       []RedirectFact
 	Wrappers        []WrapperFact
+	curlCapability  *CurlCapability `json:"-"`
 }
 
 // CommandKind distinguishes an input command from a structural shell effect.
