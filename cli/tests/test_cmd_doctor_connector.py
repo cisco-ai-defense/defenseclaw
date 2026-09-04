@@ -118,6 +118,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True),
         ):
             self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
             result = _DoctorResult()
@@ -139,6 +142,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True),
         ):
             self._write_codex_config(home, "[otel]\nlog_user_prompt = true\n")
             result = _DoctorResult()
@@ -160,6 +166,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True),
         ):
             self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
             result = _DoctorResult()
@@ -181,6 +190,9 @@ class TestCodexOtelAlignment(unittest.TestCase):
         ), patch(
             "defenseclaw.commands.cmd_doctor._http_probe",
             return_value=(200, json.dumps(payload)),
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True),
         ):
             self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
             result = _DoctorResult()
@@ -749,8 +761,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_accepts_event_native_json_and_counter_advance(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
@@ -814,8 +828,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_retries_only_after_contained_timeout(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
@@ -858,8 +874,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_fails_after_strict_bounded_attempts(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
@@ -889,8 +907,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_never_retries_incomplete_tree_cleanup(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
@@ -1011,8 +1031,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_rejects_generic_continue_output(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
@@ -1046,8 +1068,10 @@ class TestCheckConnectorHooks(unittest.TestCase):
         ),
     )
     @patch("defenseclaw.commands.cmd_doctor._run_cursor_windows_runtime_process")
+    @patch("defenseclaw.commands.cmd_doctor.bind_trusted_executable")
     def test_cursor_windows_runtime_probe_rejects_fail_open_without_delivery(
         self,
+        _bind_mock,
         run_mock,
         _powershell_mock,
         http_probe_mock,
