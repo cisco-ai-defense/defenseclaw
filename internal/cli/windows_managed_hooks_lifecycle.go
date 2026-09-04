@@ -1153,7 +1153,7 @@ func validateWindowsManagedHooksGuardianActivation(
 	stateIssues := compareEnterpriseHookProtectedTargetSets(expected, state.Results, "guardian state")
 	if activation.Version != enterpriseHookGuardianActivationVersion ||
 		!validEnterpriseHookHex(activation.ReconcileID, 16) ||
-		authorization.Version != 1 || state.Version != 1 || activationTimeErr != nil ||
+		(authorization.Version != 1 && authorization.Version != 2) || state.Version != 1 || activationTimeErr != nil ||
 		!activation.OK || activation.FailureCount != 0 ||
 		activation.SuccessCount != len(active) ||
 		activation.PendingCount != len(pendingTargets) ||

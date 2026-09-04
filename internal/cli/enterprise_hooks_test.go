@@ -91,8 +91,10 @@ func TestWriteEnterpriseHookGuardianState(t *testing.T) {
 	if err := json.Unmarshal(authorizationData, &authorization); err != nil {
 		t.Fatalf("unmarshal authorization: %v", err)
 	}
-	if authorization.Version != 1 || authorization.UpdatedAt != state.UpdatedAt {
-		t.Fatalf("authorization = %+v, want rollback-compatible matching v1 state %+v", authorization, state)
+	if authorization.Version != enterpriseHookGuardianAuthorizationVersionV2 ||
+		authorization.UpdatedAt != state.UpdatedAt ||
+		authorization.Current == nil || authorization.Current.OK {
+		t.Fatalf("authorization = %+v, want v2 current attestations that stay unready without this-run fingerprints", authorization)
 	}
 	activation, exists, err := loadEnterpriseHookGuardianActivation(dir)
 	if err != nil || !exists {
@@ -247,10 +249,11 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 	digest := strings.Repeat("a", sha256.Size*2)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	active := enterpriseHookReconcileRow{
-		UserHome:  filepath.Join(string(filepath.Separator), "Users", "active"),
-		SID:       "S-1-5-21-1-2-3-1001",
-		Connector: "codex",
-		OK:        true,
+		UserHome:         filepath.Join(string(filepath.Separator), "Users", "active"),
+		SID:              "S-1-5-21-1-2-3-1001",
+		Connector:        "codex",
+		OK:               true,
+		TokenFingerprint: managed.ScopedTokenFingerprint("test-scoped-token-active"),
 	}
 	pending := enterpriseHookReconcileRow{
 		UserHome:  filepath.Join(string(filepath.Separator), "Users", "offline"),
@@ -262,22 +265,32 @@ func TestEnterpriseHookAuthenticatedPendingTargetsBindsExactGuardianProof(t *tes
 		{UserHome: active.UserHome, SID: active.SID, Connector: active.Connector},
 		{UserHome: pending.UserHome, SID: pending.SID, Connector: pending.Connector, Deferred: true},
 	}}
+	reconcileID := strings.Repeat("b", 32)
+	current := buildEnterpriseHookCurrentReadiness(
+		[]enterpriseHookReconcileRow{active, pending},
+		reconcileID,
+		digest,
+		true,
+		0,
+	)
 	state := enterpriseHookGuardianState{
 		Version: 1, UpdatedAt: now, Manifest: manifestPath, OK: true,
 		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
 		Results: []enterpriseHookReconcileRow{active, pending},
 	}
 	authorization := enterpriseHookGuardianAuthorization{
-		Version: 1, UpdatedAt: now, OK: true,
+		Version: enterpriseHookGuardianAuthorizationVersionV2, UpdatedAt: now, OK: true,
 		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
 		ProtectedTargets: []enterpriseHookReconcileRow{active},
+		Current:          &current,
 	}
 	activation := enterpriseHookGuardianActivation{
 		Version: enterpriseHookGuardianActivationVersion, UpdatedAt: now,
-		ReconcileID: strings.Repeat("b", 32), Manifest: manifestPath,
+		ReconcileID: reconcileID, Manifest: manifestPath,
 		ManifestSHA256: digest, OK: true,
 		TargetCount: 2, SuccessCount: 1, PendingCount: 1,
 		ProtectedTargets: []enterpriseHookReconcileRow{active},
+		Current:          &current,
 	}
 
 	proof, err := enterpriseHookAuthenticatedPendingTargets(
@@ -460,9 +473,9 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 	updatedAt := time.Now().UTC().Format(time.RFC3339)
 	reconcileID := strings.Repeat("b", 32)
 	rows := []enterpriseHookReconcileRow{
-		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "claudecode", OK: true},
-		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "codex", OK: true},
-		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "cursor", OK: true},
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "claudecode", OK: true, TokenFingerprint: managed.ScopedTokenFingerprint("test-scoped-token-claudecode")},
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "codex", OK: true, TokenFingerprint: managed.ScopedTokenFingerprint("test-scoped-token-codex")},
+		{SID: "S-1-5-21-111-222-333-1001", UserHome: filepath.Join(scope, "inaccessible-target"), Connector: "cursor", OK: true, TokenFingerprint: managed.ScopedTokenFingerprint("test-scoped-token-cursor")},
 	}
 	state := enterpriseHookGuardianState{
 		Version:      1,
@@ -473,13 +486,15 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 		SuccessCount: len(rows),
 		Results:      rows,
 	}
+	current := buildEnterpriseHookCurrentReadiness(rows, reconcileID, manifestSHA256, true, 0)
 	authorization := enterpriseHookGuardianAuthorization{
-		Version:          1,
+		Version:          enterpriseHookGuardianAuthorizationVersionV2,
 		UpdatedAt:        updatedAt,
 		OK:               true,
 		TargetCount:      len(rows),
 		SuccessCount:     len(rows),
 		ProtectedTargets: rows,
+		Current:          &current,
 	}
 	activation := enterpriseHookGuardianActivation{
 		Version:          enterpriseHookGuardianActivationVersion,
@@ -491,6 +506,7 @@ func TestEnterpriseHooksStatusUsesFreshGuardianVerificationWithoutTargetAccess(t
 		TargetCount:      len(rows),
 		SuccessCount:     len(rows),
 		ProtectedTargets: rows,
+		Current:          &current,
 	}
 	for path, value := range map[string]any{
 		filepath.Join(dataDir, hookGuardianStateFile):                  state,
@@ -822,6 +838,80 @@ func TestWriteEnterpriseHookGuardianStatePreservesProtectedTargets(t *testing.T)
 	}
 	if !protected {
 		t.Fatal("previousEnterpriseHookSuccess = false after failed state overwrote results")
+	}
+	if state.Current == nil || state.Current.OK {
+		t.Fatal("historical repair eligibility was reused as current readiness")
+	}
+}
+
+func TestWriteEnterpriseHookGuardianStateCurrentAttestationsAreThisRunOnly(t *testing.T) {
+	originalOwnershipSetter := enterpriseHookAuthorizationOwnershipSetter
+	originalDirTrust := enterpriseHookAuthorizationDirTrustCheck
+	originalFileTrust := enterpriseHookAuthorizationFileTrustCheck
+	enterpriseHookAuthorizationOwnershipSetter = func(string) error { return nil }
+	enterpriseHookAuthorizationDirTrustCheck = func(string) error { return nil }
+	enterpriseHookAuthorizationFileTrustCheck = func(string) error { return nil }
+	t.Cleanup(func() {
+		enterpriseHookAuthorizationOwnershipSetter = originalOwnershipSetter
+		enterpriseHookAuthorizationDirTrustCheck = originalDirTrust
+		enterpriseHookAuthorizationFileTrustCheck = originalFileTrust
+	})
+	dir := t.TempDir()
+	authorizationDir := t.TempDir()
+	t.Setenv(hookGuardianAuthorizationDirEnv, authorizationDir)
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	aliceFP := managed.ScopedTokenFingerprint("test-scoped-token-alice")
+	bobFP := managed.ScopedTokenFingerprint("test-scoped-token-bob")
+	successRows := []enterpriseHookReconcileRow{
+		{
+			User: "alice", UserHome: "/home/alice", Connector: "codex",
+			OK: true, TokenFingerprint: aliceFP,
+		},
+		{
+			User: "bob", UserHome: "/home/bob", Connector: "codex",
+			OK: true, TokenFingerprint: bobFP,
+		},
+	}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", testEnterpriseHookManifestSHA256, successRows, 0, true); err != nil {
+		t.Fatal(err)
+	}
+	ready, _, err := loadEnterpriseHookGuardianAuthorization(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ready.Version != enterpriseHookGuardianAuthorizationVersionV2 || ready.Current == nil || !ready.Current.OK || len(ready.Current.Attestations) != 2 {
+		t.Fatalf("current ready = %+v", ready.Current)
+	}
+
+	failureRows := []enterpriseHookReconcileRow{
+		{
+			User: "alice", UserHome: "/home/alice", Connector: "codex",
+			OK: true, TokenFingerprint: aliceFP,
+		},
+		{
+			User: "bob", UserHome: "/home/bob", Connector: "codex",
+			OK: false, Error: "current verify failed",
+		},
+	}
+	if err := writeEnterpriseHookGuardianState(dir, "manifest.yaml", testEnterpriseHookManifestSHA256, failureRows, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	after, _, err := loadEnterpriseHookGuardianAuthorization(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if after.Current == nil || after.Current.OK {
+		t.Fatal("Alice success + Bob failure kept current readiness true")
+	}
+	if len(after.ProtectedTargets) != 2 {
+		t.Fatalf("repair eligibility = %d, want both historical rows", len(after.ProtectedTargets))
+	}
+	for _, row := range after.Current.Attestations {
+		if row.User == "bob" {
+			t.Fatal("failed current target was published as a current attestation")
+		}
 	}
 }
 
