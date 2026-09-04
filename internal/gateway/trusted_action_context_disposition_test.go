@@ -1393,6 +1393,104 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			wantAudit: true,
 		},
 		{
+			name:    "HTTP proxy observes tunneled HTTP path after CONNECT",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"http://safe.localhost/secrets/" + trustedActionDispositionTestToken,
+			},
+		},
+		{
+			name:    "HTTPS proxy observes tunneled HTTP header after CONNECT",
+			program: "curl",
+			argv: []string{
+				"-p", "--proxy", "https://proxy.example", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+		},
+		{
+			name:    "HTTP proxy observes tunneled origin user after CONNECT",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--user", "agent:" + trustedActionDispositionTestToken,
+				"http://safe.localhost/safe",
+			},
+		},
+		{
+			name:    "HTTP proxy observes tunneled custom Host after CONNECT",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--header", "Host: " + trustedActionDispositionTestToken + ".example",
+				"http://safe.localhost/safe",
+			},
+		},
+		{
+			name:    "separate proxy-header keeps ordinary tunneled header on HTTP proxy",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--proxy-header", "X-Proxy: safe", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+		},
+		{
+			name:    "HTTPS origin request stays encrypted after CONNECT",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--proxy-header", "X-Proxy: safe", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"https://safe.localhost/secrets/" + trustedActionDispositionTestToken,
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "local proxy cannot enforce tunneled HTTP header",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://127.0.0.1",
+				"--header", "X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "matching noproxy bypasses after-CONNECT observer",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--noproxy", "safe.localhost", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "mixed later transfer group closes after-CONNECT observer",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--header", "X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload", "--next", "https://two.example/",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "header file preempts after-CONNECT observer",
+			program: "curl",
+			argv: []string{
+				"--proxytunnel", "--proxy", "http://proxy.example",
+				"--header", "@/missing", "--user",
+				"agent:" + trustedActionDispositionTestToken,
+				"http://safe.localhost/safe",
+			},
+			wantAudit: true,
+		},
+		{
 			name: "external Wget HTTPS destination hostname", program: "wget",
 			argv: []string{
 				"--no-config",
