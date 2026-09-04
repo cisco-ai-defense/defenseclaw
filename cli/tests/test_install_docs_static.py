@@ -2258,4 +2258,4 @@ def test_policy_overview_matches_atomic_invalid_regex_rejection() -> None:
     assert "Regexes compile during [rule-pack validation]" in overview
     assert "/docs/policies/rulepack-validation" in overview
     assert "invalid Go regular expression" in validation
-    assert "silently discard the bad file" in validation
+    assert "does not silently discard the bad file" in " ".join(validation.split())
