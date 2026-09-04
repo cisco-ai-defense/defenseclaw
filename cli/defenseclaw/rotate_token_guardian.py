@@ -105,6 +105,7 @@ class GuardianRotationPlan:
     generation: str
     manifest: str
     targets: tuple[GuardianRotationTarget, ...]
+    manifest_sha256: str = ""
 
 
 def guardian_lock_base(data_dir: str) -> str:
@@ -260,11 +261,13 @@ def bind_guardian_roster(
         )
     if not _valid_rotation_hex(operation_id) or not _valid_rotation_hex(generation):
         raise click.ClickException("Guardian rotation identity is invalid; no credentials were modified.")
+    resolved = os.path.abspath(manifest_path)
     return GuardianRotationPlan(
         operation_id=operation_id,
         generation=generation,
-        manifest=os.path.abspath(manifest_path),
+        manifest=resolved,
         targets=targets,
+        manifest_sha256=guardian_manifest_digest(resolved),
     )
 
 
@@ -311,7 +314,7 @@ def assert_current_attestations(
         raise click.ClickException(
             "Guardian current attestations are bound to a different generation; rotation did not commit."
         )
-    expected_digest = guardian_manifest_digest(plan.manifest)
+    expected_digest = plan.manifest_sha256 or guardian_manifest_digest(plan.manifest)
     actual_digest = str(current.get("manifest_sha256") or "").strip()
     if actual_digest != expected_digest:
         raise click.ClickException(
@@ -435,11 +438,10 @@ def _load_current_readiness(data_dir: str) -> dict[str, Any]:
         raise click.ClickException(
             "Guardian current attestations are unavailable or unready; no credentials were modified."
         )
-    try:
-        target_count = int(current.get("target_count"))
-        success_count = int(current.get("success_count"))
-    except (TypeError, ValueError) as exc:
-        raise click.ClickException("Guardian current attestations are malformed.") from exc
+    target_count = current.get("target_count")
+    success_count = current.get("success_count")
+    if type(target_count) is not int or type(success_count) is not int:
+        raise click.ClickException("Guardian current attestations are malformed.")
     rows = current.get("attestations")
     if not isinstance(rows, list) or success_count != target_count or success_count != len(rows):
         raise click.ClickException(
