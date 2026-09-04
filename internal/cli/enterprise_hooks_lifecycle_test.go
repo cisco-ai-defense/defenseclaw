@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -462,4 +463,24 @@ func snapshotEnterpriseHooksTree(t *testing.T, root string) map[string]enterpris
 		t.Fatalf("snapshot %s: %v", root, err)
 	}
 	return entries
+}
+
+func TestPublishGuardianReadyAfterWatchReconcileSkipsRotationBusy(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	dir := t.TempDir()
+	previousManifest := enterpriseHookManifest
+	t.Cleanup(func() { enterpriseHookManifest = previousManifest })
+	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+	statePath := guardianstate.PathForStateRoot(dir)
+
+	var log bytes.Buffer
+	publishGuardianReadyAfterWatchReconcile(&log, errEnterpriseHookRotationBusy)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rotation-busy reconcile published ready: %v", err)
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil)
+	if got := guardianstate.ReadState(statePath); got != guardianstate.StateReady {
+		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
+	}
 }
