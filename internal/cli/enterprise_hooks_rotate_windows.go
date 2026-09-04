@@ -101,9 +101,10 @@ type windowsManagedRotationSnapshot struct {
 }
 
 type windowsManagedRotationSecretRecord struct {
-	Target   enterpriseHookRotationTarget   `json:"target"`
-	Artifact windowsManagedRotationSnapshot `json:"artifact"`
-	Payloads [][]byte                       `json:"payloads"`
+	Target     enterpriseHookRotationTarget       `json:"target"`
+	Artifact   windowsManagedRotationSnapshot     `json:"artifact"`
+	PublishedB windowsManagedRotationFileIdentity `json:"published_b,omitempty"`
+	Payloads   [][]byte                           `json:"payloads"`
 }
 
 func executeManagedRotationPrepare(req enterpriseHookRotationRequest) (enterpriseHookRotationJournal, error) {
@@ -184,7 +185,7 @@ func executeWindowsManagedRotationPrepare(req enterpriseHookRotationRequest) (en
 				_ = restoreWindowsManagedRotationMutated(cfg.DataDir, plan.Targets[:mutated])
 				return plan.Journal.public(), fmt.Errorf("windows managed rotation prepare: snapshot %s: %w", enterpriseHookRotationTargetLabel(target), err)
 			}
-			if err := publishWindowsManagedRotationTargetB(target, plan.Tokens[target.Connector]); err != nil {
+			if err := publishWindowsManagedRotationTargetB(cfg.DataDir, target, plan.Tokens[target.Connector]); err != nil {
 				_ = restoreWindowsManagedRotationMutated(cfg.DataDir, plan.Targets[:i+1])
 				return plan.Journal.public(), fmt.Errorf("windows managed rotation prepare: write B for %s: %w", enterpriseHookRotationTargetLabel(target), err)
 			}
@@ -289,7 +290,11 @@ func executeWindowsManagedRotationRollback(req enterpriseHookRotationRequest) (e
 		if exists {
 			targets = journal.Targets
 		}
-		if err := restoreWindowsManagedRotationMutated(cfg.DataDir, targets); err != nil {
+		snapshotted, err := windowsManagedRotationSnapshottedTargets(cfg.DataDir, targets)
+		if err != nil {
+			return journal.public(), err
+		}
+		if err := restoreWindowsManagedRotationMutated(cfg.DataDir, snapshotted); err != nil {
 			if exists {
 				journal.Phase = enterpriseHookRotationPhasePreparing
 				_ = writeWindowsManagedRotationJournal(cfg.DataDir, journal)
@@ -297,7 +302,7 @@ func executeWindowsManagedRotationRollback(req enterpriseHookRotationRequest) (e
 			return journal.public(), fmt.Errorf("windows managed rotation rollback: exact A restoration could not be proved: %w", err)
 		}
 		if exists {
-			if err := publishWindowsManagedRotationRestoredCurrent(cfg.DataDir, journal, targets); err != nil {
+			if err := publishWindowsManagedRotationRestoredCurrent(cfg.DataDir, journal, snapshotted); err != nil {
 				return journal.public(), err
 			}
 			journal.Phase = enterpriseHookRotationPhaseRolledBack
@@ -412,10 +417,16 @@ func preflightWindowsManagedRotationTarget(target enterpriseHookRotationTarget) 
 	if home == "" || !filepath.IsAbs(home) {
 		return fmt.Errorf("windows managed rotation: target %s is missing a canonical home", enterpriseHookRotationTargetLabel(target))
 	}
+	if _, err := winpath.ValidateFixedNTFSMountedPath(home); err != nil {
+		return fmt.Errorf("windows managed rotation: target %s home is not a fixed local NTFS volume: %w", enterpriseHookRotationTargetLabel(target), err)
+	}
 	if err := refuseWindowsManagedRotationReparse(home, "target home"); err != nil {
 		return err
 	}
 	userDataDir := enterpriseHookRotationUserDataDir(target)
+	if _, err := winpath.ValidateFixedNTFSMountedPath(userDataDir); err != nil {
+		return fmt.Errorf("windows managed rotation: target %s data dir is not a fixed local NTFS volume: %w", enterpriseHookRotationTargetLabel(target), err)
+	}
 	if err := refuseWindowsManagedRotationReparse(userDataDir, "target data dir"); err != nil {
 		return err
 	}
@@ -448,27 +459,27 @@ func windowsManagedRotationQualifiedConnector(name string) bool {
 	}
 }
 
-func publishWindowsManagedRotationTargetB(target enterpriseHookRotationTarget, token string) error {
+func publishWindowsManagedRotationTargetB(serviceDir string, target enterpriseHookRotationTarget, token string) error {
 	sid, err := windows.StringToSid(strings.TrimSpace(target.SID))
 	if err != nil || sid == nil {
 		return fmt.Errorf("invalid target SID")
 	}
-	dataDir := enterpriseHookRotationUserDataDir(target)
+	userDataDir := enterpriseHookRotationUserDataDir(target)
 	return windowsManagedRotationImpersonate(sid, strings.TrimSpace(target.UserHome), func() error {
-		if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+		if err := os.MkdirAll(filepath.Join(userDataDir, "hooks"), 0o700); err != nil {
 			return err
 		}
-		if err := windowsManagedRotationPublishB(dataDir, target.Connector, token); err != nil {
+		if err := windowsManagedRotationPublishB(userDataDir, target.Connector, token); err != nil {
 			return err
 		}
-		published, err := windowsManagedRotationReadPublished(dataDir, target.Connector)
+		published, err := windowsManagedRotationReadPublished(userDataDir, target.Connector)
 		if err != nil {
 			return err
 		}
 		if managed.ScopedTokenFingerprint(published) != managed.ScopedTokenFingerprint(token) {
 			return fmt.Errorf("persisted B fingerprint mismatch")
 		}
-		path, err := connector.HookAPITokenFilePath(dataDir, target.Connector)
+		path, err := connector.HookAPITokenFilePath(userDataDir, target.Connector)
 		if err != nil {
 			return err
 		}
@@ -481,6 +492,9 @@ func publishWindowsManagedRotationTargetB(target enterpriseHookRotationTarget, t
 		}
 		if !strings.EqualFold(info.OwnerSID, strings.TrimSpace(target.SID)) {
 			return fmt.Errorf("published B owner SID does not match the manifest")
+		}
+		if err := recordWindowsManagedRotationPublishedB(serviceDir, target, info.Identity); err != nil {
+			return err
 		}
 		return nil
 	})
@@ -506,6 +520,18 @@ func verifyWindowsManagedRotationCurrentB(plan windowsManagedRotationPlan) error
 		}
 		if !strings.EqualFold(info.OwnerSID, strings.TrimSpace(target.SID)) || !info.ProtectedDACL {
 			return fmt.Errorf("windows managed rotation: B DACL/owner proof failed for %s", enterpriseHookRotationTargetLabel(target))
+		}
+		record, err := loadWindowsManagedRotationRecord(windowsManagedRotationSnapshotPath(cfg.DataDir, target))
+		if err != nil {
+			return fmt.Errorf("windows managed rotation: B identity record missing for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+		}
+		if record.PublishedB == (windowsManagedRotationFileIdentity{}) {
+			return fmt.Errorf("windows managed rotation: B file identity was not captured for %s", enterpriseHookRotationTargetLabel(target))
+		}
+		if info.Identity.VolumeSerial != record.PublishedB.VolumeSerial ||
+			info.Identity.FileIndexHigh != record.PublishedB.FileIndexHigh ||
+			info.Identity.FileIndexLow != record.PublishedB.FileIndexLow {
+			return fmt.Errorf("windows managed rotation: B file identity changed since prepare for %s", enterpriseHookRotationTargetLabel(target))
 		}
 	}
 	return nil
@@ -588,9 +614,28 @@ func snapshotWindowsManagedRotationTarget(dataDir string, target enterpriseHookR
 	return encodeWindowsManagedRotationSnapshot(windowsManagedRotationSnapshotPath(dataDir, target), target, snapshot)
 }
 
-func restoreWindowsManagedRotationMutated(dataDir string, targets []enterpriseHookRotationTarget) error {
-	var errs []error
+func windowsManagedRotationSnapshottedTargets(dataDir string, targets []enterpriseHookRotationTarget) ([]enterpriseHookRotationTarget, error) {
+	out := make([]enterpriseHookRotationTarget, 0, len(targets))
 	for _, target := range targets {
+		_, err := loadWindowsManagedRotationRecord(windowsManagedRotationSnapshotPath(dataDir, target))
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("windows managed rotation: inspect snapshot for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+		}
+		out = append(out, target)
+	}
+	return out, nil
+}
+
+func restoreWindowsManagedRotationMutated(dataDir string, targets []enterpriseHookRotationTarget) error {
+	snapshotted, err := windowsManagedRotationSnapshottedTargets(dataDir, targets)
+	if err != nil {
+		return err
+	}
+	var errs []error
+	for _, target := range snapshotted {
 		if err := restoreWindowsManagedRotationTarget(dataDir, target); err != nil {
 			errs = append(errs, err)
 		}
@@ -952,19 +997,43 @@ func encodeWindowsManagedRotationSnapshot(path string, target enterpriseHookRota
 }
 
 func decodeWindowsManagedRotationSnapshot(path string) (windowsManagedRotationSnapshot, error) {
-	data, err := os.ReadFile(path)
+	record, err := loadWindowsManagedRotationRecord(path)
 	if err != nil {
 		return windowsManagedRotationSnapshot{}, err
 	}
+	return record.Artifact, nil
+}
+
+func loadWindowsManagedRotationRecord(path string) (windowsManagedRotationSecretRecord, error) {
+	held, err := inspectWindowsManagedRotationPath(path)
+	if err != nil {
+		return windowsManagedRotationSecretRecord{}, err
+	}
+	if !held.Present {
+		return windowsManagedRotationSecretRecord{}, os.ErrNotExist
+	}
 	var record windowsManagedRotationSecretRecord
-	if err := json.Unmarshal(data, &record); err != nil {
-		return windowsManagedRotationSnapshot{}, err
+	if err := json.Unmarshal(held.Bytes, &record); err != nil {
+		return windowsManagedRotationSecretRecord{}, err
 	}
-	snapshot := record.Artifact
 	if len(record.Payloads) == 1 {
-		snapshot.Bytes = record.Payloads[0]
+		record.Artifact.Bytes = record.Payloads[0]
 	}
-	return snapshot, nil
+	return record, nil
+}
+
+func recordWindowsManagedRotationPublishedB(dataDir string, target enterpriseHookRotationTarget, identity windowsManagedRotationFileIdentity) error {
+	path := windowsManagedRotationSnapshotPath(dataDir, target)
+	record, err := loadWindowsManagedRotationRecord(path)
+	if err != nil {
+		return err
+	}
+	record.PublishedB = identity
+	data, err := json.Marshal(record)
+	if err != nil {
+		return err
+	}
+	return writeEnterpriseHookProtectedFile(path, data)
 }
 
 func removeWindowsManagedRotationRollbackDir(dataDir string) error {
