@@ -62,6 +62,13 @@ def _fresh_install_function(name: str) -> str:
     return match.group(0)
 
 
+# Hosted Windows runners can take longer than 30s to cold-start
+# powershell.exe before Set-Acl even runs. Keep the same ACL assertions
+# and retry only the helper process, not the custody contract.
+_POWERSHELL_HELPER_TIMEOUT_SECONDS = 90
+_POWERSHELL_HELPER_ATTEMPTS = 3
+
+
 def _run_powershell(
     command: str,
     environment_overrides: dict[str, str],
@@ -75,21 +82,29 @@ def _run_powershell(
     }
     if Path(powershell).name.casefold() == "powershell.exe":
         environment["PSModulePath"] = str(Path(powershell).parent / "Modules")
-    return subprocess.run(
-        [
-            powershell,
-            "-NoLogo",
-            "-NoProfile",
-            "-NonInteractive",
-            "-Command",
-            command,
-        ],
-        check=False,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=environment,
-    )
+    argv = [
+        powershell,
+        "-NoLogo",
+        "-NoProfile",
+        "-NonInteractive",
+        "-Command",
+        command,
+    ]
+    last_timeout: subprocess.TimeoutExpired | None = None
+    for _attempt in range(_POWERSHELL_HELPER_ATTEMPTS):
+        try:
+            return subprocess.run(
+                argv,
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=_POWERSHELL_HELPER_TIMEOUT_SECONDS,
+                env=environment,
+            )
+        except subprocess.TimeoutExpired as exc:
+            last_timeout = exc
+    assert last_timeout is not None
+    raise last_timeout
 
 
 def _set_private_custody_acl(path: Path, *extra_rules: str) -> None:

@@ -964,7 +964,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	label := provider + r.URL.Path // e.g. "anthropic/v1/messages"
 
 	userText := lastUserText(partial.Messages)
-	if userText == "" && partial.System != "" {
+	// A coexisting Ollama /api/generate `prompt` is the user generation
+	// input. Do not let top-level `system` replace it (#718). Anthropic
+	// and other system-only native shapes still fall through here when
+	// prompt is empty.
+	if userText == "" && partial.System != "" && strings.TrimSpace(partial.Prompt) == "" {
 		userText = partial.System
 	}
 	// Responses API: input can be a string or array of message/item objects.
@@ -1037,9 +1041,23 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 
 	// Ollama /api/generate + legacy completion endpoints: top-level
 	// `prompt` is a single string. Inspect it like any user turn so
-	// direct Ollama clients are not a bypass route.
-	if userText == "" && partial.Prompt != "" {
+	// direct Ollama clients are not a bypass route. When system and
+	// prompt coexist, keep both in Messages for message-aware inspectors
+	// and join both texts for regex_judge / content scanners, which
+	// inspect the string rather than Messages (#718). One Inspect keeps
+	// managed AID at a single call.
+	ollamaSystemText := ""
+	if userText == "" && strings.TrimSpace(partial.Prompt) != "" {
 		userText = partial.Prompt
+		if strings.TrimSpace(partial.System) != "" {
+			ollamaSystemText = partial.System
+		}
+		if len(partial.Messages) == 0 {
+			if ollamaSystemText != "" {
+				partial.Messages = append(partial.Messages, ChatMessage{Role: "system", Content: ollamaSystemText})
+			}
+			partial.Messages = append(partial.Messages, ChatMessage{Role: "user", Content: partial.Prompt})
+		}
 	}
 
 	// Responses API: fall back to instructions (system-level prompt) if no
@@ -1053,7 +1071,11 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	if passthroughReqForTelemetry.Model == "" {
 		passthroughReqForTelemetry.Model = label
 	}
-	inspectionText := promptInspectionText(userText)
+	inspectRaw := userText
+	if ollamaSystemText != "" {
+		inspectRaw = ollamaSystemText + "\n" + userText
+	}
+	inspectionText := promptInspectionText(inspectRaw)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
 	// or session-startup-shaped suffix inside the user-controlled OpenClaw
@@ -1076,7 +1098,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// byte-for-byte unchanged.
 		deferManagedPrompt := managedEnterpriseActive.Load()
 		if !deferManagedPrompt {
-			passthroughPromptID = p.emitLLMPromptEventV8(r.Context(), meta, userText, body)
+			passthroughPromptID = p.emitLLMPromptEventV8(r.Context(), meta, inspectRaw, body)
 		}
 
 		t0 := time.Now()
@@ -1085,8 +1107,8 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict.
-		if inspectionText != userText {
-			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", userText, partial.Messages, label, mode)
+		if inspectionText != inspectRaw {
+			rawVerdict := p.inspector.Inspect(r.Context(), "prompt", inspectRaw, partial.Messages, label, mode)
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", label, mode)
@@ -1096,7 +1118,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// (still fails closed to redact when AID returned no directive).
 			passthroughPromptID = p.emitLLMPromptEventV8(
 				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
-				meta, userText, body)
+				meta, inspectRaw, body)
 		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
@@ -2666,6 +2688,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 
 	// --- Pre-call inspection (apply_guardrail input, child of invoke_agent) ---
 	userText := lastUserText(req.Messages)
+	inspectText := promptInspectText(req.Messages)
 	_, promptProviderName := p.llmSystemAndProvider(req.Model)
 	promptID := ""
 	pendingRoutedPrompt := false
@@ -2673,14 +2696,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	var pendingPromptRedactionEnabled *bool
 	pendingPromptHasRedactionDecision := false
 	preCallSeverity := "" // populated by guardrail inspection; fed to model router
-	inspectionText := promptInspectionText(userText)
+	inspectionText := promptInspectionText(inspectText)
 	// F-3396: heartbeat / session-startup gates run on the RAW user text, not
 	// the post-strip variant. Otherwise an attacker could wrap a heartbeat-
 	// or session-startup-shaped suffix inside the user-controlled OpenClaw
 	// metadata fence and have stripOpenClawUntrustedEnvelope hide the real
 	// payload from these allowlists while the original prompt still flows
 	// upstream.
-	if userText != "" &&
+	if inspectText != "" &&
 		!isHeartbeatMessage(userText, req.Messages) &&
 		!isSessionStartupMessage(userText) {
 		meta := proxyLLMEventMeta(p, r, &req, promptProviderName)
@@ -2699,7 +2722,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		deferManagedPrompt := managedEnterpriseActive.Load()
 		deferRoutedPrompt := p.modelRouter != nil
 		if !deferManagedPrompt && !deferRoutedPrompt {
-			promptID = p.emitLLMPromptEventV8(r.Context(), meta, userText, req.RawBody)
+			promptID = p.emitLLMPromptEventV8(r.Context(), meta, inspectText, req.RawBody)
 		}
 
 		t0 := time.Now()
@@ -2709,8 +2732,8 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		// any client can forge, so we additionally inspect the RAW user text
 		// when the strip actually changed the content. Either path can
 		// trigger a block; we keep the stricter verdict.
-		if inspectionText != userText {
-			rawVerdict := p.inspector.Inspect(agentCtx, "prompt", userText, req.Messages, req.Model, mode)
+		if inspectionText != inspectText {
+			rawVerdict := p.inspector.Inspect(agentCtx, "prompt", inspectText, req.Messages, req.Model, mode)
 			verdict = mergePromptVerdicts(verdict, rawVerdict)
 		}
 		p.resolveConfirm(r.Context(), r, verdict, "prompt", req.Model, mode)
@@ -2734,7 +2757,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 				pendingPromptHasRedactionDecision = true
 			}
 		} else if deferManagedPrompt {
-			promptID = p.emitLLMPromptEventV8(promptEmitContext, meta, userText, req.RawBody)
+			promptID = p.emitLLMPromptEventV8(promptEmitContext, meta, inspectText, req.RawBody)
 		}
 		elapsed := time.Since(t0)
 
@@ -2851,7 +2874,7 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 		pendingPromptMeta.Provider = selectedPromptProvider
 		pendingPromptMeta.Model = req.Model
 		promptID = p.emitLLMPromptEventV8(
-			ctx, pendingPromptMeta, userText, req.RawBody,
+			ctx, pendingPromptMeta, inspectText, req.RawBody,
 		)
 		pendingRoutedPrompt = false
 		return promptID

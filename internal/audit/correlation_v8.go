@@ -1302,18 +1302,23 @@ func (repo *CorrelationRepository) RecordObservation(
 		return err
 	}
 	defer release()
-	tx, err := repo.store.db.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("audit: begin correlation observation write: %w", err)
-	}
-	defer tx.Rollback() //nolint:errcheck
-	if err := putCorrelationObservationTx(ctx, tx, repo.store, observation); err != nil {
-		return err
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("audit: commit correlation observation: %w", err)
-	}
-	return nil
+	// BeginTx is outside putCorrelationObservationTx's busy retry. On Windows
+	// antivirus can lock a freshly created audit.db long enough that the first
+	// begin fails even though the insert path would have waited.
+	return retryBusyObserved(ctx, "correlation_observation_write", repo.store.sqliteBusyObservabilityV8(), func() error {
+		tx, beginErr := repo.store.db.BeginTx(ctx, nil)
+		if beginErr != nil {
+			return fmt.Errorf("audit: begin correlation observation write: %w", beginErr)
+		}
+		defer tx.Rollback() //nolint:errcheck
+		if putErr := putCorrelationObservationTx(ctx, tx, repo.store, observation); putErr != nil {
+			return putErr
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			return fmt.Errorf("audit: commit correlation observation: %w", commitErr)
+		}
+		return nil
+	})
 }
 
 func putCorrelationObservationTx(

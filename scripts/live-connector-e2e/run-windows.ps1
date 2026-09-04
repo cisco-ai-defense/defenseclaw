@@ -5457,7 +5457,8 @@ function Assert-CopilotSynchronousWindowsHookConfig([string]$Config, [string]$Co
         '[Console]::OutputEncoding = $utf8NoBom',
         '$timeoutMS = 25000',
         '$process.StandardInput.AutoFlush = $true',
-        '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
+        '$deadline.Restart()',
+        '$process.StandardInput.Write($payload)',
         'WaitForExit',
         '[System.Environment]::Exit(0)'
     )) {
@@ -5940,21 +5941,35 @@ print(json.dumps({
 
 function Assert-DoctorHookRegistration {
     $config = Get-EffectiveConnectorConfigPath $Connector
-    $doctor = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1)
-    try {
-        $report = $doctor.StdOut | ConvertFrom-Json
-    } catch {
-        throw "doctor did not return JSON after $Connector setup"
-    }
     $label = Get-ConnectorHookLabel
-    $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
-    if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
     # Doctor's public status vocabulary is pass/fail/warn/skip. Hermes keeps
     # the more specific pending-reload state in the detail while truthfully
     # failing readiness until every running upstream host is restarted.
     $expectedStatus = if ($Connector -eq 'hermes') { 'fail' } else { 'pass' }
-    if ($rows[0].status -ne $expectedStatus) {
-        throw "doctor rejected setup-created $Connector hooks: $($rows[0].detail)"
+    # Cursor's Windows runtime probe already retries inside Doctor. One extra
+    # harness retry covers a loaded runner that still times out after that
+    # bounded pair, without weakening the same pass/fail assertions.
+    $attempts = if ($Connector -eq 'cursor') { 2 } else { 1 }
+    $doctorTimeout = if ($Connector -eq 'cursor') { 360 } else { $CommandTimeoutSeconds }
+    $report = $null
+    $rows = @()
+    for ($attempt = 1; $attempt -le $attempts; $attempt++) {
+        $doctor = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout $doctorTimeout
+        try {
+            $report = $doctor.StdOut | ConvertFrom-Json
+        } catch {
+            throw "doctor did not return JSON after $Connector setup"
+        }
+        $rows = @($report.checks | Where-Object { $_.label -like "$label*" })
+        if ($rows.Count -ne 1) { throw "doctor returned $($rows.Count) $label rows after setup" }
+        if ($rows[0].status -eq $expectedStatus) {
+            break
+        }
+        $detail = [string]$rows[0].detail
+        $retryable = $Connector -eq 'cursor' -and $detail -eq 'Cursor runtime probe timed out'
+        if (-not $retryable -or $attempt -ge $attempts) {
+            throw "doctor rejected setup-created $Connector hooks: $detail"
+        }
     }
     if ($Connector -eq 'hermes' -and
         ($rows[0].detail -notmatch 'hook_entries=23' -or
@@ -6882,7 +6897,8 @@ function Assert-DoctorWindowsHookRegistration {
         Assert-CopilotSynchronousWindowsHookConfig $config "$Connector setup"
     }
 
-    $result = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout 120
+    $doctorTimeout = if ($Connector -eq 'cursor') { 240 } else { 120 }
+    $result = Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(0, 1) -Timeout $doctorTimeout
     try { $report = $result.StdOut | ConvertFrom-Json } catch { throw "Doctor did not return JSON: $($_.Exception.Message)" }
     $checks = @($report.checks | Where-Object { [string]::Equals([string]$_.label, $label, [StringComparison]::Ordinal) })
     if ($checks.Count -ne 1) { throw "Doctor returned $($checks.Count) '$label' checks, expected one" }

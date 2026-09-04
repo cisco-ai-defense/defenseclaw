@@ -45,14 +45,21 @@ func (s *Store) CollectSQLiteHealth(ctx context.Context) (SQLiteHealthSnapshot, 
 	} else if !os.IsNotExist(statErr) {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: inspect SQLite WAL health: %w", statErr)
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&snapshot.PageCount); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_page_count", s.sqliteBusyObservabilityV8(), func() error {
+		return s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&snapshot.PageCount)
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: read SQLite page count: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&snapshot.FreelistCount); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_freelist_count", s.sqliteBusyObservabilityV8(), func() error {
+		return s.db.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&snapshot.FreelistCount)
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: read SQLite freelist count: %w", err)
 	}
 	startedAt := time.Now()
-	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_wal_checkpoint", s.sqliteBusyObservabilityV8(), func() error {
+		_, execErr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
+		return execErr
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: checkpoint SQLite health: %w", err)
 	}
 	snapshot.CheckpointMs = float64(time.Since(startedAt).Milliseconds())

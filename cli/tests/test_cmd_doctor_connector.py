@@ -799,7 +799,7 @@ class TestCheckConnectorHooks(unittest.TestCase):
             _CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
         )
         self.assertEqual(_CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS, 30.0)
-        self.assertEqual(_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS, 50.0)
+        self.assertEqual(_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS, 75.0)
         self.assertGreater(
             run_mock.call_args.kwargs["timeout"],
             _CURSOR_NATIVE_HOOK_TIMEOUT_SECONDS,
