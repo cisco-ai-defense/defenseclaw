@@ -142,6 +142,7 @@ type Facts struct {
 	// reverse-shell write is a payload_write; any other valid closed-schema write
 	// is a same-path payload_mutation barrier.
 	StagedPayloadPersistenceOperations []StagedPayloadPersistenceOperationFact `json:"-"`
+	Artifacts                          []ArtifactFact
 }
 
 // StructuredTextReplacementFact is a private, in-process projection of one

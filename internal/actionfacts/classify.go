@@ -532,6 +532,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySSH(out, command, program)
 	case "scp":
 		classifySCP(out, command)
+	case "tar", "tar.exe":
+		classifyTarArchiveProducer(out, command)
+	case "zip", "zip.exe":
+		classifyZipArchiveProducer(out, command)
+	case "compress-archive":
+		classifyCompressArchiveProducer(out, command)
 	case "nc", "ncat", "netcat", "socat":
 		classifySocketTool(out, command, program)
 	case "chisel", "ligolo-agent", "ligolo-ng-agent", "cloudflared", "ngrok":
@@ -690,6 +696,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	}
 
 	classifyRedirects(out, command)
+	classifyArchiveArtifactConsumers(out, command)
 }
 
 func classifyPOSIXHistory(out *parseOutput, command *CommandFact) {
@@ -9657,6 +9664,8 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		if !parsed.complete {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "bundle":
+		classifyGitBundleProducer(out, command, index)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
@@ -12409,6 +12418,10 @@ func deduplicateFacts(out *parseOutput) {
 		return strconv.FormatInt(fact.FromCommandID, 10) + "\x00" +
 			strconv.FormatInt(fact.ToCommandID, 10) + "\x00" +
 			string(fact.From) + "\x00" + string(fact.To)
+	})
+	out.artifacts = deduplicate(out.artifacts, func(fact ArtifactFact) string {
+		return strconv.FormatInt(fact.CommandID, 10) + "\x00" +
+			string(fact.Role) + "\x00" + string(fact.Kind) + "\x00" + fact.Value
 	})
 }
 
