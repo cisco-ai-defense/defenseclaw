@@ -3952,6 +3952,8 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, hookBinary)
 	current := windowsCopilotPowerShellAdapterCommand(filepath.Join(t.TempDir(), "copilot-hook.sh"))
+	previous := windowsCopilotPowerShellAdapterCommand(filepath.Join(t.TempDir(), "previous", "copilot-hook.sh"))
+	previousEvent := copilotHookInvocationCommandForEvent("windows", "preToolUse", previous)
 	legacy := legacyWindowsCopilotPowerShellHookCommandForBinary(hookBinary)
 	duplicated := legacyWindowsCopilotDoubleCallOperatorHookCommandForBinary(hookBinary)
 	legacyEvent := legacyWindowsCopilotPowerShellHookCommandForEvent("preToolUse", hookBinary)
@@ -3964,6 +3966,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 		"version": 1,
 		"hooks": map[string]interface{}{
 			"preToolUse": []interface{}{
+				map[string]interface{}{"type": "command", "powershell": previousEvent, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": legacyEvent, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": duplicated, "timeoutSec": 30},
 				map[string]interface{}{"type": "command", "powershell": legacy, "timeoutSec": 30},
@@ -4001,7 +4004,7 @@ func TestCopilotWindowsHooksRepairAndTeardown(t *testing.T) {
 					t.Errorf("%s canonical entry drifted: %#v", event, entry)
 				}
 			}
-			if command == legacy || command == duplicated || command == historic || command == legacyEvent {
+			if command == previousEvent || command == legacy || command == duplicated || command == historic || command == legacyEvent {
 				t.Errorf("%s retained legacy Copilot command %q", event, command)
 			}
 		}
