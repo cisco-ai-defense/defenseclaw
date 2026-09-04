@@ -100,11 +100,18 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint_from_fd,
     read_pid_record,
 )
+from defenseclaw.doctor_exec import ExecBindError, bind_trusted_executable, revalidate_bound_executable
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
     _packaged_windows_install_root,
     validate_windows_copilot_hook_registration,
     validate_windows_hook_registration,
+)
+from defenseclaw.doctor_peer import (
+    PeerBindError,
+    TrustedPeer,
+    loopback_bearer_requires_peer,
+    peer_bound_handlers,
 )
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
@@ -702,6 +709,9 @@ def _http_probe(
     response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
     allow_truncation: bool = True,
     bypass_proxy: bool = False,
+    trusted_peer: TrustedPeer | None = None,
+    peer_lookup=None,
+    process_lookup=None,
 ) -> tuple[int, str]:
     """Run one HTTP probe with a portable total wall-clock deadline.
 
@@ -728,7 +738,12 @@ def _http_probe(
                 response_limit=response_limit,
                 allow_truncation=allow_truncation,
                 bypass_proxy=bypass_proxy,
+                trusted_peer=trusted_peer,
+                peer_lookup=peer_lookup,
+                process_lookup=process_lookup,
             )
+        except PeerBindError as exc:
+            value = (0, str(exc))
         except Exception as exc:  # noqa: BLE001 - redact arbitrary transport detail.
             value = (0, f"{type(exc).__name__}: probe failed")
         try:
@@ -758,6 +773,9 @@ def _http_probe_once(
     response_limit: int = _HTTP_PROBE_DISPLAY_BYTES,
     allow_truncation: bool = True,
     bypass_proxy: bool = False,
+    trusted_peer: TrustedPeer | None = None,
+    peer_lookup=None,
+    process_lookup=None,
 ) -> tuple[int, str]:
     """Fire an HTTP request; return (status_code, body_text). Returns (0, error) on failure.
 
@@ -773,6 +791,11 @@ def _http_probe_once(
     prevents local gateway bearer tokens from being forwarded to a proxy and
     prevents a proxy response from impersonating local gateway health.
 
+    Loopback ``Authorization: Bearer`` probes require ``trusted_peer``. The
+    TCP peer is bound after connect and before request bytes, so a replacement
+    listener cannot receive the gateway token. Missing peer identity fails
+    closed without sending credentials.
+
     ``response_limit`` is a byte bound, not just a post-read display slice.
     The default retains the compact diagnostic-body behavior. Structured
     callers such as the sidecar health check opt into a larger bounded document
@@ -781,6 +804,8 @@ def _http_probe_once(
     """
     if response_limit <= 0:
         raise ValueError("response_limit must be positive")
+    if loopback_bearer_requires_peer(url, headers) and trusted_peer is None:
+        return 0, "refusing to send gateway credentials before peer bind"
 
     def _read_response(stream) -> str:
         raw = stream.read(response_limit + 1)
@@ -807,11 +832,23 @@ def _http_probe_once(
     handlers: list[urllib.request.BaseHandler] = []
     if bypass_proxy or loopback_host:
         handlers.append(urllib.request.ProxyHandler({}))
-    handlers.append(urllib.request.HTTPSHandler(context=context))
+    if trusted_peer is not None:
+        handlers.extend(
+            peer_bound_handlers(
+                trusted_peer,
+                peer_lookup=peer_lookup,
+                process_lookup=process_lookup,
+                ssl_context=context,
+            )
+        )
+    else:
+        handlers.append(urllib.request.HTTPSHandler(context=context))
     opener = build_no_redirect_opener(*handlers)
     try:
         with opener.open(req, timeout=timeout) as resp:
             return resp.status, _read_response(resp)
+    except PeerBindError as exc:
+        return 0, str(exc)
     except urllib.error.HTTPError as exc:
         body_text = ""
         try:
@@ -824,7 +861,28 @@ def _http_probe_once(
         # instead of leaking the auth header to the redirect target.
         return 0, str(exc)
     except (urllib.error.URLError, OSError, ValueError) as exc:
+        if isinstance(getattr(exc, "reason", None), PeerBindError):
+            return 0, str(exc.reason)
         return 0, str(exc)
+
+
+def _probe_authenticated_gateway_status(
+    cfg,
+    token: str,
+    trust: _GatewayTrust,
+    *,
+    url: str | None = None,
+) -> tuple[int, str]:
+    """Send a loopback bearer status probe only after the TCP peer is bound."""
+    return _http_probe(
+        url or _gateway_api_url(cfg, "/status"),
+        headers={"Authorization": f"Bearer {token}"},
+        timeout=3.0,
+        response_limit=64 * 1024,
+        allow_truncation=False,
+        bypass_proxy=True,
+        trusted_peer=trust.peer(),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1821,14 +1879,7 @@ def _check_gateway_auth(cfg, r: _DoctorResult) -> bool:
         )
         return False
 
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/status"),
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=3.0,
-        response_limit=64 * 1024,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
+    code, body = _probe_authenticated_gateway_status(cfg, token, trust)
     if code == 200:
         runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
         if not runtime_ok:
@@ -2071,6 +2122,22 @@ class _GatewayTrust:
     @property
     def trusted(self) -> bool:
         return self.code == "trusted" and self.pid > 0
+
+    def peer(self) -> TrustedPeer | None:
+        """Return the kernel generation that must own a credential-bearing socket."""
+        if not self.trusted:
+            return None
+        identity = ""
+        if self.process is not None:
+            identity = (self.process.start_identity or "").strip()
+        if not identity and self.record is not None:
+            identity = (self.record.start_identity or "").strip()
+        if not identity:
+            return None
+        try:
+            return TrustedPeer(pid=self.pid, start_identity=identity)
+        except PeerBindError:
+            return None
 
 
 @dataclass(frozen=True)
@@ -2352,14 +2419,7 @@ def _authenticated_origin_main_gateway_lifecycle_trust(
             record=record,
             process=process,
         )
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/status"),
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=3.0,
-        response_limit=64 * 1024,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
+    code, body = _probe_authenticated_gateway_status(cfg, token, strong_identity)
     if code != 200:
         detail = "transport failure" if code == 0 else f"HTTP {code}"
         return _GatewayTrust(
@@ -2677,14 +2737,7 @@ def _check_windows_gateway_diagnostics(
     elif not trust.trusted:
         status_error = f"{trust.detail}; refusing to send the gateway token"
     else:
-        status_code, status_body = _http_probe(
-            _gateway_api_url(cfg, "/status"),
-            headers={"Authorization": f"Bearer {token}"},
-            timeout=3.0,
-            response_limit=64 * 1024,
-            allow_truncation=False,
-            bypass_proxy=True,
-        )
+        status_code, status_body = _probe_authenticated_gateway_status(cfg, token, trust)
         status_error = ""
 
     runtime: dict = {}
@@ -3574,12 +3627,20 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         )
         return
 
-    code, body = _http_probe(
-        f"http://127.0.0.1:{api_port}/status",
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=3.0,
-        response_limit=64 * 1024,
-        allow_truncation=False,
+    trust = _trusted_gateway_listener(cfg)
+    if not trust.trusted:
+        _emit(
+            "skip",
+            "Codex OTel runtime",
+            f"authenticated runtime telemetry status is unavailable ({trust.detail})",
+            r=r,
+        )
+        return
+    code, body = _probe_authenticated_gateway_status(
+        cfg,
+        token,
+        trust,
+        url=f"http://127.0.0.1:{api_port}/status",
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
@@ -3866,14 +3927,7 @@ def _opencode_load_heartbeat_status(cfg) -> tuple[str, str]:
     if not trust.trusted:
         return "warn", f"runtime load unverified: {trust.detail}"
 
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/status"),
-        headers={"Authorization": f"Bearer {token}"},
-        timeout=3.0,
-        response_limit=64 * 1024,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
+    code, body = _probe_authenticated_gateway_status(cfg, token, trust)
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
         return "warn", f"runtime load unverified: {detail}"
@@ -3987,6 +4041,7 @@ def _run_cursor_windows_runtime_process(
     *,
     env: dict[str, str],
     timeout: float,
+    bound=None,
 ) -> subprocess.CompletedProcess:
     """Run one Cursor transport probe with bounded descendant ownership.
 
@@ -3999,6 +4054,12 @@ def _run_cursor_windows_runtime_process(
     """
 
     creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    spawn_kwargs: dict = {}
+    if bound is not None:
+        revalidate_bound_executable(bound)
+        if sys.platform.startswith("linux"):
+            spawn_kwargs["executable"] = f"/proc/self/fd/{bound.fd}"
+            spawn_kwargs["pass_fds"] = (bound.fd,)
     if os.name != "nt":
         return subprocess.run(
             argv,
@@ -4009,6 +4070,7 @@ def _run_cursor_windows_runtime_process(
             timeout=timeout,
             check=False,
             creationflags=creationflags,
+            **spawn_kwargs,
         )
 
     from defenseclaw.tui.windows_process import WindowsJob
@@ -4022,6 +4084,7 @@ def _run_cursor_windows_runtime_process(
         stdin=subprocess.DEVNULL,
         env=env,
         creationflags=creationflags,
+        **spawn_kwargs,
     )
     job = None
     try:
@@ -4168,6 +4231,15 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
             "-EncodedCommand",
             encoded,
         ]
+        try:
+            bound_powershell = bind_trusted_executable(powershell)
+        except ExecBindError:
+            return False, "the system PowerShell executable identity could not be bound"
+        try:
+            bound_adapter = bind_trusted_executable(adapter_path)
+        except ExecBindError:
+            bound_powershell.close()
+            return False, "the Cursor adapter executable identity could not be bound"
         # The registered Cursor command contract permits 30 seconds. Doctor
         # allows the adapter's bounded five-second child-drain interval plus
         # Windows PowerShell host startup and cold Add-Type compilation on top
@@ -4175,30 +4247,37 @@ def _probe_cursor_windows_runtime(cfg, adapter_path: str) -> tuple[bool, str]:
         # extended. A contained timeout may be retried once, but the first
         # process tree is fully reaped and live sidecar state is read again
         # before a second native event is allowed to start.
-        for attempt in range(_CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS):
-            before_code, before_body = _http_probe(
-                health_url,
-                timeout=3.0,
-                response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
-                allow_truncation=False,
-                bypass_proxy=True,
-            )
-            before = _cursor_health_row(before_body) if before_code == 200 else None
-            if before is None:
-                return False, "sidecar /health has no live Cursor connector row"
-            try:
-                proc = _run_cursor_windows_runtime_process(
-                    argv,
-                    env=child_env,
-                    timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+        try:
+            for attempt in range(_CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS):
+                before_code, before_body = _http_probe(
+                    health_url,
+                    timeout=3.0,
+                    response_limit=_HEALTH_DOCUMENT_MAX_BYTES,
+                    allow_truncation=False,
+                    bypass_proxy=True,
                 )
-            except subprocess.TimeoutExpired:
-                if attempt + 1 < _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS:
-                    continue
-                return False, "Cursor runtime probe timed out"
-            break
+                before = _cursor_health_row(before_body) if before_code == 200 else None
+                if before is None:
+                    return False, "sidecar /health has no live Cursor connector row"
+                try:
+                    proc = _run_cursor_windows_runtime_process(
+                        argv,
+                        env=child_env,
+                        timeout=_CURSOR_WINDOWS_RUNTIME_PROBE_TIMEOUT_SECONDS,
+                        bound=bound_powershell,
+                    )
+                except subprocess.TimeoutExpired:
+                    if attempt + 1 < _CURSOR_WINDOWS_RUNTIME_PROBE_ATTEMPTS:
+                        continue
+                    return False, "Cursor runtime probe timed out"
+                break
+        finally:
+            bound_adapter.close()
+            bound_powershell.close()
     except FileNotFoundError:
         return False, "powershell.exe is unavailable for the Cursor runtime probe"
+    except ExecBindError:
+        return False, "the Cursor runtime probe executable identity could not be bound"
     except OSError as exc:
         return False, f"Cursor runtime probe could not start: {exc}"
     finally:
@@ -10621,14 +10700,7 @@ def _fix_gateway_token_drift(
             f"{trust.detail}; refusing to send the configured token",
         )
     if trust.trusted:
-        code, body = _http_probe(
-            _gateway_api_url(cfg, "/status"),
-            headers={"Authorization": f"Bearer {probe_token}"},
-            timeout=3.0,
-            response_limit=64 * 1024,
-            allow_truncation=False,
-            bypass_proxy=True,
-        )
+        code, body = _probe_authenticated_gateway_status(cfg, probe_token, trust)
         if code == 200:
             runtime_ok, runtime_detail = _authenticated_runtime_matches(cfg, trust.pid, body)
             if runtime_ok:
@@ -10699,14 +10771,7 @@ def _fix_gateway_token_drift(
             "gateway restarted but replacement endpoint ownership/authentication "
             f"could not be verified ({replacement_trust.detail})",
         )
-    code, body = _http_probe(
-        _gateway_api_url(cfg, "/status"),
-        headers={"Authorization": f"Bearer {replacement_token}"},
-        timeout=3.0,
-        response_limit=64 * 1024,
-        allow_truncation=False,
-        bypass_proxy=True,
-    )
+    code, body = _probe_authenticated_gateway_status(cfg, replacement_token, replacement_trust)
     if code != 200:
         return ("fail", f"gateway restarted but still rejects configured authentication (HTTP {code})")
     runtime_ok, runtime_detail = _authenticated_runtime_matches(
