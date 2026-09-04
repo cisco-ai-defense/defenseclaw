@@ -356,14 +356,15 @@ func executeEnterpriseHookRotationRollback(req enterpriseHookRotationRequest) (e
 			if err := writeEnterpriseHookRotationJournal(cfg.DataDir, journal); err != nil {
 				return journal, err
 			}
+			if err := publishEnterpriseHookRotationRestoredCurrent(cfg.DataDir, journal, targets); err != nil {
+				return journal, err
+			}
+			return journal, nil
 		}
 		if err := markEnterpriseHookRotationUnready(cfg.DataDir); err != nil {
 			return journal, err
 		}
-		if !exists {
-			return empty, nil
-		}
-		return journal, nil
+		return empty, nil
 	})
 }
 
@@ -589,6 +590,52 @@ func publishEnterpriseHookRotationCurrent(plan enterpriseHookRotationPlan) error
 		0,
 		true,
 	)
+}
+
+func publishEnterpriseHookRotationRestoredCurrent(dataDir string, journal enterpriseHookRotationJournal, targets []enterpriseHookRotationTarget) error {
+	rows, err := restoredEnterpriseHookRotationAttestationRows(dataDir, targets)
+	if err != nil {
+		return err
+	}
+	return writeEnterpriseHookGuardianStateIdentified(
+		dataDir,
+		journal.Manifest,
+		journal.ManifestSHA256,
+		"",
+		rows,
+		0,
+		true,
+	)
+}
+
+func restoredEnterpriseHookRotationAttestationRows(dataDir string, targets []enterpriseHookRotationTarget) ([]enterpriseHookReconcileRow, error) {
+	rows := make([]enterpriseHookReconcileRow, 0, len(targets))
+	for _, target := range targets {
+		snapshot, err := decodeEnterpriseHookRotationSnapshotSidecar(enterpriseHookRotationTargetSnapshotPath(dataDir, target))
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks rotate rollback: load A snapshot for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+		}
+		if !snapshot.Present {
+			return nil, fmt.Errorf("enterprise hooks rotate rollback: restored A snapshot missing for %s", enterpriseHookRotationTargetLabel(target))
+		}
+		token, err := enterpriseHookRotationReadPublished(enterpriseHookRotationUserDataDir(target), target.Connector)
+		if err != nil {
+			return nil, fmt.Errorf("enterprise hooks rotate rollback: re-read A for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+		}
+		fingerprint := managed.ScopedTokenFingerprint(token)
+		if !managed.ValidScopedTokenFingerprint(fingerprint) {
+			return nil, fmt.Errorf("enterprise hooks rotate rollback: restored A fingerprint missing for %s", enterpriseHookRotationTargetLabel(target))
+		}
+		rows = append(rows, enterpriseHookReconcileRow{
+			User:             target.User,
+			UserHome:         target.UserHome,
+			SID:              target.SID,
+			Connector:        target.Connector,
+			OK:               true,
+			TokenFingerprint: fingerprint,
+		})
+	}
+	return rows, nil
 }
 
 func markEnterpriseHookRotationUnready(dataDir string) error {
