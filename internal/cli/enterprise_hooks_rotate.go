@@ -17,6 +17,8 @@
 package cli
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -434,10 +436,7 @@ func preflightEnterpriseHookRotation(req enterpriseHookRotationRequest, requireF
 		if err := refuseEnterpriseHookRotationSymlink(home, "target home"); err != nil {
 			return plan, err
 		}
-		userDataDir := strings.TrimSpace(target.DataDir)
-		if userDataDir == "" {
-			userDataDir = filepath.Join(home, ".defenseclaw")
-		}
+		userDataDir := enterpriseHookRotationUserDataDir(target)
 		if err := refuseEnterpriseHookRotationSymlink(userDataDir, "target data dir"); err != nil {
 			return plan, err
 		}
@@ -450,7 +449,6 @@ func preflightEnterpriseHookRotation(req enterpriseHookRotationRequest, requireF
 			return plan, fmt.Errorf("enterprise hooks rotate: service token fingerprint does not match expected B for %s", target.Connector)
 		}
 		tokens[target.Connector] = token
-		_ = userDataDir
 	}
 	plan.Targets = expected
 	plan.Tokens = tokens
@@ -645,9 +643,20 @@ func markEnterpriseHookRotationUnready(dataDir string) error {
 	}
 	authorization.Current.OK = false
 	authorization.OK = false
+	activation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+	if err != nil {
+		return err
+	}
+	manifest := ""
+	if exists {
+		manifest = strings.TrimSpace(activation.Manifest)
+	}
+	if manifest == "" {
+		return fmt.Errorf("enterprise hooks rotate: cannot mark unready without the current manifest path")
+	}
 	return writeEnterpriseHookGuardianStateIdentified(
 		dataDir,
-		"",
+		manifest,
 		authorization.Current.ManifestSHA256,
 		authorization.Current.ReconcileID,
 		authorization.ProtectedTargets,
@@ -777,8 +786,8 @@ func enterpriseHookRotationRollbackPath(dataDir string) string {
 }
 
 func enterpriseHookRotationTargetSnapshotPath(dataDir string, target enterpriseHookRotationTarget) string {
-	key := strings.ReplaceAll(enterpriseHookRotationTargetKey(target), "\x00", "_")
-	return filepath.Join(enterpriseHookRotationRollbackPath(dataDir), key+".snapshot")
+	sum := sha256.Sum256([]byte(enterpriseHookRotationTargetKey(target)))
+	return filepath.Join(enterpriseHookRotationRollbackPath(dataDir), hex.EncodeToString(sum[:])+".snapshot")
 }
 
 func loadEnterpriseHookRotationJournal(dataDir string) (enterpriseHookRotationJournal, bool, error) {
