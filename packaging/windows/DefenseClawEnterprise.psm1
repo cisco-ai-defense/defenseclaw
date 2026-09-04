@@ -15961,9 +15961,17 @@ function Wait-DefenseClawFreshGuardianReconcile {
 
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
+    # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
+    # per spec 004 REQ-02 (path parity with internal/ipc/paths_windows.go).
+    # The gateway creates <InstallRoot>\ipc\ on service start and binds
+    # the AF_UNIX socket <InstallRoot>\ipc\defenseclaw_ipc.sock inside it;
+    # the graceful stop removes the socket file but not the directory, so
+    # uninstall MUST accept both in its inventory or the tree walk trips
+    # on the empty ipc\ dir before rename/removal can proceed.
     $allowedDirectories = @(
         $Layout.BinDirectory,
-        $Layout.LibexecDirectory
+        $Layout.LibexecDirectory,
+        $Layout.ManagedIPCDirectory
     )
     $allowedFiles = @(
         $Layout.BrokerPath,
@@ -15971,13 +15979,35 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.HookPath,
         $Layout.CLIPath,
         $Layout.InstallerPath,
-        $Layout.ModulePath
+        $Layout.ModulePath,
+        $Layout.ManagedIPCSocketPath
+    )
+    $expectedIPCSocket = [IO.Path]::GetFullPath(
+        [string]$Layout.ManagedIPCSocketPath
     )
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.InstallRoot -Recurse -Force) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $full = [IO.Path]::GetFullPath($item.FullName)
+        $isReparse = (
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        )
+        # Windows backs AF_UNIX socket files with an NTFS reparse point
+        # (IO_REPARSE_TAG_AF_UNIX 0x80000023). A stale socket left after
+        # an unclean guardian stop surfaces with the ReparsePoint
+        # attribute, so exempt exactly one leaf file at the AVC-contract
+        # socket path from the reparse-point veto. Every other reparse
+        # point still aborts: an attacker who plants a junction anywhere
+        # else inside the managed tree pre-uninstall is still refused.
+        if ($isReparse -and
+            (
+                $item.PSIsContainer -or
+                -not [string]::Equals(
+                    $full,
+                    $expectedIPCSocket,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
-        $full = [IO.Path]::GetFullPath($item.FullName)
         if ($item.PSIsContainer) {
             if ($full -notin $allowedDirectories) {
                 throw "refusing to remove unexpected directory from managed install root: $full"
@@ -16300,7 +16330,15 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
     $directories = @(
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents'),
-        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec')
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec'),
+        # <RetiredRoot>\ipc\ is the renamed-sibling counterpart of the
+        # managed IPC directory <InstallRoot>\ipc\. When the CLI self-
+        # uninstalls it renames InstallRoot to the RetiredRoot sibling
+        # for delayed teardown by an out-of-tree helper, and the ipc
+        # directory rides along. Accept it here or the retired-tree
+        # verifier trips on the identical empty-container shape that
+        # the canonical validator was tripping on pre-fix.
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc')
     )
     $files = @(
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
@@ -16309,7 +16347,12 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents\codex.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\install-enterprise.ps1'),
-        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1')
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1'),
+        # Retired counterpart of the AF_UNIX socket file. Absent after a
+        # graceful guardian stop; if a stale socket survived an unclean
+        # stop and rode along on the rename, this allowlist entry is
+        # what keeps the retired-tree verifier from rejecting it.
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc\defenseclaw_ipc.sock')
     )
     return @{
         directories = @(
@@ -18206,7 +18249,13 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
     Assert-DefenseClawManagedTreeNoReparse -Root $Layout.InstallRoot
     $allowed = @(
         [IO.Path]::GetFullPath($Layout.BinDirectory).TrimEnd('\'),
-        [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\')
+        [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\'),
+        # Guardian-stop leaves the empty <InstallRoot>\ipc\ container
+        # behind after removing defenseclaw_ipc.sock. The post-service-
+        # teardown cleanup must accept it as a known-empty directory or
+        # this validator trips before Remove-DefenseClawManagedTree ever
+        # runs.
+        [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem `
         -LiteralPath $Layout.InstallRoot `
