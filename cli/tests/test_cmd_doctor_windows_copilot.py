@@ -39,7 +39,8 @@ $startInfo.RedirectStandardError = $true
 [Console]::InputEncoding = $utf8NoBom
 [Console]::OutputEncoding = $utf8NoBom
 $process.StandardInput.AutoFlush = $true
-[System.Threading.Tasks.TaskCreationOptions]::LongRunning
+$deadline.Restart()
+$process.StandardInput.Write($payload)
 $process.WaitForExit($remainingMS)
 $startInfo.Arguments = 'hook --connector copilot --event ' + $Event
 [System.Environment]::Exit(0)
