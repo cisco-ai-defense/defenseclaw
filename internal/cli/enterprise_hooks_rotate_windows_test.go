@@ -100,6 +100,31 @@ func TestWindowsManagedRotationPartialPrepareRestoresA(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedRotationRestoreSkipsMissingSnapshots(t *testing.T) {
+	env := newWindowsManagedRotationTestEnv(t, "alice", "bob")
+	alice := enterpriseHookRotationTarget{
+		User:      "alice",
+		UserHome:  env.homes["alice"],
+		SID:       env.sid,
+		Connector: env.connectors["alice"],
+	}
+	bob := enterpriseHookRotationTarget{
+		User:      "bob",
+		UserHome:  env.homes["bob"],
+		SID:       env.sid,
+		Connector: env.connectors["bob"],
+	}
+	if err := snapshotWindowsManagedRotationTarget(env.serviceDir, alice); err != nil {
+		t.Fatalf("snapshot alice: %v", err)
+	}
+	if err := restoreWindowsManagedRotationMutated(env.serviceDir, []enterpriseHookRotationTarget{alice, bob}); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := env.publishedToken(t, "bob"); got != env.tokenA {
+		t.Fatal("unsnapshotted bob was mutated")
+	}
+}
+
 func TestWindowsManagedRotationRollbackRestoresExactA(t *testing.T) {
 	env := newWindowsManagedRotationTestEnv(t, "alice")
 	if _, err := executeWindowsManagedRotationPrepare(env.request()); err != nil {
@@ -163,7 +188,7 @@ func TestWindowsManagedRotationRefusesMissingSID(t *testing.T) {
 	env := newWindowsManagedRotationTestEnv(t, "alice")
 	env.clearSID(t)
 	_, err := executeWindowsManagedRotationPrepare(env.request())
-	if err == nil || !strings.Contains(err.Error(), "manifest-pinned SID") {
+	if err == nil || !(strings.Contains(err.Error(), "manifest-pinned SID") || strings.Contains(err.Error(), "requires explicit sid")) {
 		t.Fatalf("prepare error = %v, want missing SID refusal", err)
 	}
 }
@@ -230,6 +255,7 @@ type windowsManagedRotationTestEnv struct {
 	scope      string
 	serviceDir string
 	homes      map[string]string
+	connectors map[string]string
 	sid        string
 	tokenA     string
 	tokenB     string
@@ -251,6 +277,7 @@ func newWindowsManagedRotationTestEnv(t *testing.T, users ...string) *windowsMan
 		scope:      scope,
 		serviceDir: serviceDir,
 		homes:      map[string]string{},
+		connectors: map[string]string{},
 		sid:        sid,
 		tokenA:     strings.Repeat("a", 64),
 		tokenB:     strings.Repeat("b", 64),
@@ -297,22 +324,29 @@ func newWindowsManagedRotationTestEnv(t *testing.T, users ...string) *windowsMan
 	manifest.WriteString("version: 1\ntargets:\n")
 	rows := make([]enterpriseHookReconcileRow, 0, len(users))
 	expected := enterpriseHookRotationFingerprintFile{Targets: make([]enterpriseHookRotationTarget, 0, len(users))}
-	for _, user := range users {
+	for index, user := range users {
 		home := filepath.Join(scope, "home", user)
 		dataDir := filepath.Join(home, ".defenseclaw")
 		if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
 			t.Fatal(err)
 		}
-		if err := connector.PublishHookAPIToken(dataDir, "codex", env.tokenA); err != nil {
+		connectorName := "codex"
+		agentVersion := "1.7.0"
+		if index > 0 {
+			connectorName = "claudecode"
+			agentVersion = "2.1.240"
+		}
+		if err := connector.PublishHookAPIToken(dataDir, connectorName, env.tokenA); err != nil {
 			t.Fatalf("publish A for %s: %v", user, err)
 		}
 		env.homes[user] = home
-		manifest.WriteString("  - user: " + user + "\n    user_home: " + home + "\n    sid: " + sid + "\n    connector: codex\n")
+		env.connectors[user] = connectorName
+		manifest.WriteString("  - user: " + user + "\n    user_home: " + home + "\n    sid: " + sid + "\n    connector: " + connectorName + "\n    agent_version: " + agentVersion + "\n")
 		rows = append(rows, enterpriseHookReconcileRow{
 			User:             user,
 			UserHome:         home,
 			SID:              sid,
-			Connector:        "codex",
+			Connector:        connectorName,
 			OK:               true,
 			TokenFingerprint: managed.ScopedTokenFingerprint(env.tokenA),
 		})
@@ -320,7 +354,7 @@ func newWindowsManagedRotationTestEnv(t *testing.T, users ...string) *windowsMan
 			User:             user,
 			UserHome:         home,
 			SID:              sid,
-			Connector:        "codex",
+			Connector:        connectorName,
 			TokenFingerprint: managed.ScopedTokenFingerprint(env.tokenB),
 		})
 	}
@@ -357,7 +391,7 @@ func (env *windowsManagedRotationTestEnv) request() enterpriseHookRotationReques
 
 func (env *windowsManagedRotationTestEnv) publishedToken(t *testing.T, user string) string {
 	t.Helper()
-	token, err := connector.LoadHookAPIToken(filepath.Join(env.homes[user], ".defenseclaw"), "codex")
+	token, err := connector.LoadHookAPIToken(filepath.Join(env.homes[user], ".defenseclaw"), env.connectors[user])
 	if err != nil {
 		t.Fatalf("load published token for %s: %v", user, err)
 	}
