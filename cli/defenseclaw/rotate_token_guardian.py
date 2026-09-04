@@ -232,6 +232,11 @@ def _assert_windows_guardian_control_plane_path(
             windows_acl.assert_trusted_owner(security)
             windows_acl.assert_not_broadly_writable(security)
         except windows_acl.WindowsAclError as exc:
+            detail = str(exc)
+            if "broad" in detail.lower():
+                raise click.ClickException(
+                    f"{label} is broadly writable; no credentials were modified."
+                ) from exc
             raise click.ClickException(
                 f"{label} is not administrator-owned; no credentials were modified."
             ) from exc
