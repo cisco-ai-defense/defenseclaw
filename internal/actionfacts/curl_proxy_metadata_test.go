@@ -205,10 +205,13 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "proxy tunnel hides HTTP origin query", argv: []string{
+			name: "proxy tunnel exposes HTTP origin query after CONNECT", argv: []string{
 				"curl", "-p", "--proxy", "http://proxy.example",
 				"--url-query", "key=" + token, "http://127.0.0.1/",
 			},
+			want: components(
+				"http", "proxy.example", 1080, "/", "key="+token,
+			),
 			wantAuthoritative: true,
 		},
 		{
@@ -283,7 +286,9 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 				"curl", "-p", "--proxy", "http://proxy.example", "--proxy-header",
 				"Host: " + token, "http://origin.example",
 			},
-			want:              components("http", "proxy.example", 1080, "Host: "+token),
+			want: components(
+				"http", "proxy.example", 1080, "Host: "+token, "/",
+			),
 			wantAuthoritative: true,
 		},
 		{
