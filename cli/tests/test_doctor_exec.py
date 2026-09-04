@@ -25,6 +25,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from defenseclaw.commands.cmd_doctor import _windows_system_powershell
 from defenseclaw.doctor_exec import (
     ExecBindError,
     bind_trusted_executable,
@@ -127,6 +128,68 @@ def test_bind_uses_python_interpreter_as_real_executable() -> None:
     try:
         assert bound.fd >= 0
         assert bound.identity.size > 0
+        revalidate_bound_executable(bound)
+    finally:
+        bound.close()
+
+
+def test_windows_pathname_custody_uses_executable_acl_not_private_file_owner(monkeypatch) -> None:
+    from defenseclaw import doctor_exec
+
+    powershell = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+    parent = r"C:\Windows\System32\WindowsPowerShell\v1.0"
+
+    monkeypatch.setattr(doctor_exec.os, "name", "nt")
+    monkeypatch.setattr(doctor_exec.os.path, "abspath", lambda value: value)
+    monkeypatch.setattr(doctor_exec.os.path, "dirname", lambda value: parent if value == powershell else value)
+    monkeypatch.setattr(doctor_exec.os.path, "isfile", lambda _value: True)
+    monkeypatch.setattr(
+        "defenseclaw.gateway.packaged_windows_gateway_path",
+        lambda: None,
+    )
+    seen: list[tuple[str, bool]] = []
+
+    def custody(path: str, *, allow_current_user: bool = False, **_kwargs):
+        seen.append((path, allow_current_user))
+        return None
+
+    monkeypatch.setattr(doctor_exec, "windows_acl_custody_write_error", custody)
+
+    assert doctor_exec._verify_pathname_custody(powershell) == powershell
+    assert seen == [(powershell, True), (parent, True)]
+
+
+def test_windows_pathname_custody_refuses_untrusted_writers(monkeypatch) -> None:
+    from defenseclaw import doctor_exec
+    from defenseclaw.doctor_exec import ExecBindError
+
+    tool = r"C:\Users\runneradmin\cursor-hook.exe"
+    monkeypatch.setattr(doctor_exec.os, "name", "nt")
+    monkeypatch.setattr(doctor_exec.os.path, "abspath", lambda value: value)
+    monkeypatch.setattr(doctor_exec.os.path, "dirname", lambda value: r"C:\Users\runneradmin")
+    monkeypatch.setattr(doctor_exec.os.path, "isfile", lambda _value: True)
+    monkeypatch.setattr(
+        "defenseclaw.gateway.packaged_windows_gateway_path",
+        lambda: None,
+    )
+    monkeypatch.setattr(
+        doctor_exec,
+        "windows_acl_custody_write_error",
+        lambda _path, **_kwargs: "ACL grants write access to untrusted SID S-1-5-32-545",
+    )
+    with pytest.raises(ExecBindError, match="custody"):
+        doctor_exec._verify_pathname_custody(tool)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows PowerShell bind")
+def test_bind_system_powershell_with_executable_custody() -> None:
+    powershell, windows_directory = _windows_system_powershell()
+    assert powershell
+    assert windows_directory
+    bound = bind_trusted_executable(powershell)
+    try:
+        assert bound.fd >= 0
+        assert bound.path == powershell
         revalidate_bound_executable(bound)
     finally:
         bound.close()
