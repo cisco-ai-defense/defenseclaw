@@ -319,3 +319,23 @@ func projectDataKind(value actionfacts.DataKind) (semanticpb.DataKind, bool) {
 		return semanticpb.DataKind_DATA_KIND_UNSPECIFIED, false
 	}
 }
+
+func projectArtifactRole(value actionfacts.ArtifactRole) (semanticpb.ArtifactRole, bool) {
+	switch value {
+	case actionfacts.ArtifactProduce:
+		return semanticpb.ArtifactRole_ARTIFACT_ROLE_PRODUCE, true
+	case actionfacts.ArtifactConsume:
+		return semanticpb.ArtifactRole_ARTIFACT_ROLE_CONSUME, true
+	default:
+		return semanticpb.ArtifactRole_ARTIFACT_ROLE_UNSPECIFIED, false
+	}
+}
+
+func projectArtifactKind(value actionfacts.ArtifactKind) (semanticpb.ArtifactKind, bool) {
+	switch value {
+	case actionfacts.ArtifactKindArchive:
+		return semanticpb.ArtifactKind_ARTIFACT_KIND_ARCHIVE, true
+	default:
+		return semanticpb.ArtifactKind_ARTIFACT_KIND_UNSPECIFIED, false
+	}
+}

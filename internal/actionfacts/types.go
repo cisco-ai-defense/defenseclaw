@@ -79,6 +79,7 @@ type Facts struct {
 	Paths                                    []PathFact
 	Network                                  []NetworkFact
 	DataFlows                                []DataFlowFact
+	Artifacts                                []ArtifactFact
 }
 
 // Authoritative reports whether the entire action can be evaluated by migrated

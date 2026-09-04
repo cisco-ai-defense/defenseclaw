@@ -27,6 +27,8 @@ message Facts {
   repeated PathFact paths = 6;
   repeated NetworkFact network = 7;
   repeated DataFlowFact data_flows = 8;
+  repeated ArtifactFact artifacts = 9;
+  repeated ArchiveArtifactLineage archive_lineages = 10;
 }
 
 message ParseResult {
@@ -97,6 +99,25 @@ message DataFlowFact {
   int64 to_command_id = 2;
   DataKind from = 3;
   DataKind to = 4;
+}
+
+message ArtifactFact {
+  int64 command_id = 1;
+  ArtifactRole role = 2;
+  ArtifactKind kind = 3;
+  string value = 4;
+  string normalized = 5;
+  bool absolute = 6;
+  string resolved = 7;
+  string identity = 8;
+}
+
+message ArchiveArtifactLineage {
+  string identity = 1;
+  int64 produced_by = 2;
+  int64 consumed_by = 3;
+  string normalized = 4;
+  bool authoritative = 5;
 }
 
 enum ParseStatus {
@@ -252,4 +273,15 @@ enum DataKind {
   DATA_KIND_FILE = 3;
   DATA_KIND_NETWORK = 4;
   DATA_KIND_PROCESS = 5;
+}
+
+enum ArtifactRole {
+  ARTIFACT_ROLE_UNSPECIFIED = 0;
+  ARTIFACT_ROLE_PRODUCE = 1;
+  ARTIFACT_ROLE_CONSUME = 2;
+}
+
+enum ArtifactKind {
+  ARTIFACT_KIND_UNSPECIFIED = 0;
+  ARTIFACT_KIND_ARCHIVE = 1;
 }
