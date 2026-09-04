@@ -175,11 +175,14 @@ type HealthSnapshot struct {
 	Connector  *ConnectorHealth  `json:"connector,omitempty"`
 	Connectors []ConnectorHealth `json:"connectors,omitempty"`
 	// Interception is the plugin self-test / last agent-proxy hop
-	// signal for proxy connectors (OpenClaw / ZeptoClaw). Omitted
-	// until the interceptor reports a result or the proxy sees an
-	// authenticated X-DC-Target-URL hop.
+	// signal for OpenClaw. Omitted until the interceptor reports a
+	// result or the proxy sees an authenticated X-DC-Target-URL hop.
 	Interception *InterceptionHealth `json:"interception,omitempty"`
 }
+
+// InterceptionSelfTestFreshness is three plugin self-test cadences.
+// A stopped interceptor must not keep /health.interception.verified true.
+const InterceptionSelfTestFreshness = 3 * time.Minute
 
 // InterceptionHealth is the additive doctor signal that a live
 // :4000 listener is actually receiving interceptor-rewritten LLM
@@ -1465,7 +1468,11 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		}
 	}
 	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() {
-		info := &InterceptionHealth{Verified: h.interceptionVerified}
+		verified := h.interceptionVerified
+		if verified && (h.interceptionVerifiedAt.IsZero() || time.Since(h.interceptionVerifiedAt) > InterceptionSelfTestFreshness) {
+			verified = false
+		}
+		info := &InterceptionHealth{Verified: verified}
 		if !h.interceptionVerifiedAt.IsZero() {
 			info.LastVerifiedAt = h.interceptionVerifiedAt.UTC().Format(time.RFC3339)
 		}

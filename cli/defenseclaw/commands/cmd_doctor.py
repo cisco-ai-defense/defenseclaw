@@ -45,6 +45,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+from datetime import datetime, timedelta, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
@@ -5694,6 +5695,8 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
 # ZeptoClaw rewrites api_base natively and does not run the fetch
 # interceptor or publish the OpenClaw self-test document.
 _PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw"})
+# Three 60s plugin cadences. A stopped interceptor must not keep doctor green.
+_INTERCEPTION_SELF_TEST_FRESHNESS = timedelta(minutes=3)
 
 
 def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
@@ -5726,12 +5729,24 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
             r=r,
         )
         return
-    if info.get("verified") is True:
+    if info.get("verified") is True and _interception_self_test_is_fresh(info):
         detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
         last_traffic = info.get("last_agent_traffic_at")
         if isinstance(last_traffic, str) and last_traffic.strip():
             detail += "; agent traffic has reached :4000"
         _emit("pass", label, detail, r=r)
+        return
+    if info.get("verified") is True:
+        _emit(
+            "fail",
+            label,
+            "guardrail proxy is up but the interceptor self-test is stale — possible bypass",
+            remediation=(
+                "restart the OpenClaw gateway so the DefenseClaw plugin can publish "
+                "a fresh interception self-test, then rerun doctor"
+            ),
+            r=r,
+        )
         return
     _emit(
         "fail",
@@ -5744,6 +5759,19 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         ),
         r=r,
     )
+
+
+def _interception_self_test_is_fresh(info: dict) -> bool:
+    raw = info.get("last_verified_at")
+    if not isinstance(raw, str) or not raw.strip():
+        return False
+    try:
+        verified_at = datetime.fromisoformat(raw.strip().replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    if verified_at.tzinfo is None:
+        verified_at = verified_at.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - verified_at <= _INTERCEPTION_SELF_TEST_FRESHNESS
 
 
 def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:

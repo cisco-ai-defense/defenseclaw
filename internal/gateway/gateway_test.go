@@ -251,6 +251,21 @@ func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
 	}
 }
 
+func TestSidecarHealthInterceptionSnapshotExpires(t *testing.T) {
+	h := NewSidecarHealth()
+	h.RecordInterceptionResult(true)
+	h.mu.Lock()
+	h.interceptionVerifiedAt = time.Now().UTC().Add(-InterceptionSelfTestFreshness - time.Second)
+	h.mu.Unlock()
+	snap := h.Snapshot()
+	if snap.Interception == nil || snap.Interception.Verified {
+		t.Fatalf("stale verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expired snapshot must still report last_verified_at")
+	}
+}
+
 func TestSidecarHealthSetGuardrail(t *testing.T) {
 	h := NewSidecarHealth()
 
