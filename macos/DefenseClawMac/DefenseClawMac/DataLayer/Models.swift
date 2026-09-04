@@ -508,34 +508,6 @@ struct ActivityMutation: Identifiable, Sendable, Hashable {
     var connector: String = ""
 }
 
-enum StructuredDetailParser {
-    static func pairs(_ details: String) -> [(String, String)] {
-        details.split(whereSeparator: \.isWhitespace).compactMap { token in
-            let components = token.split(separator: "=", maxSplits: 1, omittingEmptySubsequences: false)
-            guard components.count == 2 else { return nil }
-            let key = String(components[0])
-            let value = String(components[1])
-                .trimmingCharacters(in: CharacterSet(charactersIn: "\"'`"))
-            guard !key.isEmpty, !value.isEmpty else { return nil }
-            return (label(key), value)
-        }
-    }
-
-    static func prettyJSON(_ raw: String) -> String {
-        guard let data = raw.data(using: .utf8),
-              let object = try? JSONSerialization.jsonObject(with: data),
-              JSONSerialization.isValidJSONObject(object),
-              let pretty = try? JSONSerialization.data(withJSONObject: object, options: [.prettyPrinted, .sortedKeys]),
-              let text = String(data: pretty, encoding: .utf8)
-        else { return raw }
-        return text
-    }
-
-    static func label(_ key: String) -> String {
-        key.split(separator: "_").map { $0.capitalized }.joined(separator: " ")
-    }
-}
-
 // MARK: - Logs
 
 enum LogStream: String, CaseIterable, Identifiable {
@@ -713,6 +685,8 @@ struct AIUsageSnapshot: Sendable {
     /// Non-model discoveries stay in the existing one-row-per-product table.
     var rows: [AIDiscoveryRow] { AIDiscoveryGrouping.rows(from: signals) }
 
+    var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
+
     /// TUI `header_parts`: a reported zero remains `active=0`; churn counters
     /// only appear when non-zero.
     var discoveryHeaderParts: [String] {
@@ -724,10 +698,6 @@ struct AIUsageSnapshot: Sendable {
         parts.append("model-lookup=\(lookupModelProvenanceOnline ? "online" : "offline")")
         return parts
     }
-
-    /// Local model signals use a dedicated compact table so high-cardinality
-    /// model IDs and lineage metadata do not crowd the product inventory.
-    var modelRows: [AIModelDiscoveryRow] { AIDiscoveryGrouping.modelRows(from: signals) }
 }
 
 /// The diagnostic subset of an AI-discovery summary. Keeping coercion in the
@@ -742,7 +712,9 @@ struct AIDiscoveryDiagnostics: Sendable, Hashable {
         let errors = Int(clamping: AIUsageValueDecoding.nonnegativeInt64(raw["errors"]))
         let detectorErrors: [String: String]
         if let values = raw["detector_errors"] as? [String: String] {
-            detectorErrors = values.filter { !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            detectorErrors = values.filter {
+                !$0.value.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            }
         } else if let values = raw["detector_errors"] as? [String: Any] {
             detectorErrors = values.reduce(into: [:]) { decoded, entry in
                 guard let message = entry.value as? String,
@@ -1090,7 +1062,6 @@ enum AISignalDecoding {
         if let value = raw as? String { return value.isEmpty ? [] : [value] }
         return (raw as? [Any])?.compactMap { $0 as? String } ?? []
     }
-
 }
 
 /// Grouped product row — exact port of the TUI's AIDiscoveryRow (_rebuild()).
@@ -1526,11 +1497,11 @@ enum AIDiscoveryGrouping {
             if !value.isEmpty { parts.append("\(label)=\(value)") }
         }
         if let confidence = model.discoveryConfidence {
-            let percent = AIConfidence.percent(
+            let percentage = AIConfidence.percent(
                 confidence,
                 roundingRule: .toNearestOrAwayFromZero
             )
-            parts.append("discovery_confidence=\(percent)%")
+            parts.append("discovery_confidence=\(percentage)%")
         }
         if model.sizeBytes > 0 { parts.append("size_bytes=\(model.sizeBytes)") }
         if model.pinned { parts.append("pinned=true") }
@@ -1584,22 +1555,15 @@ enum AIDiscoveryGrouping {
         return Int64(exactly: seconds)
     }
 
-    /// Port of AIDiscoveryPanelModel._rebuild(): group non-model signals by
-    /// (state, product, vendor, ecosystem, component, version); aggregate
-    /// unique categories/detectors in first-seen order; sort by state
-    /// weight, then count desc, then product. Identified `local_model` signals
-    /// move to `modelRows(from:)`; compatible non-local signals that happen to
-    /// carry model metadata remain product rows.
+    /// Port of AIDiscoveryPanelModel._rebuild(): group by
+    /// (state, product, vendor, ecosystem, component, version, model ID);
+    /// aggregate unique values in first-seen order; sort by state weight,
+    /// count descending, product, then model ID.
     static func rows(from signals: [AISignal]) -> [AIDiscoveryRow] {
         var groups: [GroupKey: AIDiscoveryRow] = [:]
         var order: [GroupKey] = []
         for signal in signals {
-            if signal.category == "local_model",
-               let model = signal.model,
-               !model.id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                continue
-            }
-            let modelID = ""
+            let modelID = signal.model?.id ?? ""
             let key = GroupKey(
                 state: signal.state,
                 product: signal.product,
@@ -1656,6 +1620,91 @@ enum AIDiscoveryGrouping {
         }.map(\.1)
     }
 }
+
+extension AIDiscoveryGrouping {
+
+    /// Collapse case variants of the same local-model ID across file, API, and
+    /// runtime detectors, surfacing the most actionable lifecycle state.
+    static func modelRows(from signals: [AISignal]) -> [AIModelDiscoveryRow] {
+        var groups: [AIModelDiscoveryRowID: AIModelDiscoveryRow] = [:]
+        var order: [AIModelDiscoveryRowID] = []
+        for signal in signals {
+            guard signal.category == "local_model",
+                  let model = signal.model
+            else { continue }
+            let modelID = model.id.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !modelID.isEmpty else { continue }
+            let key = AIModelDiscoveryRowID(
+                normalizedModelID: normalizedModelID(modelID)
+            )
+            var row = groups[key] ?? AIModelDiscoveryRow(
+                state: signal.state,
+                modelID: modelID,
+                statuses: [], formats: [], providers: [], products: [], vendors: [], detectors: [],
+                count: 0, provenance: nil, lastActive: nil, signals: []
+            )
+            if groups[key] == nil { order.append(key) }
+            if stateWeight(signal.state) < stateWeight(row.state) {
+                row.state = signal.state
+            }
+            row.count += 1
+            row.signals.append(signal)
+            appendUnique(model.status, to: &row.statuses)
+            appendUnique(model.format, to: &row.formats)
+            appendUnique(model.provider, to: &row.providers)
+            appendUnique(signal.product, to: &row.products)
+            appendUnique(signal.vendor, to: &row.vendors)
+            appendUnique(signal.detector, to: &row.detectors)
+            if prefersModelProvenance(model.provenance, over: row.provenance) {
+                let provenance = model.provenance
+                row.provenance = provenance
+            }
+            if let active = signal.lastActive, row.lastActive.map({ active > $0 }) ?? true {
+                row.lastActive = active
+            }
+            groups[key] = row
+        }
+        return order.compactMap { groups[$0] }.sorted {
+            (stateWeight($0.state), normalizedModelID($0.modelID))
+                < (stateWeight($1.state), normalizedModelID($1.modelID))
+        }
+    }
+
+    static func normalizedModelID(_ value: String) -> String {
+        value.folding(
+            options: [.caseInsensitive],
+            locale: Locale(identifier: "en_US_POSIX")
+        ).lowercased()
+    }
+
+    private static func appendUnique(_ value: String, to values: inout [String]) {
+        guard !value.isEmpty, !values.contains(value) else { return }
+        values.append(value)
+    }
+
+    private static func prefersModelProvenance(
+        _ candidate: AIModelProvenance?,
+        over current: AIModelProvenance?
+    ) -> Bool {
+        guard let candidate else { return false }
+        guard let current else { return true }
+        let confidenceRank = ["low": 1, "medium": 2, "high": 3]
+        func score(_ provenance: AIModelProvenance) -> (Int, Int) {
+            let populated = [
+                !provenance.publisher.isEmpty,
+                !provenance.countryCode.isEmpty,
+                !provenance.rootModel.isEmpty,
+                !provenance.baseModels.isEmpty,
+                !provenance.quantization.isEmpty,
+                !provenance.derivation.isEmpty,
+                !provenance.source.isEmpty,
+            ].filter { $0 }.count
+            return (confidenceRank[provenance.confidence.lowercased(), default: 0], populated)
+        }
+        return score(candidate) > score(current)
+    }
+}
+
 
 /// TUI-equivalent ordering and evidence deduplication for the Overview card.
 /// The card is explicitly agent-only; local models stay visible in the full
@@ -1811,91 +1860,6 @@ enum AIOverviewGrouping {
     private static func trimmed(_ value: String) -> String {
         value.trimmingCharacters(in: .whitespacesAndNewlines)
     }
-
-}
-
-extension AIDiscoveryGrouping {
-
-    /// Collapse case variants of the same local-model ID across file, API, and
-    /// runtime detectors, surfacing the most actionable lifecycle state.
-    static func modelRows(from signals: [AISignal]) -> [AIModelDiscoveryRow] {
-        var groups: [AIModelDiscoveryRowID: AIModelDiscoveryRow] = [:]
-        var order: [AIModelDiscoveryRowID] = []
-        for signal in signals {
-            guard signal.category == "local_model",
-                  let model = signal.model
-            else { continue }
-            let modelID = model.id.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !modelID.isEmpty else { continue }
-            let key = AIModelDiscoveryRowID(
-                normalizedModelID: normalizedModelID(modelID)
-            )
-            var row = groups[key] ?? AIModelDiscoveryRow(
-                state: signal.state,
-                modelID: modelID,
-                statuses: [], formats: [], providers: [], products: [], vendors: [], detectors: [],
-                count: 0, provenance: nil, lastActive: nil, signals: []
-            )
-            if groups[key] == nil { order.append(key) }
-            if stateWeight(signal.state) < stateWeight(row.state) {
-                row.state = signal.state
-            }
-            row.count += 1
-            row.signals.append(signal)
-            appendUnique(model.status, to: &row.statuses)
-            appendUnique(model.format, to: &row.formats)
-            appendUnique(model.provider, to: &row.providers)
-            appendUnique(signal.product, to: &row.products)
-            appendUnique(signal.vendor, to: &row.vendors)
-            appendUnique(signal.detector, to: &row.detectors)
-            if prefersModelProvenance(model.provenance, over: row.provenance) {
-                let provenance = model.provenance
-                row.provenance = provenance
-            }
-            if let active = signal.lastActive, row.lastActive.map({ active > $0 }) ?? true {
-                row.lastActive = active
-            }
-            groups[key] = row
-        }
-        return order.compactMap { groups[$0] }.sorted {
-            (stateWeight($0.state), normalizedModelID($0.modelID))
-                < (stateWeight($1.state), normalizedModelID($1.modelID))
-        }
-    }
-
-    static func normalizedModelID(_ value: String) -> String {
-        value.folding(
-            options: [.caseInsensitive],
-            locale: Locale(identifier: "en_US_POSIX")
-        ).lowercased()
-    }
-
-    private static func appendUnique(_ value: String, to values: inout [String]) {
-        guard !value.isEmpty, !values.contains(value) else { return }
-        values.append(value)
-    }
-
-    private static func prefersModelProvenance(
-        _ candidate: AIModelProvenance?,
-        over current: AIModelProvenance?
-    ) -> Bool {
-        guard let candidate else { return false }
-        guard let current else { return true }
-        let confidenceRank = ["low": 1, "medium": 2, "high": 3]
-        func score(_ provenance: AIModelProvenance) -> (Int, Int) {
-            let populated = [
-                !provenance.publisher.isEmpty,
-                !provenance.countryCode.isEmpty,
-                !provenance.rootModel.isEmpty,
-                !provenance.baseModels.isEmpty,
-                !provenance.quantization.isEmpty,
-                !provenance.derivation.isEmpty,
-                !provenance.source.isEmpty,
-            ].filter { $0 }.count
-            return (confidenceRank[provenance.confidence.lowercased(), default: 0], populated)
-        }
-        return score(candidate) > score(current)
-    }
 }
 
 // MARK: - Inventory
@@ -2020,13 +1984,32 @@ enum GatewayError: LocalizedError {
         switch self {
         case .offline: "Gateway unreachable — is the DefenseClaw gateway running?"
         case .unauthorized: "Gateway token rejected. The token in config.yaml may have been rotated."
-        case .degraded(let status, _):
-            status == 502
-                ? "The gateway could not reach the connector agent (HTTP 502). Skill and tool catalogs need a running OpenClaw agent."
-                : "Gateway error (HTTP \(status))."
+        case .degraded(let status, let body):
+            if let message = GatewayErrorBody.userFacingMessage(status: status, body: body) {
+                message
+            } else if status == 502 {
+                "The gateway could not reach the connector agent (HTTP 502). Skill and tool catalogs need a running OpenClaw agent."
+            } else {
+                "Gateway error (HTTP \(status))."
+            }
         case .timeout: "Gateway request timed out."
         case .badResponse(let why): "Unexpected gateway response: \(why)"
         }
+    }
+}
+
+enum GatewayErrorBody {
+    static func userFacingMessage(status: Int, body: String) -> String? {
+        guard status == 503,
+              let data = body.data(using: .utf8),
+              let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let message = object["error"] as? String,
+              message.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                == "ai discovery disabled"
+        else {
+            return nil
+        }
+        return "AI Discovery is disabled. Enable it before starting a scan."
     }
 }
 

@@ -16,6 +16,25 @@
 
 import Foundation
 
+enum SetupSecretTransportPolicy {
+    static func validationMessage(
+        wizard: WizardDefinition,
+        values: [String: String],
+        visibleFields: [WizardField]
+    ) -> String? {
+        let environmentValues = Set<String>((wizard.secretEnvironment?(values) ?? [:]).values)
+        guard let field = visibleFields.first(where: { field in
+            guard case .secure = field.kind else { return false }
+            let secret = values[field.key] ?? ""
+            return !secret.isEmpty
+                && wizard.secretInputField != field.key
+                && !environmentValues.contains(secret)
+        }) else { return nil }
+        return "\(field.label) cannot be submitted securely by the installed DefenseClaw runtime. "
+            + "Leave it blank to use an existing credential, or save it separately in Setup > Credentials."
+    }
+}
+
 /// Setup areas exposed by the DefenseClaw TUI. Definitions stay
 /// data-driven so the native form, command review, and CLI execution use one
 /// source of truth.
@@ -628,7 +647,7 @@ enum TUIWizards {
 
     private static let observability = WizardDefinition(
         id: "observability", title: "Observability", icon: "chart.xyaxis.line",
-        blurb: "Add, list, enable, disable, or remove OTel and audit destinations.",
+        blurb: "Add, list, enable, disable, remove, or test OTel and audit destinations.",
         baseArgs: ["setup", "observability"], commandBuilder: observabilityCommands,
         secretEnvironment: { v in
             let token = value(v, "token")
@@ -659,7 +678,7 @@ enum TUIWizards {
             WizardField(key: "url", label: "Webhook URL", kind: .text(placeholder: "https://…"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "method", label: "Webhook method", kind: .choice(options: ["POST", "PUT"]), defaultValue: "POST", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "url-path", label: "Webhook URL path", kind: .text(placeholder: "/events"), visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
-            WizardField(key: "verify-tls-hec", label: "Verify HEC TLS", kind: .bool, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
+            WizardField(key: "verify-tls-hec", label: "Verify HEC TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["splunk-hec"])),
             WizardField(key: "verify-tls-webhook", label: "Verify webhook TLS", kind: .bool, defaultValue: "yes", visibleWhen: (key: "action", equals: ["add"]), visibleWhen2: (key: "preset", equals: ["webhook"])),
             WizardField(key: "token", label: "Token / API key", kind: .secure(placeholder: "optional token"), visibleWhen: (key: "action", equals: ["add"])),
             WizardField(key: "dry-run", label: "Preview without writing", kind: .flagOnly, defaultValue: "no", visibleWhen: (key: "action", equals: ["add"])),
@@ -1231,9 +1250,13 @@ enum TUIWizards {
             }
             for key in keys { append(v, key, flag: "--\(key)", to: &args) }
             if preset == "splunk-hec" {
-                args.append(yes(v, "verify-tls-hec") ? "--verify-tls" : "--no-verify-tls")
+                let verifyTLS = value(v, "verify-tls-hec", "yes") != "no"
+                let insecureLoopback = !verifyTLS
+                    && splunkHECHostAllowsInsecureTLS(value(v, "host", "localhost"))
+                args.append(insecureLoopback ? "--no-verify-tls" : "--verify-tls")
             } else if preset == "webhook" {
-                args.append(yes(v, "verify-tls-webhook") ? "--verify-tls" : "--no-verify-tls")
+                let verifyTLS = value(v, "verify-tls-webhook", "yes") != "no"
+                args.append(verifyTLS ? "--verify-tls" : "--no-verify-tls")
             }
         } else if ["enable", "disable", "remove"].contains(action) {
             let name = value(v, "name")
@@ -1297,7 +1320,37 @@ enum TUIWizards {
         if preset == "splunk-hec", Int(value(v, "port")).map({ $0 > 0 }) != true {
             return "Splunk HEC port must be a positive integer."
         }
+        if preset == "splunk-hec",
+           value(v, "verify-tls-hec", "yes") == "no",
+           !splunkHECHostAllowsInsecureTLS(value(v, "host", "localhost")) {
+            return "TLS verification can only be disabled for a loopback Splunk HEC host "
+                + "(localhost, *.localhost, 127.0.0.0/8, or ::1)."
+        }
         return nil
+    }
+
+    static func splunkHECHostAllowsInsecureTLS(_ rawHost: String) -> Bool {
+        var host = rawHost.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        if host == "::1" || host == "[::1]" { return true }
+
+        let candidate = host.contains("://") ? host : "https://\(host)"
+        if let parsed = URL(string: candidate)?.host?.lowercased(), !parsed.isEmpty {
+            host = parsed
+        }
+        while host.hasSuffix(".") { host.removeLast() }
+        if host == "localhost" || host.hasSuffix(".localhost") || host == "::1" {
+            return true
+        }
+
+        let octets = host.split(separator: ".", omittingEmptySubsequences: false)
+        guard octets.count == 4,
+              octets.allSatisfy({ part in
+                  guard !part.isEmpty,
+                        part.allSatisfy(\.isNumber),
+                        let number = Int(part) else { return false }
+                  return number <= 255
+              }) else { return false }
+        return octets[0] == "127"
     }
 
     static func webhookCommands(_ v: [String: String], _ mask: Bool) -> [[String]] {

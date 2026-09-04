@@ -127,20 +127,190 @@ indirect enum YAMLNode: Sendable {
 }
 
 enum MiniYAML {
+    private static let maximumSourceBytes = 4 * 1024 * 1024
+    private static let maximumNodes = 65_536
+
     /// Parses block-style YAML mappings/sequences with plain or quoted scalars.
-    /// Ignores comments, documents markers, anchors, and flow collections —
-    /// adequate for defenseclaw's generated config.yaml.
+    /// Supports the nested flow collections emitted by DefenseClaw's
+    /// style-preserving config writer and ignores document markers and anchors.
     static func parse(_ text: String) -> YAMLNode {
+        guard text.utf8.count <= maximumSourceBytes else {
+            return .scalar("")
+        }
+        let lines = logicalLines(from: text)
+        var index = 0
+        let root = parseBlock(lines: lines, index: &index, indent: 0)
+        guard boundedNodeCount(root) != nil else { return .scalar("") }
+        return root
+    }
+
+    private enum FlowLineState {
+        case open
+        case complete
+        case invalid
+    }
+
+    private struct PendingFlowLine {
+        var indent: Int
+        var parts: [String]
+        var balance: FlowBalance
+
+        var content: String { parts.joined() }
+    }
+
+    private struct FlowBalance {
+        private var stack: [Character] = []
+        private var inSingle = false
+        private var inDouble = false
+        private var escaped = false
+        private var invalid = false
+
+        var state: FlowLineState {
+            if invalid { return .invalid }
+            if !stack.isEmpty || inSingle || inDouble { return .open }
+            return .complete
+        }
+
+        var isInsideQuote: Bool { inSingle || inDouble }
+
+        /// YAML folds ordinary quoted line breaks to a space. A trailing
+        /// backslash in a double-quoted scalar escapes the line break instead.
+        mutating func foldedLineBreakEscapesWhitespace() -> Bool {
+            guard inDouble, escaped else { return false }
+            escaped = false
+            return true
+        }
+
+        var quoteState: (inSingle: Bool, inDouble: Bool) {
+            (inSingle, inDouble)
+        }
+
+        mutating func consume(_ value: String) {
+            let characters = Array(value)
+            var index = 0
+            while index < characters.count, !invalid {
+                let character = characters[index]
+                if inDouble {
+                    if escaped {
+                        escaped = false
+                    } else if character == "\\" {
+                        escaped = true
+                    } else if character == "\"" {
+                        inDouble = false
+                    }
+                    index += 1
+                    continue
+                }
+                if inSingle {
+                    if character == "'" {
+                        if index + 1 < characters.count, characters[index + 1] == "'" {
+                            index += 2
+                            continue
+                        }
+                        inSingle = false
+                    }
+                    index += 1
+                    continue
+                }
+
+                switch character {
+                case "\"":
+                    inDouble = true
+                case "'":
+                    inSingle = true
+                case "{":
+                    stack.append("}")
+                case "[":
+                    stack.append("]")
+                case "}", "]":
+                    if stack.last == character {
+                        stack.removeLast()
+                    } else {
+                        invalid = true
+                    }
+                default:
+                    break
+                }
+                index += 1
+            }
+        }
+    }
+
+    /// PyYAML wraps large flow collections at its configured width. Rejoin
+    /// only lines that begin with a mapping/sequence value and have balanced
+    /// flow delimiters; ordinary block YAML retains its physical line shape.
+    private static func logicalLines(from text: String) -> [(indent: Int, content: String)] {
         var lines: [(indent: Int, content: String)] = []
+        var pending: PendingFlowLine?
+
         for rawLine in text.split(separator: "\n", omittingEmptySubsequences: false) {
             let line = String(rawLine)
             let stripped = line.trimmingCharacters(in: .whitespaces)
+
+            if var continuation = pending {
+                if !continuation.balance.isInsideQuote,
+                   stripped.isEmpty || stripped.hasPrefix("#") {
+                    continue
+                }
+                let escapedLineBreak = continuation.balance.foldedLineBreakEscapesWhitespace()
+                if escapedLineBreak {
+                    if let last = continuation.parts.indices.last,
+                       continuation.parts[last].last == "\\" {
+                        continuation.parts[last].removeLast()
+                    }
+                } else {
+                    continuation.parts.append(" ")
+                    continuation.balance.consume(" ")
+                }
+                let quoteState = continuation.balance.quoteState
+                let content = stripInlineComment(
+                    stripped,
+                    startingInSingle: quoteState.inSingle,
+                    startingInDouble: quoteState.inDouble
+                ).trimmingCharacters(in: .whitespaces)
+                continuation.parts.append(content)
+                continuation.balance.consume(content)
+                switch continuation.balance.state {
+                case .open:
+                    pending = continuation
+                case .complete, .invalid:
+                    lines.append((continuation.indent, continuation.content))
+                    pending = nil
+                }
+                continue
+            }
+
             if stripped.isEmpty || stripped.hasPrefix("#") || stripped == "---" { continue }
             let indent = line.prefix { $0 == " " }.count
-            lines.append((indent, stripped))
+            let content = stripInlineComment(stripped).trimmingCharacters(in: .whitespaces)
+            guard !content.isEmpty else { continue }
+
+            guard let candidate = flowCandidate(in: content) else {
+                lines.append((indent, content))
+                continue
+            }
+            var balance = FlowBalance()
+            balance.consume(candidate)
+            if balance.state == .open {
+                pending = PendingFlowLine(indent: indent, parts: [content], balance: balance)
+            } else {
+                lines.append((indent, content))
+            }
         }
-        var index = 0
-        return parseBlock(lines: lines, index: &index, indent: 0)
+        if let pending { lines.append((pending.indent, pending.content)) }
+        return lines
+    }
+
+    private static func flowCandidate(in content: String) -> String? {
+        if content.hasPrefix("- ") {
+            let candidate = String(content.dropFirst(2)).trimmingCharacters(in: .whitespaces)
+            return candidate.first == "{" || candidate.first == "[" ? candidate : nil
+        } else if let colon = findColon(content) {
+            let candidate = String(content[content.index(after: colon)...])
+                .trimmingCharacters(in: .whitespaces)
+            return candidate.first == "{" || candidate.first == "[" ? candidate : nil
+        }
+        return nil
     }
 
     private static func parseBlock(lines: [(indent: Int, content: String)], index: inout Int, indent: Int) -> YAMLNode {
@@ -162,6 +332,8 @@ enum MiniYAML {
                 index += 1
                 if inline.isEmpty {
                     seq.append(parseBlock(lines: lines, index: &index, indent: nextIndent(lines, index, greaterThan: indent)))
+                } else if inline.hasPrefix("{") || inline.hasPrefix("[") {
+                    seq.append(inlineNode(inline))
                 } else if let colon = findColon(inline) {
                     // "- key: value" — sequence of mappings; gather subsequent deeper keys
                     var item: [String: YAMLNode] = [:]
@@ -169,7 +341,7 @@ enum MiniYAML {
                     let value = String(inline[inline.index(after: colon)...]).trimmingCharacters(in: .whitespaces)
                     item[key] = value.isEmpty
                         ? parseBlock(lines: lines, index: &index, indent: nextIndent(lines, index, greaterThan: indent))
-                        : .scalar(unquote(value))
+                        : inlineNode(value)
                     while index < lines.count, lines[index].indent > indent, !lines[index].content.hasPrefix("- ") {
                         let sub = lines[index]
                         if let c = findColon(sub.content) {
@@ -178,12 +350,12 @@ enum MiniYAML {
                             index += 1
                             item[k] = v.isEmpty
                                 ? parseBlock(lines: lines, index: &index, indent: nextIndent(lines, index, greaterThan: sub.indent))
-                                : .scalar(unquote(v))
+                                : inlineNode(v)
                         } else { index += 1 }
                     }
                     seq.append(.mapping(item))
                 } else {
-                    seq.append(.scalar(unquote(inline)))
+                    seq.append(inlineNode(inline))
                 }
             } else if let colon = findColon(content) {
                 if isSequence == true { break }
@@ -194,7 +366,7 @@ enum MiniYAML {
                 if value.isEmpty {
                     map[key] = parseBlock(lines: lines, index: &index, indent: nextIndent(lines, index, greaterThan: indent))
                 } else {
-                    map[key] = .scalar(unquote(value))
+                    map[key] = inlineNode(value)
                 }
             } else {
                 index += 1 // unrecognized line — skip
@@ -202,6 +374,320 @@ enum MiniYAML {
         }
         if isSequence == true { return .sequence(seq) }
         return .mapping(map)
+    }
+
+    /// DefenseClaw preserves compact flow style when it expands seed values
+    /// such as `observability: {}`. Parse those generated collections while
+    /// leaving quoted values such as `"{}"` as ordinary strings.
+    private static func inlineNode(_ raw: String) -> YAMLNode {
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        let syntax = stripInlineComment(value).trimmingCharacters(in: .whitespaces)
+        let isQuoted = (syntax.hasPrefix("\"") && syntax.hasSuffix("\""))
+            || (syntax.hasPrefix("'") && syntax.hasSuffix("'"))
+        if !isQuoted {
+            var parser = FlowParser(syntax)
+            if let node = parser.parse() { return node }
+        }
+        return .scalar(unquote(value))
+    }
+
+    /// Bounded parser for the flow mappings/sequences produced by the runtime.
+    /// A collection is accepted only when the complete value parses, so a
+    /// truncated config remains a scalar and InstallationContext fails closed.
+    private struct FlowParser {
+        private static let maximumDepth = 32
+        private static let maximumSourceBytes = 4 * 1024 * 1024
+        private static let maximumNodes = 65_536
+        private static let maximumMappingEntries = 1_024
+
+        private let characters: [Character]
+        private let sourceByteCount: Int
+        private var index = 0
+        private var nodeCount = 0
+
+        init(_ value: String) {
+            characters = Array(value)
+            sourceByteCount = value.utf8.count
+        }
+
+        mutating func parse() -> YAMLNode? {
+            guard sourceByteCount <= Self.maximumSourceBytes else { return nil }
+            skipWhitespace()
+            guard let first = peek(), first == "{" || first == "[",
+                  let node = parseValue(depth: 0)
+            else { return nil }
+            skipWhitespace()
+            return index == characters.count ? node : nil
+        }
+
+        private mutating func parseValue(depth: Int) -> YAMLNode? {
+            guard depth <= Self.maximumDepth, nodeCount < Self.maximumNodes else { return nil }
+            nodeCount += 1
+            skipWhitespace()
+            guard let character = peek() else { return nil }
+            switch character {
+            case "{":
+                return parseMapping(depth: depth)
+            case "[":
+                return parseSequence(depth: depth)
+            case "\"", "'":
+                return parseQuotedScalar().map(YAMLNode.scalar)
+            default:
+                return parsePlainScalar().map(YAMLNode.scalar)
+            }
+        }
+
+        private mutating func parseMapping(depth: Int) -> YAMLNode? {
+            guard consume("{") else { return nil }
+            skipWhitespace()
+            if consume("}") { return .mapping([:]) }
+
+            var mapping: [String: YAMLNode] = [:]
+            while true {
+                let quotedKey = peek() == "\"" || peek() == "'"
+                guard let key = parseMappingKey() else { return nil }
+                guard key != "<<", nodeCount < Self.maximumNodes else { return nil }
+                nodeCount += 1
+                if !quotedKey, !plainMappingKeyIsString(key) { return nil }
+                skipWhitespace()
+                guard consume(":") else { return nil }
+                if !quotedKey, let next = peek(),
+                   !next.isWhitespace && next != "{" && next != "[" {
+                    return nil
+                }
+                guard let value = parseValue(depth: depth + 1) else { return nil }
+                guard mapping[key] == nil,
+                      mapping.count < Self.maximumMappingEntries
+                else { return nil }
+                mapping[key] = value
+                skipWhitespace()
+                if consume("}") { return .mapping(mapping) }
+                guard consume(",") else { return nil }
+                skipWhitespace()
+                if consume("}") { return .mapping(mapping) }
+            }
+        }
+
+        private mutating func parseSequence(depth: Int) -> YAMLNode? {
+            guard consume("[") else { return nil }
+            skipWhitespace()
+            if consume("]") { return .sequence([]) }
+
+            var sequence: [YAMLNode] = []
+            while true {
+                guard sequence.count < Self.maximumNodes else { return nil }
+                guard let value = parseValue(depth: depth + 1) else { return nil }
+                sequence.append(value)
+                skipWhitespace()
+                if consume("]") { return .sequence(sequence) }
+                guard consume(",") else { return nil }
+                skipWhitespace()
+                if consume("]") { return .sequence(sequence) }
+            }
+        }
+
+        private mutating func parseMappingKey() -> String? {
+            skipWhitespace()
+            if peek() == "\"" || peek() == "'" {
+                return parseQuotedScalar()
+            }
+
+            var key = ""
+            while let character = peek(), character != ":" {
+                guard !["{", "}", "[", "]", ","].contains(character) else { return nil }
+                key.append(character)
+                index += 1
+            }
+            let trimmed = key.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        private func plainMappingKeyIsString(_ key: String) -> Bool {
+            let lowercased = key.lowercased()
+            if ["<<", "=", "~", "null", "true", "false", "yes", "no", "on", "off"].contains(lowercased) {
+                return false
+            }
+            if key.hasPrefix("!") || key.hasPrefix("&") || key.hasPrefix("*") {
+                return false
+            }
+
+            if isImplicitYAMLNumber(key) { return false }
+            if key.range(
+                of: #"^[0-9]{4}-[0-9]{1,2}-[0-9]{1,2}(?:$|[Tt \t])"#,
+                options: .regularExpression
+            ) != nil {
+                return false
+            }
+            return true
+        }
+
+        private func isImplicitYAMLNumber(_ value: String) -> Bool {
+            // Match PyYAML's YAML 1.1 implicit int/float resolvers. Swift's
+            // Double parser is intentionally not used: values such as `1e2`,
+            // `inf`, and `Infinity` are valid unquoted string keys in YAML.
+            let integer = #"^[+-]?(?:0|[1-9][0-9_]*|0b[0-1_]+|0[0-7_]+|0x[0-9a-fA-F_]+|[1-9][0-9_]*(?::[0-5]?[0-9])+)$"#
+            let float = #"^(?:[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?:[eE][-+][0-9]+)|[-+]?\.[0-9_]+(?:[eE][-+][0-9]+)?|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN))$"#
+            return value.range(of: integer, options: .regularExpression) != nil
+                || value.range(of: float, options: .regularExpression) != nil
+        }
+
+        private mutating func parseQuotedScalar() -> String? {
+            guard let quote = peek(), quote == "\"" || quote == "'" else { return nil }
+            index += 1
+            var value = ""
+
+            while let character = peek() {
+                index += 1
+                if character == quote {
+                    if quote == "'", peek() == "'" {
+                        value.append("'")
+                        index += 1
+                        continue
+                    }
+                    return value
+                }
+                if character == "\\", quote == "\"" {
+                    guard let escaped = parseDoubleQuotedEscape() else { return nil }
+                    value.append(escaped)
+                    continue
+                }
+                value.append(character)
+            }
+            return nil
+        }
+
+        private mutating func parseDoubleQuotedEscape() -> String? {
+            guard let escape = peek() else { return nil }
+            index += 1
+            switch escape {
+            case "0": return "\0"
+            case "a": return "\u{0007}"
+            case "b": return "\u{0008}"
+            case "t": return "\t"
+            case "n": return "\n"
+            case "v": return "\u{000B}"
+            case "f": return "\u{000C}"
+            case "r": return "\r"
+            case "e": return "\u{001B}"
+            case " ": return " "
+            case "\"": return "\""
+            case "/": return "/"
+            case "\\": return "\\"
+            case "N": return "\u{0085}"
+            case "_": return "\u{00A0}"
+            case "L": return "\u{2028}"
+            case "P": return "\u{2029}"
+            case "x": return parseUnicodeEscape(digitCount: 2)
+            case "u": return parseUnicodeEscape(digitCount: 4)
+            case "U": return parseUnicodeEscape(digitCount: 8)
+            default: return nil
+            }
+        }
+
+        private mutating func parseUnicodeEscape(digitCount: Int) -> String? {
+            guard index + digitCount <= characters.count else { return nil }
+            let digits = String(characters[index..<(index + digitCount)])
+            guard digits.allSatisfy(\.isHexDigit),
+                  let value = UInt32(digits, radix: 16),
+                  let scalar = UnicodeScalar(value)
+            else { return nil }
+            index += digitCount
+            return String(scalar)
+        }
+
+        private mutating func parsePlainScalar() -> String? {
+            var value = ""
+            while let character = peek(), ![",", "]", "}"].contains(character) {
+                if character == ":", let next = peek(offset: 1),
+                   next.isWhitespace || [",", "]", "}"].contains(next) {
+                    return nil
+                }
+                value.append(character)
+                index += 1
+            }
+            let trimmed = value.trimmingCharacters(in: .whitespaces)
+            return trimmed.isEmpty ? nil : trimmed
+        }
+
+        private mutating func skipWhitespace() {
+            while peek()?.isWhitespace == true { index += 1 }
+        }
+
+        private func peek(offset: Int = 0) -> Character? {
+            let target = index + offset
+            guard characters.indices.contains(target) else { return nil }
+            return characters[target]
+        }
+
+        private mutating func consume(_ expected: Character) -> Bool {
+            guard peek() == expected else { return false }
+            index += 1
+            return true
+        }
+    }
+
+    private static func stripInlineComment(
+        _ value: String,
+        startingInSingle: Bool = false,
+        startingInDouble: Bool = false
+    ) -> String {
+        let characters = Array(value)
+        var inSingle = startingInSingle
+        var inDouble = startingInDouble
+        var escaped = false
+        var previous: Character?
+        var index = 0
+        while index < characters.count {
+            let character = characters[index]
+            if inDouble {
+                if escaped {
+                    escaped = false
+                } else if character == "\\" {
+                    escaped = true
+                } else if character == "\"" {
+                    inDouble = false
+                }
+            } else if inSingle {
+                if character == "'" {
+                    if index + 1 < characters.count, characters[index + 1] == "'" {
+                        previous = "'"
+                        index += 2
+                        continue
+                    }
+                    inSingle = false
+                }
+            } else if character == "'" {
+                inSingle = true
+            } else if character == "\"" {
+                inDouble = true
+            } else if character == "#", previous?.isWhitespace == true {
+                return String(characters[..<index])
+            }
+            previous = character
+            index += 1
+        }
+        return value
+    }
+
+    private static func boundedNodeCount(_ root: YAMLNode) -> Int? {
+        var count = 0
+        var pending = [root]
+        while let node = pending.popLast() {
+            count += 1
+            guard count <= maximumNodes else { return nil }
+            switch node {
+            case .scalar:
+                break
+            case .sequence(let values):
+                pending.append(contentsOf: values)
+            case .mapping(let values):
+                // The runtime's node budget includes mapping-key scalar nodes.
+                count += values.count
+                guard count <= maximumNodes else { return nil }
+                pending.append(contentsOf: values.values)
+            }
+        }
+        return count
     }
 
     private static func nextIndent(_ lines: [(indent: Int, content: String)], _ index: Int, greaterThan indent: Int) -> Int {
@@ -490,8 +976,8 @@ actor ConfigStore {
         if let packDir = root["guardrail.rule_pack_dir"]?.string, !packDir.isEmpty {
             c.guardrailRulePack = (packDir as NSString).lastPathComponent
         }
-        // Source baseline only. Bucket and route overrides are intentionally
-        // summarized by the canonical `setup redaction status` command.
+        // Source baseline only. Bucket and route overrides belong to the
+        // runtime's canonical redaction-policy surface, not this YAML reader.
         c.redactionDefaultProfile = root["observability.defaults.redaction_profile"]?.string ?? ""
         c.hiltEnabled = root["hilt.enabled"]?.bool ?? false
         c.hiltMinSeverity = root["hilt.min_severity"]?.string ?? "HIGH"

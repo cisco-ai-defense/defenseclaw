@@ -60,12 +60,11 @@ enum DynamicConfigCatalog {
         var values: [String: String]
     }
 
-    /// Dump the runtime's catalog. nil on any failure (missing venv, renamed
-    /// symbol in a future runtime, parse error) — callers fall back to the
-    /// static catalog.
+    /// Dump the runtime's catalog. nil on any failure (missing interpreter,
+    /// renamed symbol in a future runtime, parse error) — callers fall back to
+    /// the static v8-safe catalog.
     static func load(using cli: CLIRunner, context: InstallationContext) async -> LoadResult? {
-        let runtimePython = context.runtimePythonURL.path
-        guard FileManager.default.isExecutableFile(atPath: runtimePython) else { return nil }
+        guard let runtimePython = await cli.locateRuntimePython() else { return nil }
         let result = await cli.run(binary: runtimePython, arguments: ["-c", dumpScript], mutation: false)
         guard result.succeeded,
               let line = result.output.split(separator: "\n").first(where: { $0.hasPrefix(sentinel) }),

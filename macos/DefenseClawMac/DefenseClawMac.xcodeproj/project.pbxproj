@@ -236,7 +236,7 @@
 					"@executable_path/../Frameworks",
 				);
 				MARKETING_VERSION = 0.8.10;
-				OTHER_CODE_SIGN_FLAGS = "";
+				OTHER_CODE_SIGN_FLAGS = "--timestamp";
 				PRODUCT_BUNDLE_IDENTIFIER = com.cisco.defenseclaw.macos;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_EMIT_LOC_STRINGS = YES;
