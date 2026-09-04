@@ -33,6 +33,7 @@ from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
+from defenseclaw.rotate_token_guardian import assert_current_attestations
 
 from tests.permissions import assert_owner_only_file
 
@@ -2247,6 +2248,10 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
                     payload["current"]["attestations"][1]["ok"] = False
                     payload["current"]["attestations"][1]["token_fingerprint"] = "e" * 64
                     (Path(f"{td}-hook-guardian") / "protected_targets.json").write_text(json.dumps(payload))
+                if action == "rollback":
+                    _write_current_authorization(
+                        td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32
+                    )
 
             with (
                 mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
@@ -2270,6 +2275,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             self.assertEqual(Path(dotenv).read_bytes(), original)
             self.assertEqual(Path(td, "hooks", ".hook-codex.token").read_bytes(), original_hook)
             self.assertNotIn("a" * 64, result.output)
+            assert_current_attestations(td, plan, {"codex": _fixture_hook_fingerprint(1)})
 
     def test_busy_guardian_journal_fails_before_stop(self) -> None:
         from tempfile import TemporaryDirectory
