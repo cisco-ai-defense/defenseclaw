@@ -17,11 +17,13 @@
 package cli
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -51,6 +53,7 @@ const (
 )
 
 var (
+	errEnterpriseHookRotationBusy          = errors.New("enterprise hooks: a rotation transaction holds the guardian")
 	enterpriseHookRotationLoadB            = loadEnterpriseHookScopedToken
 	enterpriseHookRotationPublishB         = connector.PublishHookAPIToken
 	enterpriseHookRotationReadPublished    = connector.LoadHookAPIToken
@@ -353,12 +356,12 @@ func executeEnterpriseHookRotationRollback(req enterpriseHookRotationRequest) (e
 			return journal, fmt.Errorf("enterprise hooks rotate rollback: exact A restoration could not be proved: %w", err)
 		}
 		if exists {
+			if err := publishEnterpriseHookRotationRestoredCurrent(cfg.DataDir, journal, targets); err != nil {
+				return journal, err
+			}
 			journal.Phase = enterpriseHookRotationPhaseRolledBack
 			journal.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 			if err := writeEnterpriseHookRotationJournal(cfg.DataDir, journal); err != nil {
-				return journal, err
-			}
-			if err := publishEnterpriseHookRotationRestoredCurrent(cfg.DataDir, journal, targets); err != nil {
 				return journal, err
 			}
 			return journal, nil
@@ -609,7 +612,7 @@ func publishEnterpriseHookRotationRestoredCurrent(dataDir string, journal enterp
 func restoredEnterpriseHookRotationAttestationRows(dataDir string, targets []enterpriseHookRotationTarget) ([]enterpriseHookReconcileRow, error) {
 	rows := make([]enterpriseHookReconcileRow, 0, len(targets))
 	for _, target := range targets {
-		snapshot, err := decodeEnterpriseHookRotationSnapshotSidecar(enterpriseHookRotationTargetSnapshotPath(dataDir, target))
+		snapshot, err := decodeEnterpriseHookRotationSnapshotSidecar(locateEnterpriseHookRotationSnapshot(dataDir, target))
 		if err != nil {
 			return nil, fmt.Errorf("enterprise hooks rotate rollback: load A snapshot for %s: %w", enterpriseHookRotationTargetLabel(target), err)
 		}
@@ -643,23 +646,23 @@ func markEnterpriseHookRotationUnready(dataDir string) error {
 	}
 	authorization.Current.OK = false
 	authorization.OK = false
-	activation, exists, err := loadEnterpriseHookGuardianActivation(dataDir)
+	activation, actExists, err := loadEnterpriseHookGuardianActivation(dataDir)
 	if err != nil {
 		return err
 	}
-	manifest := ""
-	if exists {
-		manifest = strings.TrimSpace(activation.Manifest)
-	}
-	if manifest == "" {
+	if !actExists || strings.TrimSpace(activation.Manifest) == "" {
 		return fmt.Errorf("enterprise hooks rotate: cannot mark unready without the current manifest path")
+	}
+	if activation.ManifestSHA256 != authorization.Current.ManifestSHA256 ||
+		activation.ReconcileID != authorization.Current.ReconcileID {
+		return fmt.Errorf("enterprise hooks rotate: authorization and activation identities do not match")
 	}
 	return writeEnterpriseHookGuardianStateIdentified(
 		dataDir,
-		manifest,
-		authorization.Current.ManifestSHA256,
-		authorization.Current.ReconcileID,
-		authorization.ProtectedTargets,
+		activation.Manifest,
+		activation.ManifestSHA256,
+		activation.ReconcileID,
+		activation.ProtectedTargets,
 		0,
 		false,
 	)
@@ -696,7 +699,7 @@ func restoreEnterpriseHookRotationMutated(dataDir string, targets []enterpriseHo
 }
 
 func restoreEnterpriseHookRotationTarget(dataDir string, target enterpriseHookRotationTarget) error {
-	path := enterpriseHookRotationTargetSnapshotPath(dataDir, target)
+	path := locateEnterpriseHookRotationSnapshot(dataDir, target)
 	snapshot, err := decodeEnterpriseHookRotationSnapshotSidecar(path)
 	if err != nil {
 		return err
@@ -763,12 +766,12 @@ func enterpriseHookRotationBusy(dataDir string) error {
 		return err
 	}
 	if exists && (journal.Phase == enterpriseHookRotationPhasePreparing || journal.Phase == enterpriseHookRotationPhasePrepared) {
-		return fmt.Errorf("enterprise hooks: a rotation transaction holds the guardian roster")
+		return fmt.Errorf("%w: roster", errEnterpriseHookRotationBusy)
 	}
 	if held, err := enterpriseHookRotationLockHeld(dataDir); err != nil {
 		return err
 	} else if held {
-		return fmt.Errorf("enterprise hooks: a rotation transaction holds the guardian lock")
+		return fmt.Errorf("%w: lock", errEnterpriseHookRotationBusy)
 	}
 	return nil
 }
@@ -790,6 +793,19 @@ func enterpriseHookRotationTargetSnapshotPath(dataDir string, target enterpriseH
 	return filepath.Join(enterpriseHookRotationRollbackPath(dataDir), hex.EncodeToString(sum[:])+".snapshot")
 }
 
+func enterpriseHookRotationLegacyTargetSnapshotPath(dataDir string, target enterpriseHookRotationTarget) string {
+	key := strings.ReplaceAll(enterpriseHookRotationTargetKey(target), "\x00", "_")
+	return filepath.Join(enterpriseHookRotationRollbackPath(dataDir), key+".snapshot")
+}
+
+func locateEnterpriseHookRotationSnapshot(dataDir string, target enterpriseHookRotationTarget) string {
+	hashed := enterpriseHookRotationTargetSnapshotPath(dataDir, target)
+	if info, err := os.Lstat(hashed); err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().IsRegular() {
+		return hashed
+	}
+	return enterpriseHookRotationLegacyTargetSnapshotPath(dataDir, target)
+}
+
 func loadEnterpriseHookRotationJournal(dataDir string) (enterpriseHookRotationJournal, bool, error) {
 	path := enterpriseHookRotationJournalPath(dataDir)
 	info, err := os.Lstat(path)
@@ -807,13 +823,38 @@ func loadEnterpriseHookRotationJournal(dataDir string) (enterpriseHookRotationJo
 		return enterpriseHookRotationJournal{}, true, err
 	}
 	var journal enterpriseHookRotationJournal
-	if err := json.Unmarshal(data, &journal); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&journal); err != nil {
 		return enterpriseHookRotationJournal{}, true, fmt.Errorf("enterprise hooks rotate: parse journal: %w", err)
 	}
-	if journal.Version != enterpriseHookRotationJournalVersion {
-		return journal, true, fmt.Errorf("enterprise hooks rotate: unsupported journal version %d", journal.Version)
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return enterpriseHookRotationJournal{}, true, fmt.Errorf("enterprise hooks rotate: journal has trailing content")
+	}
+	if err := validateEnterpriseHookRotationJournal(journal); err != nil {
+		return journal, true, err
 	}
 	return journal, true, nil
+}
+
+func validateEnterpriseHookRotationJournal(journal enterpriseHookRotationJournal) error {
+	if journal.Version != enterpriseHookRotationJournalVersion {
+		return fmt.Errorf("enterprise hooks rotate: unsupported journal version %d", journal.Version)
+	}
+	if !validEnterpriseHookHex(journal.OperationID, 16) || !validEnterpriseHookHex(journal.Generation, 16) {
+		return fmt.Errorf("enterprise hooks rotate: journal identity is invalid")
+	}
+	if strings.TrimSpace(journal.Manifest) == "" || !validEnterpriseHookHex(journal.ManifestSHA256, sha256.Size) {
+		return fmt.Errorf("enterprise hooks rotate: journal manifest binding is invalid")
+	}
+	switch journal.Phase {
+	case enterpriseHookRotationPhasePreparing, enterpriseHookRotationPhasePrepared,
+		enterpriseHookRotationPhaseCommitted, enterpriseHookRotationPhaseRolledBack:
+	default:
+		return fmt.Errorf("enterprise hooks rotate: journal phase %q is invalid", journal.Phase)
+	}
+	return nil
 }
 
 func writeEnterpriseHookRotationJournal(dataDir string, journal enterpriseHookRotationJournal) error {
@@ -899,11 +940,21 @@ func restoreEnterpriseHookRotationArtifact(snapshot enterpriseHookRotationSnapsh
 		}
 		return nil
 	}
+	if snapshot.Digest == "" || snapshot.Digest != managed.ScopedTokenFingerprint(string(snapshot.Bytes)) {
+		return fmt.Errorf("rotation snapshot digest does not match captured bytes")
+	}
 	if err := os.MkdirAll(filepath.Dir(snapshot.Path), 0o700); err != nil {
 		return err
 	}
 	if err := safefile.Write(snapshot.Path, snapshot.Bytes); err != nil {
 		return err
+	}
+	rewritten, err := os.ReadFile(snapshot.Path)
+	if err != nil {
+		return err
+	}
+	if managed.ScopedTokenFingerprint(string(rewritten)) != snapshot.Digest {
+		return fmt.Errorf("rotation snapshot restore did not reproduce the captured digest")
 	}
 	if snapshot.Mode != 0 {
 		if err := os.Chmod(snapshot.Path, os.FileMode(snapshot.Mode)); err != nil {
