@@ -76,7 +76,7 @@ func StaticCurlStdinUploadTargets(command CommandFact) []NetworkFact {
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return nil
 	}
 
@@ -128,7 +128,7 @@ func StaticCurlUploadPayloads(command CommandFact) []string {
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return nil
 	}
 
@@ -544,7 +544,7 @@ func StaticCurlUploadFileSources(command CommandFact) []TransmittedFileSource {
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) ||
 		!curlStaticFormEagerSyntaxValid(parsed) {
 		return nil
 	}
@@ -716,7 +716,7 @@ func StaticCurlSMTPRequestComponents(
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return nil
 	}
 	target := parsed.Targets[0]
@@ -962,7 +962,7 @@ func staticCurlTelnetOptionProjection(
 		len(parsed.Targets) != 1 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
 		!staticCurlFTPEagerOptionConflictsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return NetworkFact{}, nil, false
 	}
 	target := parsed.Targets[0]
@@ -1952,7 +1952,10 @@ func curlFeatureDependentPositiveFlag(option curlOptionToken) bool {
 // so exact transmission projectors may retain only the build-independent
 // subset. Most options are validated eagerly per occurrence; the SOCKS5
 // GSSAPI-NEC compatibility bit is applied only when its final state is enabled.
-func staticCurlFeatureDependentPositiveOptionsValid(parsed curlArgvParse) bool {
+func staticCurlFeatureDependentPositiveOptionsValid(
+	command CommandFact,
+	parsed curlArgvParse,
+) bool {
 	socks5GSSAPINEC := make(map[int]bool)
 	for _, option := range parsed.Options {
 		if option.Canonical == "--socks5-gssapi-nec" {
@@ -1960,12 +1963,18 @@ func staticCurlFeatureDependentPositiveOptionsValid(parsed curlArgvParse) bool {
 				option.Name != "--no-socks5-gssapi-nec"
 			continue
 		}
-		if curlFeatureDependentPositiveFlag(option) {
+		if !curlFeatureDependentPositiveFlag(option) {
+			continue
+		}
+		if !curlCommandAllowsFeature(
+			command,
+			curlFeatureDependentRequiredFeature(option),
+		) {
 			return false
 		}
 	}
 	for _, enabled := range socks5GSSAPINEC {
-		if enabled {
+		if enabled && !curlCommandAllowsFeature(command, "gss-api") {
 			return false
 		}
 	}
@@ -2478,7 +2487,8 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	// HTTPS proxy support is a separate libcurl build capability. Without an
 	// executable capability fact, curl can reject an https:// proxy before it
 	// resolves or connects, so no proxy-bound destination hostname is exact.
-	hostnameSetupValid := proxy.Scheme != "https" &&
+	hostnameSetupValid := (proxy.Scheme != "https" ||
+		curlCommandAllowsFeature(command, "https-proxy")) &&
 		staticCurlHostnameFirstWireSetupValid(
 			command,
 			parsed,
@@ -3211,7 +3221,7 @@ func staticCurlFTPSOCKSPreproxyCredentialRoute(
 		parsed.Preview || parsed.EmptyTransferGroup ||
 		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) ||
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) ||
 		!staticCurlFTPEagerPreparseValid(command, parsed) ||
 		!staticCurlFTPParallelSetupValid(command, parsed) {
 		return empty()
@@ -3396,7 +3406,7 @@ func staticCurlProxyDestinationWithUploadSources(
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	group := parsed.Targets[0].Group
@@ -3718,7 +3728,7 @@ func staticCurlHostnameFirstWireSetupValid(
 		return false
 	}
 	if !staticCurlFTPEagerOptionConflictsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return false
 	}
 	if !staticCurlNetrcSetupValid(command, parsed, group) {
@@ -4225,7 +4235,7 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return CurlTransmittedMetadata{}
 	}
 
@@ -8558,6 +8568,7 @@ func curlGroupFinalOptionValue(
 }
 
 func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
+	command.curlCapability = matchCurlCapability(out.curlCapabilities, *command)
 	parsed := parseCurlArgv(command.Argv)
 	proxyCommand := *command
 	if command.ParentCommandID != 0 || len(command.Wrappers) != 0 {

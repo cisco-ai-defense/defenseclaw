@@ -69,7 +69,7 @@ func proveCurlSequentialTransferPrefix(
 		(parsed.EmptyTransferGroup && len(parsed.Targets) == 0) ||
 		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return curlSequentialPrefixProof{}
 	}
 	if !staticCurlFTPEagerPreparseValid(command, parsed) {

@@ -17,14 +17,15 @@
 package actionfacts
 
 type parseOutput struct {
-	status    ParseStatus
-	dialect   Dialect
-	issues    []IssueCode
-	commands  []CommandFact
-	paths     []PathFact
-	network   []NetworkFact
-	dataFlows []DataFlowFact
-	nextID    int64
+	status           ParseStatus
+	dialect          Dialect
+	issues           []IssueCode
+	commands         []CommandFact
+	paths            []PathFact
+	network          []NetworkFact
+	dataFlows        []DataFlowFact
+	nextID           int64
+	curlCapabilities []CurlCapability
 }
 
 func newParseOutput(dialect Dialect, startID int64) parseOutput {
