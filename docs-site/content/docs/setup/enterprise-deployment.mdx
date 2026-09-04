@@ -1689,9 +1689,12 @@ Linux and macOS managed-enterprise rotation coordinates the gateway service
 with the POSIX guardian participant. Windows joins the same coordinator
 through a native `DefenseClawHookGuardian` adapter, not that POSIX journal.
 
-On Windows `managed_enterprise`, `defenseclaw setup rotate-token` invokes
-`enterprise hooks rotate-prepare|commit|rollback` against a Windows-only
+On Windows `managed_enterprise`, the native adapter
+(`enterprise hooks rotate-prepare|commit|rollback`) uses a Windows-only
 journal (`windows-rotation-transaction.json`). Mutations run as LocalSystem.
+Administrator `setup rotate-token` refuses before stop or credential writes
+until the guardian service dispatches those phases. Do not invoke the adapter
+as an inherited administrator subprocess.
 Per-user writes require the exact active non-elevated token for the
 manifest-pinned SID. Missing sessions, untrusted DACLs, reparse points, and
 hard-link aliases fail closed. Unmanaged Windows rotation is unchanged.
