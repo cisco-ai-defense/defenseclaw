@@ -139,6 +139,11 @@ func TestReadFindsFooterBeforeCertTable(t *testing.T) {
 				t.Fatalf("entry count (padding=%d): got %d want %d",
 					padding, len(result.Entries), len(entries))
 			}
+			// Delete each matched name from wantByName as we go and
+			// assert the map empties out at the end. Otherwise a
+			// result like [x, x, z] would pass while y went missing —
+			// count matches but the invariant "every expected name
+			// appears exactly once" doesn't.
 			wantByName := map[string][]byte{}
 			for _, e := range entries {
 				wantByName[e.Name] = e.Contents
@@ -146,12 +151,20 @@ func TestReadFindsFooterBeforeCertTable(t *testing.T) {
 			for _, got := range result.Entries {
 				want, ok := wantByName[got.Name]
 				if !ok {
-					t.Errorf("unexpected entry %q (padding=%d)", got.Name, padding)
+					t.Errorf("unexpected or duplicate entry %q (padding=%d)", got.Name, padding)
 					continue
 				}
 				if !bytes.Equal(got.Contents, want) {
 					t.Errorf("entry %q content mismatch (padding=%d)", got.Name, padding)
 				}
+				delete(wantByName, got.Name)
+			}
+			if len(wantByName) != 0 {
+				names := make([]string, 0, len(wantByName))
+				for n := range wantByName {
+					names = append(names, n)
+				}
+				t.Errorf("missing expected entries (padding=%d): %v", padding, names)
 			}
 		})
 	}
