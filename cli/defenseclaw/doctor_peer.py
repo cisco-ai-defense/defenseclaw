@@ -164,6 +164,8 @@ def linux_established_peer_pid_from_proc(
     proc_root: str,
 ) -> int:
     """Resolve an ESTABLISHED Linux peer from a (possibly fake) proc tree."""
+    local_ip = _canonical_ip(local_ip)
+    remote_ip = _canonical_ip(remote_ip)
     matching_inodes: set[str] = set()
     table_found = False
     for table_name in ("tcp", "tcp6"):
@@ -426,7 +428,7 @@ class _PeerBoundHTTPSHandler(urllib.request.HTTPSHandler):
         self._process_lookup = process_lookup
 
     def https_open(self, req):
-        return self.do_open(self._connection, req)
+        return self.do_open(self._connection, req, context=self._context)
 
     def _connection(self, *args, **kwargs):
         return PeerBoundHTTPSConnection(
@@ -523,8 +525,8 @@ def _linux_hex_endpoint(
     packed = bytes.fromhex(raw_address)
     if ipv6:
         network_bytes = b"".join(packed[index : index + 4][::-1] for index in range(0, len(packed), 4))
-        return ipaddress.ip_address(network_bytes), port
-    return ipaddress.ip_address(packed[::-1]), port
+        return _canonical_ip(ipaddress.ip_address(network_bytes)), port
+    return _canonical_ip(ipaddress.ip_address(packed[::-1])), port
 
 
 def _linux_socket_inode_owner(inodes: set[str], *, proc_root: str) -> int:
@@ -676,7 +678,7 @@ def _lsof_established_peer_pid(sock: socket.socket) -> int:
     lsof_path = _trusted_lsof_path()
     if not lsof_path:
         raise PeerBindError("trusted lsof binary is unavailable")
-    selector = f"-iTCP@{local_ip}:{local_port}"
+    selector = lsof_tcp_selector(local_ip, local_port)
     try:
         proc = subprocess.run(
             [
@@ -706,6 +708,17 @@ def _lsof_established_peer_pid(sock: socket.socket) -> int:
         remote_ip,
         remote_port,
     )
+
+
+def lsof_tcp_selector(
+    ip: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    port: int,
+) -> str:
+    """Return an lsof ``-iTCP`` selector with IPv6 literals in brackets."""
+    host = str(ip)
+    if ip.version == 6:
+        host = f"[{host}]"
+    return f"-iTCP@{host}:{port}"
 
 
 def _lsof_established_name_matches(
