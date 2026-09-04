@@ -2021,5 +2021,5 @@ export function createFetchInterceptor(
     console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop, describeLayers, verifyInterception };
+  return { start, stop, describeLayers, verifyInterception, runSelfTest };
 }
