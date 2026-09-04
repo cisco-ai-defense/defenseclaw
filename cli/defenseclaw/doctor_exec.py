@@ -31,8 +31,11 @@ POSIX (Linux/macOS)
 
 Windows
   Packaged installs must resolve to the sibling gateway under the install
-  root. Non-packaged paths must pass the existing integrity ACL write check
-  and must not be a reparse point. Doctor then opens the file with
+  root. Non-packaged paths must pass executable custody
+  (``windows_acl_custody_write_error``), not the private-file current-user
+  owner check. That admits TrustedInstaller, Administrators, LocalSystem, and
+  the current user so system PowerShell and user-owned adapters can both bind.
+  The path must not be a reparse point. Doctor then opens the file with
   ``GENERIC_READ | GENERIC_EXECUTE``, ``FILE_SHARE_READ`` only (no write or
   delete sharing), and records the volume serial plus file index from that
   handle. Spawn refuses if the path's object identity has changed. Holding
@@ -58,6 +61,7 @@ from defenseclaw.file_permissions import (
     UnsafePathError,
     open_regular_file_no_follow,
     trusted_posix_executable_path,
+    windows_acl_custody_write_error,
 )
 
 Runner = Callable[..., subprocess.CompletedProcess]
@@ -214,7 +218,6 @@ def _verify_pathname_custody(path: str) -> str:
             return trusted_posix_executable_path(path)
         except (OSError, UnsafePathError) as exc:
             raise ExecBindError("lifecycle executable custody could not be verified") from exc
-    from defenseclaw.file_permissions import windows_acl_write_error
     from defenseclaw.gateway import packaged_windows_gateway_path
 
     resolved = os.path.abspath(path)
@@ -226,7 +229,9 @@ def _verify_pathname_custody(path: str) -> str:
         except OSError as exc:
             raise ExecBindError("packaged lifecycle executable could not be verified") from exc
     for candidate in (resolved, os.path.dirname(resolved)):
-        if windows_acl_write_error(candidate) is not None:
+        # Executables may be owned by Windows itself. The private-file
+        # current-user owner check would refuse System32 PowerShell.
+        if windows_acl_custody_write_error(candidate, allow_current_user=True) is not None:
             raise ExecBindError("lifecycle executable custody could not be verified")
     if not os.path.isfile(resolved):
         raise ExecBindError("lifecycle executable is not a regular file")
