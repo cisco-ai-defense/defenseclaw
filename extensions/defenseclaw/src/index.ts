@@ -398,6 +398,15 @@ export default function (api: DefenseClawPluginHost) {
     id: "llm-interceptor",
     start: async () => {
       interceptor.start();
+      const layers = interceptor.describeLayers();
+      if (!layers.fetch || !layers.httpsRequest || !layers.httpRequest) {
+        console.warn(
+          "[defenseclaw] interceptor layer missing after service start: " +
+            `fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
+            `http.request=${layers.httpRequest} undici=${layers.undiciDispatcher}`,
+        );
+      }
+      await interceptor.verifyInterception();
       healthMonitor.start();
       return {
         stop: () => {

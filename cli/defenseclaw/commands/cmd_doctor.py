@@ -75,6 +75,7 @@ from defenseclaw.connector_paths import (
     rule_paths,
 )
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.connector_contracts import openclaw_needs_interception_advisory
 from defenseclaw.cursor_contract import validate_cursor_registration
 from defenseclaw.doctor_engine import (
     RepairDecision,
@@ -5690,6 +5691,85 @@ def _check_guardrail_proxy(cfg, r: _DoctorResult) -> None:
         _emit("fail", "Guardrail proxy", f"not responding on port {cfg.guardrail.port}", r=r)
 
 
+_PROXY_DOCTOR_CONNECTORS = frozenset({"openclaw", "zeptoclaw"})
+
+
+def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
+    """Fail closed when a proxy connector's :4000 listener is unused.
+
+    Liveness on ``/health/liveliness`` only proves the port is open. OpenClaw
+    2026.6.x can talk to a provider without hopping the interceptor, so doctor
+    reads the sidecar's additive ``interception`` document (plugin self-test
+    plus last ``X-DC-Target-URL`` hop).
+    """
+    if not cfg.guardrail.enabled:
+        return
+    if _guardrail_proxy_intentionally_closed(cfg):
+        return
+    connectors = [c for c in _doctor_active_connectors(cfg) if c in _PROXY_DOCTOR_CONNECTORS]
+    if not connectors:
+        return
+
+    label = "OpenClaw interception" if connectors == ["openclaw"] else "Proxy interception"
+    info = live_health.get("interception") if isinstance(live_health, dict) else None
+    if not isinstance(info, dict):
+        _emit(
+            "warn",
+            label,
+            "guardrail proxy is up but the sidecar has not reported an interceptor self-test",
+            remediation=(
+                "restart the OpenClaw gateway so the DefenseClaw plugin can publish "
+                "its interception self-test, then rerun doctor"
+            ),
+            r=r,
+        )
+        return
+    if info.get("verified") is True:
+        detail = "plugin self-test rewrote an LLM URL onto the local guardrail proxy"
+        last_traffic = info.get("last_agent_traffic_at")
+        if isinstance(last_traffic, str) and last_traffic.strip():
+            detail += "; agent traffic has reached :4000"
+        _emit("pass", label, detail, r=r)
+        return
+    _emit(
+        "fail",
+        label,
+        "guardrail proxy is up but OpenClaw agent traffic is not being intercepted — possible bypass",
+        remediation=(
+            "inspect gateway.log for '[defenseclaw] interceptor layers' and "
+            "'interception self-test', confirm the DefenseClaw plugin is enabled, "
+            "then rerun doctor"
+        ),
+        r=r,
+    )
+
+
+def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:
+    """Warn when the installed OpenClaw is in the changed-transport range."""
+    connectors = _doctor_active_connectors(cfg)
+    if "openclaw" not in connectors:
+        return
+    try:
+        from defenseclaw.inventory import agent_discovery
+
+        disc = agent_discovery.discover_agents(use_cache=True, data_dir=getattr(cfg, "data_dir", None))
+        signal = disc.agents.get("openclaw")
+    except Exception:
+        return
+    version = ""
+    if signal is not None:
+        version = signal.version or ""
+    if not openclaw_needs_interception_advisory(version):
+        return
+    _emit(
+        "warn",
+        "OpenClaw transport",
+        f"OpenClaw {version or 'unknown'} is ≥2026.6.8; confirm the OpenClaw interception check rather than the :4000 port alone",
+        remediation="run doctor after the DefenseClaw plugin has loaded and look for 'OpenClaw interception'",
+        r=r,
+    )
+
+
 def _check_semantic_routing(cfg, r: _DoctorResult, *, live_health: dict | None = None) -> None:
     routing = getattr(cfg, "routing", None)
     if routing is None or not bool(getattr(routing, "enabled", False)):
@@ -7424,6 +7504,8 @@ def doctor(
             # hook rows) instead of only the primary.
             _check_hilt_support(cfg, _conn, r)
     _check_guardrail_proxy(cfg, r)
+    _check_proxy_interception(cfg, r, live_health=sidecar_health)
+    _check_openclaw_transport_advisory(cfg, r)
     if not json_out:
         _doctor_subsection("Credentials")
     r.set_section("credentials")
