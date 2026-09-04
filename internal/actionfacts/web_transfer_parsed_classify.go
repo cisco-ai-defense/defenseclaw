@@ -2761,6 +2761,10 @@ func StaticCurlProxyTransmittedMetadata(
 		metadata.ProxyRequestComponents,
 		staticCurlPreproxyPlaintextHTTPRequestComponents(command)...,
 	)
+	metadata.ProxyRequestComponents = appendUniqueTransmittedRequestComponents(
+		metadata.ProxyRequestComponents,
+		staticCurlHTTPAfterCONNECTRequestComponents(command),
+	)
 	return metadata
 }
 
