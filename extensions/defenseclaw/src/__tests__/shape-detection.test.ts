@@ -343,20 +343,38 @@ describe("peekBodyForShape", () => {
   });
 
   it("completes a large Request peek after the caller aborts", async () => {
-    const controller = new AbortController();
+    let release!: (chunk: Uint8Array) => void;
+    const firstChunk = new Promise<Uint8Array>((resolve) => {
+      release = resolve;
+    });
+    const stream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        controller.enqueue(await firstChunk);
+        controller.close();
+      },
+    });
+    const abort = new AbortController();
     const request = new Request("https://custom-provider.test/v1/chat", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        model: "custom",
-        messages: [{ role: "user", content: "x".repeat(70_000) }],
-      }),
-      signal: controller.signal,
-    });
-    setTimeout(() => controller.abort(), 5);
+      body: stream,
+      duplex: "half",
+      signal: abort.signal,
+    } as RequestInit);
+    const peek = peekBodyForShape(request);
+    await Promise.resolve();
+    abort.abort();
+    release(
+      new TextEncoder().encode(
+        JSON.stringify({
+          model: "custom",
+          messages: [{ role: "user", content: "hi" }],
+        }),
+      ),
+    );
     await expect(
       Promise.race([
-        peekBodyForShape(request),
+        peek,
         new Promise<never>((_, reject) => {
           setTimeout(() => reject(new Error("peek hung after abort")), 1000);
         }),
