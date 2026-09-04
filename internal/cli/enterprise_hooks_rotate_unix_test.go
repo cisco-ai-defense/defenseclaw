@@ -111,8 +111,16 @@ func TestEnterpriseHookRotationRollbackRestoresAAfterPrepare(t *testing.T) {
 		t.Fatal("rollback did not restore generation A")
 	}
 	authorization, exists, err := loadEnterpriseHookGuardianAuthorization(env.serviceDir)
-	if err != nil || !exists || authorization.Current == nil || authorization.Current.OK {
-		t.Fatalf("readiness after rollback should be unready: exists=%v err=%v current=%v", exists, err, authorization.Current)
+	if err != nil || !exists || authorization.Current == nil || !authorization.Current.OK {
+		t.Fatalf("readiness after rollback should republish generation A: exists=%v err=%v current=%v", exists, err, authorization.Current)
+	}
+	wantFingerprint := managed.ScopedTokenFingerprint(env.tokenA)
+	if authorization.Current.ManifestSHA256 != rolled.ManifestSHA256 {
+		t.Fatalf("rollback manifest digest = %q, want %q", authorization.Current.ManifestSHA256, rolled.ManifestSHA256)
+	}
+	if len(authorization.Current.Attestations) != 1 ||
+		authorization.Current.Attestations[0].TokenFingerprint != wantFingerprint {
+		t.Fatalf("rollback attestations = %+v, want generation A fingerprint", authorization.Current.Attestations)
 	}
 	if _, err := executeEnterpriseHookRotationRollback(req); err != nil {
 		t.Fatalf("idempotent rollback: %v", err)
