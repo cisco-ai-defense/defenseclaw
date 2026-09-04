@@ -224,6 +224,33 @@ func TestSidecarHealthSetAPI(t *testing.T) {
 	}
 }
 
+func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
+	h := NewSidecarHealth()
+	if h.Snapshot().Interception != nil {
+		t.Fatal("interception should be omitted until the plugin or proxy reports")
+	}
+
+	h.RecordInterceptionResult(true)
+	snap := h.Snapshot()
+	if snap.Interception == nil || !snap.Interception.Verified {
+		t.Fatalf("verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expected last_verified_at")
+	}
+
+	h.RecordAgentProxyTraffic()
+	snap = h.Snapshot()
+	if snap.Interception.LastAgentTrafficAt == "" {
+		t.Fatal("expected last_agent_traffic_at after an X-DC-Target-URL hop")
+	}
+
+	h.RecordInterceptionResult(false)
+	if h.Snapshot().Interception.Verified {
+		t.Fatal("failed self-test must clear verified")
+	}
+}
+
 func TestSidecarHealthSetGuardrail(t *testing.T) {
 	h := NewSidecarHealth()
 

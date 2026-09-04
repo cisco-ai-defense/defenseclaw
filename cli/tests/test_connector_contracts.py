@@ -38,6 +38,7 @@ from defenseclaw.connector_contracts import (
     STATUS_UNKNOWN,
     STATUS_UNVERSIONED,
     _load_contracts_from_manifest,
+    openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
@@ -112,6 +113,12 @@ class TestConnectorContractManifest(unittest.TestCase):
             compat = resolve_connector_contract(connector, "9.9.9")
             self.assertEqual(compat.status, STATUS_NOT_GATED)
             self.assertTrue(compat.supported)
+
+    def test_openclaw_transport_advisory_starts_at_2026_6_8(self) -> None:
+        self.assertFalse(openclaw_needs_interception_advisory("2026.4.15"))
+        self.assertTrue(openclaw_needs_interception_advisory("2026.6.8"))
+        self.assertTrue(openclaw_needs_interception_advisory("2026.6.11"))
+        self.assertFalse(openclaw_needs_interception_advisory(""))
 
     def test_codex_version_range_matches_contract(self) -> None:
         expected = (

@@ -2485,10 +2485,14 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 	}
 
 	fmt.Fprintf(os.Stderr, "[guardrail] ── INCOMING REQUEST ──────────────────────────────────\n")
+	targetURL := r.Header.Get("X-DC-Target-URL")
 	fmt.Fprintf(os.Stderr, "[guardrail] headers: Authorization=%s api-key=%s X-DC-Target-URL=%s\n",
 		redactAuthValue(r.Header.Get("Authorization")),
 		redactAuthValue(r.Header.Get("api-key")),
-		scrubURLSecrets(r.Header.Get("X-DC-Target-URL")))
+		scrubURLSecrets(targetURL))
+	if strings.TrimSpace(targetURL) != "" {
+		p.health.RecordAgentProxyTraffic()
+	}
 	// Request bodies contain prompts, conversation history, and tool
 	// results. Keep only their size in the pretty stderr stream because
 	// the daemon persists that stream to gateway.log and deployments may
