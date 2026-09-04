@@ -596,11 +596,14 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 			},
 		},
 		{
-			name: "preproxy changes first peer", argv: []string{
+			name: "preproxy plus HTTPS proxy keeps credentials on the main proxy",
+			argv: []string{
 				"curl", "--preproxy", "socks5://first.example", "--proxy",
 				"https://proxy.example", "--proxy-user", "proxy:" + token,
 				"https://origin.example",
 			},
+			want:              components("https", "proxy.example", 443, "proxy:"+token),
+			wantAuthoritative: true,
 		},
 		{
 			name: "SOCKS proxy credentials use their own metadata lane", argv: []string{

