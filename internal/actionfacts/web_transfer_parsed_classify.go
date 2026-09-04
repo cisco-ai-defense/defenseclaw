@@ -3214,11 +3214,21 @@ func staticCurlProxyDestination(
 	return staticCurlProxyDestinationWithUploadSources(command, false)
 }
 
-func staticCurlSOCKSPlaintextUploadRoute(
+func staticCurlSOCKSProxyDestinationWithUploads(
 	command CommandFact,
 ) (NetworkFact, curlArgvParse, bool) {
 	proxy, parsed, ok := staticCurlProxyDestinationWithUploadSources(command, true)
-	if !ok || proxy.Scheme != "tcp" || len(command.Redirects) != 0 {
+	if !ok || proxy.Scheme != "tcp" {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	return proxy, parsed, true
+}
+
+func staticCurlSOCKSPlaintextUploadRoute(
+	command CommandFact,
+) (NetworkFact, curlArgvParse, bool) {
+	proxy, parsed, ok := staticCurlSOCKSProxyDestinationWithUploads(command)
+	if !ok || len(command.Redirects) != 0 {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	hasHTTPOrigin := false
@@ -8414,7 +8424,7 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 	}
 	proxyNetwork, _, proxyProved := staticCurlProxyDestination(proxyCommand)
 	if !proxyProved {
-		if socksProxy, _, socksProved := staticCurlSOCKSPlaintextUploadRoute(proxyCommand); socksProved {
+		if socksProxy, _, socksProved := staticCurlSOCKSProxyDestinationWithUploads(proxyCommand); socksProved {
 			proxyNetwork = socksProxy
 			proxyProved = true
 		}
