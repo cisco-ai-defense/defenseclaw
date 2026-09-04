@@ -19,7 +19,6 @@
 from __future__ import annotations
 
 import os
-import stat
 import subprocess
 import sys
 from pathlib import Path
@@ -50,7 +49,7 @@ def test_bind_trusted_executable_rejects_relative_and_missing(tmp_path: Path) ->
 def test_posix_spawn_executes_held_inode_after_path_replacement(tmp_path: Path) -> None:
     tool = tmp_path / "defenseclaw-gateway"
     _write_exec(tool, "#!/bin/sh\necho ORIGINAL-GENERATION\n")
-    bound = bind_trusted_executable(str(tool))
+    bound = bind_trusted_executable(str(tool), verify_custody=False)
     try:
         tool.unlink()
         _write_exec(tool, "#!/bin/sh\necho REPLACED-GENERATION\n")
@@ -73,7 +72,7 @@ def test_run_bound_keeps_explicit_argv_and_disables_shell(tmp_path: Path) -> Non
     tool = tmp_path / "defenseclaw-gateway"
     _write_exec(tool, "#!/bin/sh\necho ok\n")
     runner = MagicMock(return_value=subprocess.CompletedProcess(["x"], 0, "", ""))
-    bound = bind_trusted_executable(str(tool))
+    bound = bind_trusted_executable(str(tool), verify_custody=False)
     try:
         run_bound_executable(bound, ["restart"], runner=runner, timeout=1)
         argv, kwargs = runner.call_args
@@ -94,7 +93,7 @@ def test_run_bound_keeps_explicit_argv_and_disables_shell(tmp_path: Path) -> Non
 def test_darwin_spawn_fails_closed_after_path_replacement(tmp_path: Path) -> None:
     tool = tmp_path / "defenseclaw-gateway"
     _write_exec(tool, "#!/bin/sh\necho ORIGINAL-GENERATION\n")
-    bound = bind_trusted_executable(str(tool))
+    bound = bind_trusted_executable(str(tool), verify_custody=False)
     try:
         tool.unlink()
         _write_exec(tool, "#!/bin/sh\necho REPLACED-GENERATION\n")
@@ -124,7 +123,7 @@ def test_windows_path_identity_change_fails_closed(monkeypatch) -> None:
 
 
 def test_bind_uses_python_interpreter_as_real_executable() -> None:
-    bound = bind_trusted_executable(os.path.realpath(sys.executable))
+    bound = bind_trusted_executable(os.path.realpath(sys.executable), verify_custody=False)
     try:
         assert bound.fd >= 0
         assert bound.identity.size > 0
