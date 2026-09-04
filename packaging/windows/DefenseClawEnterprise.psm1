@@ -10953,10 +10953,31 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         'cursor',
         'selector_targets'
     )
+    # Required = the strict-authenticated identity core. Anything whose
+    # absence means "this connector was not a target" is deliberately
+    # OPTIONAL so a journal written by a deployment that never targeted
+    # (say) codex still parses on uninstall. Every optional property is
+    # still whitelisted above — an unknown key is still rejected — and
+    # every trust-critical binding (manifest-SHA256, hook-binary path,
+    # gateway service name, activation record, target fingerprint) stays
+    # in the required set, so an attacker cannot substitute a foreign
+    # journal by omitting fields. Matches the macOS uninstall's
+    # existence-first tolerance for connector-optional state without
+    # loosening the identity contract. Reported by AVC dry-run: an
+    # activation record with a codex_targets-less journal was blocking
+    # every uninstall retry through the committed-uninstall cleanup path.
     $required = @(
-        $allowed | Microsoft.PowerShell.Core\Where-Object {
-            $_ -cne 'pending_targets'
-        }
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_sha256',
+        'manifest_fingerprint',
+        'activation_state',
+        'deployment_generation_id',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets'
     )
     [void](Assert-DefenseClawManagedHooksTeardownJsonObject `
         -Value $Journal `
@@ -10983,8 +11004,13 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
             throw "schema-6 managed-hook teardown journal $name is not a string"
         }
     }
-    if ($Journal.codex_policy_active -isnot [bool]) {
-        throw 'schema-6 managed-hook teardown codex_policy_active is not Boolean'
+    # codex_policy_active is connector-optional per the relaxed $required
+    # list above. Only enforce the boolean type check when the property is
+    # present; absence is treated as "codex was not a target".
+    $codexPolicyProperty = $Journal.PSObject.Properties['codex_policy_active']
+    if ($null -ne $codexPolicyProperty -and
+        $codexPolicyProperty.Value -isnot [bool]) {
+        throw 'schema-6 managed-hook teardown codex_policy_active is not Boolean when present'
     }
     Assert-DefenseClawManagedHooksTeardownProtectedAdminFile `
         -Path $Layout.ManagedHooksTeardownJournalPath
@@ -11040,6 +11066,7 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
             throw "schema-6 managed-hook teardown journal $($pair[0]) does not match this scope"
         }
     }
+    $codexPolicyPresent = $null -ne $codexPolicyProperty
     if (-not [string]::Equals(
             [string]$Journal.gateway_service_name,
             $GatewayServiceName,
@@ -11048,7 +11075,8 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         [string]::IsNullOrWhiteSpace([string]$Journal.gateway_addr) -or
         [string]$Journal.gateway_addr -match '[\x00-\x1f\x7f]' -or
         ([string]$Journal.gateway_addr).Length -gt 4096 -or
-        $Journal.codex_policy_active -isnot [bool]) {
+        ($codexPolicyPresent -and
+            $codexPolicyProperty.Value -isnot [bool])) {
         throw 'schema-6 managed-hook teardown journal has an invalid protected identity'
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -11337,12 +11365,27 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         'cursor',
         'selector_targets'
     )
+    # Required = strict identity core only. Connector-optional fields
+    # match the schema-6 relaxation (see above): whitelisted for
+    # unknown-property rejection but not presence-required, so a
+    # legacy journal from a deployment that never targeted a given
+    # connector can still be retired on uninstall.
+    $legacyRequired = @(
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_fingerprint',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets'
+    )
     foreach ($property in @($journal.PSObject.Properties)) {
         if ([string]$property.Name -notin $legacyProperties) {
             throw 'legacy managed-hook teardown journal contains an unexpected property'
         }
     }
-    foreach ($name in $legacyProperties) {
+    foreach ($name in $legacyRequired) {
         if ($null -eq $journal.PSObject.Properties[$name]) {
             throw "legacy managed-hook teardown journal is missing $name"
         }
@@ -11383,10 +11426,24 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         throw 'legacy managed-hook teardown journal has an invalid protected identity'
     }
     $targets = @($journal.targets)
+    # Connector-optional target arrays are legitimately absent when the
+    # deployment never targeted that connector. Read via PSObject.Properties
+    # so StrictMode's missing-property throw doesn't fire before the count
+    # cap can even be checked.
+    $legacyOptionalTargetCounts = @{}
+    foreach ($name in @('claude_target_sids', 'cursor_targets', 'selector_targets')) {
+        $property = $journal.PSObject.Properties[$name]
+        $legacyOptionalTargetCounts[$name] = if ($null -eq $property) {
+            0
+        }
+        else {
+            @($property.Value).Count
+        }
+    }
     if ($targets.Count -gt 384 -or
-        @($journal.claude_target_sids).Count -gt 384 -or
-        @($journal.cursor_targets).Count -gt 384 -or
-        @($journal.selector_targets).Count -gt 384) {
+        $legacyOptionalTargetCounts['claude_target_sids'] -gt 384 -or
+        $legacyOptionalTargetCounts['cursor_targets'] -gt 384 -or
+        $legacyOptionalTargetCounts['selector_targets'] -gt 384) {
         throw 'legacy managed-hook teardown journal exceeds its target bound'
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
