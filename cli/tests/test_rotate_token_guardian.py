@@ -184,10 +184,29 @@ class RequireGuardianParticipantBehaviorTests(RequireGuardianParticipantTests):
         self.assertFalse(require_guardian_participant(SimpleNamespace(deployment_mode="")))
 
     def test_windows_managed_joins_native_adapter(self) -> None:
-        with mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"):
+        with (
+            mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"),
+            mock.patch(
+                "defenseclaw.rotate_token_guardian._windows_process_is_localsystem",
+                return_value=True,
+            ),
+        ):
             self.assertTrue(
                 require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise"))
             )
+
+    def test_windows_admin_refuses_before_mutation(self) -> None:
+        with (
+            mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"),
+            mock.patch(
+                "defenseclaw.rotate_token_guardian._windows_process_is_localsystem",
+                return_value=False,
+            ),
+        ):
+            with self.assertRaises(click.ClickException) as raised:
+                require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise"))
+        self.assertIn("LocalSystem", str(raised.exception))
+        self.assertIn("no credentials were modified", str(raised.exception))
 
     @unittest.skipIf(os.name == "nt", "POSIX managed participant")
     def test_posix_managed_joins(self) -> None:

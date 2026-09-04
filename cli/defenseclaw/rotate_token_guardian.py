@@ -40,10 +40,13 @@ import yaml
 from defenseclaw import windows_acl
 from defenseclaw.file_permissions import (
     UnsafePathError,
+    _windows_current_user_sid,
     darwin_acl_write_error,
     open_regular_file_no_follow,
     reject_reparse_path,
 )
+
+_WINDOWS_LOCAL_SYSTEM_SID = "S-1-5-18"
 
 GUARDIAN_MANIFEST_ENV = "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST"
 GUARDIAN_AUTH_DIR_ENV = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
@@ -229,16 +232,21 @@ def _assert_windows_guardian_control_plane_path(
             raise click.ClickException(f"{label} ancestor is not a trusted directory.")
         try:
             security = windows_acl.capture_path(current, directory=stat.S_ISDIR(info.st_mode))
-            windows_acl.assert_trusted_owner(security)
-            windows_acl.assert_not_broadly_writable(security)
         except windows_acl.WindowsAclError as exc:
-            detail = str(exc)
-            if "broad" in detail.lower():
-                raise click.ClickException(
-                    f"{label} is broadly writable; no credentials were modified."
-                ) from exc
+            raise click.ClickException(
+                f"{label} security could not be read; no credentials were modified."
+            ) from exc
+        try:
+            windows_acl.assert_trusted_owner(security)
+        except windows_acl.WindowsAclError as exc:
             raise click.ClickException(
                 f"{label} is not administrator-owned; no credentials were modified."
+            ) from exc
+        try:
+            windows_acl.assert_not_broadly_writable(security)
+        except windows_acl.WindowsAclError as exc:
+            raise click.ClickException(
+                f"{label} is broadly writable; no credentials were modified."
             ) from exc
         parent = os.path.dirname(current)
         if parent == current:
@@ -264,15 +272,34 @@ WINDOWS_MANAGED_ROTATION_UNAVAILABLE = (
 )
 
 
-def require_guardian_participant(cfg: Any) -> bool:
-    """Join managed-enterprise guardians on every supported host OS.
+def _windows_process_is_localsystem() -> bool:
+    """Return whether this process token is the LocalSystem guardian."""
+    if os.name != "nt":
+        return False
+    try:
+        return _windows_current_user_sid() == _WINDOWS_LOCAL_SYSTEM_SID
+    except OSError:
+        return False
 
-    Windows uses the native DefenseClawHookGuardian adapter. The POSIX
-    journal protocol must never be selected from this coordinator.
+
+def require_guardian_participant(cfg: Any) -> bool:
+    """Join managed-enterprise guardians when the participant can actually run.
+
+    Windows uses the native DefenseClawHookGuardian adapter and must never
+    select the POSIX journal. Administrator ``rotate-token`` cannot inherit
+    LocalSystem, so it refuses before stop/mutate until the guardian service
+    dispatches rotation. LocalSystem may join the native adapter.
     """
 
     if not is_managed_enterprise(cfg):
         return False
+    if os.name == "nt" and not _windows_process_is_localsystem():
+        raise click.ClickException(
+            "Managed-enterprise token rotation on Windows must run as the "
+            "LocalSystem DefenseClawHookGuardian. Administrator rotate-token "
+            "cannot dispatch the native adapter until service-side rotation "
+            "exists; no credentials were modified."
+        )
     return True
 
 
