@@ -94,6 +94,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
+from defenseclaw.doctor_exec import ExecBindError, bind_trusted_executable, run_bound_executable
 from defenseclaw.file_permissions import (
     MAX_DOTENV_BYTES,
     atomic_write_private_bytes,
@@ -13652,15 +13653,20 @@ def _restart_defense_gateway(
         click.echo(" ✗ (binary is not a verified executable file)")
         return False
     executable = str(Path(executable).resolve())
-    cmd = [executable, "restart"] if was_running else [executable, "start"]
+    try:
+        bound = bind_trusted_executable(executable, verify_custody=False)
+    except ExecBindError:
+        click.echo(" ✗ (binary identity could not be bound)")
+        return False
+    action = "restart" if was_running else "start"
     generation_before = previous_generation or _gateway_runtime_generation_before_restart(data_dir)
     try:
-        result = subprocess.run(
-            cmd,
+        result = run_bound_executable(
+            bound,
+            [action],
+            runner=subprocess.run,
             capture_output=True,
             text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
             env=child_env,
             timeout=30,
         )
@@ -13680,6 +13686,9 @@ def _restart_defense_gateway(
             for line in err.splitlines()[:3]:
                 click.echo(f"    {line}")
         return False
+    except ExecBindError:
+        click.echo(" ✗ (binary identity could not be bound)")
+        return False
     except FileNotFoundError:
         click.echo(" ✗ (binary not found)")
         click.echo("    Build with: make gateway")
@@ -13695,7 +13704,7 @@ def _restart_defense_gateway(
         # child cannot outlive the failed setup command.  On restart, preserve
         # the pre-existing generation rather than stopping an otherwise healthy
         # service whose replacement outcome is uncertain.
-        status = _gateway_lifecycle_status(executable, child_env=child_env)
+        status = _gateway_lifecycle_status(executable, child_env=child_env, bound=bound)
         if status and _wait_for_defense_gateway_api(
             data_dir,
             previous_generation=generation_before,
@@ -13703,9 +13712,11 @@ def _restart_defense_gateway(
             click.echo(" ✓ (ready after launcher timeout)")
             return True
         if not was_running:
-            _cleanup_timed_out_gateway_start(executable, child_env=child_env)
+            _cleanup_timed_out_gateway_start(executable, child_env=child_env, bound=bound)
         click.echo(" ✗ (timed out; final status is not healthy)")
         return False
+    finally:
+        bound.close()
 
 
 def _wait_for_defense_gateway_api(
@@ -13934,18 +13945,32 @@ def _gateway_lifecycle_status(
     executable: str,
     *,
     child_env: dict[str, str] | None = None,
+    bound=None,
 ) -> bool:
     try:
-        result = subprocess.run(
-            [executable, "status"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=child_env,
-            timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
-        )
+        if bound is not None:
+            result = run_bound_executable(
+                bound,
+                ["status"],
+                runner=subprocess.run,
+                capture_output=True,
+                text=True,
+                env=child_env,
+                timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+            )
+        else:
+            result = subprocess.run(
+                [executable, "status"],
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=child_env,
+                timeout=_DEFENSE_GATEWAY_STATUS_TIMEOUT_SECONDS,
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+        return False
+    except ExecBindError:
         return False
     return result.returncode == 0
 
@@ -13954,17 +13979,29 @@ def _cleanup_timed_out_gateway_start(
     executable: str,
     *,
     child_env: dict[str, str] | None = None,
+    bound=None,
 ) -> None:
     try:
-        subprocess.run(
-            [executable, "stop"],
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=child_env,
-            timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
-        )
+        if bound is not None:
+            run_bound_executable(
+                bound,
+                ["stop"],
+                runner=subprocess.run,
+                capture_output=True,
+                text=True,
+                env=child_env,
+                timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+            )
+        else:
+            subprocess.run(
+                [executable, "stop"],
+                capture_output=True,
+                text=True,
+                shell=False,
+                stdin=subprocess.DEVNULL,
+                env=child_env,
+                timeout=_DEFENSE_GATEWAY_STOP_TIMEOUT_SECONDS,
+            )
     except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
         # The caller already reports failure. The gateway's native PID and
         # identity checks prevent this best-effort cleanup targeting another
