@@ -33,7 +33,7 @@ from defenseclaw.commands.cmd_setup import _rotate_token_atomic_write
 from defenseclaw.config import CONFIG_PATH_ENV
 from defenseclaw.context import AppContext
 from defenseclaw.logger import CanonicalObservabilityUnavailableError
-from defenseclaw.rotate_token_guardian import assert_current_attestations
+from defenseclaw.rotate_token_guardian import assert_current_attestations, guardian_journal_file
 
 from tests.permissions import assert_owner_only_file
 
@@ -2295,7 +2295,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
             plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
             lifecycle = mock.Mock()
             with (
@@ -2307,6 +2307,31 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             self.assertNotEqual(result.exit_code, 0, msg=result.output)
             lifecycle.assert_not_called()
             self.assertIn("already in progress", result.output)
+
+    def test_posix_guardian_journal_fails_before_stop_on_windows(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        if os.name != "nt":
+            self.skipTest("POSIX journal conflict is a Windows coordinator refusal")
+        with TemporaryDirectory() as td:
+            app = _make_rotate_ctx(td, ["codex"])
+            dotenv = os.path.join(td, ".env")
+            Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
+            plan = _guardian_plan("codex", td=td, users=("alice",))
+            _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
+            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
+            lifecycle = mock.Mock()
+            with (
+                mock.patch.object(cmd_setup, "_rotate_token_guardian_plan", return_value=plan),
+                mock.patch.object(cmd_setup, "_run_rotate_token_lifecycle", lifecycle),
+                mock.patch.object(cmd_setup, "_run_guardian_rotate"),
+            ):
+                result = CliRunner().invoke(cmd_setup.rotate_token_cmd, ["--yes"], obj=app)
+            self.assertNotEqual(result.exit_code, 0, msg=result.output)
+            lifecycle.assert_not_called()
+            self.assertIn("POSIX guardian journal", result.output)
+            self.assertTrue(journal.exists())
 
     def test_exposure_recovery_rolls_back_guardian_but_does_not_restart_a(self) -> None:
         from tempfile import TemporaryDirectory
@@ -2579,7 +2604,7 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
             Path(dotenv).write_bytes(b"DEFENSECLAW_GATEWAY_TOKEN=" + b"a" * 64 + b"\n")
             plan = _guardian_plan("codex", td=td, users=("alice",))
             _write_current_authorization(td, plan, {"codex": _fixture_hook_fingerprint(1)}, "a" * 32)
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
             events: list[str] = []
 
