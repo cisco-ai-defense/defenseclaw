@@ -32,6 +32,7 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 		len(facts.Paths) > maxPaths ||
 		len(facts.Network) > maxNetwork ||
 		len(facts.DataFlows) > maxDataFlows ||
+		len(facts.Artifacts) > maxArtifacts ||
 		len(facts.Parse.Issues) > maxIssues {
 		return nil, ProjectionCountLimit
 	}
@@ -58,10 +59,12 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			Dialect: dialect,
 			Issues:  make([]semanticpb.IssueCode, len(facts.Parse.Issues)),
 		},
-		Commands:  make([]*semanticpb.CommandFact, 0, len(facts.Commands)),
-		Paths:     make([]*semanticpb.PathFact, 0, len(facts.Paths)),
-		Network:   make([]*semanticpb.NetworkFact, 0, len(facts.Network)),
-		DataFlows: make([]*semanticpb.DataFlowFact, 0, len(facts.DataFlows)),
+		Commands:        make([]*semanticpb.CommandFact, 0, len(facts.Commands)),
+		Paths:           make([]*semanticpb.PathFact, 0, len(facts.Paths)),
+		Network:         make([]*semanticpb.NetworkFact, 0, len(facts.Network)),
+		DataFlows:       make([]*semanticpb.DataFlowFact, 0, len(facts.DataFlows)),
+		Artifacts:       make([]*semanticpb.ArtifactFact, 0, len(facts.Artifacts)),
+		ArchiveLineages: make([]*semanticpb.ArchiveArtifactLineage, 0),
 	}
 	for index, issue := range facts.Parse.Issues {
 		mapped, valid := projectIssue(issue)
@@ -186,6 +189,60 @@ func Project(facts actionfacts.Facts) (*semanticpb.Facts, ProjectionCode) {
 			From:          from,
 			To:            to,
 		})
+	}
+
+	for _, fact := range facts.Artifacts {
+		if !knownCommandReference(fact.CommandID, commandIDs) {
+			return nil, ProjectionInvalidReference
+		}
+		role, valid := projectArtifactRole(fact.Role)
+		if !valid {
+			return nil, ProjectionInvalidEnum
+		}
+		kind, valid := projectArtifactKind(fact.Kind)
+		if !valid {
+			return nil, ProjectionInvalidEnum
+		}
+		if !validScalar(fact.Value) ||
+			!validScalar(fact.Normalized) ||
+			!validScalar(fact.Resolved) ||
+			!validScalar(fact.Identity) {
+			return nil, ProjectionScalarLimit
+		}
+		projected.Artifacts = append(projected.Artifacts, &semanticpb.ArtifactFact{
+			CommandId:  fact.CommandID,
+			Role:       role,
+			Kind:       kind,
+			Value:      fact.Value,
+			Normalized: fact.Normalized,
+			Absolute:   fact.Absolute,
+			Resolved:   fact.Resolved,
+			Identity:   fact.Identity,
+		})
+	}
+
+	lineages := actionfacts.StaticArchiveArtifactLineage(facts)
+	if len(lineages) > maxArchiveLineages {
+		return nil, ProjectionCountLimit
+	}
+	for _, lineage := range lineages {
+		if !knownCommandReference(lineage.ProducedBy, commandIDs) ||
+			!knownCommandReference(lineage.ConsumedBy, commandIDs) {
+			return nil, ProjectionInvalidReference
+		}
+		if !validScalar(lineage.Identity) || !validScalar(lineage.Normalized) {
+			return nil, ProjectionScalarLimit
+		}
+		projected.ArchiveLineages = append(
+			projected.ArchiveLineages,
+			&semanticpb.ArchiveArtifactLineage{
+				Identity:      lineage.Identity,
+				ProducedBy:    lineage.ProducedBy,
+				ConsumedBy:    lineage.ConsumedBy,
+				Normalized:    lineage.Normalized,
+				Authoritative: lineage.Authoritative,
+			},
+		)
 	}
 	return projected, ProjectionOK
 }
