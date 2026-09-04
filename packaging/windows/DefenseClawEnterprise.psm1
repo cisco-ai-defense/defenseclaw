@@ -16020,10 +16020,39 @@ function Assert-DefenseClawManagedInstallTree {
 }
 
 function Assert-DefenseClawManagedTreeNoReparse {
-    param([Parameter(Mandatory)][string]$Root)
+    # -AllowAFUnixSocketAt is the exact-path exemption for the managed
+    # IPC AF_UNIX socket file. Windows backs AF_UNIX socket files with
+    # an NTFS reparse point (IO_REPARSE_TAG_AF_UNIX 0x80000023), so a
+    # stale socket left after an unclean guardian stop surfaces with
+    # the ReparsePoint attribute. Callers walking a tree that MAY
+    # contain that socket (InstallRoot pre-rename, retired sibling
+    # post-rename) supply the expected full path; every other reparse
+    # point still aborts. Callers walking trees that never contain the
+    # socket (StateRoot, transaction envelopes, lifecycle receipts)
+    # leave the parameter empty and get the strict pre-existing
+    # behavior — no reparse point tolerated anywhere.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string]$AllowAFUnixSocketAt = ''
+    )
     Assert-DefenseClawNoReparsePath -Path $Root
+    $exemptSocket = ''
+    if (-not [string]::IsNullOrWhiteSpace($AllowAFUnixSocketAt)) {
+        $exemptSocket = [IO.Path]::GetFullPath(
+            $AllowAFUnixSocketAt
+        ).TrimEnd('\')
+    }
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Root -Recurse -Force) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            if (-not $item.PSIsContainer -and
+                $exemptSocket -ne '' -and
+                [string]::Equals(
+                    [IO.Path]::GetFullPath($item.FullName).TrimEnd('\'),
+                    $exemptSocket,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                continue
+            }
             throw "managed tree contains a reparse point: $($item.FullName)"
         }
     }
@@ -16177,13 +16206,21 @@ function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$RequiredBase,
-        [Parameter(Mandatory)][string]$Label
+        [Parameter(Mandatory)][string]$Label,
+        # Pass-through to Assert-DefenseClawManagedTreeNoReparse. Callers
+        # tearing down the install tree (canonical or retired sibling)
+        # specify the AF_UNIX socket's exact full path so a stale
+        # socket-reparse-point does not trip the pre-remove reparse
+        # veto. Callers on other trees leave it empty for strict mode.
+        [string]$AllowAFUnixSocketAt = ''
     )
     $safe = Assert-DefenseClawSafeRoot -Path $Path -Label $Label -RequiredBase $RequiredBase
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse -Root $safe
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $safe `
+        -AllowAFUnixSocketAt $AllowAFUnixSocketAt
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $safe -Recurse -Force
 }
 
@@ -16382,7 +16419,12 @@ function Assert-DefenseClawRetiredInstallTree {
     $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
         -Layout $Layout `
         -RetiredRoot $retired
-    Assert-DefenseClawManagedTreeNoReparse -Root $retired
+    $retiredIPCSocket = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc\defenseclaw_ipc.sock'
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $retired `
+        -AllowAFUnixSocketAt $retiredIPCSocket
     $objects = @(
         Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $retired `
@@ -16498,7 +16540,9 @@ function Assert-DefenseClawInstallTreeRetirementState {
     $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
         -Layout $Layout `
         -RetiredRoot $root
-    Assert-DefenseClawManagedTreeNoReparse -Root $root
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $root `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     $objects = @(
         Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $root `
@@ -17433,12 +17477,25 @@ function Remove-DefenseClawRetiredInstallTree {
     $modulePath = Microsoft.PowerShell.Management\Join-Path `
         $retired `
         'libexec\DefenseClawEnterprise.psm1'
+    # AF_UNIX socket: skip the per-file no-reparse gate below (the socket
+    # is an IO_REPARSE_TAG_AF_UNIX reparse point by design) and delete it
+    # separately at the end alongside its ipc\ container.
+    $retiredIPCSocket = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc\defenseclaw_ipc.sock'
     foreach ($path in @(
         $allowlist.files |
             Microsoft.PowerShell.Core\Where-Object {
                 -not [string]::Equals(
                     [string]$_,
                     $modulePath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and
+                -not [string]::Equals(
+                    [string]$_,
+                    (
+                        [IO.Path]::GetFullPath($retiredIPCSocket).TrimEnd('\')
+                    ),
                     [StringComparison]::OrdinalIgnoreCase
                 )
             }
@@ -17451,6 +17508,27 @@ function Remove-DefenseClawRetiredInstallTree {
                 -LiteralPath $path `
                 -Force
         }
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $retiredIPCSocket `
+        -PathType Leaf) {
+        # Remove-Item -Force deletes the reparse point itself (no target
+        # follow) which is exactly the right primitive for AF_UNIX
+        # sockets — the "target" is the socket, there is nothing else
+        # behind it.
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $retiredIPCSocket `
+            -Force
+    }
+    $retiredIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc'
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $retiredIPCDirectory `
+        -PathType Container) {
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $retiredIPCDirectory `
+            -Force
     }
     foreach ($directory in @(
         (Microsoft.PowerShell.Management\Join-Path $retired 'agents'),
@@ -18246,7 +18324,9 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
             -LiteralPath $Layout.InstallRoot)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse -Root $Layout.InstallRoot
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $Layout.InstallRoot `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     $allowed = @(
         [IO.Path]::GetFullPath($Layout.BinDirectory).TrimEnd('\'),
         [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\'),
@@ -18257,19 +18337,36 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
         # runs.
         [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
+    $expectedSocket = [IO.Path]::GetFullPath(
+        $Layout.ManagedIPCSocketPath
+    ).TrimEnd('\')
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem `
         -LiteralPath $Layout.InstallRoot `
         -Recurse `
         -Force) {
         $full = [IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
-        if (-not $item.PSIsContainer -or $full -notin $allowed) {
+        # The AF_UNIX socket file at the AVC-contract path is the ONLY
+        # non-directory leaf tolerated here — an unclean guardian stop
+        # can leave it behind, and pre-remove cleanup must not fail
+        # closed on that residue.
+        if ($item.PSIsContainer) {
+            if ($full -notin $allowed) {
+                throw "committed uninstall left unexpected InstallRoot content: $full"
+            }
+        }
+        elseif (-not [string]::Equals(
+                $full,
+                $expectedSocket,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
             throw "committed uninstall left unexpected InstallRoot content: $full"
         }
     }
     Remove-DefenseClawManagedTree `
         -Path $Layout.InstallRoot `
         -RequiredBase $script:ProgramFiles `
-        -Label 'InstallRoot'
+        -Label 'InstallRoot' `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
 }
 
 function Publish-DefenseClawStatePurgeIntent {
@@ -18481,7 +18578,8 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         Remove-DefenseClawManagedTree `
             -Path $Layout.InstallRoot `
             -RequiredBase $script:ProgramFiles `
-            -Label 'InstallRoot'
+            -Label 'InstallRoot' `
+            -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     }
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
@@ -20416,7 +20514,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             Remove-DefenseClawManagedTree `
                 -Path $Layout.InstallRoot `
                 -RequiredBase $script:ProgramFiles `
-                -Label 'InstallRoot'
+                -Label 'InstallRoot' `
+                -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
         }
     }
     catch {
