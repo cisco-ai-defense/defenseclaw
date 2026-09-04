@@ -112,6 +112,7 @@ from defenseclaw.doctor_peer import (
     TrustedPeer,
     loopback_bearer_requires_peer,
     peer_bound_handlers,
+    trusted_lsof_path,
 )
 from defenseclaw.envvars import active_security_overrides
 from defenseclaw.file_lock import FileLockTimeoutError, locked_file_update
@@ -3128,10 +3129,7 @@ def _gateway_listener_pid(port: int, *, host: str = "") -> int:
 
 def _trusted_lsof_path() -> str:
     """Return a fixed system lsof path, never a PATH-resolved executable."""
-    for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
-        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-            return candidate
-    return ""
+    return trusted_lsof_path()
 
 
 def _lsof_listener_address_matches(endpoint: str, host: str, port: int) -> bool:

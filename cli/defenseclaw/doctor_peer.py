@@ -675,7 +675,7 @@ def _windows_established_peer_pid(sock: socket.socket) -> int:  # pragma: no cov
 
 def _lsof_established_peer_pid(sock: socket.socket) -> int:
     local_ip, local_port, remote_ip, remote_port = socket_endpoints(sock)
-    lsof_path = _trusted_lsof_path()
+    lsof_path = trusted_lsof_path()
     if not lsof_path:
         raise PeerBindError("trusted lsof binary is unavailable")
     selector = lsof_tcp_selector(local_ip, local_port)
@@ -751,7 +751,7 @@ def _lsof_endpoint(
         return None
 
 
-def _trusted_lsof_path() -> str:
+def trusted_lsof_path() -> str:
     for candidate in ("/usr/sbin/lsof", "/usr/bin/lsof"):
         if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
             return candidate
