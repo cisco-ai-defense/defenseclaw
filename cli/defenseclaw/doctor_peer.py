@@ -489,11 +489,14 @@ def _linux_established_peer_pid(sock: socket.socket) -> int:
     )
 
 
+_LinuxEndpoint = ipaddress.IPv4Address | ipaddress.IPv6Address
+
+
 def _linux_established_row(
     row: str,
     *,
     ipv6: bool,
-) -> tuple[ipaddress.IPv4Address | ipaddress.IPv6Address, int, ipaddress.IPv4Address | ipaddress.IPv6Address, int, str] | None:
+) -> tuple[_LinuxEndpoint, int, _LinuxEndpoint, int, str] | None:
     fields = row.split()
     if len(fields) < 10 or fields[3] != _LINUX_TCP_ESTABLISHED:
         return None

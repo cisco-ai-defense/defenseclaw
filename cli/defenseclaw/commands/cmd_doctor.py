@@ -85,6 +85,7 @@ from defenseclaw.doctor_engine import (
     legacy_outcome_state,
     stable_doctor_id,
 )
+from defenseclaw.doctor_exec import ExecBindError, bind_trusted_executable, revalidate_bound_executable
 from defenseclaw.doctor_gateway import (
     GATEWAY_PROCESS_NAMES,
     GatewayEvidence,
@@ -100,7 +101,6 @@ from defenseclaw.doctor_gateway import (
     pid_file_fingerprint_from_fd,
     read_pid_record,
 )
-from defenseclaw.doctor_exec import ExecBindError, bind_trusted_executable, revalidate_bound_executable
 from defenseclaw.doctor_hooks import (
     WindowsHookCheck,
     _packaged_windows_install_root,
