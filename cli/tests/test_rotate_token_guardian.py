@@ -29,6 +29,9 @@ from defenseclaw.rotate_token_guardian import (
 
 
 def _plan(manifest: str = "/etc/defenseclaw/hook-guardian/targets.yaml") -> GuardianRotationPlan:
+    digest = ""
+    if os.path.isfile(manifest):
+        digest = guardian_manifest_digest(os.path.abspath(manifest))
     return GuardianRotationPlan(
         operation_id="a" * 32,
         generation="b" * 32,
@@ -38,7 +41,15 @@ def _plan(manifest: str = "/etc/defenseclaw/hook-guardian/targets.yaml") -> Guar
             GuardianRotationTarget("bob", "/home/bob", "", "codex", ""),
             GuardianRotationTarget("alice", "/home/alice", "", "claudecode", ""),
         ),
+        manifest_sha256=digest,
     )
+
+
+def _in_tree_auth_dir(td: str) -> Path:
+    auth = Path(td, "hook-guardian")
+    auth.mkdir(exist_ok=True)
+    os.environ[GUARDIAN_AUTH_DIR_ENV] = str(auth)
+    return auth
 
 
 def _write_test_manifest(path: Path) -> str:
@@ -101,9 +112,7 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            auth = Path(f"{td}-hook-guardian")
-            auth.mkdir()
-            journal = auth / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
             journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
             assert_guardian_idle(td)
             self.assertFalse(journal.exists())
@@ -112,13 +121,22 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            auth = Path(f"{td}-hook-guardian")
-            auth.mkdir()
-            journal = auth / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
             journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_idle(td)
             self.assertIn("already in progress", str(raised.exception))
+            self.assertTrue(journal.exists())
+
+    def test_refuses_unknown_journal_phase(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "unknown", "operation_id": "c" * 32}), encoding="utf-8")
+            with self.assertRaises(click.ClickException) as raised:
+                assert_guardian_idle(td)
+            self.assertIn("unexpected phase", str(raised.exception))
             self.assertTrue(journal.exists())
 
 
@@ -170,6 +188,9 @@ class BindGuardianRosterTests(RequireGuardianParticipantTests):
                 operation_id="a" * 32,
                 generation="b" * 32,
             )
+            self.assertIsNotNone(plan)
+            assert plan is not None
+            self.assertEqual(plan.manifest_sha256, guardian_manifest_digest(str(manifest.resolve())))
         self.assertIsNotNone(plan)
         assert plan is not None
         self.assertEqual([target.connector for target in plan.targets], ["codex", "codex"])
@@ -230,6 +251,39 @@ class BindGuardianRosterTests(RequireGuardianParticipantTests):
                 )
         self.assertIn("enabled flag must be a boolean", str(raised.exception))
 
+    def test_empty_roster_does_not_join(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = Path(td, "targets.yaml")
+            manifest.write_text("version: 1\ntargets: []\n", encoding="utf-8")
+            self.assertIsNone(
+                bind_guardian_roster(
+                    manifest_path=str(manifest),
+                    requested_scopes={"codex"},
+                    operation_id="a" * 32,
+                    generation="b" * 32,
+                )
+            )
+
+    def test_rejects_invalid_rotation_identity(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = Path(td, "targets.yaml")
+            manifest.write_text(
+                "version: 1\ntargets:\n  - user: alice\n    user_home: /home/alice\n    connector: codex\n",
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                bind_guardian_roster(
+                    manifest_path=str(manifest),
+                    requested_scopes={"codex"},
+                    operation_id="not-a-valid-generation-id",
+                    generation="b" * 32,
+                )
+        self.assertIn("identity is invalid", str(raised.exception))
+
 
 class CurrentAttestationTests(RequireGuardianParticipantTests):
     def test_rejects_aggregate_count_without_per_target_proof(self) -> None:
@@ -239,8 +293,7 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
             manifest = _write_test_manifest(Path(td, "targets.yaml"))
             plan = _plan(manifest)
             digest = guardian_manifest_digest(manifest)
-            auth = Path(f"{td}-hook-guardian")
-            auth.mkdir()
+            auth = _in_tree_auth_dir(td)
             (auth / "protected_targets.json").write_text(
                 json.dumps(
                     {
@@ -276,8 +329,7 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
         with TemporaryDirectory() as td:
             manifest = _write_test_manifest(Path(td, "targets.yaml"))
             plan = _plan(manifest)
-            auth = Path(f"{td}-hook-guardian")
-            auth.mkdir()
+            auth = _in_tree_auth_dir(td)
             (auth / "protected_targets.json").write_text(
                 json.dumps(
                     {
@@ -315,8 +367,7 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
             manifest = _write_test_manifest(Path(td, "targets.yaml"))
             plan = _plan(manifest)
             digest = guardian_manifest_digest(manifest)
-            auth = Path(f"{td}-hook-guardian")
-            auth.mkdir()
+            auth = _in_tree_auth_dir(td)
             (auth / "protected_targets.json").write_text(
                 json.dumps(
                     {
@@ -346,6 +397,44 @@ class CurrentAttestationTests(RequireGuardianParticipantTests):
             with self.assertRaises(click.ClickException) as raised:
                 assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
         self.assertIn("attested a different manifest", str(raised.exception))
+
+    def test_rejects_coerced_readiness_counts(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            manifest = _write_test_manifest(Path(td, "targets.yaml"))
+            plan = _plan(manifest)
+            digest = guardian_manifest_digest(manifest)
+            auth = _in_tree_auth_dir(td)
+            (auth / "protected_targets.json").write_text(
+                json.dumps(
+                    {
+                        "current": {
+                            "ok": True,
+                            "generation": "b" * 32,
+                            "manifest_sha256": digest,
+                            "target_count": "3",
+                            "success_count": "3",
+                            "attestations": [
+                                {
+                                    "user": target.user,
+                                    "user_home": target.user_home,
+                                    "connector": target.connector,
+                                    "ok": True,
+                                    "generation": "b" * 32,
+                                    "token_fingerprint": "c" * 64,
+                                    "manifest_sha256": digest,
+                                }
+                                for target in plan.targets
+                            ],
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaises(click.ClickException) as raised:
+                assert_current_attestations(td, plan, {"codex": "c" * 64, "claudecode": "c" * 64})
+        self.assertIn("malformed", str(raised.exception))
 
 
 class GuardianResponseTests(RequireGuardianParticipantTests):
