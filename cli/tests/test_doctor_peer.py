@@ -21,6 +21,7 @@ from __future__ import annotations
 import http.server
 import ipaddress
 import os
+import ssl
 import threading
 from pathlib import Path
 
@@ -33,6 +34,8 @@ from defenseclaw.doctor_peer import (
     linux_established_peer_pid_from_proc,
     loopback_bearer_requires_peer,
     lsof_established_peer_pid_from_output,
+    lsof_tcp_selector,
+    peer_bound_handlers,
     windows_established_peer_pid_from_rows,
 )
 
@@ -120,6 +123,35 @@ def test_linux_established_peer_pid_from_fake_proc(tmp_path: Path) -> None:
     )
 
 
+def test_linux_tcp6_mapped_loopback_matches_ipv4_endpoints(tmp_path: Path) -> None:
+    proc_root = tmp_path / "proc"
+    (proc_root / "net").mkdir(parents=True)
+    (proc_root / "4242" / "fd").mkdir(parents=True)
+    (proc_root / "net" / "tcp").write_text(
+        "  sl  local_address rem_address   st inode\n",
+        encoding="ascii",
+    )
+    (proc_root / "net" / "tcp6").write_text(
+        "  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode\n"
+        "   0: 0000000000000000FFFF00000100007F:4966 "
+        "0000000000000000FFFF00000100007F:D431 01 00000000:00000000 "
+        "00:00000000 00000000     0        0 99 1 0000000000000000 20 0 0 1 0\n",
+        encoding="ascii",
+    )
+    os.symlink("socket:[99]", proc_root / "4242" / "fd" / "3")
+
+    assert (
+        linux_established_peer_pid_from_proc(
+            ipaddress.ip_address("127.0.0.1"),
+            54321,
+            ipaddress.ip_address("127.0.0.1"),
+            18790,
+            proc_root=str(proc_root),
+        )
+        == 4242
+    )
+
+
 def test_linux_established_peer_pid_fails_closed_when_missing(tmp_path: Path) -> None:
     proc_root = tmp_path / "proc"
     (proc_root / "net").mkdir(parents=True)
@@ -159,6 +191,30 @@ def test_windows_established_rows_require_unique_owner() -> None:
             remote_ip,
             18790,
         )
+
+
+def test_lsof_tcp_selector_brackets_ipv6_literals() -> None:
+    assert lsof_tcp_selector(ipaddress.ip_address("127.0.0.1"), 18790) == "-iTCP@127.0.0.1:18790"
+    assert lsof_tcp_selector(ipaddress.ip_address("::1"), 18790) == "-iTCP@[::1]:18790"
+
+
+def test_https_handler_forwards_ssl_context() -> None:
+    context = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    handler = peer_bound_handlers(
+        TrustedPeer(pid=4242, start_identity="start-1"),
+        ssl_context=context,
+    )[1]
+    captured: dict[str, object] = {}
+
+    def fake_do_open(http_class, _req, **kwargs):
+        captured["kwargs"] = kwargs
+        captured["connection"] = http_class("127.0.0.1", 443, **kwargs)
+        return object()
+
+    handler.do_open = fake_do_open  # type: ignore[method-assign]
+    assert handler.https_open(object()) is not None
+    assert captured["kwargs"] == {"context": context}
+    assert getattr(captured["connection"], "_context") is context
 
 
 def test_lsof_established_output_selects_gateway_side() -> None:

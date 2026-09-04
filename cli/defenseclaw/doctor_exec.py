@@ -25,8 +25,9 @@ POSIX (Linux/macOS)
   must not grant write. The path must be a regular file (no symlink). After
   that pathname custody check, Doctor opens the file with ``O_RDONLY`` /
   ``O_NOFOLLOW`` and executes the held inode through ``/proc/self/fd/<n>``
-  (Linux) or ``/dev/fd/<n>`` (macOS). A replacement at the original path
-  cannot change the object that is spawned.
+  (Linux). Darwin ``/dev/fd/<n>`` is not executable, so macOS re-validates
+  the held inode against the pathname (``os.path.samestat``) and fail-closes
+  on swap, then execs by path. Do not switch Darwin to ``/dev/fd`` exec.
 
 Windows
   Packaged installs must resolve to the sibling gateway under the install
@@ -167,6 +168,8 @@ def run_bound_executable(
         executable = _posix_held_executable_path(bound.fd)
         extra = {"pass_fds": tuple(set(kwargs.pop("pass_fds", ())) | {bound.fd})}
     else:
+        # Darwin /dev/fd/N is not executable. Revalidate already fail-closed
+        # if the pathname no longer names the held inode; exec that path.
         executable = bound.path
         extra = {}
     argv = [bound.path, *list(args)]
