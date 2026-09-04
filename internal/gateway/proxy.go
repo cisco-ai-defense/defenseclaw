@@ -1098,7 +1098,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 		// byte-for-byte unchanged.
 		deferManagedPrompt := managedEnterpriseActive.Load()
 		if !deferManagedPrompt {
-			passthroughPromptID = p.emitLLMPromptEventV8(r.Context(), meta, userText, body)
+			passthroughPromptID = p.emitLLMPromptEventV8(r.Context(), meta, inspectRaw, body)
 		}
 
 		t0 := time.Now()
@@ -1118,7 +1118,7 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 			// (still fails closed to redact when AID returned no directive).
 			passthroughPromptID = p.emitLLMPromptEventV8(
 				withRedactionDecision(r.Context(), verdict.RedactionEnabled),
-				meta, userText, body)
+				meta, inspectRaw, body)
 		}
 		elapsed := time.Since(t0)
 		p.logPreCall(label, partial.Messages, verdict, elapsed)
