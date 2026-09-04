@@ -2225,6 +2225,156 @@ func StaticCurlProxyUploadPayloads(
 	return components
 }
 
+// StaticCurlProxyUploadFileSources returns exact file-backed curl upload
+// sources observed in plaintext by one explicit SOCKS peer. HTTPS origin
+// bodies stay excluded: they are encrypted after the SOCKS handshake.
+func StaticCurlProxyUploadFileSources(
+	command CommandFact,
+) []TransmittedFileSource {
+	proxy, parsed, ok := staticCurlSOCKSPlaintextUploadRoute(command)
+	if !ok {
+		return nil
+	}
+	originSources := StaticCurlUploadFileSources(command)
+	if len(originSources) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var sources []TransmittedFileSource
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid || targetFact.Scheme != "http" {
+			continue
+		}
+		for _, source := range originSources {
+			if !strings.EqualFold(source.Scheme, targetFact.Scheme) ||
+				source.Host != targetFact.Host || source.Port != targetFact.Port {
+				continue
+			}
+			key := source.Path + "\x00" + proxy.Host + "\x00" +
+				strconv.FormatInt(proxy.Port, 10)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			sources = append(sources, TransmittedFileSource{
+				Path:   source.Path,
+				Scheme: proxy.Scheme,
+				Host:   proxy.Host,
+				Port:   proxy.Port,
+			})
+		}
+	}
+	return sources
+}
+
+// StaticCurlProxyStdinUploadTargets returns the explicit SOCKS peer that
+// observes stdin uploaded through --data-binary @- or --upload-file - to a
+// plaintext HTTP origin. HTTPS origins remain excluded.
+func StaticCurlProxyStdinUploadTargets(command CommandFact) []NetworkFact {
+	proxy, parsed, ok := staticCurlSOCKSPlaintextUploadRoute(command)
+	if !ok || command.Dialect != DialectPOSIX {
+		return nil
+	}
+	stdinBody := false
+	stdinUpload := false
+	for _, option := range parsed.Options {
+		if option.Group != parsed.Targets[0].Group || !option.ValuePresent ||
+			!staticCurlOptionValue(command, option) {
+			continue
+		}
+		switch option.Canonical {
+		case "--data-binary":
+			if option.Value == "@-" {
+				stdinBody = true
+			}
+		case "--upload-file":
+			if option.Value == "-" {
+				stdinUpload = true
+			}
+		}
+	}
+	if !stdinBody && !stdinUpload {
+		return nil
+	}
+	hasHTTPOrigin := false
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid {
+			return nil
+		}
+		if targetFact.Scheme == "http" {
+			hasHTTPOrigin = true
+		}
+	}
+	if !hasHTTPOrigin {
+		return nil
+	}
+	return []NetworkFact{{
+		CommandID: command.ID,
+		Action:    NetworkConnect,
+		Scheme:    proxy.Scheme,
+		Host:      proxy.Host,
+		Port:      proxy.Port,
+	}}
+}
+
+func curlSOCKSExactUploadSourceOptionValid(
+	command CommandFact,
+	option curlOptionToken,
+) bool {
+	if !option.ValuePresent || !staticCurlOptionValue(command, option) {
+		return false
+	}
+	switch option.Canonical {
+	case "--upload-file":
+		if option.Value == "" || option.Value == "." {
+			return false
+		}
+		if option.Value == "-" {
+			return true
+		}
+		_, valid := curlStaticFileSourcePath(command, option.Value)
+		return valid
+	case "--data", "--data-ascii", "--data-binary", "--json":
+		path, stdin, fileSource := webDataFile(option.Value)
+		if stdin {
+			return option.Canonical == "--data-binary"
+		}
+		if !fileSource {
+			return false
+		}
+		_, valid := curlStaticFileSourcePath(command, path)
+		return valid
+	case "--form":
+		if curlFormHasUnmodeledFileReference(option.Value) {
+			return false
+		}
+		path, stdin, fileSource := webFormFile(option.Value)
+		if stdin || !fileSource {
+			return false
+		}
+		_, valid := curlStaticFileSourcePath(command, path)
+		return valid
+	default:
+		return false
+	}
+}
+
 // StaticCurlProxyTransmittedMetadata returns literal credentials and custom
 // headers that a closed curl invocation can transmit to one explicit HTTP(S)
 // proxy. This uses the same argv-only/no-ambient-defaults assumption as the
@@ -3061,6 +3211,43 @@ func curlSOCKS5BasicAuthenticationEnabled(
 func staticCurlProxyDestination(
 	command CommandFact,
 ) (NetworkFact, curlArgvParse, bool) {
+	return staticCurlProxyDestinationWithUploadSources(command, false)
+}
+
+func staticCurlSOCKSPlaintextUploadRoute(
+	command CommandFact,
+) (NetworkFact, curlArgvParse, bool) {
+	proxy, parsed, ok := staticCurlProxyDestinationWithUploadSources(command, true)
+	if !ok || proxy.Scheme != "tcp" || len(command.Redirects) != 0 {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	hasHTTPOrigin := false
+	for _, target := range parsed.Targets {
+		if !curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+		if targetFact.Scheme == "http" {
+			hasHTTPOrigin = true
+		}
+	}
+	if !hasHTTPOrigin {
+		return NetworkFact{}, curlArgvParse{}, false
+	}
+	return proxy, parsed, true
+}
+
+func staticCurlProxyDestinationWithUploadSources(
+	command CommandFact,
+	allowExactUploadSources bool,
+) (NetworkFact, curlArgvParse, bool) {
 	if command.Effect != EffectExecute || !command.ArgvComplete ||
 		command.ParentCommandID != 0 || len(command.Wrappers) != 0 ||
 		command.Program != "curl" || len(command.Argv) == 0 ||
@@ -3097,7 +3284,11 @@ func staticCurlProxyDestination(
 	); !valid {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
-	if !curlStaticFormSequenceValid(command, parsed, group) {
+	if allowExactUploadSources {
+		if !curlStaticFormEagerSyntaxValid(parsed) {
+			return NetworkFact{}, curlArgvParse{}, false
+		}
+	} else if !curlStaticFormSequenceValid(command, parsed, group) {
 		return NetworkFact{}, curlArgvParse{}, false
 	}
 	lastProxy := -1
@@ -3111,7 +3302,9 @@ func staticCurlProxyDestination(
 			option.Role == curlOptionConfig {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
-		if !curlProxyOptionPreservesDestination(command, option) {
+		if !curlProxyOptionPreservesDestination(command, option) &&
+			!(allowExactUploadSources &&
+				curlSOCKSExactUploadSourceOptionValid(command, option)) {
 			return NetworkFact{}, curlArgvParse{}, false
 		}
 		if option.Role == curlOptionNetworkOverride {
@@ -8220,6 +8413,12 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		}
 	}
 	proxyNetwork, _, proxyProved := staticCurlProxyDestination(proxyCommand)
+	if !proxyProved {
+		if socksProxy, _, socksProved := staticCurlSOCKSPlaintextUploadRoute(proxyCommand); socksProved {
+			proxyNetwork = socksProxy
+			proxyProved = true
+		}
+	}
 	proxyNetworks := []NetworkFact(nil)
 	proxyRoutingProved := make(map[int]bool)
 	if proxyProved {
