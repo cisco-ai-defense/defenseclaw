@@ -125,7 +125,7 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
             assert_guardian_idle(td)
             self.assertFalse(journal.exists())
@@ -134,7 +134,7 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_idle(td)
@@ -145,7 +145,7 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "unknown", "operation_id": "c" * 32}), encoding="utf-8")
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_idle(td)
