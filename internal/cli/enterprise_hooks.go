@@ -1978,6 +1978,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		settleUntil = time.Now().Add(settle)
 		droppedInSettle = 0
+		// A rotation-busy startup leaves ready unpublished. The next
+		// successful reconcile must publish it so sidecar health does
+		// not stay waiting_for_targets / unknown after rotation ends.
+		publishGuardianReadyAfterWatchReconcile(cmd.ErrOrStderr(), nil)
 		return changed, nil
 	}
 
@@ -2207,6 +2211,13 @@ func isMissingManifestErr(err error) bool {
 // returns an error: a state-file write failure is a health-surface
 // degradation (the sidecar will fall through to its safe default), not
 // a reason to fail the guardian's core reconcile path.
+func publishGuardianReadyAfterWatchReconcile(w io.Writer, reconcileErr error) {
+	if reconcileErr != nil {
+		return
+	}
+	writeGuardianStateOrLog(w, guardianstate.StateReady)
+}
+
 func writeGuardianStateOrLog(w io.Writer, state string) {
 	if enterpriseHookManifest == "" {
 		return
