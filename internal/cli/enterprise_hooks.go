@@ -1986,27 +1986,34 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
+	startupReady := true
 	if _, err := reconcile("startup"); err != nil {
-		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if errors.Is(err, errEnterpriseHookRotationBusy) {
+			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] rotation in progress; deferring startup reconcile\n")
+			startupReady = false
+		} else if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
-		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
-			return waitErr
-		}
-		// Manifest is present now — re-run the startup reconcile so
-		// the watch loop enters its main select with a valid row set,
-		// hashes, and watched dirs. Any other error from THIS retry
-		// (parse failure, missing file races back to gone, etc.) is
-		// fatal — we've done our one bounded wait; further retries
-		// belong to the SCM restart cycle.
-		if _, err := reconcile("startup_after_wait"); err != nil {
-			return err
+		} else {
+			if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+				return waitErr
+			}
+			// Manifest is present now — re-run the startup reconcile so
+			// the watch loop enters its main select with a valid row set,
+			// hashes, and watched dirs. Any other error from THIS retry
+			// (parse failure, missing file races back to gone, etc.) is
+			// fatal — we've done our one bounded wait; further retries
+			// belong to the SCM restart cycle.
+			if _, err := reconcile("startup_after_wait"); err != nil {
+				return err
+			}
 		}
 	}
 	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
 	// the guardian-side "ready" state so the sidecar's health surface
 	// (spec 003 REQ-19) can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	if startupReady {
+		writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	}
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
