@@ -474,12 +474,20 @@ func TestPublishGuardianReadyAfterWatchReconcileSkipsRotationBusy(t *testing.T) 
 	statePath := guardianstate.PathForStateRoot(dir)
 
 	var log bytes.Buffer
-	publishGuardianReadyAfterWatchReconcile(&log, errEnterpriseHookRotationBusy)
+	publishGuardianReadyAfterWatchReconcile(&log, errEnterpriseHookRotationBusy, 0, nil)
 	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("rotation-busy reconcile published ready: %v", err)
 	}
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 1, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed-target reconcile published ready: %v", err)
+	}
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, errors.New("state write failed"))
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state-error reconcile published ready: %v", err)
+	}
 
-	publishGuardianReadyAfterWatchReconcile(&log, nil)
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, nil)
 	if got := guardianstate.ReadState(statePath); got != guardianstate.StateReady {
 		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
 	}
