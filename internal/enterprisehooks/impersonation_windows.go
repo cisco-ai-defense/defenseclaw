@@ -36,6 +36,17 @@ var (
 	}
 )
 
+// RunWithWindowsEnterpriseTargetImpersonation is the LocalSystem mutation
+// entry used by Windows managed rotation. It has no LocalSystem path-string
+// fallback: a missing interactive token fails closed.
+func RunWithWindowsEnterpriseTargetImpersonation(
+	target *windows.SID,
+	expectedHome string,
+	fn func() error,
+) error {
+	return withWindowsEnterpriseTargetImpersonation(target, expectedHome, fn)
+}
+
 // withWindowsEnterpriseTargetImpersonation runs a bounded per-user connector
 // mutation on one locked OS thread under an active-session token whose TokenUser
 // exactly matches the manifest-pinned SID. There is deliberately no fallback to

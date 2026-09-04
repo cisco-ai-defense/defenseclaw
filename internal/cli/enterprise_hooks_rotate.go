@@ -110,10 +110,12 @@ type enterpriseHookRotationTargetSnapshot struct {
 
 var enterpriseHooksRotatePrepareCmd = &cobra.Command{
 	Use:   "rotate-prepare",
-	Short: "Prepare generation B in every enabled Linux/macOS guardian target",
+	Short: "Prepare generation B in every enabled guardian target",
 	Long: `Snapshot generation A and write generation B into the exact enabled
-manifest roster. Public output contains only identities, the operation and
-generation IDs, and canonical non-secret fingerprints.`,
+manifest roster. Linux/macOS uses the POSIX guardian journal. Windows uses
+the native DefenseClawHookGuardian adapter and must never share that journal.
+Public output contains only identities, the operation and generation IDs,
+and canonical non-secret fingerprints.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return enterpriseHooksRotatePrepareRunE(cmd, args)
 	},
@@ -121,7 +123,7 @@ generation IDs, and canonical non-secret fingerprints.`,
 
 var enterpriseHooksRotateCommitCmd = &cobra.Command{
 	Use:   "rotate-commit",
-	Short: "Commit a prepared Linux/macOS guardian rotation",
+	Short: "Commit a prepared guardian rotation",
 	Long: `Retire protected rollback material after the coordinator has proved
 every selected target authenticated with generation B.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -131,16 +133,17 @@ every selected target authenticated with generation B.`,
 
 var enterpriseHooksRotateRollbackCmd = &cobra.Command{
 	Use:   "rotate-rollback",
-	Short: "Restore generation A for a Linux/macOS guardian rotation",
-	Long: `Idempotently restore exact A bytes, absence, owner, and mode for every
-already-mutated target. Readiness stays false unless restoration can be proved.`,
+	Short: "Restore generation A for a guardian rotation",
+	Long: `Idempotently restore exact A bytes, absence, owner, and protected
+DACL or POSIX mode for every already-mutated target. Readiness stays false
+unless restoration can be proved.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return enterpriseHooksRotateRollbackRunE(cmd, args)
 	},
 }
 
 func runEnterpriseHooksRotatePrepare(cmd *cobra.Command, _ []string) error {
-	report, err := executeEnterpriseHookRotationPrepare(enterpriseHookRotationRequest{
+	report, err := executeManagedRotationPrepare(enterpriseHookRotationRequest{
 		OperationID:  enterpriseHookRotateOperationID,
 		Generation:   enterpriseHookRotateGeneration,
 		Manifest:     enterpriseHookManifest,
@@ -150,7 +153,7 @@ func runEnterpriseHooksRotatePrepare(cmd *cobra.Command, _ []string) error {
 }
 
 func runEnterpriseHooksRotateCommit(cmd *cobra.Command, _ []string) error {
-	report, err := executeEnterpriseHookRotationCommit(enterpriseHookRotationRequest{
+	report, err := executeManagedRotationCommit(enterpriseHookRotationRequest{
 		OperationID: enterpriseHookRotateOperationID,
 		Generation:  enterpriseHookRotateGeneration,
 		Manifest:    enterpriseHookManifest,
@@ -159,7 +162,7 @@ func runEnterpriseHooksRotateCommit(cmd *cobra.Command, _ []string) error {
 }
 
 func runEnterpriseHooksRotateRollback(cmd *cobra.Command, _ []string) error {
-	report, err := executeEnterpriseHookRotationRollback(enterpriseHookRotationRequest{
+	report, err := executeManagedRotationRollback(enterpriseHookRotationRequest{
 		OperationID: enterpriseHookRotateOperationID,
 		Generation:  enterpriseHookRotateGeneration,
 		Manifest:    enterpriseHookManifest,
@@ -761,6 +764,9 @@ func enterpriseHookRotationJournalConflicts(actual, want enterpriseHookRotationJ
 }
 
 func enterpriseHookRotationBusy(dataDir string) error {
+	if runtime.GOOS == "windows" {
+		return windowsManagedRotationBusy(dataDir)
+	}
 	journal, exists, err := loadEnterpriseHookRotationJournal(dataDir)
 	if err != nil {
 		return err
