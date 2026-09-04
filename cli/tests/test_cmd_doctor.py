@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -198,6 +199,7 @@ class DoctorGuardrailTests(unittest.TestCase):
             live_health={
                 "interception": {
                     "verified": True,
+                    "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
                     "last_agent_traffic_at": "2026-09-04T12:00:00Z",
                 }
             },
@@ -206,6 +208,27 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1, result.checks)
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
+
+    def test_proxy_interception_fails_when_self_test_is_stale(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _check_proxy_interception(
+            cfg,
+            result,
+            live_health={"interception": {"verified": True, "last_verified_at": stale}},
+        )
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("stale", result.checks[0]["detail"])
 
     def test_proxy_interception_skips_zeptoclaw_only(self):
         cfg = Config(
