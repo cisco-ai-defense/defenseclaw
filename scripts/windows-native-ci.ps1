@@ -4849,7 +4849,8 @@ function Assert-WizardHookRegistration(
             '[Console]::OutputEncoding = $utf8NoBom',
             '$timeoutMS = 25000',
             '$process.StandardInput.AutoFlush = $true',
-            '[System.Threading.Tasks.TaskCreationOptions]::LongRunning',
+            '$deadline.Restart()',
+            '$process.StandardInput.Write($payload)',
             '$process.WaitForExit($remainingMS)',
             '[System.Environment]::Exit(0)'
         )) {

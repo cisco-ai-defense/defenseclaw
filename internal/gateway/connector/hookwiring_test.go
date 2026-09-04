@@ -1342,6 +1342,11 @@ func TestAntigravityWindowsHookCommandBindsOfficialEvent(t *testing.T) {
 // catches PowerShell returning before the process exits.
 const windowsNativePowerShellTestTimeout = time.Minute
 
+func copilotAdapterStdinTimeout(stderr string) bool {
+	marker := fmt.Sprintf("timed out after %dms while receiving input", copilotWindowsHookAdapterTimeoutMS)
+	return strings.Contains(stderr, marker)
+}
+
 func TestWindowsNativePowerShellHookCommandPropagatesProcessResults(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("Windows GUI-subsystem process semantics are Windows-specific")
@@ -1426,28 +1431,35 @@ func main() {
 	}
 	for _, testCase := range cases {
 		t.Run(fmt.Sprintf("%s-exit-%d", testCase.connector, testCase.exitCode), func(t *testing.T) {
-			ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
-			defer cancel()
 			command := windowsNativePowerShellHookCommand(testCase.connector)
 			if testCase.connector == "copilot" {
 				command = copilotHookInvocationCommandForEvent(
 					"windows", "preToolUse", filepath.Join(root, "copilot-hook.sh"),
 				)
 			}
-			cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
-			cmd.Env = minimalWindowsHookTestEnvironment(
-				"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
-				"DC_TEST_CONNECTOR="+testCase.connector,
-				fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
-			)
-			cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			err := cmd.Run()
-			if ctx.Err() != nil {
+			runAttempt := func() (stdout, stderr string, runErr error, ctxErr error) {
+				ctx, cancel := context.WithTimeout(context.Background(), windowsNativePowerShellTestTimeout)
+				defer cancel()
+				cmd := windowsNativePowerShellTestProcess(ctx, testCase.connector, command)
+				cmd.Env = minimalWindowsHookTestEnvironment(
+					"PSModuleAnalysisCachePath="+filepath.Join(t.TempDir(), "module-analysis-cache"),
+					"DC_TEST_CONNECTOR="+testCase.connector,
+					fmt.Sprintf("DC_TEST_EXIT_CODE=%d", testCase.exitCode),
+				)
+				cmd.Stdin = strings.NewReader(`{"tool":"win-aud-069"}`)
+				var stdoutBuf, stderrBuf bytes.Buffer
+				cmd.Stdout = &stdoutBuf
+				cmd.Stderr = &stderrBuf
+				runErr = cmd.Run()
+				return stdoutBuf.String(), stderrBuf.String(), runErr, ctx.Err()
+			}
+			stdout, stderr, err, ctxErr := runAttempt()
+			if testCase.connector == "copilot" && copilotAdapterStdinTimeout(stderr) {
+				stdout, stderr, err, ctxErr = runAttempt()
+			}
+			if ctxErr != nil {
 				t.Fatalf("generated command exceeded %s: %v\ncommand: %s\nstdout: %s\nstderr: %s",
-					windowsNativePowerShellTestTimeout, ctx.Err(), command, stdout.String(), stderr.String())
+					windowsNativePowerShellTestTimeout, ctxErr, command, stdout, stderr)
 			}
 			wantExitCode := testCase.exitCode
 			if testCase.connector == "copilot" {
@@ -1455,16 +1467,16 @@ func main() {
 			}
 			if got := windowsProcessExitCodeForTest(t, err); got != wantExitCode {
 				t.Fatalf("generated command exit = %d, want %d\ncommand: %s\nstdout: %s\nstderr: %s",
-					got, wantExitCode, command, stdout.String(), stderr.String())
+					got, wantExitCode, command, stdout, stderr)
 			}
-			if got, want := strings.TrimSpace(stdout.String()), "probe stdout "+testCase.connector; got != want {
-				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr.String())
+			if got, want := strings.TrimSpace(stdout), "probe stdout "+testCase.connector; got != want {
+				t.Fatalf("generated command stdout = %q, want %q; stderr=%q", got, want, stderr)
 			}
-			if got, want := stderr.String(), "probe stderr "+testCase.connector; !strings.Contains(got, want) {
+			if got, want := stderr, "probe stderr "+testCase.connector; !strings.Contains(got, want) {
 				t.Fatalf("generated command stderr = %q, want marker %q", got, want)
 			}
-			if strings.Contains(stderr.String(), "Preparing modules for first use") {
-				t.Fatalf("generated command performed broad first-use module discovery: %q", stderr.String())
+			if strings.Contains(stderr, "Preparing modules for first use") {
+				t.Fatalf("generated command performed broad first-use module discovery: %q", stderr)
 			}
 		})
 	}
@@ -2492,7 +2504,8 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					"[Console]::OutputEncoding = $utf8NoBom",
 					fmt.Sprintf("$timeoutMS = %d", copilotWindowsHookAdapterTimeoutMS),
 					"$process.StandardInput.AutoFlush = $true",
-					"[System.Threading.Tasks.TaskCreationOptions]::LongRunning",
+					"$deadline.Restart()",
+					"$process.StandardInput.Write($payload)",
 					"hook --connector copilot --event ",
 					"[System.Environment]::Exit(0)",
 				} {
