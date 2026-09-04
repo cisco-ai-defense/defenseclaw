@@ -5467,28 +5467,9 @@ func staticCurlFTPProxyRequestComponents(
 func staticCurlFTPControlRequestComponents(
 	command CommandFact,
 ) ([]TransmittedRequestComponent, []TransmittedRequestComponent) {
-	executionEligible := (command.Dialect == DialectPOSIX ||
-		command.Dialect == DialectArgv) && command.Effect == EffectExecute &&
-		command.ParentCommandID == 0 && len(command.Wrappers) == 0 &&
-		len(command.Redirects) == 0 &&
-		exactCaseSensitivePOSIXProgram(&command, "curl")
-	if !executionEligible || !command.ArgvComplete || len(command.Argv) == 0 ||
-		command.Executable != command.Argv[0] ||
-		len(command.Arguments) != len(command.Argv) {
-		return nil, nil
-	}
 	parsed := parseCurlArgv(command.Argv)
-	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
-	if (!parsed.Complete && !nullConfigOnly) || parsed.Preview ||
-		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
-		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
-		return nil, nil
-	}
-	if !staticCurlFTPEagerPreparseValid(command, parsed) {
-		return nil, nil
-	}
-	if !staticCurlFTPParallelSetupValid(command, parsed) {
+	prefix := proveCurlSequentialTransferPrefix(command, parsed)
+	if !prefix.ok() {
 		return nil, nil
 	}
 	for _, target := range parsed.Targets {
@@ -5521,7 +5502,7 @@ func staticCurlFTPControlRequestComponents(
 		if _, present := groups[group]; !present {
 			continue
 		}
-		if !staticCurlFTPGroupSetupValid(command, parsed, group) {
+		if !prefix.covers(group) {
 			break
 		}
 		if !curlRequestModeValidForGroup(parsed, group) ||
