@@ -2165,18 +2165,31 @@ func StaticCurlProxyUploadPayloads(
 	command CommandFact,
 ) []TransmittedRequestComponent {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
-	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" &&
-		proxy.Scheme != "tcp" {
-		return nil
+	observers := []NetworkFact(nil)
+	if ok && (proxy.Scheme == "http" || proxy.Scheme == "https" ||
+		proxy.Scheme == "tcp") {
+		if proxy.Scheme == "tcp" && !staticCurlHostnameFirstWireSetupValid(
+			command,
+			parsed,
+			parsed.Targets[0].Group,
+		) {
+			// The SOCKS relay can observe an HTTP body only after curl completes
+			// local setup and reaches the proxy. Keep this new observer lane on the
+			// same conservative first-wire boundary as SOCKS request metadata.
+			return nil
+		}
+		observers = []NetworkFact{proxy}
+	} else if chain, chainParsed, chainOK := staticCurlHTTPProxyChainRoute(command); chainOK {
+		parsed = chainParsed
+		observers = []NetworkFact{chain.MainProxy}
+		if chain.DownstreamPlaintext &&
+			staticCurlHostnameFirstWireSetupValid(
+				command, parsed, parsed.Targets[0].Group,
+			) {
+			observers = append(observers, chain.Preproxy)
+		}
 	}
-	if proxy.Scheme == "tcp" && !staticCurlHostnameFirstWireSetupValid(
-		command,
-		parsed,
-		parsed.Targets[0].Group,
-	) {
-		// The SOCKS relay can observe an HTTP body only after curl completes
-		// local setup and reaches the proxy. Keep this new observer lane on the
-		// same conservative first-wire boundary as SOCKS request metadata.
+	if len(observers) == 0 {
 		return nil
 	}
 	hasHTTPOrigin := false
@@ -2213,14 +2226,16 @@ func StaticCurlProxyUploadPayloads(
 	if len(payloads) == 0 {
 		return nil
 	}
-	components := make([]TransmittedRequestComponent, 0, len(payloads))
-	for _, payload := range payloads {
-		components = append(components, TransmittedRequestComponent{
-			Value:  payload,
-			Scheme: proxy.Scheme,
-			Host:   proxy.Host,
-			Port:   proxy.Port,
-		})
+	components := make([]TransmittedRequestComponent, 0, len(payloads)*len(observers))
+	for _, observer := range observers {
+		for _, payload := range payloads {
+			components = append(components, TransmittedRequestComponent{
+				Value:  payload,
+				Scheme: observer.Scheme,
+				Host:   observer.Host,
+				Port:   observer.Port,
+			})
+		}
 	}
 	return components
 }
@@ -2445,6 +2460,9 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	command CommandFact,
 ) CurlProxyTransmittedMetadata {
 	proxy, parsed, ok := staticCurlProxyDestination(command)
+	if !ok {
+		proxy, parsed, ok = staticCurlHTTPProxyChainDestination(command)
+	}
 	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" {
 		return CurlProxyTransmittedMetadata{}
 	}
@@ -2735,6 +2753,14 @@ func StaticCurlProxyTransmittedMetadata(
 		metadata.ProxyRequestComponents,
 		staticCurlFTPProxyRequestComponents(command)...,
 	)
+	metadata.ProxyDestinationHostnameComponents = append(
+		metadata.ProxyDestinationHostnameComponents,
+		staticCurlPreproxyDestinationHostnameComponents(command)...,
+	)
+	metadata.ProxyRequestComponents = append(
+		metadata.ProxyRequestComponents,
+		staticCurlPreproxyPlaintextHTTPRequestComponents(command)...,
+	)
 	return metadata
 }
 
@@ -3007,8 +3033,8 @@ func curlTargetUsesExplicitProxy(parsed curlArgvParse, target curlTransferTarget
 // enabled and selected by the server.
 //
 // The shared destination proof owns direct HTTP(S)/FTP(S) routes and a sole
-// SOCKS preproxy. A separately closed FTP route owns the two-hop
-// SOCKS-preproxy + HTTP-main case: --proxy-user belongs to the main HTTP proxy,
+// SOCKS preproxy. Separately closed FTP and HTTP(S) two-hop routes own
+// SOCKS-preproxy + HTTP-main: --proxy-user belongs to the main HTTP proxy,
 // while only URL credentials belong to that SOCKS preproxy.
 func StaticCurlSOCKSProxyCredentialComponents(
 	command CommandFact,
@@ -3020,6 +3046,10 @@ func StaticCurlSOCKSProxyCredentialComponents(
 	if !ok {
 		proxy, parsed, chainGroup, chainProxyIndex, chainProxyCanonical, ok =
 			staticCurlFTPSOCKSPreproxyCredentialRoute(command)
+	}
+	if !ok {
+		proxy, parsed, chainGroup, chainProxyIndex, chainProxyCanonical, ok =
+			staticCurlHTTPSOCKSPreproxyCredentialRoute(command)
 	}
 	if !ok || proxy.Scheme != "tcp" || len(command.Redirects) != 0 ||
 		command.PipelineID != 0 || len(parsed.Targets) == 0 {
@@ -3219,6 +3249,30 @@ func staticCurlFTPSOCKSPreproxyCredentialRoute(
 		return empty()
 	}
 	return route.Networks[0], parsed, group, lastPreproxy, "--proxy", true
+}
+
+func staticCurlHTTPSOCKSPreproxyCredentialRoute(
+	command CommandFact,
+) (NetworkFact, curlArgvParse, int, int, string, bool) {
+	empty := func() (NetworkFact, curlArgvParse, int, int, string, bool) {
+		return NetworkFact{}, curlArgvParse{}, 0, -1, "", false
+	}
+	chain, parsed, ok := staticCurlHTTPProxyChainRoute(command)
+	if !ok || command.PipelineID != 0 || len(parsed.Targets) == 0 {
+		return empty()
+	}
+	group := parsed.Targets[0].Group
+	lastPreproxy := -1
+	for index, option := range parsed.Options {
+		if option.Group == group && option.Canonical == "--preproxy" {
+			lastPreproxy = index
+		}
+	}
+	if lastPreproxy < 0 ||
+		!curlExplicitSOCKSProxyURL(parsed.Options[lastPreproxy].Value) {
+		return empty()
+	}
+	return chain.Preproxy, parsed, group, lastPreproxy, "--proxy", true
 }
 
 // StaticCurlSOCKSProxyCredentialComponentsForFacts admits an exactly isolated
@@ -4204,6 +4258,12 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		return CurlTransmittedMetadata{}
 	}
 	explicitProxy, _, explicitProxyValid := staticCurlProxyDestination(command)
+	if !explicitProxyValid {
+		if chain, _, chainOK := staticCurlHTTPProxyChainRoute(command); chainOK {
+			explicitProxy = chain.Preproxy
+			explicitProxyValid = true
+		}
+	}
 	allTargetsTunnelled := false
 	if explicitProxyValid {
 		proxyTunnel := curlProxyTunnelEnabled(parsed, group)
@@ -4244,7 +4304,8 @@ func StaticCurlTransmittedMetadata(command CommandFact) CurlTransmittedMetadata 
 		if option.Role == curlOptionNetworkOverride &&
 			(!explicitProxyValid || !allTargetsTunnelled ||
 				!curlMainProxyOption(option.Canonical) &&
-					option.Canonical != "--noproxy") {
+					option.Canonical != "--noproxy" &&
+					option.Canonical != "--preproxy") {
 			return CurlTransmittedMetadata{}
 		}
 		if option.Canonical == "--user" && option.ValuePresent {
@@ -8502,19 +8563,19 @@ func classifyParsedCurlTransfer(out *parseOutput, command *CommandFact) {
 		}
 	}
 	proxyNetwork, _, proxyProved := staticCurlProxyDestination(proxyCommand)
-	if !proxyProved {
-		if socksProxy, _, socksProved := staticCurlSOCKSProxyDestinationWithUploads(proxyCommand); socksProved {
-			proxyNetwork = socksProxy
-			proxyProved = true
-		}
-	}
 	proxyNetworks := []NetworkFact(nil)
 	proxyRoutingProved := make(map[int]bool)
 	if proxyProved {
 		proxyNetworks = append(proxyNetworks, proxyNetwork)
-		if len(parsed.Targets) > 0 {
-			proxyRoutingProved[parsed.Targets[0].Group] = true
-		}
+	} else if chainNetworks := curlHTTPProxyChainNetworks(proxyCommand); len(chainNetworks) != 0 {
+		proxyNetworks = append(proxyNetworks, chainNetworks...)
+		proxyProved = true
+	} else if socksProxy, _, socksProved := staticCurlSOCKSProxyDestinationWithUploads(proxyCommand); socksProved {
+		proxyNetworks = append(proxyNetworks, socksProxy)
+		proxyProved = true
+	}
+	if proxyProved && len(parsed.Targets) > 0 {
+		proxyRoutingProved[parsed.Targets[0].Group] = true
 	}
 	if !proxyProved && len(parsed.Targets) > 0 {
 		groups := make(map[int]struct{})

@@ -1283,6 +1283,117 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			wantAudit: true,
 		},
 		{
+			name:    "SOCKS5h preproxy observes HTTP origin hostname through HTTP main",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://127.0.0.1",
+				"http://" + trustedActionDispositionTestToken + ".localhost/safe",
+			},
+		},
+		{
+			name:    "SOCKS5 preproxy plus Host override hides origin hostname",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5://preproxy.example",
+				"--proxy", "http://127.0.0.1", "--header", "Host: safe.example",
+				"http://" + trustedActionDispositionTestToken + ".localhost/safe",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "HTTPS main proxy hides origin hostname from SOCKS5h",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "https://127.0.0.1",
+				"https://" + trustedActionDispositionTestToken + ".localhost/safe",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "SOCKS5h preproxy observes plaintext HTTP header through HTTP main",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://127.0.0.1", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+		},
+		{
+			name:    "HTTPS main proxy hides origin header from SOCKS5h",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "https://127.0.0.1", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "SOCKS5h preproxy observes plaintext HTTP body through HTTP main",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://127.0.0.1", "--data-raw",
+				trustedActionDispositionTestToken, "http://safe.localhost/upload",
+			},
+		},
+		{
+			name:    "HTTPS main proxy hides origin body from SOCKS5h",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "https://127.0.0.1", "--data-raw",
+				trustedActionDispositionTestToken, "http://safe.localhost/upload",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "SOCKS5h preproxy observes HTTP main-proxy hostname",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://" + trustedActionDispositionTestToken + ".proxy.example",
+				"http://safe.localhost/safe",
+			},
+		},
+		{
+			name:    "locally resolving SOCKS5 does not receive HTTP main hostname",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5://preproxy.example",
+				"--proxy", "http://" + trustedActionDispositionTestToken + ".proxy.example",
+				"--header", "Host: safe.example",
+				"http://safe.localhost/safe",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "matching noproxy bypasses HTTP proxy chain observers",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://proxy.example", "--noproxy", "safe.localhost",
+				"--header", "X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload",
+			},
+			wantAudit: true,
+		},
+		{
+			name:    "mixed later transfer group closes HTTP proxy chain",
+			program: "curl",
+			argv: []string{
+				"--preproxy", "socks5h://preproxy.example",
+				"--proxy", "http://127.0.0.1", "--header",
+				"X-Key: " + trustedActionDispositionTestToken,
+				"http://safe.localhost/upload", "--next", "https://two.example/",
+			},
+			wantAudit: true,
+		},
+		{
 			name: "external Wget HTTPS destination hostname", program: "wget",
 			argv: []string{
 				"--no-config",
