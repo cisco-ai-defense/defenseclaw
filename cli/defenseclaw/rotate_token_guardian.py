@@ -190,16 +190,19 @@ def is_managed_enterprise(cfg: Any) -> bool:
     return str(getattr(cfg, "deployment_mode", "") or "").strip().lower() == "managed_enterprise"
 
 
+WINDOWS_MANAGED_ROTATION_UNAVAILABLE = (
+    "Managed-enterprise token rotation on Windows requires the native "
+    "guardian adapter; the general Linux/macOS guardian cannot join."
+)
+
+
 def require_guardian_participant(cfg: Any) -> bool:
-    """Windows managed targets join only through the native adapter (#736)."""
+    """Join Linux/macOS guardians only. Windows waits for spec 007 / #736."""
 
     if not is_managed_enterprise(cfg):
         return False
     if os.name == "nt":
-        raise click.ClickException(
-            "Managed-enterprise token rotation on Windows requires the native "
-            "guardian adapter; the general Linux/macOS guardian cannot join."
-        )
+        raise click.ClickException(WINDOWS_MANAGED_ROTATION_UNAVAILABLE)
     return True
 
 
