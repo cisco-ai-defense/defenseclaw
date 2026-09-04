@@ -207,6 +207,21 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("self-test", result.checks[0]["detail"])
         self.assertIn("agent traffic", result.checks[0]["detail"])
 
+    def test_proxy_interception_skips_zeptoclaw_only(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, port=4000, connector="zeptoclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.checks, [])
+
     def test_proxy_interception_skips_hook_connectors(self):
         cfg = Config(
             data_dir="/tmp/defenseclaw",

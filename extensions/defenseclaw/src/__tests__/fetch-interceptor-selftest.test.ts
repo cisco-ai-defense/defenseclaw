@@ -48,6 +48,10 @@ describe("OpenClaw interception self-test", () => {
     expect(result.ok).toBe(true);
     expect(result.destination).toBe(`http://127.0.0.1:${guardrailPort}/v1/chat/completions`);
     expect(result.layers.fetch).toBe(true);
+    expect(result.layers.httpsRequest).toBe(true);
+    expect(result.layers.httpRequest).toBe(true);
+    expect(result.layers.httpGet).toBe(true);
+    expect(result.layers.undiciDispatcher).toBe(true);
     expect(result.reason).toBe("interception-self-test");
     expect(forwarded.some((url) => url.includes("api.openai.com"))).toBe(false);
   });
@@ -58,8 +62,9 @@ describe("OpenClaw interception self-test", () => {
     expect(layers.httpsRequest).toBe(true);
     expect(layers.httpRequest).toBe(true);
     expect(layers.httpGet).toBe(true);
+    expect(layers.undiciDispatcher).toBe(true);
     const banner = vi.mocked(console.log).mock.calls.map((call) => String(call[0]));
-    expect(banner.some((line) => line.includes("interceptor layers") && line.includes("fetch=true"))).toBe(true);
+    expect(banner.some((line) => line.includes("interceptor layers") && line.includes("undici=true"))).toBe(true);
   });
 
   it("does not emit the probe header toward a real provider host", async () => {

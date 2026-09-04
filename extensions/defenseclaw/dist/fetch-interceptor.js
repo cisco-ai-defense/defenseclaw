@@ -946,6 +946,47 @@ export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
 const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
 const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
 export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
+function readUndiciHeader(headers, name) {
+    if (headers == null) {
+        return "";
+    }
+    const wanted = name.toLowerCase();
+    if (Array.isArray(headers)) {
+        for (let i = 0; i < headers.length - 1; i += 2) {
+            if (String(headers[i]).toLowerCase() === wanted) {
+                return String(headers[i + 1]);
+            }
+        }
+        return "";
+    }
+    if (typeof headers === "object") {
+        for (const [key, value] of Object.entries(headers)) {
+            if (key.toLowerCase() === wanted) {
+                return Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
+            }
+        }
+    }
+    return "";
+}
+function completeUndiciProbe(handler) {
+    const sink = handler;
+    try {
+        sink.onConnect?.(() => undefined);
+        sink.onHeaders?.(200, [
+            Buffer.from(INTERCEPTION_PROBE_HEADER.toLowerCase()),
+            Buffer.from("1"),
+            Buffer.from("content-type"),
+            Buffer.from("application/json"),
+        ], () => undefined, "OK");
+        sink.onData?.(Buffer.from('{"id":"dc-intercept-probe"}'));
+        sink.onComplete?.([]);
+        return true;
+    }
+    catch (err) {
+        sink.onError?.(err instanceof Error ? err : new Error(String(err)));
+        return false;
+    }
+}
 /**
  * Creates an interceptor that, when started, patches globalThis.fetch to
  * redirect LLM API calls through the guardrail proxy.
@@ -971,6 +1012,7 @@ export function createFetchInterceptor(portOrOpts) {
     let chatgptCodexPassthroughWarned = false;
     let selfTestTimer = null;
     const loggedInterceptHosts = new Set();
+    let lastUndiciProbeDestination = "";
     function describeLayers() {
         return {
             fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
@@ -1510,6 +1552,10 @@ export function createFetchInterceptor(portOrOpts) {
                         decision: "intercept",
                         reason: "undici-dispatcher",
                     });
+                    if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+                        lastUndiciProbeDestination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+                        return completeUndiciProbe(handler);
+                    }
                 }
                 return parentDispatcher.dispatch(opts, handler);
             };
@@ -1537,18 +1583,19 @@ export function createFetchInterceptor(portOrOpts) {
             };
         }
         let destination = "";
+        const probeInit = {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                [INTERCEPTION_PROBE_HEADER]: "1",
+            },
+            body: JSON.stringify({
+                model: "defenseclaw-intercept-probe",
+                messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
+            }),
+        };
         try {
-            const response = await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, {
-                method: "POST",
-                headers: {
-                    "content-type": "application/json",
-                    [INTERCEPTION_PROBE_HEADER]: "1",
-                },
-                body: JSON.stringify({
-                    model: "defenseclaw-intercept-probe",
-                    messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
-                }),
-            });
+            const response = await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, probeInit);
             // Probe hops short-circuit inside the wrapper after rewrite. A
             // 200 with the probe header means the rewrite happened and the
             // original fetch was never used for a provider host.
@@ -1559,12 +1606,33 @@ export function createFetchInterceptor(portOrOpts) {
         catch {
             // Keep the miss path for a broken wrapper.
         }
-        const ok = destination === expectedDest && layers.fetch;
+        lastUndiciProbeDestination = "";
+        if (undici && typeof undici.request === "function" && layers.undiciDispatcher) {
+            try {
+                const response = await undici.request(INTERCEPTION_SELF_TEST_URL, probeInit);
+                await response.body?.text?.();
+            }
+            catch {
+                // Rewrite is recorded on the dispatcher even if the sink is stubbed.
+            }
+        }
+        const requiredLayers = layers.fetch && layers.httpsRequest && layers.httpRequest && layers.httpGet;
+        const undiciRequired = Boolean(undici);
+        const undiciOk = !undiciRequired ||
+            (layers.undiciDispatcher && lastUndiciProbeDestination === expectedDest);
+        const ok = destination === expectedDest && requiredLayers && undiciOk;
+        let reason = "interception-self-test-miss";
+        if (ok) {
+            reason = "interception-self-test";
+        }
+        else if (destination === expectedDest && requiredLayers && !undiciOk) {
+            reason = "interception-self-test-undici-miss";
+        }
         return {
             ok,
             destination,
             layers,
-            reason: ok ? "interception-self-test" : "interception-self-test-miss",
+            reason,
         };
     }
     async function publishSelfTest(result) {
