@@ -333,6 +333,10 @@ jobs:
       actions: read
       contents: read
       issues: write
+    # Issue mutation is authorized only by GitHub's recorded live-job
+    # conclusion (needs.live.result). Candidate-writable artifacts such as
+    # classification.json may shape the issue body after reporter checks,
+    # but they must never enable --open-issue.
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -366,12 +370,11 @@ jobs:
           set -euo pipefail
           mkdir -p radar-results
           open_flag=()
-          while IFS= read -r -d '' classification; do
-            if jq -e '.classification == "candidate_regression"' "${classification}" >/dev/null; then
-              open_flag+=(--open-issue)
-              break
-            fi
-          done < <(find radar-results -name classification.json -type f -print0)
+          # Trusted authorization: the live job's GitHub-recorded conclusion.
+          # A forged but coherent classification.json cannot set this flag.
+          if [ "${{ needs.live.result }}" = "failure" ]; then
+            open_flag+=(--open-issue)
+          fi
           python3 scripts/live-connector-e2e/report.py \
             --results-dir radar-results \
             "${open_flag[@]}" \
