@@ -2165,6 +2165,10 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    # Off by default, like the other opt-ins below it: the address identifies a
+    # person rather than an account on one endpoint, and it leaves the endpoint
+    # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
+    include_user_email: bool = False
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -4885,6 +4889,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         lookup_model_provenance_online=_coerce_bool(
             raw.get("lookup_model_provenance_online", False)
         ),

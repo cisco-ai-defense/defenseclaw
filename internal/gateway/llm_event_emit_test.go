@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
@@ -19,6 +20,7 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
 
 	root := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-stable", "turn-1", "gpt-5", "codex", "", "", "codex",
 		map[string]interface{}{
 			"hook_event_name": "SessionStart",
@@ -37,6 +39,7 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 	}
 
 	child := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-stable", "turn-1", "gpt-5", "codex", "child-7", "worker", "explore",
 		map[string]interface{}{"hook_event_name": "SubagentStart", "agent_id": "child-7"},
 	)
@@ -46,6 +49,7 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 
 	gatewaylog.SetProcessRunID("gateway-run-b")
 	resumed := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-stable", "turn-2", "gpt-5", "codex", "", "", "codex",
 		map[string]interface{}{"hook_event_name": "SessionStart", "source": "resume"},
 	)
@@ -59,6 +63,7 @@ func TestHookLLMEventMetaLifecycleCorrelation(t *testing.T) {
 		hookSessionStateKey(root): {meta: root},
 	}}
 	turn := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-stable", "turn-3", "gpt-5", "codex", "", "", "codex",
 		map[string]interface{}{"hook_event_name": "Stop"},
 	)
@@ -476,6 +481,7 @@ func TestHookExecutionRotatesWithinGatewayProcess(t *testing.T) {
 	t.Cleanup(func() { gatewaylog.SetProcessRunID("") })
 	api := &APIServer{}
 	base := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-resumed", "", "gpt-5", "codex", "", "", "codex",
 		map[string]interface{}{"hook_event_name": "SessionStart", "source": "resume"},
 	)
@@ -592,7 +598,7 @@ func TestHermesNestedSubagentIdentityNormalizesChildSession(t *testing.T) {
 		t.Fatalf("normalized child identity=%+v", req)
 	}
 	meta := applyHookEventMeta(
-		hookLLMEventMeta("hermes", req.SessionID, req.TurnID, "", "hermes", req.AgentID, req.AgentName, req.AgentType, req.Payload),
+		hookLLMEventMeta(t.Context(), "hermes", req.SessionID, req.TurnID, "", "hermes", req.AgentID, req.AgentName, req.AgentType, req.Payload),
 		req.HookEventName, req.Payload,
 	)
 	if meta.ParentSessionID != "parent-hermes-session" || meta.ParentAgentID == "" || meta.AgentDepth != 1 {
@@ -656,7 +662,7 @@ func TestExplicitSubagentConnectorsKeepStableChildIdentity(t *testing.T) {
 			}
 			startReq := normalizeAgentHookRequest(connector, startPayload)
 			start := applyHookEventMeta(
-				hookLLMEventMeta(connector, startReq.SessionID, "", "", connector, startReq.AgentID, startReq.AgentName, startReq.AgentType, startReq.Payload),
+				hookLLMEventMeta(t.Context(), connector, startReq.SessionID, "", "", connector, startReq.AgentID, startReq.AgentName, startReq.AgentType, startReq.Payload),
 				startReq.HookEventName, startReq.Payload,
 			)
 			stopPayload := map[string]interface{}{}
@@ -670,7 +676,7 @@ func TestExplicitSubagentConnectorsKeepStableChildIdentity(t *testing.T) {
 			}
 			stopReq := normalizeAgentHookRequest(connector, stopPayload)
 			stop := applyHookEventMeta(
-				hookLLMEventMeta(connector, stopReq.SessionID, "", "", connector, stopReq.AgentID, stopReq.AgentName, stopReq.AgentType, stopReq.Payload),
+				hookLLMEventMeta(t.Context(), connector, stopReq.SessionID, "", "", connector, stopReq.AgentID, stopReq.AgentName, stopReq.AgentType, stopReq.Payload),
 				stopReq.HookEventName, stopReq.Payload,
 			)
 			if start.AgentID != stop.AgentID || start.LifecycleID != stop.LifecycleID ||
@@ -681,25 +687,109 @@ func TestExplicitSubagentConnectorsKeepStableChildIdentity(t *testing.T) {
 	}
 }
 
-func TestHookLLMEventMetaFallsBackToLocalUser(t *testing.T) {
+// TestHookLLMEventMetaLocalUserFallbackRespectsManagedMode pins the boundary
+// that keeps a managed endpoint's telemetry attributable.
+//
+// Under an unmanaged install the gateway runs as the person using it, so its
+// own OS identity is the right answer for a hook that reported none. Under a
+// managed install it runs as a service account, and reporting that account
+// would attribute every event on a multi-user endpoint to one principal that
+// never touched an agent.
+func TestHookLLMEventMetaLocalUserFallbackRespectsManagedMode(t *testing.T) {
 	current, err := osuser.Current()
 	if err != nil || current == nil {
 		t.Skipf("os/user current unavailable: %v", err)
 	}
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
 
-	meta := hookLLMEventMeta("codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", "ide", map[string]interface{}{})
-	if meta.UserID == "" && meta.UserName == "" {
-		t.Fatalf("expected local user fallback, got user_id=%q user_name=%q", meta.UserID, meta.UserName)
+	SetManagedEnterpriseActive(false)
+	unmanaged := hookLLMEventMeta(t.Context(), "codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", "ide", map[string]interface{}{})
+	if unmanaged.UserID == "" && unmanaged.UserName == "" {
+		t.Fatalf("expected local user fallback when unmanaged, got user_id=%q user_name=%q", unmanaged.UserID, unmanaged.UserName)
+	}
+
+	SetManagedEnterpriseActive(true)
+	m := hookLLMEventMeta(t.Context(), "codex", "sess", "turn", "gpt-5.5", "openai", "", "codex", "ide", map[string]interface{}{})
+	if m.UserID != "" || m.UserName != "" {
+		t.Fatalf("managed install attributed a hook to the service account: user_id=%q user_name=%q", m.UserID, m.UserName)
+	}
+}
+
+// TestHookUserEmailRequiresTheCollectionGate pins that the address is opt-in.
+//
+// It identifies a person across every system they use, unlike the uid or SID
+// it rides alongside, and it reaches AI Defense as plaintext. A deployment
+// that has not decided to collect it must emit records without it rather than
+// rely on nobody looking at the field.
+func TestHookUserEmailRequiresTheCollectionGate(t *testing.T) {
+	payload := map[string]interface{}{"user_email": "carol@example.com"}
+
+	withUserEmailCollection(t, false)
+	if got := hookUserEmail("cursor", payload); got != "" {
+		t.Fatalf("email collected with the gate off: %q", got)
+	}
+
+	withUserEmailCollection(t, true)
+	if got := hookUserEmail("cursor", payload); got != "carol@example.com" {
+		t.Fatalf("gate on: hookUserEmail = %q, want carol@example.com", got)
+	}
+}
+
+// TestHookUserEmailComesOnlyFromTheEvent pins that a hook event cannot cause a
+// profile read.
+//
+// codex and claudecode keep the address in a file under the user's profile,
+// and the only profile this path could name is the one derived from the user
+// id in the request — a value no local caller is authenticated to claim. So
+// these connectors report no address here even with the gate on and even when
+// the payload offers one; theirs is attributed by the inventory pass instead.
+func TestHookUserEmailComesOnlyFromTheEvent(t *testing.T) {
+	withUserEmailCollection(t, true)
+	payload := map[string]interface{}{"user_email": "carol@example.com"}
+
+	for _, connector := range []string{"codex", "claudecode"} {
+		if got := hookUserEmail(connector, payload); got != "" {
+			t.Errorf("%s resolved an address on the hook path: %q", connector, got)
+		}
+	}
+	if got := hookUserEmail("cursor", payload); got != "carol@example.com" {
+		t.Errorf("cursor lost its payload-reported address: %q", got)
 	}
 }
 
 func TestHookUserEmailIsPseudonymized(t *testing.T) {
-	userID, userName := userFromHookPayload(map[string]interface{}{"user_email": "Alice@Example.COM"})
+	userID, userName := userFieldsFromHookPayload(map[string]interface{}{"user_email": "Alice@Example.COM"})
 	if userID == "" || strings.Contains(strings.ToLower(userID), "alice@example.com") {
 		t.Fatalf("user email was not pseudonymized: %q", userID)
 	}
 	if strings.Contains(strings.ToLower(userName), "alice@example.com") {
 		t.Fatalf("user name leaked email: %q", userName)
+	}
+}
+
+// TestResolveHookUserIdentityPrefersHookReportedIdentity pins the precedence
+// that makes per-user attribution trustworthy: the hook runs as the real user,
+// while the payload it forwards is agent-controlled.
+func TestResolveHookUserIdentityPrefersHookReportedIdentity(t *testing.T) {
+	restore := ManagedEnterpriseActive()
+	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
+	SetManagedEnterpriseActive(true)
+
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{UserID: "501", UserName: "real"})
+	user := resolveHookUser(ctx, map[string]interface{}{"user_id": "S-1-5-21-1-2-3-1001", "user_name": "claimed"})
+	if user.ID != "501" || user.Name != "real" {
+		t.Fatalf("payload overrode the hook-reported identity: %+v", user)
+	}
+	if user.IDKind != useridentity.KindPOSIXUID {
+		t.Fatalf("uid was not classified as a posix uid: %q", user.IDKind)
+	}
+
+	// An identifier the gateway cannot place must not be labelled, or a
+	// consumer would join an arbitrary string as though it were a uid.
+	opaque := resolveHookUser(t.Context(), map[string]interface{}{"user_id": "alice"})
+	if opaque.IDKind != "" {
+		t.Fatalf("opaque identifier was labelled %q", opaque.IDKind)
 	}
 }
 

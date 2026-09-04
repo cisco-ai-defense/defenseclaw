@@ -38,6 +38,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 )
 
@@ -93,6 +94,15 @@ type endpointInventoryComponent struct {
 	agentVersion                string
 	agentProbeStatus            string
 	agentScannedAt              string
+	// The owning end user, when the row came from a specific profile
+	// directory. Left empty for rows the scan cannot attribute — a
+	// process-wide surface, or a profile whose owner does not resolve —
+	// because a row attributed to the wrong person is worse than one
+	// attributed to nobody.
+	userID     string
+	userIDKind string
+	userName   string
+	userEmail  string
 }
 
 // endpointInventoryCarrier is an atomic, typed snapshot split into parallel
@@ -265,8 +275,25 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 	homes := cfg.AIDiscovery.HomeDirs
 	seenComponent := make(map[string]struct{})
 	components := make([]endpointInventoryComponent, 0, len(connectors)*(len(homes)+1))
-	appendServers := func(connectorName, homeScope string, servers []config.MCPServerEntry) {
+	// Owner lookups hit the passwd database or the ProfileList registry and
+	// read a credential file, so they are memoized for the scan: the loops
+	// below revisit the same home once per connector.
+	owners := map[string]llmEventUser{}
+	ownerFor := func(connectorName, home string) llmEventUser {
+		if home == "" {
+			return llmEventUser{}
+		}
+		key := connectorName + "\x00" + home
+		if cached, ok := owners[key]; ok {
+			return cached
+		}
+		owner := inventoryHomeOwner(connectorName, home)
+		owners[key] = owner
+		return owner
+	}
+	appendServers := func(connectorName, homeScope, home string, servers []config.MCPServerEntry) {
 		slug := inventoryStableToken(connectorName, 128)
+		owner := ownerFor(connectorName, home)
 		for _, server := range servers {
 			command := inventorySafeBasename(server.Command)
 			host := mcpURLHost(server.URL)
@@ -310,6 +337,10 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 				mcpDisabled:         &disabled,
 				agentConnector:      slug,
 				agentInstalled:      &installed,
+				userID:              owner.ID,
+				userIDKind:          owner.IDKind,
+				userName:            owner.Name,
+				userEmail:           owner.Email,
 			})
 		}
 	}
@@ -326,7 +357,7 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 			continue
 		}
 		if servers, err := cfg.ReadMCPServersForConnector(connectorName); err == nil {
-			appendServers(connectorName, "", servers)
+			appendServers(connectorName, "", daemonHomeForInventoryAttribution(), servers)
 		}
 	}
 	// Pass 2 — every configured user home via direct-path readers.
@@ -340,11 +371,62 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 		homeScope := endpointInventoryScopeKey(home)
 		for _, connectorName := range connectors {
 			for _, servers := range readMCPServersUnderHomeForOS(connectorName, home, goos) {
-				appendServers(connectorName, homeScope, servers)
+				appendServers(connectorName, homeScope, home, servers)
 			}
 		}
 	}
 	return components
+}
+
+// inventoryHomeOwner resolves who owns one profile directory, and which
+// account they are signed into the connector as.
+//
+// The sidecar cannot use its own process identity here. It walks every profile
+// root on the endpoint, and under a managed install it runs as a service
+// account, so "the current user" is either the wrong user or no user at all.
+func inventoryHomeOwner(connectorName, home string) llmEventUser {
+	identity := useridentity.ForHome(home)
+	owner := llmEventUser{
+		ID:     sanitizeLLMEventUser(identity.ID),
+		IDKind: identity.IDKind,
+		Name:   sanitizeLLMEventUser(identity.Name),
+	}
+	if owner.ID == "" {
+		// Without a resolvable owner there is nobody to attribute the
+		// address to, and emitting it alone would assert that someone on
+		// this endpoint uses it without saying who.
+		return llmEventUser{}
+	}
+	// This read is safe where the hook path's is not: home comes from the
+	// operator-configured profile roots and its owner was just resolved by
+	// stat'ing that directory, so no request influences whose file is opened.
+	// It is still gated, because collecting the address at all is a privacy
+	// decision independent of whether it can be attributed correctly.
+	if UserEmailCollectionEnabled() {
+		if email, err := useridentity.EmailForConnector(connectorName, home, nil); err == nil {
+			owner.Email = email
+		}
+	}
+	return owner
+}
+
+// daemonHomeForInventoryAttribution returns the profile the sidecar itself
+// runs under, but only when that profile belongs to a person.
+//
+// The first inventory pass reads the daemon's own HOME, which covers dev runs
+// and single-user installs where no profile roots are configured. Under a
+// managed install that home belongs to the service account, and attributing
+// its MCP configuration to that principal would put a row in the inventory
+// claiming a service account uses an agent.
+func daemonHomeForInventoryAttribution() string {
+	if ManagedEnterpriseActive() {
+		return ""
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSpace(home)
 }
 
 // hasNativeMCPReader reports whether the given connector slug has a native
@@ -872,6 +954,10 @@ func emitEndpointInventoryComponent(
 			DefenseClawAIComponentProduct:                   aiDiscoveryV8OptionalText(component.product),
 			DefenseClawInventoryItemName:                    aiDiscoveryV8OptionalText(component.itemName),
 			DefenseClawInventoryItemDescription:             aiDiscoveryV8OptionalText(component.itemDescription),
+			UserID:                                          aiDiscoveryV8OptionalText(component.userID),
+			DefenseClawUserIDKind:                           v8UserIDKind(component.userIDKind),
+			DefenseClawUserName:                             aiDiscoveryV8OptionalText(component.userName),
+			DefenseClawUserEmail:                            v8UserEmail(component.userEmail),
 			DefenseClawInventoryConnectorSource:             aiDiscoveryV8OptionalText(component.connectorSource),
 			DefenseClawInventoryConnectorToolInspectionMode: aiDiscoveryV8OptionalText(component.connectorToolInspectionMode),
 			DefenseClawInventoryConnectorSubprocessPolicy:   aiDiscoveryV8OptionalText(component.connectorSubprocessPolicy),

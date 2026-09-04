@@ -27,6 +27,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"sort"
 	"strings"
 	"sync"
@@ -42,6 +43,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 type endpointInventoryCapture struct {
@@ -123,6 +125,13 @@ func withManagedEnterprise(t *testing.T, on bool) {
 	previous := ManagedEnterpriseActive()
 	SetManagedEnterpriseActive(on)
 	t.Cleanup(func() { SetManagedEnterpriseActive(previous) })
+}
+
+func withUserEmailCollection(t *testing.T, on bool) {
+	t.Helper()
+	previous := UserEmailCollectionEnabled()
+	SetUserEmailCollectionEnabled(on)
+	t.Cleanup(func() { SetUserEmailCollectionEnabled(previous) })
 }
 
 func TestEmitEndpointInventoryManagedUsesCanonicalV8Snapshots(t *testing.T) {
@@ -1549,5 +1558,83 @@ func TestPerConnectorMCPEntriesWindowsExcludesUnsupportedAndDeprecated(t *testin
 	}
 	if !foundNative {
 		t.Fatalf("Windows MCP fanout did not include canonical Copilot entry: %+v", components)
+	}
+}
+
+// TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner is the per-user MCP
+// attribution the identity work exists for: an endpoint with several profiles
+// must report which person configured each MCP server, not just that the
+// endpoint has one.
+func TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("profile ownership on Windows comes from ProfileList, which a temp dir has no entry in")
+	}
+	withManagedEnterprise(t, true)
+	withUserEmailCollection(t, true)
+
+	home := t.TempDir()
+	claudeConfig := filepath.Join(home, ".claude.json")
+	body := `{"oauthAccount":{"emailAddress":"owner@example.com"},` +
+		`"mcpServers":{"github":{"command":"github-mcp"}}}`
+	if err := os.WriteFile(claudeConfig, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := &config.Config{
+		AIDiscovery: config.AIDiscoveryConfig{HomeDirs: []string{home}},
+		Guardrail: config.GuardrailConfig{Connectors: map[string]config.PerConnectorGuardrailConfig{
+			"claudecode": {},
+		}},
+	}
+	components := perConnectorMCPEntriesForOS(cfg, nil, runtime.GOOS)
+
+	self := useridentity.Current()
+	var attributed int
+	for _, component := range components {
+		if component.componentType != "mcp_server" || component.itemName != "github" {
+			continue
+		}
+		attributed++
+		if component.userID != self.ID {
+			t.Errorf("MCP row owner = %q, want the temp dir's owner %q", component.userID, self.ID)
+		}
+		if component.userIDKind != self.IDKind {
+			t.Errorf("MCP row id_kind = %q, want %q", component.userIDKind, self.IDKind)
+		}
+		if component.userEmail != "owner@example.com" {
+			t.Errorf("MCP row email = %q, want the address in that profile", component.userEmail)
+		}
+	}
+	if attributed == 0 {
+		t.Fatalf("no MCP row produced for the seeded profile: %+v", components)
+	}
+}
+
+// TestManagedInventorySkipsTheDaemonsOwnProfile keeps the first inventory pass
+// from attributing the service account's MCP configuration to a person. Under
+// a managed install the sidecar's own home belongs to a service principal, and
+// a row claiming that principal runs an agent is a false positive an operator
+// would have to chase.
+func TestManagedInventorySkipsTheDaemonsOwnProfile(t *testing.T) {
+	withManagedEnterprise(t, true)
+	if got := daemonHomeForInventoryAttribution(); got != "" {
+		t.Fatalf("managed install offered the daemon home %q for attribution", got)
+	}
+
+	withManagedEnterprise(t, false)
+	if daemonHomeForInventoryAttribution() == "" {
+		t.Fatal("unmanaged install refused to attribute rows to the person running it")
+	}
+}
+
+// TestInventoryHomeOwnerRefusesEmailWithoutAnOwner pins the rule that an
+// address is never emitted alone. A row carrying only an email asserts that
+// somebody on this endpoint uses that account without saying who, which cannot
+// be joined and cannot be acted on.
+func TestInventoryHomeOwnerRefusesEmailWithoutAnOwner(t *testing.T) {
+	withUserEmailCollection(t, true)
+	missing := filepath.Join(t.TempDir(), "no-such-profile")
+	if got := inventoryHomeOwner("claudecode", missing); !reflect.DeepEqual(got, llmEventUser{}) {
+		t.Fatalf("unresolvable profile produced %+v, want an empty owner", got)
 	}
 }

@@ -568,7 +568,7 @@ func (a *APIServer) finalizeAgentHook(
 	}
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
 	safeSection("identity", func() {
-		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+		a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the
 		// destination collects traces but not metrics.
@@ -620,6 +620,7 @@ func (a *APIServer) hookDecisionMeta(
 	// hook-session snapshot, so mergeHookSessionLifecycle recovers the active
 	// execution identity without advancing the phase sequence a second time.
 	meta := hookLLMEventMeta(
+		ctx,
 		source,
 		req.SessionID,
 		req.TurnID,
@@ -886,7 +887,7 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 		AuditActionOverride: string(audit.ActionConnectorHookSynthetic),
 		Extra:               mergeHookEnvelopeExtra(extra, hookCompatibilityExtra(profile)),
 	}
-	a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+	a.stampHookEnvelopeIdentity(ctx, connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
 	if !req.SuppressCorrelationEmit {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
@@ -1320,13 +1321,13 @@ func refreshAuditEnvelopeFromIdentity(ctx context.Context, sessionID string, ide
 func agentIdentityForGenericHook(ctx context.Context, req agentHookRequest) AgentIdentity {
 	agentName := firstNonEmpty(req.AgentName, req.AgentType, req.ConnectorName)
 	agentType := firstNonEmpty(req.AgentType, req.ConnectorName)
-	userID, userName := userFromHookPayload(req.Payload)
+	user := resolveHookUser(ctx, req.Payload)
 	identity := AgentIdentity{
 		AgentID:   strings.TrimSpace(req.AgentID),
 		AgentName: agentName,
 		AgentType: agentType,
-		UserID:    userID,
-		UserName:  userName,
+		UserID:    user.ID,
+		UserName:  user.Name,
 	}
 	if reg := SharedAgentRegistry(); reg != nil {
 		resolved := reg.Resolve(ctx, req.SessionID, identity.AgentID)
@@ -1399,6 +1400,7 @@ func enrichAgentHookSpan(ctx context.Context, req agentHookRequest, resp agentHo
 	}
 	span.SetAttributes(attrs...)
 	meta := hookLLMEventMeta(
+		ctx,
 		req.ConnectorName, req.SessionID, req.TurnID,
 		firstString(req.Payload, "model", "model_name", "modelName"),
 		req.ConnectorName, req.AgentID, req.AgentName, req.AgentType, req.Payload,

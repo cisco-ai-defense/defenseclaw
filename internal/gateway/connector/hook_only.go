@@ -6372,6 +6372,9 @@ func managedHookCommandEntry(raw interface{}, hookScript string) bool {
 		if isCopilotPowerShellAdapterCommand(hookScript) && isCopilotNativeHookCommand(command) {
 			return true
 		}
+		if isCopilotPowerShellAdapterCommand(hookScript) && isCopilotEventBoundPowerShellAdapterCommand(command) {
+			return true
+		}
 		for _, event := range copilotCurrentHookEvents {
 			if command == copilotHookInvocationCommandForEvent("windows", event, hookScript) {
 				return true
@@ -6388,6 +6391,18 @@ func isCopilotPowerShellAdapterCommand(command string) bool {
 	command = strings.TrimSpace(command)
 	return strings.HasPrefix(command, "& '") &&
 		strings.HasSuffix(strings.ToLower(command), "copilot-hook.ps1'")
+}
+
+func isCopilotEventBoundPowerShellAdapterCommand(command string) bool {
+	command = strings.TrimSpace(command)
+	for _, event := range copilotCurrentHookEvents {
+		suffix := " -Event " + powershellQuoteLiteral(event)
+		if strings.HasSuffix(command, suffix) &&
+			isCopilotPowerShellAdapterCommand(strings.TrimSuffix(command, suffix)) {
+			return true
+		}
+	}
+	return false
 }
 
 func isCopilotNativeHookCommand(command string) bool {

@@ -1001,7 +1001,7 @@ func TestHookLifecycleOutcomeRetainsRawTerminalSemantics(t *testing.T) {
 }
 
 func TestHookLifecycleLineageProvenanceDistinguishesReportedAndInferred(t *testing.T) {
-	root := hookLLMEventMeta("codex", "session-root", "", "", "", "agent-root", "root", "codex", nil)
+	root := hookLLMEventMeta(t.Context(), "codex", "session-root", "", "", "", "agent-root", "root", "codex", nil)
 	root = applyHookEventMeta(root, "SessionStart", nil)
 	if root.LineageProvenance != "inferred" {
 		t.Fatalf("derived root/depth topology provenance=%q", root.LineageProvenance)
@@ -1011,6 +1011,7 @@ func TestHookLifecycleLineageProvenanceDistinguishesReportedAndInferred(t *testi
 		"root_agent_id": "agent-root", "parent_agent_id": "agent-root", "agent_depth": float64(1),
 	}
 	reported := hookLLMEventMeta(
+		t.Context(),
 		"codex", "session-child", "", "", "", "agent-child", "child", "subagent", reportedPayload,
 	)
 	reported = applyHookEventMeta(reported, "SubagentStart", reportedPayload)
@@ -1018,7 +1019,7 @@ func TestHookLifecycleLineageProvenanceDistinguishesReportedAndInferred(t *testi
 		t.Fatalf("reported topology provenance=%q", reported.LineageProvenance)
 	}
 
-	inferred := hookLLMEventMeta("codex", "session-child", "", "", "", "agent-child", "child", "subagent", nil)
+	inferred := hookLLMEventMeta(t.Context(), "codex", "session-child", "", "", "", "agent-child", "child", "subagent", nil)
 	inferred = applyHookEventMeta(inferred, "SubagentStart", nil)
 	if inferred.LineageProvenance != "inferred" || inferred.ParentAgentID == "" {
 		t.Fatalf("inferred topology=%#v", inferred)
