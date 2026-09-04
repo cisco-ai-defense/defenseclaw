@@ -2812,7 +2812,15 @@ func (p *GuardrailProxy) handleChatCompletion(w http.ResponseWriter, r *http.Req
 			UserID:         routerMeta.UserID,
 			Metadata:       routerMetadata,
 		}
-		if decision := p.modelRouter.Route(r.Context(), routerInput); decision != nil {
+		var routeOutcome SemanticRouteOutcome
+		startedRoute := time.Now()
+		if detailed, ok := p.modelRouter.(detailedModelRouter); ok {
+			routeOutcome = detailed.RouteDetailed(r.Context(), routerInput)
+		} else {
+			routeOutcome = outcomeFromDecision(routerInput, p.modelRouter.Route(r.Context(), routerInput), time.Since(startedRoute))
+		}
+		p.recordSemanticRoutingDecisionV8(r.Context(), routeOutcome)
+		if decision := routeOutcome.Decision; decision != nil {
 			routedDecision = decision
 			if decision.TargetURLOverride || decision.APIKeyOverride {
 				// A router-selected backend is a new credential boundary. Do not

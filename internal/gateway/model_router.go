@@ -10,7 +10,100 @@
 
 package gateway
 
-import "context"
+import (
+	"context"
+	"time"
+)
+
+// Closed semantic-routing result and failure-code dimensions. These are the
+// only values allowed on canonical v8 metric labels (#783).
+const (
+	SemanticRouteApplied  = "applied"
+	SemanticRouteFallback = "fallback"
+
+	SemanticRouteFailureNone           = "none"
+	SemanticRouteFailureTimeout        = "timeout"
+	SemanticRouteFailureUpstreamStatus = "upstream_status"
+	SemanticRouteFailureDecode         = "decode_failure"
+	SemanticRouteFailureUnknownAlias   = "unknown_alias"
+	SemanticRouteFailureCredential     = "credential_failure"
+	SemanticRouteFailureConfig         = "configuration_failure"
+)
+
+// SemanticRouteOutcome is the content-free routing decision for one request.
+// Decision.Reason, aliases, endpoints, and prompt text must never be copied
+// onto metric labels.
+type SemanticRouteOutcome struct {
+	Result           string
+	FailureCode      string
+	OverrideApplied  bool
+	Latency          time.Duration
+	RequestModel     string
+	SelectedProvider string
+	SelectedModel    string
+	Decision         *ModelRouterDecision
+}
+
+// detailedModelRouter is implemented by routers that can classify why a
+// request fell back. The proxy uses it when available.
+type detailedModelRouter interface {
+	RouteDetailed(ctx context.Context, input *ModelRouterInput) SemanticRouteOutcome
+}
+
+func normalizeSemanticRouteOutcome(outcome SemanticRouteOutcome) SemanticRouteOutcome {
+	switch outcome.Result {
+	case SemanticRouteApplied, SemanticRouteFallback:
+	default:
+		if outcome.Decision != nil {
+			outcome.Result = SemanticRouteApplied
+		} else {
+			outcome.Result = SemanticRouteFallback
+		}
+	}
+	switch outcome.FailureCode {
+	case SemanticRouteFailureNone,
+		SemanticRouteFailureTimeout,
+		SemanticRouteFailureUpstreamStatus,
+		SemanticRouteFailureDecode,
+		SemanticRouteFailureUnknownAlias,
+		SemanticRouteFailureCredential,
+		SemanticRouteFailureConfig:
+	default:
+		if outcome.Result == SemanticRouteApplied {
+			outcome.FailureCode = SemanticRouteFailureNone
+		} else {
+			outcome.FailureCode = SemanticRouteFailureConfig
+		}
+	}
+	if outcome.Result == SemanticRouteApplied {
+		outcome.FailureCode = SemanticRouteFailureNone
+	}
+	return outcome
+}
+
+func outcomeFromDecision(input *ModelRouterInput, decision *ModelRouterDecision, latency time.Duration) SemanticRouteOutcome {
+	outcome := SemanticRouteOutcome{
+		Result:      SemanticRouteFallback,
+		FailureCode: SemanticRouteFailureNone,
+		Latency:     latency,
+	}
+	if input != nil {
+		outcome.RequestModel = input.RequestModel
+		if outcome.RequestModel == "" {
+			outcome.RequestModel = input.Model
+		}
+	}
+	if decision == nil {
+		return normalizeSemanticRouteOutcome(outcome)
+	}
+	outcome.Result = SemanticRouteApplied
+	outcome.Decision = decision
+	outcome.SelectedProvider = decision.Provider
+	outcome.SelectedModel = decision.Model
+	outcome.OverrideApplied = decision.TargetURLOverride || decision.APIKeyOverride ||
+		(outcome.RequestModel != "" && decision.Model != "" && decision.Model != outcome.RequestModel)
+	return normalizeSemanticRouteOutcome(outcome)
+}
 
 // ModelRouter is the interface for an embedded semantic router that selects
 // the optimal LLM provider/model for each request based on content signals.

@@ -4370,6 +4370,113 @@ groups:
     legacy_bindings:
     - source: schemas/otel/metrics.schema.json x-emitted-metrics
       disposition: preserved
+- id: metric.defenseclaw.semantic_routing.decision
+  type: metric
+  brief: Per-request semantic routing decision (result=applied|fallback, error.code=closed failure class, decision=override|default)
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.error.code
+    requirement_level: recommended
+  - ref: defenseclaw.metric.decision
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.semantic_routing.decision
+    instrument_type: counter
+    value_type: int64
+    unit: '{decision}'
+    description: Per-request semantic routing decision (result=applied|fallback, error.code=closed failure class, decision=override|default)
+    temporality: delta
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.metric.error.code
+        label: error.code
+      - ref: defenseclaw.metric.decision
+        label: decision
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: issue 783 semantic routing observability
+      disposition: new
+- id: metric.defenseclaw.semantic_routing.latency
+  type: metric
+  brief: Semantic routing classification latency in milliseconds
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.error.code
+    requirement_level: recommended
+  body_fields: []
+  metric:
+    instrument_name: defenseclaw.semantic_routing.latency
+    instrument_type: histogram
+    value_type: double
+    unit: ms
+    description: Semantic routing classification latency in milliseconds
+    temporality: delta
+    boundaries: []
+    label_projections:
+    - profile: local-observability-v1
+      mappings:
+      - ref: defenseclaw.metric.result
+        label: result
+      - ref: defenseclaw.metric.error.code
+        label: error.code
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    route_selector: true
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: issue 783 semantic routing observability
+      disposition: new
+- id: log.semantic_routing.decision
+  type: log
+  brief: Request-correlated semantic routing decision without prompt, credential, endpoint, or reason text
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.model.io
+  attributes:
+  - ref: defenseclaw.metric.result
+    requirement_level: recommended
+  - ref: defenseclaw.metric.error.code
+    requirement_level: recommended
+  - ref: defenseclaw.metric.decision
+    requirement_level: recommended
+  body_fields: []
+  log:
+    event_name: semantic_routing.decision
+  x-defenseclaw:
+    bucket: model.io
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - failed
+    - timed_out
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+    legacy_bindings:
+    - source: issue 783 semantic routing observability
+      disposition: new
 - id: metric.defenseclaw.llm_bridge.latency
   type: metric
   brief: LiteLLM bridge call latency (Python subprocess)
