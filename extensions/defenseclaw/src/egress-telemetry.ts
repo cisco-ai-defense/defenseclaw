@@ -35,7 +35,7 @@ import { loadSidecarConfig } from "./sidecar-config.js";
 const DC_AUTH_HEADER = "X-DC-Auth";
 
 /** Branch labels mirror the Go-side emitter in internal/gateway/events.go. */
-export type EgressBranch = "known" | "shape" | "passthrough" | "undici";
+export type EgressBranch = "known" | "shape" | "passthrough" | "undici" | "selftest";
 
 /** Allow/block decision at the guardrail edge. */
 export type EgressDecision = "allow" | "block" | "intercept";

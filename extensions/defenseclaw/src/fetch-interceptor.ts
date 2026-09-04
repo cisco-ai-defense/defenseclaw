@@ -1040,6 +1040,25 @@ export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
   HEADER_DEFENSECLAW_TRACE_ID,
 ] as const;
 
+export interface InterceptorLayers {
+  fetch: boolean;
+  httpRequest: boolean;
+  httpsRequest: boolean;
+  httpGet: boolean;
+  undiciDispatcher: boolean;
+}
+
+export interface InterceptionSelfTest {
+  ok: boolean;
+  destination: string;
+  layers: InterceptorLayers;
+  reason: string;
+}
+
+const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
+const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
+export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
+
 export interface CreateFetchInterceptorOptions {
   guardrailPort: number;
   /**
@@ -1078,6 +1097,43 @@ export function createFetchInterceptor(
   let originalUndiciDispatcher: UndiciDispatcher | null = null;
   let egressReporter: EgressReporter | null = null;
   let chatgptCodexPassthroughWarned = false;
+  let selfTestTimer: ReturnType<typeof setInterval> | null = null;
+  const loggedInterceptHosts = new Set<string>();
+
+  function describeLayers(): InterceptorLayers {
+    return {
+      fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
+      httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
+      httpsRequest: originalHttpsRequest !== null && https.request !== originalHttpsRequest,
+      httpGet: originalHttpGet !== null && http.get !== originalHttpGet,
+      undiciDispatcher: Boolean(
+        undici &&
+          originalUndiciDispatcher &&
+          undici.getGlobalDispatcher() !== originalUndiciDispatcher,
+      ),
+    };
+  }
+
+  function logStartupBanner(layers: InterceptorLayers): void {
+    console.log(
+      `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
+        `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
+        `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
+    );
+  }
+
+  function noteInterceptLayer(layer: string, urlStr: string): void {
+    let host = urlStr;
+    try {
+      host = new URL(urlStr).hostname;
+    } catch {
+      // keep the raw string when URL parsing fails
+    }
+    const key = `${layer}:${host}`;
+    if (loggedInterceptHosts.has(key)) return;
+    loggedInterceptHosts.add(key);
+    console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+  }
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
@@ -1206,6 +1262,7 @@ export function createFetchInterceptor(
 
       // Rewrite: keep path + query, replace scheme://host with proxy.
       const proxied = `${proxyBase}${original.pathname}${original.search}`;
+      noteInterceptLayer("fetch", urlStr);
 
       // Merge effective headers (Request + init overrides) and add
       // proxy-hop headers. init wins, matching native Fetch (#742).
@@ -1456,6 +1513,7 @@ export function createFetchInterceptor(
       );
 
       if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
+        noteInterceptLayer("https.request", urlStr);
         let opts: NodeRequestOptions = {};
         let cb = callback;
 
@@ -1701,6 +1759,7 @@ export function createFetchInterceptor(
           );
           opts.headers = { ...existingHeaders, ...proxyHdrs };
 
+          noteInterceptLayer("undici", urlStr);
           egressReporter?.report({
             targetHost: new URL(origin).hostname,
             targetPath: pathStr,
@@ -1726,6 +1785,108 @@ export function createFetchInterceptor(
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
+    const layers = describeLayers();
+    logStartupBanner(layers);
+    scheduleSelfTest();
+  }
+
+  async function verifyInterception(): Promise<InterceptionSelfTest> {
+    const layers = describeLayers();
+    const expectedDest = `${proxyBase}/v1/chat/completions`;
+    if (!originalFetch) {
+      return {
+        ok: false,
+        destination: "",
+        layers,
+        reason: "interceptor-not-started",
+      };
+    }
+
+    const captured: string[] = [];
+    const prev = originalFetch;
+    originalFetch = (async (input: RequestInfo | URL) => {
+      captured.push(String(input instanceof Request ? input.url : input));
+      return new Response(JSON.stringify({ id: "dc-intercept-probe" }), {
+        status: 200,
+        headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+      });
+    }) as typeof fetch;
+
+    try {
+      await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          [INTERCEPTION_PROBE_HEADER]: "1",
+        },
+        body: JSON.stringify({
+          model: "defenseclaw-intercept-probe",
+          messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
+        }),
+      });
+    } catch {
+      // The stub never throws; keep the miss path for a broken wrapper.
+    } finally {
+      originalFetch = prev;
+    }
+
+    const destination = captured[0] ?? "";
+    const ok = destination === expectedDest && layers.fetch;
+    return {
+      ok,
+      destination,
+      layers,
+      reason: ok ? "interception-self-test" : "interception-self-test-miss",
+    };
+  }
+
+  async function publishSelfTest(result: InterceptionSelfTest): Promise<void> {
+    if (!originalFetch) return;
+    const token = loadSidecarConfig().token;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers[DC_AUTH_HEADER] = `Bearer ${token}`;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2_000);
+      await originalFetch(`http://127.0.0.1:${guardrailPort}/v1/events/egress`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          target_host: "api.openai.com",
+          target_path: "/v1/chat/completions",
+          body_shape: "messages",
+          looks_like_llm: true,
+          branch: "selftest",
+          decision: result.ok ? "intercept" : "allow",
+          reason: result.reason,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+    } catch {
+      // Self-test telemetry is best-effort and must not stall the plugin.
+    }
+  }
+
+  async function runSelfTest(): Promise<InterceptionSelfTest> {
+    const result = await verifyInterception();
+    console.log(
+      `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
+        `reason=${result.reason}`,
+    );
+    await publishSelfTest(result);
+    return result;
+  }
+
+  function scheduleSelfTest(): void {
+    void runSelfTest();
+    if (selfTestTimer) return;
+    selfTestTimer = setInterval(() => {
+      void runSelfTest();
+    }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
+    if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
+      (selfTestTimer as { unref?: () => void }).unref?.();
+    }
   }
 
   function stop(): void {
@@ -1758,10 +1919,15 @@ export function createFetchInterceptor(
       egressReporter = null;
     }
     chatgptCodexPassthroughWarned = false;
+    loggedInterceptHosts.clear();
+    if (selfTestTimer) {
+      clearInterval(selfTestTimer);
+      selfTestTimer = null;
+    }
     _shared.installed = false;
     _shared.guardrailPort = null;
     console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop };
+  return { start, stop, describeLayers, verifyInterception };
 }
