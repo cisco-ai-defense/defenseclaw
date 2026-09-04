@@ -1683,6 +1683,22 @@ Expected evidence:
 
 Treat this evidence as a release gate for the managed endpoint image. Run destructive tamper scenarios only in a dedicated validation environment with an independent administrator recovery channel.
 
+## Scoped token rotation platform boundary
+
+Linux and macOS managed-enterprise rotation coordinates the gateway service
+with the POSIX guardian participant. Windows does not join that protocol.
+
+On Windows `managed_enterprise`, `defenseclaw setup rotate-token` fail-closes
+before it stops the service or publishes replacement credentials. The shipped
+`DefenseClawHookGuardian` LocalSystem service continues to install and repair
+hooks; it is not a token-rotation participant until a native prepare, commit,
+and rollback adapter is certified. Unmanaged Windows rotation is unchanged.
+
+Do not route Windows through `enterprise hooks rotate-prepare`,
+`rotate-commit`, or `rotate-rollback`. That would claim Linux/macOS parity at
+a privileged credential boundary. See spec 007 for the approved topology,
+identity, DACL, and certification requirements.
+
 ## Production checklist
 
 - [ ] AI agent users are standard users without passwordless sudo/admin rights.
