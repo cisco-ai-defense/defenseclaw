@@ -10,7 +10,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -616,15 +615,21 @@ func TestWindowsManagedHooksTeardownExpectedEnrollmentEmptyTargetsAreNonNil(t *t
 // Backward-compat: a pre-fix journal on disk from an older Setup EXE
 // may have "codex_targets": null (or cursor_targets/claude_target_sids
 // null) because the buggy writer emitted null for empty target lists.
-// readWindowsManagedHooksTeardownJournal must accept those without
+// parseWindowsManagedHooksTeardownJournalBody must accept those without
 // throwing "managed-hook teardown journal is missing codex_targets" so
 // AVC (and every downstream operator) can uninstall a box that was
 // installed with the buggy writer. Trust-critical identity fields
 // (manifest_sha256, activation_state, deployment_generation_id) stay
 // presence-required; validateWindowsManagedHooksTeardownJournal below
 // still binds every target list to the recomputed activation identity.
-func TestReadWindowsManagedHooksTeardownJournalAcceptsNullConnectorArrays(t *testing.T) {
-	journalPath := filepath.Join(t.TempDir(), "managed-hooks-teardown-journal.json")
+//
+// Tested against the ACL-independent JSON layer so the CI runner's
+// non-Admin user identity does not trip
+// managed.ValidateTrustedFilePath's owner walk. The production entry
+// point readWindowsManagedHooksTeardownJournal still enforces owner
+// trust (SYSTEM/Admins/TrustedInstaller) before reaching this parse
+// step.
+func TestParseWindowsManagedHooksTeardownJournalBodyAcceptsNullConnectorArrays(t *testing.T) {
 	body := []byte(`{
   "schema_version": 6,
   "phase": "prepared",
@@ -646,12 +651,9 @@ func TestReadWindowsManagedHooksTeardownJournalAcceptsNullConnectorArrays(t *tes
   "selector_targets": null
 }
 `)
-	if err := os.WriteFile(journalPath, body, 0o600); err != nil {
-		t.Fatalf("write journal: %v", err)
-	}
-	journal, err := readWindowsManagedHooksTeardownJournal(journalPath)
+	journal, err := parseWindowsManagedHooksTeardownJournalBody(body)
 	if err != nil {
-		t.Fatalf("read journal with null connector arrays: %v", err)
+		t.Fatalf("parse journal with null connector arrays: %v", err)
 	}
 	if len(journal.CodexTargets) != 0 || len(journal.CursorTargets) != 0 ||
 		len(journal.ClaudeTargetSIDs) != 0 {
@@ -670,12 +672,23 @@ func TestReadWindowsManagedHooksTeardownJournalAcceptsNullConnectorArrays(t *tes
 		`"manifest_sha256": null,`,
 		1,
 	)
-	if err := os.WriteFile(journalPath, []byte(withoutManifestSHA), 0o600); err != nil {
-		t.Fatalf("rewrite journal: %v", err)
-	}
-	if _, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil ||
-		!strings.Contains(err.Error(), "missing manifest_sha256") {
+	if _, err := parseWindowsManagedHooksTeardownJournalBody(
+		[]byte(withoutManifestSHA),
+	); err == nil || !strings.Contains(err.Error(), "missing manifest_sha256") {
 		t.Errorf("expected missing-manifest_sha256 rejection, got %v", err)
+	}
+	// Unknown property still fails closed (DisallowUnknownFields).
+	withForeignKey := strings.Replace(
+		string(body),
+		`"selector_targets": null`,
+		`"selector_targets": null,
+  "attacker_planted_key": "evil"`,
+		1,
+	)
+	if _, err := parseWindowsManagedHooksTeardownJournalBody(
+		[]byte(withForeignKey),
+	); err == nil || !strings.Contains(err.Error(), "unknown field") {
+		t.Errorf("expected unknown-field rejection, got %v", err)
 	}
 }
 

@@ -1755,6 +1755,21 @@ func readWindowsManagedHooksTeardownJournal(
 	if err := file.Close(); err != nil {
 		return journal, err
 	}
+	return parseWindowsManagedHooksTeardownJournalBody(body)
+}
+
+// parseWindowsManagedHooksTeardownJournalBody is the ACL-independent
+// JSON layer of readWindowsManagedHooksTeardownJournal. Split out so
+// the schema/tolerance contract can be unit-tested without the
+// trusted-owner ACL walk, which requires SYSTEM/Admins ownership on
+// the input file — impractical inside a Go test running under a CI
+// runner user. readWindowsManagedHooksTeardownJournal is the only
+// production entry point and always enforces the ACL walk first via
+// managed.ValidateTrustedFilePath before calling this helper.
+func parseWindowsManagedHooksTeardownJournalBody(
+	body []byte,
+) (windowsManagedHooksTeardownJournal, error) {
+	var journal windowsManagedHooksTeardownJournal
 	var properties map[string]json.RawMessage
 	if err := json.Unmarshal(body, &properties); err != nil {
 		return journal, err

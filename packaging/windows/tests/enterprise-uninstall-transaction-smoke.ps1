@@ -2624,7 +2624,14 @@ targets:
             param(
                 [Parameter(Mandatory)][string]$Path,
                 [Parameter(Mandatory)][string]$RequiredBase,
-                [Parameter(Mandatory)][string]$Label
+                [Parameter(Mandatory)][string]$Label,
+                # Mirrors the production function's optional param
+                # (added when the InstallRoot teardown pipeline learned
+                # to tolerate the AF_UNIX socket reparse point). The
+                # smoke harness does not need the value; accepting the
+                # parameter keeps the mock signature-compatible with
+                # every module caller.
+                [string]$AllowAFUnixSocketAt = ''
             )
             $script:HarnessState.events.Add("remove-tree:$Label")
             if ($Label -eq 'StateRoot') {
