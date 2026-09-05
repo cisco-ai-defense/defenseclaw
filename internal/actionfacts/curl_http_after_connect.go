@@ -29,8 +29,10 @@ func staticCurlHTTPAfterCONNECTRequestComponents(
 		proxy, parsed, ok = staticCurlHTTPProxyChainDestination(command)
 	}
 	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" ||
-		len(parsed.Targets) == 0 ||
-		!curlCommandAllowsHTTPSProxyScheme(command, proxy.Scheme) {
+		len(parsed.Targets) == 0 {
+		return nil
+	}
+	if proxy.Scheme == "https" && !curlCommandAttestsHTTPSProxy(command) {
 		return nil
 	}
 	group := parsed.Targets[0].Group
