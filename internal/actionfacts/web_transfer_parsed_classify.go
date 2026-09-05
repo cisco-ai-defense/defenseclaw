@@ -2275,36 +2275,64 @@ func StaticCurlProxyUploadFileSources(
 	return sources
 }
 
+// StaticCurlDirectUploadFileSources returns exact file-backed curl upload
+// sources whose target uses a direct route, including --noproxy bypass.
+// Targets that still use an explicit SOCKS proxy are excluded even when the
+// origin body is HTTPS and therefore invisible to the SOCKS observer.
+func StaticCurlDirectUploadFileSources(
+	command CommandFact,
+) []TransmittedFileSource {
+	originSources := StaticCurlUploadFileSources(command)
+	if len(originSources) == 0 {
+		return nil
+	}
+	_, parsed, hasSOCKS := staticCurlSOCKSProxyDestinationWithUploads(command)
+	if !hasSOCKS {
+		return originSources
+	}
+	seen := make(map[string]struct{})
+	var sources []TransmittedFileSource
+	for _, target := range parsed.Targets {
+		if curlTargetUsesExplicitProxy(parsed, target) {
+			continue
+		}
+		targetFact, valid := webTargetFact(
+			command.ID,
+			target.Value,
+			NetworkUpload,
+		)
+		if !valid {
+			continue
+		}
+		for _, source := range originSources {
+			if !strings.EqualFold(source.Scheme, targetFact.Scheme) ||
+				source.Host != targetFact.Host || source.Port != targetFact.Port {
+				continue
+			}
+			key := source.Path + "\x00" + strings.ToLower(source.Scheme) + "\x00" +
+				source.Host + "\x00" + strconv.FormatInt(source.Port, 10)
+			if _, duplicate := seen[key]; duplicate {
+				continue
+			}
+			seen[key] = struct{}{}
+			sources = append(sources, source)
+		}
+	}
+	return sources
+}
+
 // StaticCurlProxyStdinUploadTargets returns the explicit SOCKS peer that
 // observes stdin uploaded through --data-binary @- or --upload-file - to a
-// plaintext HTTP origin. HTTPS origins remain excluded.
+// plaintext HTTP origin. HTTPS origins remain excluded. Stdin is bound to
+// the paired target: --upload-file uses that target's upload slot, and
+// --data-binary @- is consumed only by targets that do not have their own
+// --upload-file operand.
 func StaticCurlProxyStdinUploadTargets(command CommandFact) []NetworkFact {
 	proxy, parsed, ok := staticCurlSOCKSPlaintextUploadRoute(command)
 	if !ok || command.Dialect != DialectPOSIX {
 		return nil
 	}
-	stdinBody := false
-	stdinUpload := false
-	for _, option := range parsed.Options {
-		if option.Group != parsed.Targets[0].Group || !option.ValuePresent ||
-			!staticCurlOptionValue(command, option) {
-			continue
-		}
-		switch option.Canonical {
-		case "--data-binary":
-			if option.Value == "@-" {
-				stdinBody = true
-			}
-		case "--upload-file":
-			if option.Value == "-" {
-				stdinUpload = true
-			}
-		}
-	}
-	if !stdinBody && !stdinUpload {
-		return nil
-	}
-	hasHTTPOrigin := false
+	hasHTTPStdin := false
 	for _, target := range parsed.Targets {
 		if !curlTargetUsesExplicitProxy(parsed, target) {
 			continue
@@ -2317,11 +2345,13 @@ func StaticCurlProxyStdinUploadTargets(command CommandFact) []NetworkFact {
 		if !valid {
 			return nil
 		}
-		if targetFact.Scheme == "http" {
-			hasHTTPOrigin = true
+		if targetFact.Scheme != "http" ||
+			!curlTargetConsumesStdinUpload(command, parsed, target) {
+			continue
 		}
+		hasHTTPStdin = true
 	}
-	if !hasHTTPOrigin {
+	if !hasHTTPStdin {
 		return nil
 	}
 	return []NetworkFact{{
@@ -2331,6 +2361,37 @@ func StaticCurlProxyStdinUploadTargets(command CommandFact) []NetworkFact {
 		Host:      proxy.Host,
 		Port:      proxy.Port,
 	}}
+}
+
+func curlTargetConsumesStdinUpload(
+	command CommandFact,
+	parsed curlArgvParse,
+	target curlTransferTarget,
+) bool {
+	if target.UploadSet {
+		if target.UploadValue != "-" {
+			return false
+		}
+		for _, option := range parsed.Options {
+			if option.Group != target.Group || !option.ValuePresent ||
+				option.Canonical != "--upload-file" || option.Value != "-" ||
+				!staticCurlOptionValue(command, option) {
+				continue
+			}
+			return true
+		}
+		return false
+	}
+	for _, option := range parsed.Options {
+		if option.Group != target.Group || !option.ValuePresent ||
+			!staticCurlOptionValue(command, option) {
+			continue
+		}
+		if option.Canonical == "--data-binary" && option.Value == "@-" {
+			return true
+		}
+	}
+	return false
 }
 
 func curlSOCKSExactUploadSourceOptionValid(
@@ -7604,8 +7665,9 @@ func curlStaticFormSequenceValid(
 // curlStaticFormEagerSyntaxValid mirrors the syntax-only part of curl 8.7.1's
 // formparse/get_param_part pass. Curl parses every operation before starting
 // the first transfer, so malformed syntax in a later --next group prevents an
-// earlier FTP login. Ordinary form file availability remains a per-transfer
-// setup concern and is deliberately not checked here.
+// earlier FTP login. Unknown encoder= names are rejected here because curl
+// looks them up before connect; ordinary form file availability remains a
+// per-transfer setup concern and is deliberately not checked here.
 func curlStaticFormEagerSyntaxValid(parsed curlArgvParse) bool {
 	depths := make(map[int]int)
 	for _, option := range parsed.Options {
@@ -7724,9 +7786,13 @@ func curlFormParameterSyntax(
 		case curlFormHasFoldedPrefix(value, position, "encoder="):
 			typeActive = false
 			position = curlSkipFormSpace(value, position+len("encoder="))
-			_, position = curlFormParameterWordUntil(
+			encoder, next := curlFormParameterWordUntil(
 				value, position, endCharacters,
 			)
+			if !curlFormEncoderNameValid(encoder) {
+				return 0, 0, false
+			}
+			position = next
 		case typeActive:
 			for position < len(value) && value[position] != ';' &&
 				(endCharacter == 0 || value[position] != endCharacter) {
@@ -8203,6 +8269,19 @@ func curlFormHasFoldedPrefix(value string, position int, prefix string) bool {
 func curlMIMEHeaderOverridesField(value string, field string) bool {
 	return len(value) > len(field) &&
 		curlASCIIEqualFold(value[:len(field)], field) && value[len(field)] == ':'
+}
+
+func curlFormEncoderNameValid(encoder string) bool {
+	switch {
+	case curlASCIIEqualFold(encoder, "binary"),
+		curlASCIIEqualFold(encoder, "8bit"),
+		curlASCIIEqualFold(encoder, "7bit"),
+		curlASCIIEqualFold(encoder, "quoted-printable"),
+		curlASCIIEqualFold(encoder, "base64"):
+		return true
+	default:
+		return false
+	}
 }
 
 func curlASCIIEqualFold(value string, expected string) bool {
