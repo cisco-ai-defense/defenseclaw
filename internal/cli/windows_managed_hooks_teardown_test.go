@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -540,6 +541,141 @@ func TestValidateWindowsManagedHooksTeardownEnrollmentDistinguishesNoStart(t *te
 		true,
 	); err == nil {
 		t.Fatal("activated deployment with an emptied Codex registry was accepted")
+	}
+}
+
+// AVC's dry-run of the v11 kit failed uninstall with
+// "managed-hook teardown journal is missing codex_targets" on a
+// single-user test VM where the activated deployment had zero eligible
+// codex users. Root cause was append([]T(nil), src...) returning nil
+// when src is an empty non-nil slice, which then marshals as JSON
+// `null` and used to trip the reader's presence check on retry. This
+// test locks the writer fix in place: the enrollment helper must
+// return empty-non-nil slices for every connector target list, so the
+// journal always serializes as `[]` (never `null`) even for connectors
+// with zero eligible users at install time.
+func TestWindowsManagedHooksTeardownExpectedEnrollmentEmptyTargetsAreNonNil(t *testing.T) {
+	for _, state := range []string{
+		windowsManagedHooksNeverActivated,
+		"activated",
+	} {
+		state := state
+		t.Run(state, func(t *testing.T) {
+			claude, codexActive, codex, cursor :=
+				windowsManagedHooksTeardownExpectedEnrollment(
+					state,
+					[]string{},
+					[]connector.WindowsCodexManagedRuntimeTarget{},
+					[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+				)
+			if claude == nil {
+				t.Error("claude target SIDs slice is nil for empty input")
+			}
+			if codex == nil {
+				t.Error("codex targets slice is nil for empty input")
+			}
+			if cursor == nil {
+				t.Error("cursor targets slice is nil for empty input")
+			}
+			if codexActive {
+				t.Error("codex policy active is true when zero codex targets")
+			}
+			// Round-trip through JSON to prove the wire representation
+			// is `[]` and never `null`, so a peer reader that rejects
+			// null on these fields continues to accept our output.
+			body, err := json.Marshal(windowsManagedHooksTeardownJournal{
+				ClaudeTargetSIDs: claude,
+				CodexTargets:     codex,
+				CursorTargets:    cursor,
+			})
+			if err != nil {
+				t.Fatalf("marshal empty enrollment: %v", err)
+			}
+			for _, key := range []string{
+				`"claude_target_sids":[]`,
+				`"codex_targets":[]`,
+				`"cursor_targets":[]`,
+			} {
+				if !strings.Contains(string(body), key) {
+					t.Errorf("marshal(%s): expected %s in %s", state, key, string(body))
+				}
+			}
+			for _, key := range []string{
+				`"claude_target_sids":null`,
+				`"codex_targets":null`,
+				`"cursor_targets":null`,
+			} {
+				if strings.Contains(string(body), key) {
+					t.Errorf("marshal(%s): unexpected null field %s", state, key)
+				}
+			}
+		})
+	}
+}
+
+// Backward-compat: a pre-fix journal on disk from an older Setup EXE
+// may have "codex_targets": null (or cursor_targets/claude_target_sids
+// null) because the buggy writer emitted null for empty target lists.
+// readWindowsManagedHooksTeardownJournal must accept those without
+// throwing "managed-hook teardown journal is missing codex_targets" so
+// AVC (and every downstream operator) can uninstall a box that was
+// installed with the buggy writer. Trust-critical identity fields
+// (manifest_sha256, activation_state, deployment_generation_id) stay
+// presence-required; validateWindowsManagedHooksTeardownJournal below
+// still binds every target list to the recomputed activation identity.
+func TestReadWindowsManagedHooksTeardownJournalAcceptsNullConnectorArrays(t *testing.T) {
+	journalPath := filepath.Join(t.TempDir(), "managed-hooks-teardown-journal.json")
+	body := []byte(`{
+  "schema_version": 6,
+  "phase": "prepared",
+  "manifest_path": "C:\\ProgramData\\DefenseClaw\\hook-guardian\\targets.yaml",
+  "manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "manifest_fingerprint": "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "activation_state": "activated",
+  "deployment_generation_id": "cccccccccccccccccccccccccccccccc",
+  "hook_binary": "C:\\Program Files\\DefenseClaw\\bin\\defenseclaw-hook.exe",
+  "gateway_addr": "127.0.0.1:18970",
+  "gateway_service_name": "DefenseClawGateway",
+  "targets": [],
+  "claude_target_sids": null,
+  "claude": {},
+  "codex_policy_active": false,
+  "codex_targets": null,
+  "cursor_targets": null,
+  "cursor": {},
+  "selector_targets": null
+}
+`)
+	if err := os.WriteFile(journalPath, body, 0o600); err != nil {
+		t.Fatalf("write journal: %v", err)
+	}
+	journal, err := readWindowsManagedHooksTeardownJournal(journalPath)
+	if err != nil {
+		t.Fatalf("read journal with null connector arrays: %v", err)
+	}
+	if len(journal.CodexTargets) != 0 || len(journal.CursorTargets) != 0 ||
+		len(journal.ClaudeTargetSIDs) != 0 {
+		t.Errorf("expected empty target lists, got %#v / %#v / %#v",
+			journal.CodexTargets, journal.CursorTargets, journal.ClaudeTargetSIDs)
+	}
+	if journal.ManifestSHA256 != strings.Repeat("a", 64) ||
+		journal.ActivationState != "activated" ||
+		journal.DeploymentGenerationID != strings.Repeat("c", 32) {
+		t.Errorf("trust-critical identity fields did not decode: %+v", journal)
+	}
+	// Missing trust-critical field still rejects.
+	withoutManifestSHA := strings.Replace(
+		string(body),
+		`"manifest_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",`,
+		`"manifest_sha256": null,`,
+		1,
+	)
+	if err := os.WriteFile(journalPath, []byte(withoutManifestSHA), 0o600); err != nil {
+		t.Fatalf("rewrite journal: %v", err)
+	}
+	if _, err := readWindowsManagedHooksTeardownJournal(journalPath); err == nil ||
+		!strings.Contains(err.Error(), "missing manifest_sha256") {
+		t.Errorf("expected missing-manifest_sha256 rejection, got %v", err)
 	}
 }
 
