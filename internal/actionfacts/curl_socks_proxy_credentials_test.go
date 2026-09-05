@@ -482,12 +482,33 @@ func TestStaticCurlSOCKSProxyCredentialComponents(t *testing.T) {
 			},
 		},
 		{
-			name: "SOCKS preproxy chain uses a separate credential namespace",
+			name: "HTTP chain sends preproxy URL credentials to SOCKS peer",
 			argv: []string{
 				"curl", "--preproxy", "socks5h://pre:" + token + "@first.example",
 				"--proxy", "http://proxy.example", "--proxy-user", "main:safe",
 				"https://origin.example",
 			},
+			want:              components("first.example", 1080, "pre", token),
+			wantAuthoritative: true,
+		},
+		{
+			name: "HTTP chain does not give main proxy user to preproxy",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://pre:safe@first.example",
+				"--proxy", "http://proxy.example", "--proxy-user", "main:" + token,
+				"https://origin.example",
+			},
+			want:              components("first.example", 1080, "pre", "safe"),
+			wantAuthoritative: true,
+		},
+		{
+			name: "HTTP chain without preproxy URL credentials has no SOCKS fields",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://first.example",
+				"--proxy", "http://proxy.example", "--proxy-user", "main:" + token,
+				"https://origin.example",
+			},
+			wantAuthoritative: true,
 		},
 		{
 			name: "FTP chain sends preproxy URL credentials to SOCKS peer",
