@@ -18,10 +18,9 @@ package actionfacts
 
 // staticCurlHTTPAfterCONNECTRequestComponents rebinds already-proved origin
 // HTTP path, query, ordinary headers, and origin authentication onto the
-// explicit HTTP proxy that observes those bytes after CONNECT. HTTPS origin
-// request bytes stay excluded: they are encrypted inside the tunnel. HTTPS
-// proxies are excluded: https-proxy is a separate libcurl capability, and
-// this lane has no executable capability fact.
+// explicit HTTP(S) proxy that observes those bytes after CONNECT. HTTPS
+// origin request bytes stay excluded: they are encrypted inside the tunnel.
+// HTTPS proxies require attested https-proxy before this lane projects.
 func staticCurlHTTPAfterCONNECTRequestComponents(
 	command CommandFact,
 ) []TransmittedRequestComponent {
@@ -30,10 +29,8 @@ func staticCurlHTTPAfterCONNECTRequestComponents(
 		proxy, parsed, ok = staticCurlHTTPProxyChainDestination(command)
 	}
 	if !ok || proxy.Scheme != "http" && proxy.Scheme != "https" ||
-		len(parsed.Targets) == 0 {
-		return nil
-	}
-	if proxy.Scheme == "https" {
+		len(parsed.Targets) == 0 ||
+		!curlCommandAllowsHTTPSProxyScheme(command, proxy.Scheme) {
 		return nil
 	}
 	group := parsed.Targets[0].Group

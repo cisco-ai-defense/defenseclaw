@@ -17,6 +17,7 @@ func TestStaticCurlHTTPAfterCONNECTRequestComponents(t *testing.T) {
 	for _, test := range []struct {
 		name              string
 		argv              []string
+		caps              []CurlCapability
 		want              []string
 		wantScheme        string
 		wantHost          string
@@ -36,11 +37,24 @@ func TestStaticCurlHTTPAfterCONNECTRequestComponents(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "HTTPS proxy does not project after-CONNECT without https-proxy",
+			name: "HTTPS proxy after-CONNECT stays closed without capability",
 			argv: []string{
 				"curl", "-p", "--proxy", "https://proxy.example",
 				"--header", "X-Key: " + token, "http://127.0.0.1/upload",
 			},
+			wantAuthoritative: true,
+		},
+		{
+			name: "attested HTTPS proxy observes tunneled HTTP header",
+			argv: []string{
+				"curl", "-p", "--proxy", "https://proxy.example",
+				"--header", "X-Key: " + token, "http://127.0.0.1/upload",
+			},
+			caps:              []CurlCapability{testCurlHTTPSProxyCapability()},
+			want:              []string{"X-Key: " + token, "/upload"},
+			wantScheme:        "https",
+			wantHost:          "proxy.example",
+			wantPort:          443,
 			wantAuthoritative: true,
 		},
 		{
@@ -168,7 +182,11 @@ func TestStaticCurlHTTPAfterCONNECTRequestComponents(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			facts := Analyze(Input{
+				Tool:             "exec",
+				Argv:             test.argv,
+				CurlCapabilities: test.caps,
+			})
 			if facts.Authoritative() != test.wantAuthoritative {
 				t.Fatalf("Authoritative() = %t, want %t status=%s issues=%v",
 					facts.Authoritative(), test.wantAuthoritative,
