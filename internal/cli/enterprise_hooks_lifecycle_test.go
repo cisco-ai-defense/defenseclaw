@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/testenv"
@@ -35,7 +36,7 @@ type enterpriseHooksTreeEntry struct {
 }
 
 func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksPlatformPreflight = func() error {
@@ -74,12 +75,15 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 			enterpriseHooksWatchRunE = blockedRun
 			enterpriseHooksStatusRunE = blockedRun
 			enterpriseHooksVerifyRunE = blockedRun
+			enterpriseHooksRotatePrepareRunE = blockedRun
+			enterpriseHooksRotateCommitRunE = blockedRun
+			enterpriseHooksRotateRollbackRunE = blockedRun
 
 			args := []string{"enterprise", "hooks", command}
 			switch command {
 			case "install", "uninstall":
 				args = append(args, "--connector", "codex", "--user", "alice", "--user-home", userHome)
-			case "reconcile", "watch", "status", "verify":
+			case "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback":
 				args = append(args, "--manifest", manifest)
 			}
 			var stdout, stderr bytes.Buffer
@@ -133,7 +137,7 @@ func TestEnterpriseHooksWindowsAdministratorGatePrecedesRootAndCommandLifecycle(
 }
 
 func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T) {
-	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify"} {
+	for _, command := range []string{"install", "uninstall", "reconcile", "watch", "status", "verify", "rotate-prepare", "rotate-commit", "rotate-rollback"} {
 		t.Run(command, func(t *testing.T) {
 			restoreEnterpriseHooksLifecycleTestState(t)
 			enterpriseHooksRuntimeGOOS = func() string { return "linux" }
@@ -159,6 +163,12 @@ func TestEnterpriseHooksSupportedPlatformChainsRootPreRunAndCommand(t *testing.T
 				enterpriseHooksStatusRunE = commandRun
 			case "verify":
 				enterpriseHooksVerifyRunE = commandRun
+			case "rotate-prepare":
+				enterpriseHooksRotatePrepareRunE = commandRun
+			case "rotate-commit":
+				enterpriseHooksRotateCommitRunE = commandRun
+			case "rotate-rollback":
+				enterpriseHooksRotateRollbackRunE = commandRun
 			}
 
 			rootCmd.SetArgs([]string{"enterprise", "hooks", command})
@@ -379,6 +389,9 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 	originalWatch := enterpriseHooksWatchRunE
 	originalStatus := enterpriseHooksStatusRunE
 	originalVerify := enterpriseHooksVerifyRunE
+	originalRotatePrepare := enterpriseHooksRotatePrepareRunE
+	originalRotateCommit := enterpriseHooksRotateCommitRunE
+	originalRotateRollback := enterpriseHooksRotateRollbackRunE
 	originalTokenMinter := enterpriseHookScopedTokenMinter
 	originalOTLPTokenMinter := enterpriseHookScopedOTLPTokenMinter
 	originalCfg, originalAuditStore, originalAuditLog := cfg, auditStore, auditLog
@@ -396,6 +409,9 @@ func restoreEnterpriseHooksLifecycleTestState(t *testing.T) {
 		enterpriseHooksWatchRunE = originalWatch
 		enterpriseHooksStatusRunE = originalStatus
 		enterpriseHooksVerifyRunE = originalVerify
+		enterpriseHooksRotatePrepareRunE = originalRotatePrepare
+		enterpriseHooksRotateCommitRunE = originalRotateCommit
+		enterpriseHooksRotateRollbackRunE = originalRotateRollback
 		enterpriseHookScopedTokenMinter = originalTokenMinter
 		enterpriseHookScopedOTLPTokenMinter = originalOTLPTokenMinter
 		cfg, auditStore, auditLog = originalCfg, originalAuditStore, originalAuditLog
@@ -447,4 +463,70 @@ func snapshotEnterpriseHooksTree(t *testing.T, root string) map[string]enterpris
 		t.Fatalf("snapshot %s: %v", root, err)
 	}
 	return entries
+}
+
+func TestPublishGuardianReadyAfterWatchReconcileSkipsRotationBusy(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	dir := t.TempDir()
+	previousManifest := enterpriseHookManifest
+	t.Cleanup(func() { enterpriseHookManifest = previousManifest })
+	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+	statePath := guardianstate.PathForStateRoot(dir)
+
+	var log bytes.Buffer
+	publishGuardianReadyAfterWatchReconcile(&log, errEnterpriseHookRotationBusy, 0, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rotation-busy reconcile published ready: %v", err)
+	}
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 1, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed-target reconcile published ready: %v", err)
+	}
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, errors.New("state write failed"))
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("state-error reconcile published ready: %v", err)
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, nil)
+	if got := guardianstate.ReadState(statePath); got != guardianstate.StateReady {
+		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
+	}
+}
+
+func TestPublishGuardianReadyAfterWatchStartupDoesNotLeaveReady(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	dir := t.TempDir()
+	previousManifest := enterpriseHookManifest
+	t.Cleanup(func() { enterpriseHookManifest = previousManifest })
+	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+	statePath := guardianstate.PathForStateRoot(dir)
+
+	var log bytes.Buffer
+	// reconcile() returned nil with Failures>0; it skipped ready.
+	// The leftover startup tail used to write StateReady anyway.
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 1, nil)
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after failed-target reconcile: %v", err)
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, errors.New("state write failed"))
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after state-error reconcile: %v", err)
+	}
+
+	applyEnterpriseHookWatchStartupReadyTail(&log, errEnterpriseHookRotationBusy)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after rotation-busy: %v", err)
+	}
+	if !strings.Contains(log.String(), "rotation in progress") {
+		t.Fatalf("rotation-busy startup tail log = %q, want deferral message", log.String())
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, nil)
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if got := guardianstate.ReadState(statePath); got != guardianstate.StateReady {
+		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
+	}
 }

@@ -60,21 +60,24 @@ var enterpriseHookTargetsWaitTimeout = 24 * time.Hour
 var enterpriseHookTargetsWaitPoll = 30 * time.Second
 
 var (
-	enterpriseHookConnector     string
-	enterpriseHookUser          string
-	enterpriseHookUserHome      string
-	enterpriseHookUID           int
-	enterpriseHookGID           int
-	enterpriseHookSID           string
-	enterpriseHookDataDir       string
-	enterpriseHookAPIAddr       string
-	enterpriseHookProxyAddr     string
-	enterpriseHookAgentVersion  string
-	enterpriseHookManifest      string
-	enterpriseHookJSON          bool
-	enterpriseHookWatchInterval time.Duration
-	enterpriseHookWatchDebounce time.Duration
-	enterpriseHookWatchSettle   time.Duration
+	enterpriseHookConnector          string
+	enterpriseHookUser               string
+	enterpriseHookUserHome           string
+	enterpriseHookUID                int
+	enterpriseHookGID                int
+	enterpriseHookSID                string
+	enterpriseHookDataDir            string
+	enterpriseHookAPIAddr            string
+	enterpriseHookProxyAddr          string
+	enterpriseHookAgentVersion       string
+	enterpriseHookManifest           string
+	enterpriseHookJSON               bool
+	enterpriseHookWatchInterval      time.Duration
+	enterpriseHookWatchDebounce      time.Duration
+	enterpriseHookWatchSettle        time.Duration
+	enterpriseHookRotateOperationID  string
+	enterpriseHookRotateGeneration   string
+	enterpriseHookRotateFingerprints string
 
 	enterpriseHooksRuntimeGOOS               = func() string { return runtime.GOOS }
 	enterpriseHooksPlatformPreflight         = enterpriseHooksNativePlatformPreflight
@@ -100,6 +103,9 @@ var (
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
 	enterpriseHooksStatusRunE                  = runEnterpriseHooksStatus
 	enterpriseHooksVerifyRunE                  = runEnterpriseHooksVerify
+	enterpriseHooksRotatePrepareRunE           = runEnterpriseHooksRotatePrepare
+	enterpriseHooksRotateCommitRunE            = runEnterpriseHooksRotateCommit
+	enterpriseHooksRotateRollbackRunE          = runEnterpriseHooksRotateRollback
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
 	enterpriseHookAuthorizationDirTrustCheck   = func(path string) error {
 		return managed.ValidateTrustedRuntimeDir(path, "hook guardian authorization directory")
@@ -340,12 +346,32 @@ func init() {
 	enterpriseHooksVerifyCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 
+	for _, rotateCmd := range []*cobra.Command{
+		enterpriseHooksRotatePrepareCmd,
+		enterpriseHooksRotateCommitCmd,
+		enterpriseHooksRotateRollbackCmd,
+	} {
+		rotateCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+			"YAML manifest of the exact enabled target roster")
+		rotateCmd.Flags().StringVar(&enterpriseHookRotateOperationID, "operation-id", "",
+			"Opaque 32-hex-character rotation operation ID")
+		rotateCmd.Flags().StringVar(&enterpriseHookRotateGeneration, "generation", "",
+			"Opaque 32-hex-character rotation generation")
+		rotateCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+			"Emit machine-readable JSON")
+	}
+	enterpriseHooksRotatePrepareCmd.Flags().StringVar(&enterpriseHookRotateFingerprints, "expected-fingerprints", "",
+		"Trusted JSON file of per-target canonical non-secret B fingerprints")
+
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksStatusCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksVerifyCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotatePrepareCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotateCommitCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotateRollbackCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -1589,6 +1615,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
 		return run, err
 	}
+	if err := enterpriseHookRotationBusy(cfg.DataDir); err != nil {
+		return run, err
+	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
 		if err := enterpriseHookManifestFileTrustCheck(enterpriseHookManifest); err != nil {
 			return run, fmt.Errorf("enterprise hooks reconcile: manifest trust check failed: %w", err)
@@ -1949,6 +1978,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		settleUntil = time.Now().Add(settle)
 		droppedInSettle = 0
+		// A rotation-busy startup leaves ready unpublished. The next
+		// successful reconcile must publish it so sidecar health does
+		// not stay waiting_for_targets / unknown after rotation ends.
+		publishGuardianReadyAfterWatchReconcile(cmd.ErrOrStderr(), nil, run.Failures, run.StateErr)
 		return changed, nil
 	}
 
@@ -1957,27 +1990,32 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
+	var startupErr error
 	if _, err := reconcile("startup"); err != nil {
-		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if errors.Is(err, errEnterpriseHookRotationBusy) {
+			startupErr = err
+		} else if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
-		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
-			return waitErr
-		}
-		// Manifest is present now — re-run the startup reconcile so
-		// the watch loop enters its main select with a valid row set,
-		// hashes, and watched dirs. Any other error from THIS retry
-		// (parse failure, missing file races back to gone, etc.) is
-		// fatal — we've done our one bounded wait; further retries
-		// belong to the SCM restart cycle.
-		if _, err := reconcile("startup_after_wait"); err != nil {
-			return err
+		} else {
+			if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+				return waitErr
+			}
+			// Manifest is present now — re-run the startup reconcile so
+			// the watch loop enters its main select with a valid row set,
+			// hashes, and watched dirs. Any other error from THIS retry
+			// (parse failure, missing file races back to gone, etc.) is
+			// fatal — we've done our one bounded wait; further retries
+			// belong to the SCM restart cycle.
+			if _, err := reconcile("startup_after_wait"); err != nil {
+				return err
+			}
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	// Ready is published only inside reconcile() via
+	// publishGuardianReadyAfterWatchReconcile. A leftover write here
+	// would mark the sidecar ready after a nil-error incomplete
+	// startup (Failures>0 or StateErr!=nil).
+	applyEnterpriseHookWatchStartupReadyTail(cmd.ErrOrStderr(), startupErr)
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2171,6 +2209,24 @@ func isMissingManifestErr(err error) bool {
 // returns an error: a state-file write failure is a health-surface
 // degradation (the sidecar will fall through to its safe default), not
 // a reason to fail the guardian's core reconcile path.
+func publishGuardianReadyAfterWatchReconcile(w io.Writer, reconcileErr error, failures int, stateErr error) {
+	if reconcileErr != nil || failures > 0 || stateErr != nil {
+		return
+	}
+	writeGuardianStateOrLog(w, guardianstate.StateReady)
+}
+
+// applyEnterpriseHookWatchStartupReadyTail finishes the watch-loop
+// startup after reconcile() has already run. Ready is published only
+// inside reconcile() via publishGuardianReadyAfterWatchReconcile.
+// runEnterpriseHookReconcileOnce can return err==nil with Failures>0
+// or StateErr!=nil, so this leftover must not write StateReady.
+func applyEnterpriseHookWatchStartupReadyTail(w io.Writer, startupErr error) {
+	if errors.Is(startupErr, errEnterpriseHookRotationBusy) {
+		fmt.Fprintf(w, "[hook-guardian] rotation in progress; deferring startup reconcile\n")
+	}
+}
+
 func writeGuardianStateOrLog(w io.Writer, state string) {
 	if enterpriseHookManifest == "" {
 		return
@@ -2611,6 +2667,26 @@ func writeEnterpriseHookGuardianState(
 	failures int,
 	complete bool,
 ) error {
+	return writeEnterpriseHookGuardianStateIdentified(
+		dataDir,
+		manifest,
+		manifestSHA256,
+		"",
+		rows,
+		failures,
+		complete,
+	)
+}
+
+func writeEnterpriseHookGuardianStateIdentified(
+	dataDir,
+	manifest,
+	manifestSHA256,
+	reconcileID string,
+	rows []enterpriseHookReconcileRow,
+	failures int,
+	complete bool,
+) error {
 	dataDir = strings.TrimSpace(dataDir)
 	if dataDir == "" {
 		return fmt.Errorf("no data directory configured")
@@ -2619,11 +2695,16 @@ func writeEnterpriseHookGuardianState(
 	if !validEnterpriseHookHex(manifestSHA256, sha256.Size) {
 		return fmt.Errorf("invalid hook guardian manifest SHA-256")
 	}
-	reconcileIDBytes := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, reconcileIDBytes); err != nil {
-		return fmt.Errorf("generate hook guardian reconcile ID: %w", err)
+	reconcileID = strings.TrimSpace(reconcileID)
+	if reconcileID == "" {
+		reconcileIDBytes := make([]byte, 16)
+		if _, err := io.ReadFull(rand.Reader, reconcileIDBytes); err != nil {
+			return fmt.Errorf("generate hook guardian reconcile ID: %w", err)
+		}
+		reconcileID = hex.EncodeToString(reconcileIDBytes)
+	} else if !validEnterpriseHookHex(reconcileID, 16) {
+		return fmt.Errorf("invalid hook guardian reconcile identity")
 	}
-	reconcileID := hex.EncodeToString(reconcileIDBytes)
 	successes := 0
 	pending := 0
 	for _, row := range rows {
@@ -2730,11 +2811,7 @@ func writeEnterpriseHookGuardianState(
 		return fmt.Errorf("set hook guardian state ownership: %w", err)
 	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		if err := managed.ValidateTrustedServiceRuntimeFilePath(
-			path,
-			"hook guardian state",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
+		if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
 			return err
 		}
 	}
