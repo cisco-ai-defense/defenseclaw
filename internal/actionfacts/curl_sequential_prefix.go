@@ -49,9 +49,11 @@ func (p curlSequentialPrefixProof) covers(group int) bool {
 
 // proveCurlSequentialTransferPrefix reports the last --next group that will
 // start after argv/eager validation. Later lazy setup failures do not close
-// an already proved sequential prefix. Parallel mode, eager later-group
-// failures, redirects, wrappers, and incomplete envelopes yield the zero
-// proof. The result never makes Facts.Authoritative() true.
+// an already proved sequential prefix. A trailing empty --next group keeps
+// earlier Targets and does not close that prefix; leading or interior empty
+// groups clear Targets and yield the zero proof. Parallel mode, eager
+// later-group failures, redirects, wrappers, and incomplete envelopes also
+// yield the zero proof. The result never makes Facts.Authoritative() true.
 func proveCurlSequentialTransferPrefix(
 	command CommandFact,
 	parsed curlArgvParse,
@@ -60,8 +62,11 @@ func proveCurlSequentialTransferPrefix(
 		return curlSequentialPrefixProof{}
 	}
 	nullConfigOnly := staticCurlPOSIXNullConfigOnly(command, parsed)
+	// Trailing empty --next: EmptyTransferGroup && len(Targets) > 0. The
+	// parser preserves the completed prefix; continue proving it. Leading
+	// and interior empties clear Targets and still reject here.
 	if (!parsed.Complete && !nullConfigOnly) || parsed.Preview ||
-		parsed.EmptyTransferGroup ||
+		(parsed.EmptyTransferGroup && len(parsed.Targets) == 0) ||
 		!parsed.hasValidOptionValues() || len(parsed.Targets) == 0 ||
 		!curlRangeOptionsValid(parsed) ||
 		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
