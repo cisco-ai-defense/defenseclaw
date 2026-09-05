@@ -492,3 +492,41 @@ func TestPublishGuardianReadyAfterWatchReconcileSkipsRotationBusy(t *testing.T) 
 		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
 	}
 }
+
+func TestPublishGuardianReadyAfterWatchStartupDoesNotLeaveReady(t *testing.T) {
+	restoreEnterpriseHooksLifecycleTestState(t)
+	dir := t.TempDir()
+	previousManifest := enterpriseHookManifest
+	t.Cleanup(func() { enterpriseHookManifest = previousManifest })
+	enterpriseHookManifest = filepath.Join(dir, "targets.yaml")
+	statePath := guardianstate.PathForStateRoot(dir)
+
+	var log bytes.Buffer
+	// reconcile() returned nil with Failures>0; it skipped ready.
+	// The leftover startup tail used to write StateReady anyway.
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 1, nil)
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after failed-target reconcile: %v", err)
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, errors.New("state write failed"))
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after state-error reconcile: %v", err)
+	}
+
+	applyEnterpriseHookWatchStartupReadyTail(&log, errEnterpriseHookRotationBusy)
+	if _, err := os.Stat(statePath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("startup tail published ready after rotation-busy: %v", err)
+	}
+	if !strings.Contains(log.String(), "rotation in progress") {
+		t.Fatalf("rotation-busy startup tail log = %q, want deferral message", log.String())
+	}
+
+	publishGuardianReadyAfterWatchReconcile(&log, nil, 0, nil)
+	applyEnterpriseHookWatchStartupReadyTail(&log, nil)
+	if got := guardianstate.ReadState(statePath); got != guardianstate.StateReady {
+		t.Fatalf("successful reconcile ready = %q, want %q", got, guardianstate.StateReady)
+	}
+}

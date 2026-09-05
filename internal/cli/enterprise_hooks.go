@@ -1990,11 +1990,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
-	startupReady := true
+	var startupErr error
 	if _, err := reconcile("startup"); err != nil {
 		if errors.Is(err, errEnterpriseHookRotationBusy) {
-			fmt.Fprintf(cmd.ErrOrStderr(), "[hook-guardian] rotation in progress; deferring startup reconcile\n")
-			startupReady = false
+			startupErr = err
 		} else if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
 		} else {
@@ -2012,12 +2011,11 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 			}
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
-	if startupReady {
-		writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
-	}
+	// Ready is published only inside reconcile() via
+	// publishGuardianReadyAfterWatchReconcile. A leftover write here
+	// would mark the sidecar ready after a nil-error incomplete
+	// startup (Failures>0 or StateErr!=nil).
+	applyEnterpriseHookWatchStartupReadyTail(cmd.ErrOrStderr(), startupErr)
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2216,6 +2214,17 @@ func publishGuardianReadyAfterWatchReconcile(w io.Writer, reconcileErr error, fa
 		return
 	}
 	writeGuardianStateOrLog(w, guardianstate.StateReady)
+}
+
+// applyEnterpriseHookWatchStartupReadyTail finishes the watch-loop
+// startup after reconcile() has already run. Ready is published only
+// inside reconcile() via publishGuardianReadyAfterWatchReconcile.
+// runEnterpriseHookReconcileOnce can return err==nil with Failures>0
+// or StateErr!=nil, so this leftover must not write StateReady.
+func applyEnterpriseHookWatchStartupReadyTail(w io.Writer, startupErr error) {
+	if errors.Is(startupErr, errEnterpriseHookRotationBusy) {
+		fmt.Fprintf(w, "[hook-guardian] rotation in progress; deferring startup reconcile\n")
+	}
 }
 
 func writeGuardianStateOrLog(w io.Writer, state string) {
