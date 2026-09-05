@@ -14,6 +14,7 @@ import click
 from defenseclaw.rotate_token_guardian import (
     GUARDIAN_AUTH_DIR_ENV,
     GUARDIAN_MANIFEST_ENV,
+    WINDOWS_MANAGED_ROTATION_UNAVAILABLE,
     GuardianRotationPlan,
     GuardianRotationTarget,
     assert_current_attestations,
@@ -149,7 +150,9 @@ class RequireGuardianParticipantBehaviorTests(RequireGuardianParticipantTests):
         with mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"):
             with self.assertRaises(click.ClickException) as raised:
                 require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise"))
-        self.assertIn("native guardian adapter", str(raised.exception))
+        self.assertEqual(str(raised.exception), WINDOWS_MANAGED_ROTATION_UNAVAILABLE)
+        self.assertNotIn("rotate-prepare", str(raised.exception))
+        self.assertNotIn("rotate-commit", str(raised.exception))
 
     @unittest.skipIf(os.name == "nt", "POSIX managed participant")
     def test_posix_managed_joins(self) -> None:
