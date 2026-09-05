@@ -3638,7 +3638,6 @@ def _check_codex_otel_alignment(cfg, r: _DoctorResult) -> None:
         cfg,
         token,
         trust,
-        url=f"http://127.0.0.1:{api_port}/status",
     )
     if code != 200:
         detail = "gateway is unreachable" if code == 0 else f"authenticated status returned HTTP {code}"
