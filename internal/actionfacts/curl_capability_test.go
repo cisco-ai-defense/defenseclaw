@@ -319,7 +319,7 @@ func TestCurlCapabilityProtocolAndHTTPSProxyRestore(t *testing.T) {
 			wantTelnet: true,
 		},
 		{
-			name: "HTTPS proxy without capability hides proxy-user and path",
+			name: "HTTPS proxy without capability still projects proxy-user",
 			input: Input{
 				Tool: "exec",
 				Argv: []string{
@@ -328,6 +328,7 @@ func TestCurlCapabilityProtocolAndHTTPSProxyRestore(t *testing.T) {
 					"http://origin.example/secrets/" + token,
 				},
 			},
+			wantProxyUser: true,
 		},
 		{
 			name: "attested https-proxy restores proxy-user and path",

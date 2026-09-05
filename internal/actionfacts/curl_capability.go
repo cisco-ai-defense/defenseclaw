@@ -198,7 +198,22 @@ func curlCommandAllowsProtocol(command CommandFact, protocol string) bool {
 }
 
 func curlCommandAllowsHTTPSProxyScheme(command CommandFact, scheme string) bool {
-	return scheme != "https" || curlCommandAllowsFeature(command, "https-proxy")
+	if scheme != "https" {
+		return true
+	}
+	// Nil capability is the conservative default: common curl builds
+	// still transmit proxy-user / URL credentials to https:// proxies.
+	// An attested inventory must include https-proxy before those facts
+	// stay open.
+	if command.curlCapability == nil {
+		return true
+	}
+	return curlCommandAllowsFeature(command, "https-proxy")
+}
+
+func curlCommandAttestsHTTPSProxy(command CommandFact) bool {
+	return command.curlCapability != nil &&
+		curlCommandAllowsFeature(command, "https-proxy")
 }
 
 func curlCommandAttestedSchemesValid(command CommandFact, parsed curlArgvParse) bool {

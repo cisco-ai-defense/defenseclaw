@@ -2490,12 +2490,15 @@ func staticCurlHTTPProxyTransmittedMetadata(
 		}
 	}
 	metadata := CurlProxyTransmittedMetadata{}
-	// HTTPS proxy support is a separate libcurl build capability. Without an
-	// attested https-proxy feature, curl can reject the proxy before any
-	// request bytes move, so the whole HTTPS-proxy metadata object stays closed.
+	// An attested inventory without https-proxy rejects the proxy before any
+	// request bytes move. Nil capability is the conservative default and still
+	// projects proxy-user / URL credentials / proxy-headers; origin hostname
+	// and after-TLS request bytes stay closed until https-proxy is attested.
 	if !curlCommandAllowsHTTPSProxyScheme(command, proxy.Scheme) {
 		return CurlProxyTransmittedMetadata{}
 	}
+	projectHTTPSOriginFacts := proxy.Scheme != "https" ||
+		curlCommandAttestsHTTPSProxy(command)
 	hostnameSetupValid := staticCurlHostnameFirstWireSetupValid(
 		command,
 		parsed,
@@ -2576,7 +2579,7 @@ func staticCurlHTTPProxyTransmittedMetadata(
 				!staticCurlOptionValue(command, option) ||
 				strings.HasPrefix(option.Value, "@") ||
 				curlHeaderOverridesHTTPField(option.Value, "host")
-			if curlProxyHeaderCandidateIsTransmitted(
+			if projectHTTPSOriginFacts && curlProxyHeaderCandidateIsTransmitted(
 				option.Value,
 				ordinaryHeaderTargets,
 				proxy.Scheme,
@@ -2662,7 +2665,8 @@ func staticCurlHTTPProxyTransmittedMetadata(
 			(targetFact.Scheme != "http" && targetFact.Scheme != "https") {
 			continue
 		}
-		if proxyTunnel || targetFact.Scheme == "https" {
+		if projectHTTPSOriginFacts &&
+			(proxyTunnel || targetFact.Scheme == "https") {
 			appendProxyHostname(target, targetFact)
 		}
 	}
@@ -2693,7 +2697,9 @@ func staticCurlHTTPProxyTransmittedMetadata(
 			(requestProjection.requestTargetSet && originHostOverridden) {
 			continue
 		}
-		appendProxyHostname(target, targetFact)
+		if projectHTTPSOriginFacts {
+			appendProxyHostname(target, targetFact)
+		}
 	}
 	getPostData, valid := staticCurlGETPostDataProjection(
 		command,
@@ -2702,6 +2708,9 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	)
 	if !valid {
 		return CurlProxyTransmittedMetadata{}
+	}
+	if !projectHTTPSOriginFacts {
+		return metadata
 	}
 	for _, target := range parsed.Targets {
 		if !curlTargetUsesExplicitProxy(parsed, target) ||
