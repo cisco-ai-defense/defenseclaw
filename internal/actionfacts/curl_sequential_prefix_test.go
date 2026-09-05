@@ -83,9 +83,18 @@ func TestProveCurlSequentialTransferPrefix(t *testing.T) {
 			wantAuthoritative: true,
 		},
 		{
-			name: "later eager empty next closes prefix",
+			name: "later trailing empty next keeps earlier sequential prefix",
 			input: Input{Tool: "exec", Argv: []string{
 				"curl", "--ftp-account", token, "ftp://one.example/", "--next",
+			}},
+			wantOK:  true,
+			wantFTP: true,
+		},
+		{
+			name: "interior empty next closes prefix",
+			input: Input{Tool: "exec", Argv: []string{
+				"curl", "--ftp-account", token, "ftp://one.example/",
+				"--next", "--next", "https://two.example/",
 			}},
 		},
 		{
