@@ -135,6 +135,12 @@ func executeWindowsManagedRotationPrepare(req enterpriseHookRotationRequest) (en
 			return empty, err
 		}
 		if exists {
+			// Refuse a crashed prepare before roster comparison. A retry
+			// can present a different target set; snapshot rewrite must
+			// not run until the operator rolls back.
+			if journal.Phase == enterpriseHookRotationPhasePreparing {
+				return journal.public(), fmt.Errorf("windows managed rotation prepare: operation is already preparing; rollback first")
+			}
 			if err := windowsManagedRotationJournalConflicts(journal, plan.Journal); err != nil {
 				return journal.public(), err
 			}
@@ -146,8 +152,8 @@ func executeWindowsManagedRotationPrepare(req enterpriseHookRotationRequest) (en
 				return journal.public(), nil
 			case enterpriseHookRotationPhaseRolledBack:
 				return journal.public(), fmt.Errorf("windows managed rotation prepare: operation already rolled back")
-			case enterpriseHookRotationPhasePreparing:
-				return journal.public(), fmt.Errorf("windows managed rotation prepare: operation is already preparing; rollback first")
+			default:
+				return journal.public(), fmt.Errorf("windows managed rotation prepare: unrecognized journal phase %q", journal.Phase)
 			}
 		}
 		if err := refusePOSIXRotationJournal(cfg.DataDir); err != nil {
