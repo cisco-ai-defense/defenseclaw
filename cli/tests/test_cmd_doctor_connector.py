@@ -130,6 +130,33 @@ class TestCodexOtelAlignment(unittest.TestCase):
         self.assertIn("'windows'", result.checks[0]["detail"])
         self.assertIn("running", result.checks[1]["detail"])
 
+    def test_runtime_probe_uses_configured_ipv6_api_bind(self) -> None:
+        payload = {
+            "runtime": {"environment": "windows"},
+            "health": {"telemetry": {"state": "running"}},
+        }
+        probe = MagicMock(return_value=(200, json.dumps(payload)))
+        cfg = self._cfg()
+        cfg.gateway.api_bind = "::1"
+        with tempfile.TemporaryDirectory() as home, patch.dict(
+            os.environ,
+            {"CODEX_HOME": home},
+            clear=False,
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            probe,
+        ), patch(
+            "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+            return_value=MagicMock(trusted=True),
+        ):
+            self._write_codex_config(home, '[otel]\nenvironment = "windows"\n')
+            result = _DoctorResult()
+            _check_codex_otel_alignment(cfg, result)
+
+        self.assertEqual([check["status"] for check in result.checks], ["pass", "pass"])
+        probe.assert_called()
+        self.assertEqual(probe.call_args.args[0], "http://[::1]:18970/status")
+
     def test_missing_codex_environment_exposes_dev_default(self) -> None:
         payload = {
             "runtime": {"environment": "windows"},
