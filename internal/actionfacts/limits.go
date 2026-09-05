@@ -34,6 +34,7 @@ const (
 	maxPathFacts              = 256
 	maxNetworkFacts           = 128
 	maxDataFlowFacts          = 256
+	maxArtifactFacts          = 64
 	maxIssues                 = 8
 	maxWindowsTokens          = 512
 	maxWindowsTokenBytes      = maxScalarBytes

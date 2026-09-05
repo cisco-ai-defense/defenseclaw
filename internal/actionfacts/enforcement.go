@@ -112,6 +112,11 @@ func (f Facts) EnforcementProjection() Facts {
 			appendProjectionDataFlows(&projected, []DataFlowFact{fact})
 		}
 	}
+	for _, fact := range f.Artifacts {
+		if ownsCommand(fact.CommandID, executing) {
+			appendProjectionArtifacts(&projected, []ArtifactFact{fact})
+		}
+	}
 
 	return projected
 }
@@ -195,6 +200,16 @@ func appendProjectionDataFlows(projected *Facts, facts []DataFlowFact) {
 			return
 		}
 		projected.DataFlows = append(projected.DataFlows, fact)
+	}
+}
+
+func appendProjectionArtifacts(projected *Facts, facts []ArtifactFact) {
+	for _, fact := range facts {
+		if len(projected.Artifacts) >= maxArtifactFacts {
+			markProjectionFactLimit(projected)
+			return
+		}
+		projected.Artifacts = append(projected.Artifacts, fact)
 	}
 }
 

@@ -163,6 +163,17 @@ func assertFactsInvariants(t testing.TB, facts Facts) {
 		assertKnownCommandID(t, commandIDs, fact.FromCommandID)
 		assertKnownCommandID(t, commandIDs, fact.ToCommandID)
 	}
+	if len(facts.Artifacts) > maxArtifactFacts {
+		t.Fatalf("unbounded artifacts: %d", len(facts.Artifacts))
+	}
+	for _, fact := range facts.Artifacts {
+		assertKnownCommandID(t, commandIDs, fact.CommandID)
+		if fact.Value == "" || fact.Role == "" || fact.Kind == "" ||
+			len(fact.Value) > maxScalarBytes ||
+			len(fact.Identity) > maxScalarBytes {
+			t.Fatalf("invalid artifact fact: %#v", fact)
+		}
+	}
 }
 
 func assertKnownCommandID(t testing.TB, commandIDs map[int64]struct{}, id int64) {
