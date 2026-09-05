@@ -541,6 +541,41 @@ them inline instead — the DefenseClaw contract only cares that
 \`setup_sha256\` matches the shipped EXE's hash by the time the artefact
 reaches release engineering.
 
+## Install / Uninstall — smoke-test the signed Setup EXE
+
+Both commands need an **elevated PowerShell** prompt (Run as
+Administrator). Signed builds install into the production paths
+(\`%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\\` and
+\`%ProgramData%\\...\\DefenseClaw\\\`) and use the fixed service names
+(\`DefenseClawGateway\`, \`DefenseClawGuardian\`, \`DefenseClawEnumerator\`).
+
+Do NOT pass \`--allow-unsigned\` or any cert-scope flags
+(\`--install-root\`, \`--state-root\`, \`--gateway-service-name\`,
+\`--guardian-service-name\`, \`--certification-codex-home\`) — the
+signed binary refuses them with exit 1603.
+
+### Install (action mode, all three connectors)
+
+    .\\DefenseClawSetup-Enterprise-x64.exe --action install \`
+        --mode action \`
+        --connector codex,claudecode,cursor \`
+        --json
+
+### Uninstall (always with --purge)
+
+    .\\DefenseClawSetup-Enterprise-x64.exe --action uninstall \`
+        --purge \`
+        --json
+
+### Verify install
+
+    Get-Service DefenseClawGateway, DefenseClawGuardian |
+        Format-Table Name, Status, StartType
+    Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18970/healthz |
+        Select-Object -ExpandProperty Content
+    .\\DefenseClawSetup-Enterprise-x64.exe --action status --json |
+        ConvertFrom-Json | Format-List
+
 ## What this kit deliberately does NOT ship
 
 - No Go source tree.  DefenseClaw prebuilds the outer Setup EXE.

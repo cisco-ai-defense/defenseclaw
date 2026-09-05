@@ -99,6 +99,7 @@ function Invoke-ProtectedEnvironmentProbe {
             [void](Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $root `
                 -ExpectedSecurity $context.Security `
+                -ExpectedParent $windowsTemp `
                 -RequireEmpty)
 
             foreach ($name in @(
@@ -343,6 +344,7 @@ function Invoke-CollisionNoSeizeProbe {
             [void](Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $collisionPath `
                 -ExpectedSecurity $expected `
+                -ExpectedParent $windowsTemp `
                 -RequireEmpty)
         }
         catch {

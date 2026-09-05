@@ -75,6 +75,17 @@ type windowsEnterpriseLifecycleOptions struct {
 	// atomically drops them. See
 	// docs/specs/003-windows-deferred-config/.
 	deferredConfig bool
+	// bootstrapParent forwards the outer signed DefenseClawSetup EXE's
+	// protected %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch
+	// path to install-enterprise.ps1's -BootstrapParent, so the
+	// installer's one-shot bootstrap directory lives inside an admin-
+	// only ancestor chain rather than C:\Windows\Temp. Required on
+	// Azure-AD-joined hosts, where C:\Windows\Temp carries an inherited
+	// Allow ACE for the interactive AAD principal with Delete rights;
+	// the module's later trusted-ancestor walk on rendered config /
+	// targets YAML would reject it otherwise. Empty falls back to
+	// C:\Windows\Temp for direct-caller compatibility on stock Windows.
+	bootstrapParent string
 	// mode / connector are the macOS-parity QA shorthand. When both
 	// are supplied (and configPath / manifestPath are empty),
 	// install-enterprise.ps1 renders a minimal managed_enterprise
@@ -223,6 +234,8 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// installer, not here (this flag is a passthrough).
 	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
 		"provision drop points and register services stopped; config.yaml and targets.yaml may arrive later via UCB")
+	flags.StringVar(&opts.bootstrapParent, "bootstrap-parent", "",
+		"protected admin-only parent directory for the installer's one-shot bootstrap dir (outer signed Setup EXE passes its own %ProgramData%\\DefenseClaw-Enterprise-Setup-<hex>\\scratch path here)")
 	flags.StringVar(&opts.mode, "mode", "",
 		"QA shorthand: observe|action (paired with --connector; the installed install-enterprise.ps1 renders config.yaml + targets.yaml)")
 	flags.StringVar(&opts.connector, "connector", "",
@@ -530,6 +543,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-GatewayServiceName", opts.gatewayServiceName)
 	appendValue("-GuardianServiceName", opts.guardianServiceName)
 	appendValue("-CertificationCodexHome", opts.certificationCodexHome)
+	appendValue("-BootstrapParent", opts.bootstrapParent)
 	if opts.coreHardeningCertification {
 		args = append(args, "-CoreHardeningCertification")
 	}
