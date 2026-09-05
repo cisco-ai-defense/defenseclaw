@@ -612,26 +612,11 @@ func trustedActionSameCommandPathReadFeedsExternalEgress(
 		if !oneOfFold(command.Program, "curl", "curl.exe") {
 			return trustedActionCommandProvesExternalEgress(facts, command.ID)
 		}
-		proxySources := actionfacts.StaticCurlProxyUploadFileSources(command)
-		if len(proxySources) == 0 {
-			for _, source := range actionfacts.StaticCurlUploadFileSources(command) {
-				if source.Path != candidate.Value {
-					continue
-				}
-				for _, network := range facts.Network {
-					if network.CommandID == command.ID && isExternalNetwork(network) &&
-						networkActionIn(
-							network.Action,
-							actionfacts.NetworkDownload,
-							actionfacts.NetworkUpload,
-						) && strings.EqualFold(network.Scheme, source.Scheme) &&
-						network.Host == source.Host && network.Port == source.Port {
-						return true
-					}
-				}
-			}
-		}
-		for _, source := range proxySources {
+		// Resolve the route per target. A global "any SOCKS observer"
+		// check would let a local HTTP observer steal a sibling noproxy
+		// upload, and a global "no SOCKS observer" check would treat
+		// HTTPS-through-SOCKS bodies as direct NetworkUpload facts.
+		for _, source := range actionfacts.StaticCurlProxyUploadFileSources(command) {
 			if source.Path != candidate.Value {
 				continue
 			}
@@ -640,6 +625,22 @@ func trustedActionSameCommandPathReadFeedsExternalEgress(
 					network.Action == actionfacts.NetworkConnect &&
 					isExternalNetwork(network) &&
 					strings.EqualFold(network.Scheme, source.Scheme) &&
+					network.Host == source.Host && network.Port == source.Port {
+					return true
+				}
+			}
+		}
+		for _, source := range actionfacts.StaticCurlDirectUploadFileSources(command) {
+			if source.Path != candidate.Value {
+				continue
+			}
+			for _, network := range facts.Network {
+				if network.CommandID == command.ID && isExternalNetwork(network) &&
+					networkActionIn(
+						network.Action,
+						actionfacts.NetworkDownload,
+						actionfacts.NetworkUpload,
+					) && strings.EqualFold(network.Scheme, source.Scheme) &&
 					network.Host == source.Host && network.Port == source.Port {
 					return true
 				}
