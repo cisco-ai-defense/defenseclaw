@@ -612,7 +612,25 @@ func trustedActionSameCommandPathReadFeedsExternalEgress(
 		if !oneOfFold(command.Program, "curl", "curl.exe") {
 			return trustedActionCommandProvesExternalEgress(facts, command.ID)
 		}
-		for _, source := range actionfacts.StaticCurlUploadFileSources(command) {
+		// Resolve the route per target. A global "any SOCKS observer"
+		// check would let a local HTTP observer steal a sibling noproxy
+		// upload, and a global "no SOCKS observer" check would treat
+		// HTTPS-through-SOCKS bodies as direct NetworkUpload facts.
+		for _, source := range actionfacts.StaticCurlProxyUploadFileSources(command) {
+			if source.Path != candidate.Value {
+				continue
+			}
+			for _, network := range facts.Network {
+				if network.CommandID == command.ID &&
+					network.Action == actionfacts.NetworkConnect &&
+					isExternalNetwork(network) &&
+					strings.EqualFold(network.Scheme, source.Scheme) &&
+					network.Host == source.Host && network.Port == source.Port {
+					return true
+				}
+			}
+		}
+		for _, source := range actionfacts.StaticCurlDirectUploadFileSources(command) {
 			if source.Path != candidate.Value {
 				continue
 			}
@@ -721,13 +739,16 @@ func trustedActionCommandFeedsExternalUpload(
 				!trustedActionCurlStdinFeedsExternalUpload(facts, destination) {
 				continue
 			}
-			if hasExternalUpload(facts, destination.ID) &&
-				hasDataFlowFrom(
-					facts,
-					destination.ID,
-					actionfacts.DataStdin,
-					actionfacts.DataNetwork,
-				) {
+			if !hasDataFlowFrom(
+				facts,
+				destination.ID,
+				actionfacts.DataStdin,
+				actionfacts.DataNetwork,
+			) {
+				continue
+			}
+			if hasExternalUpload(facts, destination.ID) ||
+				trustedActionCurlStdinObservedByExternalSOCKS(facts, destination) {
 				return true
 			}
 		}
@@ -743,6 +764,27 @@ func trustedActionCurlStdinFeedsExternalUpload(
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
 				network.Action == actionfacts.NetworkUpload &&
+				isExternalNetwork(network) &&
+				strings.EqualFold(network.Scheme, target.Scheme) &&
+				network.Host == target.Host && network.Port == target.Port {
+				return true
+			}
+		}
+	}
+	return trustedActionCurlStdinObservedByExternalSOCKS(facts, command)
+}
+
+func trustedActionCurlStdinObservedByExternalSOCKS(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	if command.Program != "curl" && command.Program != "curl.exe" {
+		return false
+	}
+	for _, target := range actionfacts.StaticCurlProxyStdinUploadTargets(command) {
+		for _, network := range facts.Network {
+			if network.CommandID == command.ID &&
+				network.Action == actionfacts.NetworkConnect &&
 				isExternalNetwork(network) &&
 				strings.EqualFold(network.Scheme, target.Scheme) &&
 				network.Host == target.Host && network.Port == target.Port {
