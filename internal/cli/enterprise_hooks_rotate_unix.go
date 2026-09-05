@@ -103,3 +103,17 @@ func checkEnterpriseHookRotationSpace(dataDir string) error {
 func errorsIsNotExist(err error) bool {
 	return err != nil && os.IsNotExist(err)
 }
+
+func windowsManagedRotationBusy(string) error { return nil }
+
+func executeManagedRotationPrepare(req enterpriseHookRotationRequest) (enterpriseHookRotationJournal, error) {
+	return executeEnterpriseHookRotationPrepare(req)
+}
+
+func executeManagedRotationCommit(req enterpriseHookRotationRequest) (enterpriseHookRotationJournal, error) {
+	return executeEnterpriseHookRotationCommit(req)
+}
+
+func executeManagedRotationRollback(req enterpriseHookRotationRequest) (enterpriseHookRotationJournal, error) {
+	return executeEnterpriseHookRotationRollback(req)
+}

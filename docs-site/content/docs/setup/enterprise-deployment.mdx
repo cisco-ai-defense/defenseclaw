@@ -1686,18 +1686,23 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 ## Scoped token rotation platform boundary
 
 Linux and macOS managed-enterprise rotation coordinates the gateway service
-with the POSIX guardian participant. Windows does not join that protocol.
+with the POSIX guardian participant. Windows joins the same coordinator
+through a native `DefenseClawHookGuardian` adapter, not that POSIX journal.
 
-On Windows `managed_enterprise`, `defenseclaw setup rotate-token` fail-closes
-before it stops the service or publishes replacement credentials. The shipped
-`DefenseClawHookGuardian` LocalSystem service continues to install and repair
-hooks; it is not a token-rotation participant until a native prepare, commit,
-and rollback adapter is certified. Unmanaged Windows rotation is unchanged.
+On Windows `managed_enterprise`, the native adapter
+(`enterprise hooks rotate-prepare|commit|rollback`) uses a Windows-only
+journal (`windows-rotation-transaction.json`). Mutations run as LocalSystem.
+Administrator `setup rotate-token` refuses before stop or credential writes
+until the guardian service dispatches those phases. Do not invoke the adapter
+as an inherited administrator subprocess.
+Per-user writes require the exact active non-elevated token for the
+manifest-pinned SID. Missing sessions, untrusted DACLs, reparse points, and
+hard-link aliases fail closed. Unmanaged Windows rotation is unchanged.
 
-Do not route Windows through `enterprise hooks rotate-prepare`,
-`rotate-commit`, or `rotate-rollback`. That would claim Linux/macOS parity at
-a privileged credential boundary. See spec 007 for the approved topology,
-identity, DACL, and certification requirements.
+Do not reuse the Linux/macOS `rotation-transaction.json` journal on Windows.
+That would claim POSIX parity at a privileged credential boundary. See spec
+007 for the approved topology, identity, DACL, and remaining certification
+requirements. #704 stays open until disposable-host certification lands.
 
 ## Production checklist
 
