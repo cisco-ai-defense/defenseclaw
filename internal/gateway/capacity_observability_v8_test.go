@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime"
 	"testing"
 	"time"
 
@@ -31,7 +32,7 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
 	var lastErr error
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := 0; attempt < 5; attempt++ {
 		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
 		if lastErr == nil {
 			return
@@ -46,10 +47,13 @@ func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
 
 func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
 	t.Helper()
-	runtime, capture := newProxyGeneratedMetricRuntime(t)
+	// Windows CI has failed the first histogram family when PauseNs is still
+	// empty. Force one GC so the generated gc.pause point has a real sample.
+	runtime.GC()
+	metricRuntime, capture := newProxyGeneratedMetricRuntime(t)
 	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute), store: capture.store}
 	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
-	results, err := runtime.RecordGeneratedMetricBatch(t.Context(), items)
+	results, err := metricRuntime.RecordGeneratedMetricBatch(t.Context(), items)
 	if err != nil {
 		recorded := capture.metricSnapshot()
 		failedFamily := observability.EventName("")

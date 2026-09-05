@@ -116,6 +116,19 @@ from defenseclaw.platform_support import (
     LOCAL_SHELL_STACKS_UNSUPPORTED_REASON,
     local_shell_stacks_supported,
 )
+from defenseclaw.rotate_token_guardian import (
+    GUARDIAN_AUTH_DIR_ENV,
+    GUARDIAN_MANIFEST_ENV,
+    GuardianRotationPlan,
+    assert_current_attestations,
+    assert_guardian_idle,
+    bind_guardian_roster,
+    expected_fingerprints_payload,
+    guardian_authorization_dir,
+    guardian_manifest_path,
+    parse_guardian_rotate_response,
+    require_guardian_participant,
+)
 from defenseclaw.safety import DotenvValueError, reject_symlink, sanitize_dotenv_value
 
 _supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
@@ -217,6 +230,10 @@ _TOKEN_ROTATION_CHILD_ENV_ALLOWLIST = (
     # same-user attacker is outside this boundary); unsafe modes are rejected.
     # Windows paths must pass the equivalent ACL write-access checks.
     "DEFENSECLAW_TRUSTED_BIN_PREFIXES",
+    # Preserve the validated guardian binding so the Go participant reads
+    # the same authorization ledger and manifest the coordinator preflighted.
+    GUARDIAN_AUTH_DIR_ENV,
+    GUARDIAN_MANIFEST_ENV,
 )
 _NATIVE_SPLUNK_CONFIG_SNAPSHOT_ATTR = "_native_splunk_config_snapshot"
 _NATIVE_SPLUNK_DOTENV_SNAPSHOT_ATTR = "_native_splunk_dotenv_snapshot"
@@ -3566,6 +3583,105 @@ class _RotateTokenLifecycleError(click.ClickException):
     """Secret-free retry sentinel for one bounded gateway lifecycle phase."""
 
 
+class _RotateTokenGuardianError(click.ClickException):
+    """Secret-free failure from one bounded guardian rotation phase."""
+
+
+def _rotate_token_guardian_plan(
+    authoritative_cfg: Any,
+    *,
+    requested_scopes: set[str],
+) -> GuardianRotationPlan | None:
+    """Bind the trusted manifest roster before stop(A) or return None."""
+
+    if not require_guardian_participant(authoritative_cfg):
+        return None
+    return bind_guardian_roster(
+        manifest_path=guardian_manifest_path(),
+        requested_scopes=requested_scopes,
+        operation_id=secrets.token_hex(16),
+        generation=secrets.token_hex(16),
+    )
+
+
+def _rotate_token_write_guardian_fingerprints(
+    data_dir: str,
+    plan: GuardianRotationPlan,
+    fingerprints: Mapping[str, str],
+) -> str:
+    path = os.path.join(data_dir, f".rotation-expected-fingerprints-{plan.operation_id}.json")
+    payload = expected_fingerprints_payload(plan, fingerprints)
+    atomic_write_private_bytes(
+        path,
+        (_json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("ascii"),
+    )
+    return path
+
+
+def _run_guardian_rotate(
+    data_dir: str,
+    action: str,
+    *,
+    config_file: str,
+    plan: GuardianRotationPlan,
+    fingerprints_path: str | None = None,
+) -> None:
+    """Run one bounded guardian participant phase without placing secrets on argv."""
+
+    if action not in {"prepare", "commit", "rollback"}:
+        raise ValueError("unsupported guardian rotation action")
+    if action == "prepare" and not fingerprints_path:
+        raise ValueError("guardian rotate-prepare requires expected fingerprints")
+    if action != "prepare" and fingerprints_path is not None:
+        raise ValueError("expected fingerprints are only valid for prepare")
+    executable = _gateway_lifecycle_executable()
+    if not executable:
+        raise click.ClickException("Guardian rotation executable was not found.")
+    command = [
+        executable,
+        "enterprise",
+        "hooks",
+        f"rotate-{action}",
+        "--operation-id",
+        plan.operation_id,
+        "--generation",
+        plan.generation,
+        "--manifest",
+        plan.manifest,
+        "--json",
+    ]
+    if fingerprints_path is not None:
+        command.extend(["--expected-fingerprints", fingerprints_path])
+    child_env = _rotate_token_child_environment(data_dir, config_file, "")
+    child_env.pop(_GATEWAY_TOKEN_ENV, None)
+    child_env[GUARDIAN_AUTH_DIR_ENV] = guardian_authorization_dir(data_dir)
+    child_env[GUARDIAN_MANIFEST_ENV] = plan.manifest
+    try:
+        result = subprocess.run(
+            command,
+            capture_output=True,
+            text=True,
+            shell=False,
+            stdin=subprocess.DEVNULL,
+            env=child_env,
+            timeout=_TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        raise _RotateTokenGuardianError(
+            f"Guardian rotation {action} timed out during the token-rotation transaction."
+        ) from exc
+    except OSError as exc:
+        raise _RotateTokenGuardianError(
+            f"Guardian rotation {action} could not be executed during the token-rotation transaction."
+        ) from exc
+    stdout = result.stdout or ""
+    returncode = result.returncode
+    del result
+    if returncode != 0:
+        raise _RotateTokenGuardianError(f"Guardian rotation {action} failed during the token-rotation transaction.")
+    parse_guardian_rotate_response(stdout, action=action, plan=plan)
+
+
 def _run_rotate_token_lifecycle(
     data_dir: str,
     action: str,
@@ -3718,8 +3834,22 @@ def _rotate_token_transaction(
             if name in configured_scopes
         }
         connector_state_a = _rotate_token_connector_state(authoritative_cfg, configured_old_hook_fingerprints)
+        guardian_plan = _rotate_token_guardian_plan(
+            authoritative_cfg,
+            requested_scopes=set(requested_scopes),
+        )
+        if guardian_plan is not None:
+            assert_guardian_idle(data_dir)
+            assert_current_attestations(
+                data_dir,
+                guardian_plan,
+                old_hook_fingerprints,
+            )
         old_stopped = False
         mutation_attempted = False
+        guardian_prepare_attempted = False
+        guardian_prepared = False
+        guardian_committed = False
         new_hook_values: dict[str, str] = {}
         try:
             try:
@@ -3766,6 +3896,28 @@ def _rotate_token_transaction(
                 )
             os.environ[_GATEWAY_TOKEN_ENV] = new_token
 
+            if guardian_plan is not None:
+                fingerprints_path = _rotate_token_write_guardian_fingerprints(
+                    data_dir,
+                    guardian_plan,
+                    new_hook_fingerprints,
+                )
+                try:
+                    guardian_prepare_attempted = True
+                    _run_guardian_rotate(
+                        data_dir,
+                        "prepare",
+                        config_file=config_file,
+                        plan=guardian_plan,
+                        fingerprints_path=fingerprints_path,
+                    )
+                    guardian_prepared = True
+                finally:
+                    try:
+                        os.unlink(fingerprints_path)
+                    except OSError:
+                        pass
+
             _run_rotate_token_lifecycle(
                 data_dir,
                 "start",
@@ -3777,13 +3929,36 @@ def _rotate_token_transaction(
             current_config, current_mode = _snapshot_regular_file(config_file, what="gateway config")
             if current_config != config_snapshot or current_mode != config_mode:
                 raise click.ClickException("Gateway configuration changed during token rotation.")
+            if guardian_plan is not None:
+                assert_current_attestations(
+                    data_dir,
+                    guardian_plan,
+                    new_hook_fingerprints,
+                    generation=guardian_plan.generation,
+                )
+            if guardian_plan is not None:
+                _run_guardian_rotate(
+                    data_dir,
+                    "commit",
+                    config_file=config_file,
+                    plan=guardian_plan,
+                )
+                guardian_committed = True
+            commit_audit = audit_details
+            if guardian_plan is not None:
+                commit_audit = (
+                    f"{audit_details} guardian_operation={guardian_plan.operation_id} "
+                    f"guardian_targets={len(guardian_plan.targets)}"
+                )
             _log_setup_action(
                 app,
                 ACTION_SETUP_GATEWAY,
-                audit_details,
+                commit_audit,
                 allow_offline=False,
             )
         except BaseException as primary_error:
+            if guardian_committed:
+                raise
             if not old_stopped:
                 raise
 
@@ -3802,6 +3977,20 @@ def _rotate_token_transaction(
                     raise click.ClickException(
                         "Token rotation failed and the replacement gateway could not be "
                         "safely stopped; token B was preserved on disk."
+                    ) from primary_error
+
+            if guardian_plan is not None and (guardian_prepared or guardian_prepare_attempted):
+                try:
+                    _run_guardian_rotate(
+                        data_dir,
+                        "rollback",
+                        config_file=config_file,
+                        plan=guardian_plan,
+                    )
+                except BaseException:
+                    raise click.ClickException(
+                        "Token rotation failed and the guardian participant could not be "
+                        "rolled back to generation A; the gateway remains stopped."
                     ) from primary_error
 
             restore_error: BaseException | None = None
@@ -3881,8 +4070,12 @@ def rotate_token_cmd(app: AppContext, connector: str | None, no_restart: bool, y
 
     Generates distinct 32-byte CSPRNG values, verifies and stops gateway A,
     durably commits the gateway and scoped sidecars for generation B, then
-    refreshes every affected hook/plugin and verifies gateway B. Any post-stop
-    failure restores the exact credential snapshots and prior ready generation.
+    refreshes every affected hook/plugin and verifies gateway B. Managed
+    Linux/macOS deployments also bind the trusted guardian roster to one
+    opaque operation and commit only after every selected target attests
+    generation B. Any post-stop failure restores the exact credential
+    snapshots, rolls back prepared guardian targets, and restores the prior
+    ready generation.
 
     Rotation is global by design: every eligible configured scoped-hook
     credential and every safely discovered persisted sidecar receive distinct

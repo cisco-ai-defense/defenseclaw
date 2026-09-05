@@ -29,11 +29,17 @@ const (
 	GeneratedMetricRecordFailed  GeneratedMetricErrorCode = "record_failed"
 )
 
-type GeneratedMetricError struct{ code GeneratedMetricErrorCode }
+type GeneratedMetricError struct {
+	code GeneratedMetricErrorCode
+	err  error
+}
 
 func (err *GeneratedMetricError) Error() string {
 	if err == nil {
 		return "generated metric operation failed"
+	}
+	if err.err != nil {
+		return "generated metric operation failed: " + string(err.code) + ": " + err.err.Error()
 	}
 	return "generated metric operation failed: " + string(err.code)
 }
@@ -43,6 +49,13 @@ func (err *GeneratedMetricError) Code() GeneratedMetricErrorCode {
 		return ""
 	}
 	return err.code
+}
+
+func (err *GeneratedMetricError) Unwrap() error {
+	if err == nil {
+		return nil
+	}
+	return err.err
 }
 
 // GeneratedMetricBuilder runs only after the exact family bucket is collected.
@@ -204,11 +217,15 @@ func recordGeneratedMetricWithLease(
 		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricBuildRejected}
 	}
 	if err := persistRuntimeCorrelationObservation(ctx, store, record); err != nil {
-		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+		return telemetry.V8MetricRecordResult{}, &GeneratedMetricError{
+			code: GeneratedMetricRecordFailed, err: err,
+		}
 	}
 	result, recordErr := provider.RecordGeneratedMetric(ctx, record)
 	if recordErr != nil {
-		return result, &GeneratedMetricError{code: GeneratedMetricRecordFailed}
+		return result, &GeneratedMetricError{
+			code: GeneratedMetricRecordFailed, err: recordErr,
+		}
 	}
 	return result, nil
 }
