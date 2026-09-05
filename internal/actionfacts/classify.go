@@ -271,6 +271,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	defer classifyArchiveArtifactConsumers(out, command)
 	if command.Effect == "" {
 		command.Effect = EffectExecute
 	}
@@ -642,7 +643,6 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	}
 
 	classifyRedirects(out, command)
-	classifyArchiveArtifactConsumers(out, command)
 }
 
 func classifyPOSIXHistory(out *parseOutput, command *CommandFact) {
