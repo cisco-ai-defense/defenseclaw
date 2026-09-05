@@ -5710,7 +5710,11 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
         return
     if _guardrail_proxy_intentionally_closed(cfg):
         return
-    connectors = [c for c in _doctor_active_connectors(cfg) if c in _PROXY_DOCTOR_CONNECTORS]
+    connectors = [
+        c
+        for c in _doctor_active_connectors(cfg)
+        if c in _PROXY_DOCTOR_CONNECTORS and _connector_enabled(cfg, c)
+    ]
     if not connectors:
         return
 
@@ -5718,7 +5722,7 @@ def _check_proxy_interception(cfg, r: _DoctorResult, *, live_health: dict | None
     info = live_health.get("interception") if isinstance(live_health, dict) else None
     if not isinstance(info, dict):
         _emit(
-            "warn",
+            "fail",
             label,
             "guardrail proxy is up but the sidecar has not reported an interceptor self-test",
             remediation=(
@@ -5775,8 +5779,12 @@ def _interception_self_test_is_fresh(info: dict) -> bool:
 
 def _check_openclaw_transport_advisory(cfg, r: _DoctorResult) -> None:
     """Warn when the installed OpenClaw is in the changed-transport range."""
-    connectors = _doctor_active_connectors(cfg)
-    if "openclaw" not in connectors:
+    connectors = [
+        c
+        for c in _doctor_active_connectors(cfg)
+        if c == "openclaw" and _connector_enabled(cfg, c)
+    ]
+    if not connectors:
         return
     try:
         from defenseclaw.inventory import agent_discovery
