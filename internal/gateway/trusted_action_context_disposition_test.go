@@ -1292,14 +1292,13 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 			},
 		},
 		{
-			name:    "SOCKS5 preproxy plus Host override hides origin hostname",
+			name:    "SOCKS5 preproxy plus Host override still observes origin hostname",
 			program: "curl",
 			argv: []string{
 				"--preproxy", "socks5://preproxy.example",
 				"--proxy", "http://127.0.0.1", "--header", "Host: safe.example",
 				"http://" + trustedActionDispositionTestToken + ".localhost/safe",
 			},
-			wantAudit: true,
 		},
 		{
 			name:    "HTTPS main proxy hides origin hostname from SOCKS5h",

@@ -244,6 +244,13 @@ func staticCurlPreproxyDestinationHostnameComponents(
 		return components
 	}
 	group := parsed.Targets[0].Group
+	requestProjection, requestValid := staticCurlHTTPRequestComponentProjection(
+		command, parsed, group,
+	)
+	if !requestValid {
+		return components
+	}
+	originHostOverridden := curlOriginHostHeaderOverridden(command, parsed, group)
 	for _, target := range parsed.Targets {
 		if target.Group != group || !curlTargetUsesExplicitProxy(parsed, target) {
 			continue
@@ -261,9 +268,11 @@ func staticCurlPreproxyDestinationHostnameComponents(
 			continue
 		}
 		if targetFact.Scheme == "http" {
-			// CONNECT still names the origin authority after a Host override.
+			// CONNECT names the origin authority after a Host override.
+			// Forward-proxy HTTP still sends the absolute-form origin
+			// hostname; only --request-target plus a Host override hides it.
 			if curlProxyTunnelEnabled(parsed, target.Group) ||
-				!curlOriginHostHeaderOverridden(command, parsed, target.Group) {
+				!(requestProjection.requestTargetSet && originHostOverridden) {
 				appendComponent(hostname.Value)
 			}
 		}
