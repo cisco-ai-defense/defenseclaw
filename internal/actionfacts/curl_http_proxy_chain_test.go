@@ -207,11 +207,22 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 			wantObserver: "preproxy.example",
 		},
 		{
-			name: "Host override does not copy origin hostname onto SOCKS5",
+			name: "Host override still copies forward-proxy origin hostname onto SOCKS5",
 			argv: []string{
 				"curl", "--preproxy", "socks5://preproxy.example",
 				"--proxy", "http://proxy.example", "--header",
 				"Host: other.example", "http://origin.example/",
+			},
+			wantHost:     "origin.example",
+			wantRequest:  "Host: other.example",
+			wantObserver: "preproxy.example",
+		},
+		{
+			name: "request-target plus Host override hides origin hostname from SOCKS5",
+			argv: []string{
+				"curl", "--preproxy", "socks5://preproxy.example",
+				"--proxy", "http://proxy.example", "--request-target", "/decoy",
+				"--header", "Host: other.example", "http://origin.example/",
 			},
 			rejectHost:   "origin.example",
 			wantRequest:  "Host: other.example",
