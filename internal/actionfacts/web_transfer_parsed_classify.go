@@ -1956,6 +1956,9 @@ func staticCurlFeatureDependentPositiveOptionsValid(
 	command CommandFact,
 	parsed curlArgvParse,
 ) bool {
+	if !curlCommandAttestedSchemesValid(command, parsed) {
+		return false
+	}
 	socks5GSSAPINEC := make(map[int]bool)
 	for _, option := range parsed.Options {
 		if option.Canonical == "--socks5-gssapi-nec" {
@@ -1966,11 +1969,14 @@ func staticCurlFeatureDependentPositiveOptionsValid(
 		if !curlFeatureDependentPositiveFlag(option) {
 			continue
 		}
-		if !curlCommandAllowsFeature(
-			command,
-			curlFeatureDependentRequiredFeature(option),
-		) {
+		required := curlFeatureDependentRequiredFeatures(option)
+		if len(required) == 0 {
 			return false
+		}
+		for _, feature := range required {
+			if !curlCommandAllowsFeature(command, feature) {
+				return false
+			}
 		}
 	}
 	for _, enabled := range socks5GSSAPINEC {
@@ -2485,15 +2491,16 @@ func staticCurlHTTPProxyTransmittedMetadata(
 	}
 	metadata := CurlProxyTransmittedMetadata{}
 	// HTTPS proxy support is a separate libcurl build capability. Without an
-	// executable capability fact, curl can reject an https:// proxy before it
-	// resolves or connects, so no proxy-bound destination hostname is exact.
-	hostnameSetupValid := (proxy.Scheme != "https" ||
-		curlCommandAllowsFeature(command, "https-proxy")) &&
-		staticCurlHostnameFirstWireSetupValid(
-			command,
-			parsed,
-			parsed.Targets[0].Group,
-		)
+	// attested https-proxy feature, curl can reject the proxy before any
+	// request bytes move, so the whole HTTPS-proxy metadata object stays closed.
+	if !curlCommandAllowsHTTPSProxyScheme(command, proxy.Scheme) {
+		return CurlProxyTransmittedMetadata{}
+	}
+	hostnameSetupValid := staticCurlHostnameFirstWireSetupValid(
+		command,
+		parsed,
+		parsed.Targets[0].Group,
+	)
 	appendProxyDestinationHostname := func(value string) {
 		candidate := component(value)
 		for _, existing := range metadata.ProxyDestinationHostnameComponents {

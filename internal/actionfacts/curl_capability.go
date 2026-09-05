@@ -17,9 +17,15 @@
 package actionfacts
 
 import (
+	"strconv"
 	"strings"
 	"unicode"
 )
+
+// curlModeledCapabilityVersion is the curl grammar ActionFacts models. Exact
+// restore accepts only this version; other nonempty strings, including 7.x
+// that lack --proxy-http2 (added in 8.1.0), cannot mint authority.
+const curlModeledCapabilityVersion = "8.7.1"
 
 // CurlCapability is trusted caller context describing one resolved curl
 // executable. ActionFacts never discovers it from GOOS, dialect, basename,
@@ -60,11 +66,56 @@ func authenticatedCurlCapabilities(candidates []CurlCapability) []CurlCapability
 }
 
 func curlCapabilityIdentityValid(capability CurlCapability) bool {
-	if capability.Executable == "" || capability.Version == "" ||
+	if capability.Executable == "" ||
+		!curlCapabilityVersionValid(capability.Version) ||
 		!curlCapabilityDigestValid(capability.Digest) {
 		return false
 	}
 	return true
+}
+
+func curlCapabilityVersionValid(version string) bool {
+	_, _, _, ok := parseCurlCapabilityVersion(version)
+	return ok && version == curlModeledCapabilityVersion
+}
+
+func parseCurlCapabilityVersion(version string) (major, minor, patch int, ok bool) {
+	parts := strings.Split(version, ".")
+	if len(parts) != 3 {
+		return 0, 0, 0, false
+	}
+	major, ok = parseCurlCapabilityVersionPart(parts[0])
+	if !ok {
+		return 0, 0, 0, false
+	}
+	minor, ok = parseCurlCapabilityVersionPart(parts[1])
+	if !ok {
+		return 0, 0, 0, false
+	}
+	patch, ok = parseCurlCapabilityVersionPart(parts[2])
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return major, minor, patch, true
+}
+
+func parseCurlCapabilityVersionPart(part string) (int, bool) {
+	if part == "" {
+		return 0, false
+	}
+	if part[0] == '0' && len(part) > 1 {
+		return 0, false
+	}
+	for _, char := range part {
+		if char < '0' || char > '9' {
+			return 0, false
+		}
+	}
+	value, err := strconv.Atoi(part)
+	if err != nil || value < 0 {
+		return 0, false
+	}
+	return value, true
 }
 
 func curlCapabilityDigestValid(digest string) bool {
@@ -146,29 +197,108 @@ func curlCommandAllowsProtocol(command CommandFact, protocol string) bool {
 	return false
 }
 
-func curlFeatureDependentRequiredFeature(option curlOptionToken) string {
+func curlCommandAllowsHTTPSProxyScheme(command CommandFact, scheme string) bool {
+	return scheme != "https" || curlCommandAllowsFeature(command, "https-proxy")
+}
+
+func curlCommandAttestedSchemesValid(command CommandFact, parsed curlArgvParse) bool {
+	if command.curlCapability == nil {
+		return true
+	}
+	for _, target := range parsed.Targets {
+		scheme := curlEffectiveTransferScheme(parsed, target)
+		if curlSchemeRequiresProtocolAttestation(scheme) &&
+			!curlCommandAllowsProtocol(command, scheme) {
+			return false
+		}
+	}
+	for _, option := range parsed.Options {
+		if !option.ValuePresent || option.Value == "" {
+			continue
+		}
+		if !curlMainProxyOption(option.Canonical) &&
+			option.Canonical != "--preproxy" {
+			continue
+		}
+		scheme := curlEffectiveProxyURLScheme(option.Canonical, option.Value)
+		if curlSchemeRequiresProtocolAttestation(scheme) &&
+			!curlCommandAllowsProtocol(command, scheme) {
+			return false
+		}
+	}
+	return true
+}
+
+func curlEffectiveTransferScheme(parsed curlArgvParse, target curlTransferTarget) string {
+	if scheme := curlURLSchemeToken(target.Value); scheme != "" {
+		return scheme
+	}
+	if option, present := curlFinalGroupOption(
+		parsed, target.Group, "--proto-default",
+	); present {
+		return strings.ToLower(strings.TrimSpace(option.Value))
+	}
+	return "http"
+}
+
+func curlEffectiveProxyURLScheme(canonical, value string) string {
+	if scheme := curlURLSchemeToken(value); scheme != "" {
+		return scheme
+	}
+	switch canonical {
+	case "--socks4", "--socks4a", "--socks5", "--socks5-hostname":
+		return ""
+	default:
+		return "http"
+	}
+}
+
+func curlURLSchemeToken(value string) string {
+	delimiter := strings.IndexByte(value, ':')
+	if delimiter <= 0 {
+		return ""
+	}
+	scheme := strings.ToLower(value[:delimiter])
+	for _, char := range scheme {
+		if char < 'a' || char > 'z' {
+			return ""
+		}
+	}
+	return scheme
+}
+
+func curlSchemeRequiresProtocolAttestation(scheme string) bool {
+	switch scheme {
+	case "", "socks4", "socks4a", "socks5", "socks5h", "tcp":
+		return false
+	default:
+		return true
+	}
+}
+
+func curlFeatureDependentRequiredFeatures(option curlOptionToken) []string {
 	switch option.Canonical {
 	case "--compressed":
-		return "libz"
+		return []string{"libz"}
 	case "--http2", "--http2-prior-knowledge":
-		return "http2"
+		return []string{"http2"}
 	case "--http3", "--http3-only":
-		return "http3"
+		return []string{"http3"}
 	case "--ssl", "--ssl-reqd", "--ftp-ssl-control":
-		return "ssl"
+		return []string{"ssl"}
 	case "--negotiate", "--proxy-negotiate":
-		return "gss-api"
+		return []string{"gss-api"}
 	case "--ntlm", "--ntlm-wb", "--proxy-ntlm":
-		return "ntlm"
+		return []string{"ntlm"}
 	case "--proxy-http2":
-		return "https-proxy"
+		return []string{"https-proxy", "http2"}
 	case "--metalink":
-		return "metalink"
+		return []string{"metalink"}
 	case "--tcp-fastopen":
-		return "tcp-fastopen"
+		return []string{"tcp-fastopen"}
 	case "--wdebug":
-		return "wdebug"
+		return []string{"wdebug"}
 	default:
-		return ""
+		return nil
 	}
 }

