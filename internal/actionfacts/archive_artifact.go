@@ -412,11 +412,30 @@ func JoinArchiveArtifactLineage(produced Facts, consumed Facts) []ArchiveArtifac
 	)
 }
 
+func precedingArchiveProducer(
+	producers []ArtifactFact,
+	consumer ArtifactFact,
+) (ArtifactFact, bool) {
+	var best ArtifactFact
+	found := false
+	for _, producer := range producers {
+		if producer.Identity != consumer.Identity ||
+			producer.CommandID >= consumer.CommandID {
+			continue
+		}
+		if !found || producer.CommandID > best.CommandID {
+			best = producer
+			found = true
+		}
+	}
+	return best, found
+}
+
 func joinArchiveArtifactFacts(
 	facts []ArtifactFact,
 	authoritative bool,
 ) []ArchiveArtifactLineage {
-	produced := make(map[string]ArtifactFact, len(facts))
+	var producers []ArtifactFact
 	var lineages []ArchiveArtifactLineage
 	seen := make(map[string]struct{})
 	for _, fact := range facts {
@@ -424,7 +443,7 @@ func joinArchiveArtifactFacts(
 			continue
 		}
 		if fact.Role == ArtifactProduce {
-			produced[fact.Identity] = fact
+			producers = append(producers, fact)
 		}
 	}
 	for _, fact := range facts {
@@ -432,8 +451,8 @@ func joinArchiveArtifactFacts(
 			fact.Identity == "" {
 			continue
 		}
-		producer, ok := produced[fact.Identity]
-		if !ok || producer.CommandID == fact.CommandID {
+		producer, ok := precedingArchiveProducer(producers, fact)
+		if !ok {
 			continue
 		}
 		key := fact.Identity + "\x00" +

