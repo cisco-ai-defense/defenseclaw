@@ -97,6 +97,10 @@ func TestWindowsManagedRotationPreparingJournalRefusesResumeThenRollbackRestores
 	}
 	snapshotPath := windowsManagedRotationSnapshotPath(env.serviceDir, alice)
 	beforeSnapshot := mustRead(t, snapshotPath)
+	beforeRecord, err := loadWindowsManagedRotationRecord(snapshotPath)
+	if err != nil {
+		t.Fatalf("load A snapshot: %v", err)
+	}
 	if err := connector.PublishHookAPIToken(filepath.Join(env.homes["alice"], ".defenseclaw"), env.connectors["alice"], env.tokenB); err != nil {
 		t.Fatalf("publish B for alice: %v", err)
 	}
@@ -115,7 +119,7 @@ func TestWindowsManagedRotationPreparingJournalRefusesResumeThenRollbackRestores
 	if err != nil {
 		t.Fatalf("reload A snapshot: %v", err)
 	}
-	if record.Artifact.Digest != managed.ScopedTokenFingerprint(env.tokenA) {
+	if record.Artifact.Digest != beforeRecord.Artifact.Digest {
 		t.Fatal("prepare replaced the generation A snapshot digest")
 	}
 
