@@ -82,31 +82,6 @@ type windowsManagedRotationPlan struct {
 	Tokens  map[string]string
 }
 
-type windowsManagedRotationFileIdentity struct {
-	VolumeSerial  uint32 `json:"volume_serial"`
-	FileIndexHigh uint32 `json:"file_index_high"`
-	FileIndexLow  uint32 `json:"file_index_low"`
-	NumberOfLinks uint32 `json:"number_of_links"`
-	CanonicalPath string `json:"canonical_path,omitempty"`
-}
-
-type windowsManagedRotationSnapshot struct {
-	Path          string                             `json:"path"`
-	Present       bool                               `json:"present"`
-	Digest        string                             `json:"digest,omitempty"`
-	OwnerSID      string                             `json:"owner_sid,omitempty"`
-	ProtectedDACL bool                               `json:"protected_dacl,omitempty"`
-	Identity      windowsManagedRotationFileIdentity `json:"identity,omitempty"`
-	Bytes         []byte                             `json:"-"`
-}
-
-type windowsManagedRotationSecretRecord struct {
-	Target     enterpriseHookRotationTarget       `json:"target"`
-	Artifact   windowsManagedRotationSnapshot     `json:"artifact"`
-	PublishedB windowsManagedRotationFileIdentity `json:"published_b,omitempty"`
-	Payloads   [][]byte                           `json:"payloads"`
-}
-
 func executeManagedRotationPrepare(req enterpriseHookRotationRequest) (enterpriseHookRotationJournal, error) {
 	return executeWindowsManagedRotationPrepare(req)
 }
@@ -171,6 +146,8 @@ func executeWindowsManagedRotationPrepare(req enterpriseHookRotationRequest) (en
 				return journal.public(), nil
 			case enterpriseHookRotationPhaseRolledBack:
 				return journal.public(), fmt.Errorf("windows managed rotation prepare: operation already rolled back")
+			case enterpriseHookRotationPhasePreparing:
+				return journal.public(), fmt.Errorf("windows managed rotation prepare: operation is already preparing; rollback first")
 			}
 		}
 		if err := refusePOSIXRotationJournal(cfg.DataDir); err != nil {
@@ -465,7 +442,8 @@ func publishWindowsManagedRotationTargetB(serviceDir string, target enterpriseHo
 		return fmt.Errorf("invalid target SID")
 	}
 	userDataDir := enterpriseHookRotationUserDataDir(target)
-	return windowsManagedRotationImpersonate(sid, strings.TrimSpace(target.UserHome), func() error {
+	var publishedB windowsManagedRotationFileIdentity
+	if err := windowsManagedRotationImpersonate(sid, strings.TrimSpace(target.UserHome), func() error {
 		if err := os.MkdirAll(filepath.Join(userDataDir, "hooks"), 0o700); err != nil {
 			return err
 		}
@@ -493,11 +471,12 @@ func publishWindowsManagedRotationTargetB(serviceDir string, target enterpriseHo
 		if !strings.EqualFold(info.OwnerSID, strings.TrimSpace(target.SID)) {
 			return fmt.Errorf("published B owner SID does not match the manifest")
 		}
-		if err := recordWindowsManagedRotationPublishedB(serviceDir, target, info.Identity); err != nil {
-			return err
-		}
+		publishedB = info.Identity
 		return nil
-	})
+	}); err != nil {
+		return err
+	}
+	return recordWindowsManagedRotationPublishedB(serviceDir, target, publishedB)
 }
 
 func verifyWindowsManagedRotationCurrentB(plan windowsManagedRotationPlan) error {
@@ -644,8 +623,11 @@ func restoreWindowsManagedRotationMutated(dataDir string, targets []enterpriseHo
 }
 
 func restoreWindowsManagedRotationTarget(dataDir string, target enterpriseHookRotationTarget) error {
-	snapshot, err := decodeWindowsManagedRotationSnapshot(windowsManagedRotationSnapshotPath(dataDir, target))
+	record, err := loadWindowsManagedRotationRecord(windowsManagedRotationSnapshotPath(dataDir, target))
 	if err != nil {
+		return err
+	}
+	if err := bindWindowsManagedRotationRestore(record, target); err != nil {
 		return err
 	}
 	sid, err := windows.StringToSid(strings.TrimSpace(target.SID))
@@ -653,7 +635,7 @@ func restoreWindowsManagedRotationTarget(dataDir string, target enterpriseHookRo
 		return fmt.Errorf("invalid target SID")
 	}
 	return windowsManagedRotationImpersonate(sid, strings.TrimSpace(target.UserHome), func() error {
-		return restoreWindowsManagedRotationArtifact(target, snapshot)
+		return restoreWindowsManagedRotationArtifact(target, record.Artifact)
 	})
 }
 
