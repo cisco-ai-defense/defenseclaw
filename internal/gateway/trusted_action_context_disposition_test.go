@@ -1409,6 +1409,9 @@ func TestTrustedActionRequestMetadataRiskPairs(t *testing.T) {
 				"X-Key: " + trustedActionDispositionTestToken,
 				"http://safe.localhost/upload",
 			},
+			// Nil capability cannot attest https-proxy, so after-CONNECT
+			// facts stay closed and this pair remains detection-only.
+			wantAudit: true,
 		},
 		{
 			name:    "HTTP proxy observes tunneled origin user after CONNECT",
