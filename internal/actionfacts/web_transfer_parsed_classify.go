@@ -2183,6 +2183,9 @@ func StaticCurlProxyUploadPayloads(
 	observers := []NetworkFact(nil)
 	if ok && (proxy.Scheme == "http" || proxy.Scheme == "https" ||
 		proxy.Scheme == "tcp") {
+		if !curlCommandAllowsHTTPSProxyScheme(command, proxy.Scheme) {
+			return nil
+		}
 		if proxy.Scheme == "tcp" && !staticCurlHostnameFirstWireSetupValid(
 			command,
 			parsed,
@@ -2195,6 +2198,9 @@ func StaticCurlProxyUploadPayloads(
 		}
 		observers = []NetworkFact{proxy}
 	} else if chain, chainParsed, chainOK := staticCurlHTTPProxyChainRoute(command); chainOK {
+		if !curlCommandAllowsHTTPSProxyScheme(command, chain.MainProxy.Scheme) {
+			return nil
+		}
 		parsed = chainParsed
 		observers = []NetworkFact{chain.MainProxy}
 		if chain.DownstreamPlaintext &&
