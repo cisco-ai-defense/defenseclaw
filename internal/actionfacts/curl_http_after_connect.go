@@ -102,22 +102,3 @@ func staticCurlHTTPAfterCONNECTRequestComponents(
 	appendTargetBound(origin.HTTPOriginCredentialComponents)
 	return components
 }
-
-func appendUniqueTransmittedRequestComponents(
-	dst []TransmittedRequestComponent,
-	src []TransmittedRequestComponent,
-) []TransmittedRequestComponent {
-	for _, candidate := range src {
-		found := false
-		for _, existing := range dst {
-			if existing == candidate {
-				found = true
-				break
-			}
-		}
-		if !found {
-			dst = append(dst, candidate)
-		}
-	}
-	return dst
-}
