@@ -75,6 +75,65 @@ func TestWindowsManagedRotationPrepareCommitRollback(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedRotationPreparingJournalRefusesResumeThenRollbackRestoresA(t *testing.T) {
+	env := newWindowsManagedRotationTestEnv(t, "alice", "bob")
+	targets := []enterpriseHookRotationTarget{env.rotationTarget("alice"), env.rotationTarget("bob")}
+	if err := writeWindowsManagedRotationJournal(env.serviceDir, windowsManagedRotationJournal{
+		Schema:         windowsManagedRotationSchema,
+		Version:        enterpriseHookRotationJournalVersion,
+		OperationID:    env.operation,
+		Generation:     env.generation,
+		Manifest:       env.manifest,
+		ManifestSHA256: testEnterpriseHookManifestSHA256,
+		Phase:          enterpriseHookRotationPhasePreparing,
+		Targets:        targets,
+		UpdatedAt:      "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatalf("seed preparing journal: %v", err)
+	}
+	alice := targets[0]
+	if err := snapshotWindowsManagedRotationTarget(env.serviceDir, alice); err != nil {
+		t.Fatalf("snapshot A for alice: %v", err)
+	}
+	snapshotPath := windowsManagedRotationSnapshotPath(env.serviceDir, alice)
+	beforeSnapshot := mustRead(t, snapshotPath)
+	if err := connector.PublishHookAPIToken(filepath.Join(env.homes["alice"], ".defenseclaw"), env.connectors["alice"], env.tokenB); err != nil {
+		t.Fatalf("publish B for alice: %v", err)
+	}
+
+	prepared, err := executeWindowsManagedRotationPrepare(env.request())
+	if err == nil || !strings.Contains(err.Error(), "operation is already preparing; rollback first") {
+		t.Fatalf("prepare error = %v, want preparing-journal refusal", err)
+	}
+	if prepared.Phase != enterpriseHookRotationPhasePreparing {
+		t.Fatalf("refused prepare phase = %q", prepared.Phase)
+	}
+	if afterSnapshot := mustRead(t, snapshotPath); afterSnapshot != beforeSnapshot {
+		t.Fatal("prepare overwrote the generation A snapshot")
+	}
+	record, err := loadWindowsManagedRotationRecord(snapshotPath)
+	if err != nil {
+		t.Fatalf("reload A snapshot: %v", err)
+	}
+	if record.Artifact.Digest != managed.ScopedTokenFingerprint(env.tokenA) {
+		t.Fatal("prepare replaced the generation A snapshot digest")
+	}
+
+	rolled, err := executeWindowsManagedRotationRollback(env.request())
+	if err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+	if rolled.Phase != enterpriseHookRotationPhaseRolledBack {
+		t.Fatalf("rollback phase = %q", rolled.Phase)
+	}
+	if got := env.publishedToken(t, "alice"); got != env.tokenA {
+		t.Fatal("alice was not restored to generation A")
+	}
+	if got := env.publishedToken(t, "bob"); got != env.tokenA {
+		t.Fatal("bob was not left on generation A")
+	}
+}
+
 func TestWindowsManagedRotationPartialPrepareRestoresA(t *testing.T) {
 	env := newWindowsManagedRotationTestEnv(t, "alice", "bob")
 	writes := 0
@@ -97,6 +156,28 @@ func TestWindowsManagedRotationPartialPrepareRestoresA(t *testing.T) {
 	}
 	if got := env.publishedToken(t, "bob"); got != env.tokenA {
 		t.Fatal("bob was not restored to generation A")
+	}
+}
+
+func TestWindowsManagedRotationRestoreRefusesTargetMismatch(t *testing.T) {
+	env := newWindowsManagedRotationTestEnv(t, "alice", "bob")
+	alice := env.rotationTarget("alice")
+	bob := env.rotationTarget("bob")
+	if err := snapshotWindowsManagedRotationTarget(env.serviceDir, alice); err != nil {
+		t.Fatalf("snapshot alice: %v", err)
+	}
+	record, err := loadWindowsManagedRotationRecord(windowsManagedRotationSnapshotPath(env.serviceDir, alice))
+	if err != nil {
+		t.Fatalf("load alice snapshot: %v", err)
+	}
+	if err := encodeWindowsManagedRotationSnapshot(windowsManagedRotationSnapshotPath(env.serviceDir, bob), record.Target, record.Artifact); err != nil {
+		t.Fatalf("plant mismatched snapshot: %v", err)
+	}
+	if err := restoreWindowsManagedRotationTarget(env.serviceDir, bob); err == nil || !strings.Contains(err.Error(), "target does not match") {
+		t.Fatalf("restore error = %v, want target mismatch", err)
+	}
+	if got := env.publishedToken(t, "bob"); got != env.tokenA {
+		t.Fatal("bob was mutated after mismatched restore")
 	}
 }
 
@@ -378,6 +459,16 @@ func newWindowsManagedRotationTestEnv(t *testing.T, users ...string) *windowsMan
 	}
 	cfg.DeploymentMode = managed.DeploymentModeManagedEnterprise
 	return env
+}
+
+func (env *windowsManagedRotationTestEnv) rotationTarget(user string) enterpriseHookRotationTarget {
+	return enterpriseHookRotationTarget{
+		User:             user,
+		UserHome:         env.homes[user],
+		SID:              env.sid,
+		Connector:        env.connectors[user],
+		TokenFingerprint: managed.ScopedTokenFingerprint(env.tokenB),
+	}
 }
 
 func (env *windowsManagedRotationTestEnv) request() enterpriseHookRotationRequest {
