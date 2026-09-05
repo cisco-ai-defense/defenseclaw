@@ -236,6 +236,37 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 			wantHost:     "origin.example",
 			wantObserver: "preproxy.example",
 		},
+		{
+			name: "proxytunnel CONNECT keeps origin hostname despite Host override",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://ext.example",
+				"--proxy", "http://127.0.0.1", "--proxytunnel",
+				"--header", "Host: decoy.example",
+				"http://secret-token.example/",
+			},
+			wantHost:     "secret-token.example",
+			wantObserver: "ext.example",
+		},
+		{
+			name: "locally resolving SOCKS5 observes HTTPS main-proxy SNI",
+			argv: []string{
+				"curl", "--preproxy", "socks5://ext.example",
+				"--proxy", "https://proxy.example", "http://origin.example/",
+			},
+			wantHost:     "proxy.example",
+			rejectHost:   "origin.example",
+			wantObserver: "ext.example",
+		},
+		{
+			name: "remote SOCKS5h does not expose numeric HTTP main-proxy host",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://ext.example",
+				"--proxy", "http://192.0.2.10", "http://origin.example/",
+			},
+			wantHost:     "origin.example",
+			rejectHost:   "192.0.2.10",
+			wantObserver: "ext.example",
+		},
 	} {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
@@ -290,6 +321,95 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 					if host.Value == test.rejectHost {
 						t.Fatalf("hostname %q leaked onto SOCKS: %#v", test.rejectHost, hosts)
 					}
+				}
+			}
+		})
+	}
+}
+
+func TestStaticCurlPreproxyProjectsPlaintextHTTPProxyRequest(t *testing.T) {
+	t.Parallel()
+
+	for _, test := range []struct {
+		name         string
+		argv         []string
+		wantValues   []string
+		rejectValues []string
+		observer     string
+	}{
+		{
+			name: "plaintext HTTP main-proxy credentials reach the preproxy",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://ext.example",
+				"--proxy", "http://user:pass@proxy.example",
+				"--proxy-user", "other:secret",
+				"--proxy-header", "X-Proxy: tok",
+				"http://origin.example/",
+			},
+			wantValues: []string{"user:pass", "X-Proxy: tok"},
+			observer:   "ext.example",
+		},
+		{
+			name: "plaintext HTTP --proxy-user reaches the preproxy",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://ext.example",
+				"--proxy", "http://proxy.example",
+				"--proxy-user", "other:secret",
+				"--proxy-header", "X-Proxy: tok",
+				"http://origin.example/",
+			},
+			wantValues: []string{"other:secret", "X-Proxy: tok"},
+			observer:   "ext.example",
+		},
+		{
+			name: "HTTPS main proxy hides proxy request components from SOCKS",
+			argv: []string{
+				"curl", "--preproxy", "socks5h://ext.example",
+				"--proxy", "https://user:pass@proxy.example",
+				"--proxy-user", "other:secret",
+				"--proxy-header", "X-Proxy: tok",
+				"http://origin.example/",
+			},
+			rejectValues: []string{"user:pass", "other:secret", "X-Proxy: tok"},
+			observer:     "ext.example",
+		},
+	} {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			if len(facts.Commands) != 1 {
+				t.Fatalf("commands = %#v", facts.Commands)
+			}
+			command := facts.Commands[0]
+			requests := staticCurlPreproxyPlaintextHTTPRequestComponents(command)
+			hasPreproxyValue := func(value string) bool {
+				for _, request := range requests {
+					if request.Value == value &&
+						request.Host == test.observer && request.Scheme == "tcp" {
+						return true
+					}
+				}
+				return false
+			}
+			for _, value := range test.wantValues {
+				if !hasPreproxyValue(value) {
+					t.Fatalf("requests = %#v, want %q on %q", requests, value, test.observer)
+				}
+			}
+			for _, candidate := range staticCurlHTTPProxyTransmittedMetadata(command).ProxyRequestComponents {
+				if candidate.Value == "" {
+					continue
+				}
+				if chain, _, ok := staticCurlHTTPProxyChainRoute(command); ok &&
+					chain.DownstreamPlaintext && !hasPreproxyValue(candidate.Value) {
+					t.Fatalf("main-proxy component %q missing on preproxy: %#v",
+						candidate.Value, requests)
+				}
+			}
+			for _, value := range test.rejectValues {
+				if hasPreproxyValue(value) {
+					t.Fatalf("component %q leaked onto SOCKS: %#v", value, requests)
 				}
 			}
 		})

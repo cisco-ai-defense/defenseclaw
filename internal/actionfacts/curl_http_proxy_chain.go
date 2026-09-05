@@ -234,8 +234,11 @@ func staticCurlPreproxyDestinationHostnameComponents(
 		}
 		components = append(components, candidate)
 	}
-	if curlProxyResolvesTargetHostname(chain.PreproxyCanonical, chain.PreproxyValue) {
-		appendComponent(chain.MainProxy.Host)
+	if _, err := netip.ParseAddr(chain.MainProxy.Host); err != nil {
+		if chain.MainProxy.Scheme == "https" ||
+			curlProxyResolvesTargetHostname(chain.PreproxyCanonical, chain.PreproxyValue) {
+			appendComponent(chain.MainProxy.Host)
+		}
 	}
 	if !chain.DownstreamPlaintext {
 		return components
@@ -257,10 +260,12 @@ func staticCurlPreproxyDestinationHostnameComponents(
 		if !hostnameValid {
 			continue
 		}
-		if targetFact.Scheme == "http" && !curlOriginHostHeaderOverridden(
-			command, parsed, target.Group,
-		) {
-			appendComponent(hostname.Value)
+		if targetFact.Scheme == "http" {
+			// CONNECT still names the origin authority after a Host override.
+			if curlProxyTunnelEnabled(parsed, target.Group) ||
+				!curlOriginHostHeaderOverridden(command, parsed, target.Group) {
+				appendComponent(hostname.Value)
+			}
 		}
 		if targetFact.Scheme == "https" {
 			sni, sniValid := staticHTTPSDestinationSNIComponent(
@@ -269,6 +274,28 @@ func staticCurlPreproxyDestinationHostnameComponents(
 			if sniValid {
 				appendComponent(sni.Value)
 			}
+		}
+	}
+	return components
+}
+
+func appendUniqueTransmittedRequestComponents(
+	components []TransmittedRequestComponent,
+	candidates ...TransmittedRequestComponent,
+) []TransmittedRequestComponent {
+	for _, candidate := range candidates {
+		if candidate.Value == "" {
+			continue
+		}
+		duplicate := false
+		for _, existing := range components {
+			if existing == candidate {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			components = append(components, candidate)
 		}
 	}
 	return components
@@ -297,10 +324,6 @@ func staticCurlPreproxyPlaintextHTTPRequestComponents(
 			proxiedHTTP = append(proxiedHTTP, targetFact)
 		}
 	}
-	if len(proxiedHTTP) == 0 {
-		return nil
-	}
-	origin := StaticCurlTransmittedMetadata(command)
 	component := func(value string) TransmittedRequestComponent {
 		return TransmittedRequestComponent{
 			Value: value, Scheme: chain.Preproxy.Scheme,
@@ -309,39 +332,36 @@ func staticCurlPreproxyPlaintextHTTPRequestComponents(
 	}
 	var components []TransmittedRequestComponent
 	appendComponent := func(value string) {
-		if value == "" {
-			return
+		components = appendUniqueTransmittedRequestComponents(components, component(value))
+	}
+	if len(proxiedHTTP) > 0 {
+		origin := StaticCurlTransmittedMetadata(command)
+		for _, value := range origin.Headers {
+			appendComponent(value)
 		}
-		candidate := component(value)
-		for _, existing := range components {
-			if existing == candidate {
-				return
-			}
+		for _, value := range origin.HTTPOriginCredentials {
+			appendComponent(value)
 		}
-		components = append(components, candidate)
-	}
-	for _, value := range origin.Headers {
-		appendComponent(value)
-	}
-	for _, value := range origin.HTTPOriginCredentials {
-		appendComponent(value)
-	}
-	for _, value := range origin.HTTPBearerTokens {
-		appendComponent(value)
-	}
-	appendTargetBound := func(candidates []TransmittedRequestComponent) {
-		for _, candidate := range candidates {
-			for _, target := range proxiedHTTP {
-				if candidate.Scheme == target.Scheme &&
-					candidate.Host == target.Host && candidate.Port == target.Port {
-					appendComponent(candidate.Value)
-					break
+		for _, value := range origin.HTTPBearerTokens {
+			appendComponent(value)
+		}
+		appendTargetBound := func(candidates []TransmittedRequestComponent) {
+			for _, candidate := range candidates {
+				for _, target := range proxiedHTTP {
+					if candidate.Scheme == target.Scheme &&
+						candidate.Host == target.Host && candidate.Port == target.Port {
+						appendComponent(candidate.Value)
+						break
+					}
 				}
 			}
 		}
+		appendTargetBound(origin.HTTPRequestComponents)
+		appendTargetBound(origin.HTTPOriginCredentialComponents)
 	}
-	appendTargetBound(origin.HTTPRequestComponents)
-	appendTargetBound(origin.HTTPOriginCredentialComponents)
+	for _, candidate := range staticCurlHTTPProxyTransmittedMetadata(command).ProxyRequestComponents {
+		components = appendUniqueTransmittedRequestComponents(components, component(candidate.Value))
+	}
 	return components
 }
 
