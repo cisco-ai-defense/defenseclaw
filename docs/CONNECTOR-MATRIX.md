@@ -19,3 +19,12 @@ Historical connector rollout records remain in
 [`CONNECTOR-COMMIT-SUMMARY.md`](CONNECTOR-COMMIT-SUMMARY.md), and
 [`CONNECTOR-REMAINING-FIXES.md`](CONNECTOR-REMAINING-FIXES.md). They are not
 current support matrices.
+
+## By-design / version limitation
+
+OpenClaw remains a proxy connector (`STATUS_NOT_GATED`): there is no hook
+contract gate on `openclaw --version`. Releases ≥2026.6.8 changed provider
+transport, so setup and doctor emit a transport advisory and require the
+plugin self-test rather than treating `:4000` liveness as agent-path
+coverage. Provider `base_url` injection is intentionally not used; a
+single-provider rewrite is bypassed by switching models.

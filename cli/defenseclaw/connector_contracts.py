@@ -494,6 +494,27 @@ def compare_agent_versions(a: str, b: str) -> int:
     return _compare_version(a, b)
 
 
+# First OpenClaw release known to change LLM transport away from a
+# fetch-only path. Setup and doctor emit an advisory; they do not block.
+OPENCLAW_TRANSPORT_ADVISORY_SINCE = "2026.6.8"
+
+
+def openclaw_needs_interception_advisory(raw_version: str | None) -> bool:
+    """Return True when OpenClaw is in the transport-changed range.
+
+    OpenClaw 2026.6.8+ may emit provider traffic through undici or
+    embedded runtimes that skip a fetch-only interceptor. The
+    interceptor now covers those layers; this advisory tells the
+    operator to confirm doctor's interception self-test rather than
+    treating a live proxy port as proof.
+    """
+
+    normalized = normalize_agent_version(raw_version or "")
+    if not normalized:
+        return False
+    return compare_agent_versions(normalized, OPENCLAW_TRANSPORT_ADVISORY_SINCE) >= 0
+
+
 def _version_tuple(value: str) -> tuple[int, int, int]:
     normalized = normalize_agent_version(value)
     if not normalized:

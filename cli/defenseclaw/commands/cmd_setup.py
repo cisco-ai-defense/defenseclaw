@@ -91,6 +91,7 @@ from defenseclaw.connector_contracts import (
     compare_agent_versions,
     connector_lock_contract_invariant,
     normalize_connector,
+    openclaw_needs_interception_advisory,
     resolve_connector_contract,
 )
 from defenseclaw.context import SETUP_RESTART_HANDLED_META_KEY, AppContext, pass_ctx
@@ -5023,6 +5024,12 @@ def _check_connector_version_supported_for_setup(
     if compatibility.status == STATUS_NOT_GATED:
         if emit:
             ux.ok(f"{label}: version {version_display}; proxy/chat connector has no hook contract gate.")
+            if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
+                ux.warn(
+                    f"{label}: {version_display} is in the OpenClaw ≥2026.6.8 transport range. "
+                    "A live :4000 port is not proof that agent LLM traffic is intercepted — "
+                    "run `defenseclaw doctor` and confirm the OpenClaw interception check."
+                )
         return True
 
     if compatibility.status == STATUS_UNVERSIONED:
