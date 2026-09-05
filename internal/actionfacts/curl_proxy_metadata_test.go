@@ -702,7 +702,11 @@ func TestStaticCurlProxyTransmittedMetadata(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			facts := Analyze(Input{
+				Tool:             "exec",
+				Argv:             test.argv,
+				CurlCapabilities: []CurlCapability{testCurlHTTPSProxyCapability()},
+			})
 			if len(facts.Commands) != 1 {
 				t.Fatalf("commands = %#v", facts.Commands)
 			}
