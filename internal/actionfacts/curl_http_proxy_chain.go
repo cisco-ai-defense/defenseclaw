@@ -54,7 +54,7 @@ func staticCurlHTTPProxyChainRoute(
 		parsed.EmptyTransferGroup || !parsed.hasValidOptionValues() ||
 		len(parsed.Targets) == 0 || !curlRequestModeValid(parsed) ||
 		!curlRangeOptionsValid(parsed) ||
-		!staticCurlFeatureDependentPositiveOptionsValid(parsed) {
+		!staticCurlFeatureDependentPositiveOptionsValid(command, parsed) {
 		return empty()
 	}
 	group := parsed.Targets[0].Group
@@ -235,8 +235,11 @@ func staticCurlPreproxyDestinationHostnameComponents(
 		components = append(components, candidate)
 	}
 	if _, err := netip.ParseAddr(chain.MainProxy.Host); err != nil {
-		if chain.MainProxy.Scheme == "https" ||
-			curlProxyResolvesTargetHostname(chain.PreproxyCanonical, chain.PreproxyValue) {
+		httpsMainAllowed := chain.MainProxy.Scheme == "https" &&
+			curlCommandAllowsHTTPSProxyScheme(command, chain.MainProxy.Scheme)
+		if httpsMainAllowed ||
+			(chain.MainProxy.Scheme != "https" &&
+				curlProxyResolvesTargetHostname(chain.PreproxyCanonical, chain.PreproxyValue)) {
 			appendComponent(chain.MainProxy.Host)
 		}
 	}
