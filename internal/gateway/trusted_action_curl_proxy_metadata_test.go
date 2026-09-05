@@ -422,10 +422,18 @@ func TestTrustedActionCurlProxyMetadataEgress(t *testing.T) {
 				token + " //origin.example/path",
 		},
 		{
-			name: "preproxy changes first peer",
+			name: "preproxy plus HTTPS proxy keeps credentials on the main proxy",
 			command: "curl --preproxy socks5://first.example --proxy " +
 				"https://proxy.example --proxy-user proxy:" + token +
 				" https://origin.example",
+			wantEnforce: true,
+		},
+		{
+			name: "HTTP chain proxy user reaches the external preproxy",
+			command: "curl --preproxy socks5h://first.example --proxy " +
+				"http://127.0.0.1 --proxy-user proxy:" + token +
+				" http://origin.example/",
+			wantEnforce: true,
 		},
 		{
 			name: "SOCKS proxy credentials use their own metadata lane",
