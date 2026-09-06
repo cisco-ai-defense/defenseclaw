@@ -224,6 +224,48 @@ func TestSidecarHealthSetAPI(t *testing.T) {
 	}
 }
 
+func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
+	h := NewSidecarHealth()
+	if h.Snapshot().Interception != nil {
+		t.Fatal("interception should be omitted until the plugin or proxy reports")
+	}
+
+	h.RecordInterceptionResult(true)
+	snap := h.Snapshot()
+	if snap.Interception == nil || !snap.Interception.Verified {
+		t.Fatalf("verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expected last_verified_at")
+	}
+
+	h.RecordAgentProxyTraffic()
+	snap = h.Snapshot()
+	if snap.Interception.LastAgentTrafficAt == "" {
+		t.Fatal("expected last_agent_traffic_at after an X-DC-Target-URL hop")
+	}
+
+	h.RecordInterceptionResult(false)
+	if h.Snapshot().Interception.Verified {
+		t.Fatal("failed self-test must clear verified")
+	}
+}
+
+func TestSidecarHealthInterceptionSnapshotExpires(t *testing.T) {
+	h := NewSidecarHealth()
+	h.RecordInterceptionResult(true)
+	h.mu.Lock()
+	h.interceptionVerifiedAt = time.Now().UTC().Add(-InterceptionSelfTestFreshness - time.Second)
+	h.mu.Unlock()
+	snap := h.Snapshot()
+	if snap.Interception == nil || snap.Interception.Verified {
+		t.Fatalf("stale verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expired snapshot must still report last_verified_at")
+	}
+}
+
 func TestSidecarHealthSetGuardrail(t *testing.T) {
 	h := NewSidecarHealth()
 
