@@ -547,7 +547,8 @@ Both commands need an **elevated PowerShell** prompt (Run as
 Administrator). Signed builds install into the production paths
 (\`%ProgramFiles%\\Cisco\\Cisco Secure Client\\DefenseClaw\\\` and
 \`%ProgramData%\\...\\DefenseClaw\\\`) and use the fixed service names
-(\`DefenseClawGateway\`, \`DefenseClawGuardian\`, \`DefenseClawEnumerator\`).
+\`DefenseClawGateway\`, \`DefenseClawHookGuardian\`, \`DefenseClawHookEnumerator\`,
+and \`DefenseClawCMIDBroker\`.
 
 Do NOT pass \`--allow-unsigned\` or any cert-scope flags
 (\`--install-root\`, \`--state-root\`, \`--gateway-service-name\`,
@@ -569,7 +570,7 @@ signed binary refuses them with exit 1603.
 
 ### Verify install
 
-    Get-Service DefenseClawGateway, DefenseClawGuardian |
+    Get-Service DefenseClawGateway, DefenseClawHookGuardian, DefenseClawHookEnumerator, DefenseClawCMIDBroker |
         Format-Table Name, Status, StartType
     Invoke-WebRequest -UseBasicParsing http://127.0.0.1:18970/healthz |
         Select-Object -ExpandProperty Content

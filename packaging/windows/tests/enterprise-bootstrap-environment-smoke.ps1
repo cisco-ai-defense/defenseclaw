@@ -293,6 +293,186 @@ function Invoke-ProtectedEnvironmentProbe {
     return $probeResult
 }
 
+function Invoke-SuppliedBootstrapParentProbe {
+    # Exercises the -BootstrapParent code path added for AVC:
+    #   1. Happy path — a caller-supplied parent that mirrors the outer
+    #      signed Setup EXE's protected scratch dir (SYSTEM+Admins FA,
+    #      DACL protected) is accepted; the bootstrap child lands under
+    #      that parent and Remove- restores state without touching the
+    #      caller-supplied parent itself.
+    #   2. Untrusted-ancestor rejection — passing a user-owned path (a
+    #      profile subdirectory) trips
+    #      Assert-DefenseClawBootstrapExternalParentTrust's owner walk.
+    #   3. Reparse-point rejection — a directory junction under the same
+    #      protected parent trips the reparse-in-ancestor-chain guard.
+    #
+    # Fixture roots are staged under the caller's %TEMP% so the smoke
+    # harness stays hermetic. The protected parent's SDDL matches
+    # exactly what cmd/defenseclaw-enterprise-setup/platform_windows.go
+    # createEnterpriseSetupStage emits.
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
+    $principal = [Security.Principal.WindowsPrincipal]::new($identity)
+    $elevated = $principal.IsInRole(
+        [Security.Principal.WindowsBuiltInRole]::Administrator
+    )
+    if (-not $elevated) {
+        # The probe requires elevation to construct the protected parent.
+        # Match the pattern used by the other probes: skip cleanly under
+        # a non-elevated harness rather than failing closed.
+        return [pscustomobject]@{
+            skipped = $true
+            reason = 'requires elevation to create a protected parent'
+        }
+    }
+
+    $originalBootstrapParent = $script:BootstrapParent
+    $protectedParent = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-BootstrapParentSmoke-$([Guid]::NewGuid().ToString('N'))"
+    )
+    $parentSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    $parentSecurity.SetSecurityDescriptorSddlForm(
+        'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
+    )
+    $parentDirInfo = [IO.DirectoryInfo]::new($protectedParent)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::Create($parentDirInfo, $parentSecurity)
+    }
+    else {
+        $parentDirInfo.Create($parentSecurity)
+    }
+
+    $bootstrapChildPath = $null
+    try {
+        # Happy path: supplied protected parent is honored.
+        $script:BootstrapParent = $protectedParent
+        $context = New-DefenseClawBootstrapEnvironment
+        try {
+            $bootstrapChildPath = [string]$context.Path
+            $parentOfChild = [IO.Path]::GetDirectoryName(
+                $bootstrapChildPath
+            )
+            if (-not [string]::Equals(
+                    $parentOfChild,
+                    $protectedParent,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -or
+                [IO.Path]::GetFileName($bootstrapChildPath) -cnotmatch
+                    '^DefenseClaw-Bootstrap-[a-f0-9]{32}$') {
+                throw (
+                    'supplied -BootstrapParent was not honored: root=' +
+                    "$bootstrapChildPath parent=$parentOfChild"
+                )
+            }
+            [void](Assert-DefenseClawBootstrapOneShotRoot `
+                -Path $bootstrapChildPath `
+                -ExpectedSecurity $context.Security `
+                -ExpectedParent $protectedParent `
+                -RequireEmpty)
+            if (-not [string]::Equals(
+                    [string]$context.BootstrapParent,
+                    $protectedParent,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                throw (
+                    'context.BootstrapParent did not record the supplied parent: ' +
+                    [string]$context.BootstrapParent
+                )
+            }
+        }
+        finally {
+            Restore-DefenseClawBootstrapEnvironment -Context $context
+            Remove-DefenseClawBootstrapEnvironment -Context $context
+        }
+        if ([IO.Directory]::Exists($bootstrapChildPath)) {
+            throw (
+                'bootstrap child survived Remove-DefenseClawBootstrapEnvironment: ' +
+                $bootstrapChildPath
+            )
+        }
+        if (-not [IO.Directory]::Exists($protectedParent)) {
+            throw (
+                'cleanup removed the caller-supplied protected parent: ' +
+                $protectedParent
+            )
+        }
+
+        # Untrusted-ancestor rejection: use a user-owned profile path
+        # whose ancestor chain includes the runner's SID as owner.
+        $untrusted = [Environment]::GetFolderPath(
+            [Environment+SpecialFolder]::LocalApplicationData
+        )
+        if ([string]::IsNullOrWhiteSpace($untrusted) -or
+            -not [IO.Directory]::Exists($untrusted)) {
+            $untrusted = [IO.Path]::GetTempPath().TrimEnd('\')
+        }
+        $untrustedRejected = $false
+        try {
+            [void](Assert-DefenseClawBootstrapExternalParentTrust `
+                -Path $untrusted)
+        }
+        catch {
+            $untrustedRejected = $true
+        }
+        if (-not $untrustedRejected) {
+            throw (
+                'Assert-DefenseClawBootstrapExternalParentTrust accepted a ' +
+                "user-owned ancestor: $untrusted"
+            )
+        }
+
+        # Reparse-point rejection: create a junction under the protected
+        # parent and pass its path to the validator. The ancestor-chain
+        # walk refuses any reparse-point node.
+        $reparseTarget = [IO.Path]::Combine(
+            $protectedParent,
+            'reparse-target'
+        )
+        [void][IO.Directory]::CreateDirectory($reparseTarget)
+        $reparseJunction = [IO.Path]::Combine(
+            $protectedParent,
+            'reparse-junction'
+        )
+        [void](Microsoft.PowerShell.Management\New-Item `
+            -ItemType Junction `
+            -Path $reparseJunction `
+            -Value $reparseTarget `
+            -Force)
+        $reparseRejected = $false
+        try {
+            [void](Assert-DefenseClawBootstrapExternalParentTrust `
+                -Path $reparseJunction)
+        }
+        catch {
+            $reparseRejected = $true
+        }
+        if (-not $reparseRejected) {
+            throw (
+                'Assert-DefenseClawBootstrapExternalParentTrust accepted a ' +
+                "reparse-point parent: $reparseJunction"
+            )
+        }
+    }
+    finally {
+        $script:BootstrapParent = $originalBootstrapParent
+        if ([IO.Directory]::Exists($protectedParent)) {
+            try {
+                [IO.Directory]::Delete($protectedParent, $true)
+            }
+            catch {
+                # Best-effort cleanup; the fixture path lives under
+                # %TEMP% and will be reclaimed regardless.
+            }
+        }
+    }
+    return [pscustomobject]@{
+        skipped = $false
+        supplied_parent_honored = $true
+        untrusted_ancestor_rejected = $true
+        reparse_point_rejected = $true
+    }
+}
+
 function Invoke-CollisionNoSeizeProbe {
     $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
     $principal = [Security.Principal.WindowsPrincipal]::new($identity)
@@ -1743,6 +1923,7 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
+$suppliedBootstrapParent = Invoke-SuppliedBootstrapParentProbe
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
 $renderedTargetsActiveSessionContract =
     Invoke-RenderedEnterpriseTargetsActiveSessionProbe
