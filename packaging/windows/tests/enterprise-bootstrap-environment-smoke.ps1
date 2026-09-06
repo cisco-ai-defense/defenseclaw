@@ -342,6 +342,34 @@ function Invoke-SuppliedBootstrapParentProbe {
         $parentDirInfo.Create($parentSecurity)
     }
 
+    # Dedicated untrusted fixture: a directory whose DACL explicitly grants
+    # BUILTIN\Users (S-1-5-32-545) modify access. Under a LocalSystem-
+    # elevated harness, ambient system-profile paths like LocalApplicationData
+    # resolve to Admins/SYSTEM ownership — the trust walk would ACCEPT them
+    # and the probe would spuriously succeed on rejection. Staging our own
+    # fixture with a planted Users:Modify ACE guarantees the ancestor-chain
+    # walk finds an untrusted principal with replacement rights regardless
+    # of what identity the harness runs under.
+    $untrustedFixture = [IO.Path]::Combine(
+        [IO.Path]::GetTempPath(),
+        "DefenseClaw-BootstrapUntrustedFixture-$([Guid]::NewGuid().ToString('N'))"
+    )
+    $untrustedSecurity = [Security.AccessControl.DirectorySecurity]::new()
+    # 0x001301BF = FILE_MODIFY_ACCESS (write-like — the exact right the
+    # trust walk refuses on untrusted principals). BU = BUILTIN\Users.
+    $untrustedSecurity.SetSecurityDescriptorSddlForm(
+        'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x001301BF;;;BU)'
+    )
+    $untrustedDirInfo = [IO.DirectoryInfo]::new($untrustedFixture)
+    if ($PSVersionTable.PSEdition -eq 'Core') {
+        [IO.FileSystemAclExtensions]::Create(
+            $untrustedDirInfo, $untrustedSecurity
+        )
+    }
+    else {
+        $untrustedDirInfo.Create($untrustedSecurity)
+    }
+
     $bootstrapChildPath = $null
     try {
         # Happy path: supplied protected parent is honored.
@@ -397,19 +425,15 @@ function Invoke-SuppliedBootstrapParentProbe {
             )
         }
 
-        # Untrusted-ancestor rejection: use a user-owned profile path
-        # whose ancestor chain includes the runner's SID as owner.
-        $untrusted = [Environment]::GetFolderPath(
-            [Environment+SpecialFolder]::LocalApplicationData
-        )
-        if ([string]::IsNullOrWhiteSpace($untrusted) -or
-            -not [IO.Directory]::Exists($untrusted)) {
-            $untrusted = [IO.Path]::GetTempPath().TrimEnd('\')
-        }
+        # Untrusted-ancestor rejection: point the validator at the fixture
+        # we staged with an explicit BUILTIN\Users Modify ACE. Deterministic
+        # regardless of whether the harness runs under a normal admin user
+        # or LocalSystem — the planted Users:Modify ACE is always
+        # write-like for an untrusted principal.
         $untrustedRejected = $false
         try {
             [void](Assert-DefenseClawBootstrapExternalParentTrust `
-                -Path $untrusted)
+                -Path $untrustedFixture)
         }
         catch {
             $untrustedRejected = $true
@@ -417,7 +441,7 @@ function Invoke-SuppliedBootstrapParentProbe {
         if (-not $untrustedRejected) {
             throw (
                 'Assert-DefenseClawBootstrapExternalParentTrust accepted a ' +
-                "user-owned ancestor: $untrusted"
+                "fixture with a planted Users:Modify ACE: $untrustedFixture"
             )
         }
 
@@ -455,13 +479,15 @@ function Invoke-SuppliedBootstrapParentProbe {
     }
     finally {
         $script:BootstrapParent = $originalBootstrapParent
-        if ([IO.Directory]::Exists($protectedParent)) {
-            try {
-                [IO.Directory]::Delete($protectedParent, $true)
-            }
-            catch {
-                # Best-effort cleanup; the fixture path lives under
-                # %TEMP% and will be reclaimed regardless.
+        foreach ($fixture in @($protectedParent, $untrustedFixture)) {
+            if ([IO.Directory]::Exists($fixture)) {
+                try {
+                    [IO.Directory]::Delete($fixture, $true)
+                }
+                catch {
+                    # Best-effort cleanup; the fixture paths live under
+                    # %TEMP% and will be reclaimed regardless.
+                }
             }
         }
     }
@@ -1924,6 +1950,22 @@ if (-not [bool]$status.ok -or [bool]$status.installed -or
 $single = Invoke-ProtectedEnvironmentProbe
 $collisionRejected = Invoke-CollisionNoSeizeProbe
 $suppliedBootstrapParent = Invoke-SuppliedBootstrapParentProbe
+# Assert the supplied-BootstrapParent contract. When the probe DIDN'T
+# skip (harness is elevated), every named path must have passed. A
+# future refactor that lets one of these fall to false without throwing
+# from within the probe body would otherwise slip through into a
+# successful report.
+if (-not [bool]$suppliedBootstrapParent.skipped -and
+    -not (
+        [bool]$suppliedBootstrapParent.supplied_parent_honored -and
+        [bool]$suppliedBootstrapParent.untrusted_ancestor_rejected -and
+        [bool]$suppliedBootstrapParent.reparse_point_rejected
+    )) {
+    throw (
+        'Invoke-SuppliedBootstrapParentProbe returned without a skip but ' +
+        'did not confirm all three supplied-parent contract fields'
+    )
+}
 $renderedTargetsVersionContract = Invoke-RenderedEnterpriseTargetsVersionProbe
 $renderedTargetsActiveSessionContract =
     Invoke-RenderedEnterpriseTargetsActiveSessionProbe
@@ -2060,6 +2102,14 @@ if ($legacyRelativeEnvironmentResidue.Count -ne 0) {
         [bool]$single.hostile_fixture_cleanup_verified
     existing_collision_rejected_without_acl_seizure =
         [bool]$collisionRejected
+    supplied_bootstrap_parent_skipped =
+        [bool]$suppliedBootstrapParent.skipped
+    supplied_bootstrap_parent_honored =
+        [bool]$suppliedBootstrapParent.supplied_parent_honored
+    supplied_bootstrap_parent_untrusted_ancestor_rejected =
+        [bool]$suppliedBootstrapParent.untrusted_ancestor_rejected
+    supplied_bootstrap_parent_reparse_point_rejected =
+        [bool]$suppliedBootstrapParent.reparse_point_rejected
     rendered_targets_version_contract =
         [bool]$renderedTargetsVersionContract
     rendered_targets_active_session_contract =
