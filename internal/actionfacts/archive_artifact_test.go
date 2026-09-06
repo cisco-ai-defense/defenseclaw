@@ -761,6 +761,22 @@ func TestCompressArchiveWhatIfDoesNotProduceArtifact(t *testing.T) {
 	if !found {
 		t.Fatalf("Compress-Archive -WhatIf:$false missed ArtifactProduce: %#v", execute.Artifacts)
 	}
+
+	help := Analyze(Input{
+		Argv: []string{
+			"Compress-Archive", "-?", "-Path", "src", "-DestinationPath", "repo.zip",
+		},
+		CWD:         `C:\Users\dev`,
+		DialectHint: DialectPowerShell,
+	})
+	if help.Parse.Status == StatusInvalid {
+		t.Fatalf("Compress-Archive -? caused an invalid parse: %#v", help.Parse)
+	}
+	for _, artifact := range help.Artifacts {
+		if artifact.Role == ArtifactProduce {
+			t.Fatalf("Compress-Archive -? minted ArtifactProduce: %#v", help.Artifacts)
+		}
+	}
 }
 
 func TestArchiveLineagePreservesEachConsumer(t *testing.T) {
