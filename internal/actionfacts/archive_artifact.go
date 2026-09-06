@@ -266,14 +266,31 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 	fileIndex := index + 2
 	for fileIndex < len(command.Argv) {
 		arg := command.Argv[fileIndex]
+		if arg == "--version" {
+			if fileIndex+1 >= len(command.Argv) ||
+				strings.HasPrefix(command.Argv[fileIndex+1], "-") {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			if !gitBundleVersionSupported(command.Argv[fileIndex+1]) {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			fileIndex += 2
+			continue
+		}
+		if strings.HasPrefix(arg, "--version=") {
+			if !gitBundleVersionSupported(strings.TrimPrefix(arg, "--version=")) {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			fileIndex++
+			continue
+		}
 		if !gitBundleCreateOnlyOption(arg) {
 			break
 		}
 		fileIndex++
-		if arg == "--version" && fileIndex < len(command.Argv) &&
-			!strings.HasPrefix(command.Argv[fileIndex], "-") {
-			fileIndex++
-		}
 	}
 	if fileIndex >= len(command.Argv) {
 		out.markPartial(IssueUnknownOperandGrammar)
@@ -332,13 +349,16 @@ func gitBundleRevisionListArg(arg string) bool {
 	}
 }
 
+func gitBundleVersionSupported(value string) bool {
+	return value == "2" || value == "3"
+}
+
 func gitBundleCreateOnlyOption(arg string) bool {
 	switch arg {
-	case "-q", "--quiet", "--progress", "--all-progress", "--all-progress-implied",
-		"--version":
+	case "-q", "--quiet", "--progress", "--all-progress", "--all-progress-implied":
 		return true
 	default:
-		return strings.HasPrefix(arg, "--version=")
+		return false
 	}
 }
 
