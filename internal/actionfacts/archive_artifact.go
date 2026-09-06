@@ -263,12 +263,21 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	file := command.Argv[index+2]
+	fileIndex := index + 2
+	for fileIndex < len(command.Argv) &&
+		gitBundleCreateOnlyOption(command.Argv[fileIndex]) {
+		fileIndex++
+	}
+	if fileIndex >= len(command.Argv) {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	file := command.Argv[fileIndex]
 	if strings.HasPrefix(file, "-") || !staticArchiveArtifactPath(file) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	if !gitBundleCreateHasRevisionInput(command.Argv, index+2) {
+	if !gitBundleCreateHasRevisionInput(command.Argv, fileIndex) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
@@ -294,11 +303,18 @@ func gitBundleRevisionListArg(arg string) bool {
 		return false
 	}
 	switch {
-	case arg == "--stdin", arg == "--all", arg == "--not":
+	case arg == "--stdin",
+		arg == "--all",
+		arg == "--reflog",
+		arg == "--alternate-refs":
 		return true
-	case strings.HasPrefix(arg, "--branches"),
-		strings.HasPrefix(arg, "--tags"),
-		strings.HasPrefix(arg, "--remotes"):
+	case arg == "--branches",
+		strings.HasPrefix(arg, "--branches="),
+		arg == "--tags",
+		strings.HasPrefix(arg, "--tags="),
+		arg == "--remotes",
+		strings.HasPrefix(arg, "--remotes="),
+		strings.HasPrefix(arg, "--glob="):
 		return true
 	case strings.HasPrefix(arg, "^") && arg != "^":
 		return true
