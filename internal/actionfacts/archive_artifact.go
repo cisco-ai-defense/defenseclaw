@@ -268,9 +268,28 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 		out.markPartial(IssueUnsupportedConstruct)
 		return
 	}
+	if !gitBundleCreateHasRevisionInput(command.Argv, index+2) {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	addOperation(command, OperationWrite)
 	appendCommandPath(out, command, PathAccessWrite, file)
 	appendArchiveArtifact(out, command.ID, ArtifactProduce, file)
+}
+
+func gitBundleCreateHasRevisionInput(argv []string, fileIndex int) bool {
+	if fileIndex < 0 || fileIndex >= len(argv) {
+		return false
+	}
+	for i, arg := range argv {
+		if arg == "--stdin" {
+			return true
+		}
+		if i > fileIndex && arg != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyArchiveArtifactConsumers(out *parseOutput, command *CommandFact) {
