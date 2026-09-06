@@ -14,7 +14,6 @@ import click
 from defenseclaw.rotate_token_guardian import (
     GUARDIAN_AUTH_DIR_ENV,
     GUARDIAN_MANIFEST_ENV,
-    WINDOWS_MANAGED_ROTATION_UNAVAILABLE,
     GuardianRotationPlan,
     GuardianRotationTarget,
     assert_current_attestations,
@@ -23,6 +22,7 @@ from defenseclaw.rotate_token_guardian import (
     bind_guardian_roster,
     default_guardian_manifest_path,
     expected_fingerprints_payload,
+    guardian_journal_file,
     guardian_manifest_digest,
     parse_guardian_rotate_response,
     require_guardian_participant,
@@ -107,13 +107,25 @@ class DefaultManifestTests(RequireGuardianParticipantTests):
             "/etc/defenseclaw/hook-guardian/targets.yaml",
         )
 
+    def test_uses_windows_programdata_layout(self) -> None:
+        self.assertEqual(
+            default_guardian_manifest_path("win32"),
+            r"C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml",
+        )
+
+    def test_windows_journal_file_is_native(self) -> None:
+        with mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"):
+            self.assertEqual(guardian_journal_file(), "windows-rotation-transaction.json")
+        with mock.patch("defenseclaw.rotate_token_guardian.os.name", "posix"):
+            self.assertEqual(guardian_journal_file(), "rotation-transaction.json")
+
 
 class IdleJournalTests(RequireGuardianParticipantTests):
     def test_retires_terminal_journal(self) -> None:
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
             assert_guardian_idle(td)
             self.assertFalse(journal.exists())
@@ -122,7 +134,7 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "prepared", "operation_id": "c" * 32}), encoding="utf-8")
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_idle(td)
@@ -133,12 +145,37 @@ class IdleJournalTests(RequireGuardianParticipantTests):
         from tempfile import TemporaryDirectory
 
         with TemporaryDirectory() as td:
-            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal = _in_tree_auth_dir(td) / guardian_journal_file()
             journal.write_text(json.dumps({"phase": "unknown", "operation_id": "c" * 32}), encoding="utf-8")
             with self.assertRaises(click.ClickException) as raised:
                 assert_guardian_idle(td)
             self.assertIn("unexpected phase", str(raised.exception))
             self.assertTrue(journal.exists())
+
+    def test_windows_refuses_posix_journal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            journal = _in_tree_auth_dir(td) / "rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
+            with mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"):
+                with self.assertRaises(click.ClickException) as raised:
+                    assert_guardian_idle(td)
+            self.assertIn("POSIX guardian journal", str(raised.exception))
+            self.assertTrue(journal.exists())
+
+    def test_windows_retires_native_journal(self) -> None:
+        from tempfile import TemporaryDirectory
+
+        with TemporaryDirectory() as td:
+            journal = _in_tree_auth_dir(td) / "windows-rotation-transaction.json"
+            journal.write_text(json.dumps({"phase": "committed", "operation_id": "c" * 32}), encoding="utf-8")
+            with mock.patch(
+                "defenseclaw.rotate_token_guardian.guardian_journal_file",
+                return_value="windows-rotation-transaction.json",
+            ):
+                assert_guardian_idle(td)
+            self.assertFalse(journal.exists())
 
 
 class RequireGuardianParticipantBehaviorTests(RequireGuardianParticipantTests):
@@ -146,13 +183,30 @@ class RequireGuardianParticipantBehaviorTests(RequireGuardianParticipantTests):
         self.assertFalse(require_guardian_participant(SimpleNamespace(deployment_mode="unmanaged_byod")))
         self.assertFalse(require_guardian_participant(SimpleNamespace(deployment_mode="")))
 
-    def test_windows_managed_is_refused(self) -> None:
-        with mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"):
+    def test_windows_managed_joins_native_adapter(self) -> None:
+        with (
+            mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"),
+            mock.patch(
+                "defenseclaw.rotate_token_guardian._windows_process_is_localsystem",
+                return_value=True,
+            ),
+        ):
+            self.assertTrue(
+                require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise"))
+            )
+
+    def test_windows_admin_refuses_before_mutation(self) -> None:
+        with (
+            mock.patch("defenseclaw.rotate_token_guardian.os.name", "nt"),
+            mock.patch(
+                "defenseclaw.rotate_token_guardian._windows_process_is_localsystem",
+                return_value=False,
+            ),
+        ):
             with self.assertRaises(click.ClickException) as raised:
                 require_guardian_participant(SimpleNamespace(deployment_mode="managed_enterprise"))
-        self.assertEqual(str(raised.exception), WINDOWS_MANAGED_ROTATION_UNAVAILABLE)
-        self.assertNotIn("rotate-prepare", str(raised.exception))
-        self.assertNotIn("rotate-commit", str(raised.exception))
+        self.assertIn("LocalSystem", str(raised.exception))
+        self.assertIn("no credentials were modified", str(raised.exception))
 
     @unittest.skipIf(os.name == "nt", "POSIX managed participant")
     def test_posix_managed_joins(self) -> None:

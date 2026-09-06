@@ -14,11 +14,13 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Coordinate the Linux/macOS guardian participant during token rotation.
+"""Coordinate the managed guardian participant during token rotation.
 
 Issue #735 binds service-side rotate-token to the #734 prepare/commit/rollback
-commands. Public state carries only identities, opaque operation/generation
-IDs, and canonical non-secret fingerprints.
+commands. Windows managed-enterprise uses the native DefenseClawHookGuardian
+adapter from spec 007 / #736 and must never share the POSIX journal. Public
+state carries only identities, opaque operation/generation IDs, and canonical
+non-secret fingerprints.
 """
 
 from __future__ import annotations
@@ -35,17 +37,26 @@ from typing import Any
 import click
 import yaml
 
+from defenseclaw import windows_acl
 from defenseclaw.file_permissions import (
     UnsafePathError,
+    _windows_current_user_sid,
     darwin_acl_write_error,
     open_regular_file_no_follow,
+    reject_reparse_path,
 )
+
+_WINDOWS_LOCAL_SYSTEM_SID = "S-1-5-18"
 
 GUARDIAN_MANIFEST_ENV = "DEFENSECLAW_HOOK_GUARDIAN_MANIFEST"
 GUARDIAN_AUTH_DIR_ENV = "DEFENSECLAW_HOOK_GUARDIAN_AUTH_DIR"
 _LINUX_DEFAULT_MANIFEST = "/etc/defenseclaw/hook-guardian/targets.yaml"
 _DARWIN_DEFAULT_MANIFEST = "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml"
+_WINDOWS_DEFAULT_MANIFEST = (
+    r"C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml"
+)
 _JOURNAL_FILE = "rotation-transaction.json"
+_WINDOWS_JOURNAL_FILE = "windows-rotation-transaction.json"
 _AUTHORIZATION_FILE = "protected_targets.json"
 _LOCK_BASE_NAME = "rotation-transaction"
 _MANIFEST_MAX_BYTES = 4 << 20
@@ -123,7 +134,15 @@ def default_guardian_manifest_path(platform: str | None = None) -> str:
     resolved = (platform or sys.platform).strip().lower()
     if resolved == "darwin":
         return _DARWIN_DEFAULT_MANIFEST
+    if resolved.startswith("win"):
+        return _WINDOWS_DEFAULT_MANIFEST
     return _LINUX_DEFAULT_MANIFEST
+
+
+def guardian_journal_file() -> str:
+    if os.name == "nt":
+        return _WINDOWS_JOURNAL_FILE
+    return _JOURNAL_FILE
 
 
 def guardian_manifest_path() -> str:
@@ -148,6 +167,8 @@ def assert_guardian_control_plane_path(
 
     if not path or not os.path.isabs(path):
         raise click.ClickException(f"{label} path is not an absolute trusted path.")
+    if os.name == "nt":
+        return _assert_windows_guardian_control_plane_path(path, label, directory=directory)
     current = path
     leaf = True
     leaf_info: os.stat_result | None = None
@@ -181,6 +202,61 @@ def assert_guardian_control_plane_path(
     return leaf_info
 
 
+def _assert_windows_guardian_control_plane_path(
+    path: str,
+    label: str,
+    *,
+    directory: bool = False,
+) -> os.stat_result:
+    current = path
+    leaf = True
+    leaf_info: os.stat_result | None = None
+    while True:
+        try:
+            reject_reparse_path(current)
+        except UnsafePathError as exc:
+            raise click.ClickException(f"{label} is not a trusted regular path.") from exc
+        try:
+            info = os.lstat(current)
+        except OSError as exc:
+            raise click.ClickException(f"{label} is unavailable; no credentials were modified.") from exc
+        if stat.S_ISLNK(info.st_mode):
+            raise click.ClickException(f"{label} is not a trusted regular path.")
+        if leaf:
+            if directory and not stat.S_ISDIR(info.st_mode):
+                raise click.ClickException(f"{label} is not a trusted directory.")
+            if not directory and not stat.S_ISREG(info.st_mode):
+                raise click.ClickException(f"{label} is not a trusted regular file.")
+            leaf_info = info
+        elif not stat.S_ISDIR(info.st_mode):
+            raise click.ClickException(f"{label} ancestor is not a trusted directory.")
+        try:
+            security = windows_acl.capture_path(current, directory=stat.S_ISDIR(info.st_mode))
+        except windows_acl.WindowsAclError as exc:
+            raise click.ClickException(
+                f"{label} security could not be read; no credentials were modified."
+            ) from exc
+        try:
+            windows_acl.assert_trusted_owner(security)
+        except windows_acl.WindowsAclError as exc:
+            raise click.ClickException(
+                f"{label} is not administrator-owned; no credentials were modified."
+            ) from exc
+        try:
+            windows_acl.assert_not_broadly_writable(security)
+        except windows_acl.WindowsAclError as exc:
+            raise click.ClickException(
+                f"{label} is broadly writable; no credentials were modified."
+            ) from exc
+        parent = os.path.dirname(current)
+        if parent == current:
+            break
+        current = parent
+        leaf = False
+    assert leaf_info is not None
+    return leaf_info
+
+
 def guardian_manifest_digest(manifest_path: str) -> str:
     info = assert_guardian_control_plane_path(manifest_path, "guardian manifest")
     return _sha256_regular_file(manifest_path, info, _MANIFEST_MAX_BYTES, "guardian manifest")
@@ -196,13 +272,34 @@ WINDOWS_MANAGED_ROTATION_UNAVAILABLE = (
 )
 
 
+def _windows_process_is_localsystem() -> bool:
+    """Return whether this process token is the LocalSystem guardian."""
+    if os.name != "nt":
+        return False
+    try:
+        return _windows_current_user_sid() == _WINDOWS_LOCAL_SYSTEM_SID
+    except OSError:
+        return False
+
+
 def require_guardian_participant(cfg: Any) -> bool:
-    """Join Linux/macOS guardians only. Windows waits for spec 007 / #736."""
+    """Join managed-enterprise guardians when the participant can actually run.
+
+    Windows uses the native DefenseClawHookGuardian adapter and must never
+    select the POSIX journal. Administrator ``rotate-token`` cannot inherit
+    LocalSystem, so it refuses before stop/mutate until the guardian service
+    dispatches rotation. LocalSystem may join the native adapter.
+    """
 
     if not is_managed_enterprise(cfg):
         return False
-    if os.name == "nt":
-        raise click.ClickException(WINDOWS_MANAGED_ROTATION_UNAVAILABLE)
+    if os.name == "nt" and not _windows_process_is_localsystem():
+        raise click.ClickException(
+            "Managed-enterprise token rotation on Windows must run as the "
+            "LocalSystem DefenseClawHookGuardian. Administrator rotate-token "
+            "cannot dispatch the native adapter until service-side rotation "
+            "exists; no credentials were modified."
+        )
     return True
 
 
@@ -278,7 +375,13 @@ def assert_guardian_idle(data_dir: str) -> None:
     auth_dir = guardian_authorization_dir(data_dir)
     if os.path.lexists(auth_dir):
         assert_guardian_control_plane_path(auth_dir, "guardian authorization directory", directory=True)
-    journal_path = os.path.join(auth_dir, _JOURNAL_FILE)
+    if os.name == "nt":
+        posix_journal = os.path.join(auth_dir, _JOURNAL_FILE)
+        if os.path.lexists(posix_journal):
+            raise click.ClickException(
+                "A POSIX guardian journal is present on Windows; no credentials were modified."
+            )
+    journal_path = os.path.join(auth_dir, guardian_journal_file())
     if not os.path.lexists(journal_path):
         return
     payload = _load_bounded_json(journal_path, "guardian rotation journal")
