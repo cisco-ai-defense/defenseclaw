@@ -215,6 +215,36 @@ func TestArchiveArtifactLineageCorpus(t *testing.T) {
 			wantMatch: true,
 			reason:    "TP SCP operand still consumes the produced archive",
 		},
+		{
+			name: "incomplete git bundle create is not a producer",
+			produced: Input{
+				Argv:        []string{"git", "bundle", "create", "repo.bundle"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			consumed: Input{
+				Argv:        []string{"scp", "repo.bundle", "host.example:repo.bundle"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			wantMatch: false,
+			reason:    "TN git bundle create without revision input",
+		},
+		{
+			name: "git bundle create --stdin still produces",
+			produced: Input{
+				Argv:        []string{"git", "bundle", "create", "repo.bundle", "--stdin"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			consumed: Input{
+				Argv:        []string{"scp", "repo.bundle", "host.example:repo.bundle"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			wantMatch: true,
+			reason:    "TP git bundle --stdin then scp upload",
+		},
 	}
 
 	var tp, tn, fp, fn int
@@ -356,6 +386,41 @@ func TestJoinArchiveArtifactFactsRequiresPrecedingProducer(t *testing.T) {
 		true,
 	); len(got) != 0 {
 		t.Fatalf("reversed command IDs joined: %#v", got)
+	}
+}
+
+func TestIncompleteGitBundleCreateDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "repo.bundle"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+			t.Fatalf("incomplete git bundle minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateStdinStillProducesArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "repo.bundle", "--stdin"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	found := false
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("git bundle --stdin missed ArtifactProduce: %#v", facts.Artifacts)
 	}
 }
 
