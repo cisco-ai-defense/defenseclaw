@@ -458,6 +458,84 @@ func TestGitBundleCreateProgressOnlyDoesNotProduceArtifact(t *testing.T) {
 	}
 }
 
+func TestGitBundleCreateOptionsBeforeFileStillProduce(t *testing.T) {
+	t.Parallel()
+
+	cases := [][]string{
+		{"git", "bundle", "create", "--progress", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "-q", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version=3", "repo.bundle", "HEAD"},
+	}
+	for _, argv := range cases {
+		facts := Analyze(Input{
+			Argv:        argv,
+			CWD:         "/tmp/work",
+			DialectHint: DialectArgv,
+		})
+		if facts.Parse.Status == StatusInvalid {
+			t.Fatalf("%q caused an invalid parse: %#v", argv, facts.Parse)
+		}
+		found := false
+		for _, artifact := range facts.Artifacts {
+			if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%q missed ArtifactProduce: %#v", argv, facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateNotOnlyDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "repo.bundle", "--not"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("git bundle --not caused an invalid parse: %#v", facts.Parse)
+	}
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+			t.Fatalf("modifier-only --not minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateSelectorsProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	cases := [][]string{
+		{"git", "bundle", "create", "repo.bundle", "--all"},
+		{"git", "bundle", "create", "repo.bundle", "--branches"},
+		{"git", "bundle", "create", "repo.bundle", "--glob=refs/heads/*"},
+	}
+	for _, argv := range cases {
+		facts := Analyze(Input{
+			Argv:        argv,
+			CWD:         "/tmp/work",
+			DialectHint: DialectArgv,
+		})
+		if facts.Parse.Status == StatusInvalid {
+			t.Fatalf("%q caused an invalid parse: %#v", argv, facts.Parse)
+		}
+		found := false
+		for _, artifact := range facts.Artifacts {
+			if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("%q missed ArtifactProduce: %#v", argv, facts.Artifacts)
+		}
+	}
+}
+
 func TestGitBundleCreateStdinStillProducesArtifact(t *testing.T) {
 	t.Parallel()
 
