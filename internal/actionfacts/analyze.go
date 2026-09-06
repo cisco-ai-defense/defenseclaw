@@ -1730,7 +1730,8 @@ func equivalentCommandStructure(left, right parseOutput) bool {
 	if len(left.commands) != len(right.commands) ||
 		!equalComparableSlices(left.paths, right.paths) ||
 		!equalComparableSlices(left.network, right.network) ||
-		!equalComparableSlices(left.dataFlows, right.dataFlows) {
+		!equalComparableSlices(left.dataFlows, right.dataFlows) ||
+		!equalComparableSlices(left.artifacts, right.artifacts) {
 		return false
 	}
 	for index := range left.commands {

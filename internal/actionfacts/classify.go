@@ -271,6 +271,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
+	defer classifyArchiveArtifactConsumers(out, command)
 	if command.Effect == "" {
 		command.Effect = EffectExecute
 	}
@@ -508,6 +509,12 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifySSH(out, command, program)
 	case "scp":
 		classifySCP(out, command)
+	case "tar", "tar.exe":
+		classifyTarArchiveProducer(out, command)
+	case "zip", "zip.exe":
+		classifyZipArchiveProducer(out, command)
+	case "compress-archive":
+		classifyCompressArchiveProducer(out, command)
 	case "nc", "ncat", "netcat", "socat":
 		classifySocketTool(out, command, program)
 	case "chisel", "ligolo-agent", "ligolo-ng-agent", "cloudflared", "ngrok":
@@ -5149,8 +5156,13 @@ func validSSHUsername(value string) bool {
 	return true
 }
 
-func classifySCP(out *parseOutput, command *CommandFact) {
-	var operands []string
+func collectSCPOperands(
+	out *parseOutput,
+	command *CommandFact,
+) (operands []string, help bool) {
+	if command == nil {
+		return nil, false
+	}
 	options := true
 	for i := 1; i < len(command.Argv); i++ {
 		arg := command.Argv[i]
@@ -5161,17 +5173,20 @@ func classifySCP(out *parseOutput, command *CommandFact) {
 		if options && strings.HasPrefix(arg, "-") && arg != "-" {
 			if arg == "-h" || arg == "-?" ||
 				strings.EqualFold(arg, "--help") {
-				command.Effect = EffectPreview
-				return
+				return nil, true
 			}
 			consumes, joined, known := scpOptionGrammar(arg)
 			if !known {
-				out.markPartial(IssueUnknownOperandGrammar)
+				if out != nil {
+					out.markPartial(IssueUnknownOperandGrammar)
+				}
 				continue
 			}
 			if consumes && !joined {
 				if i+1 >= len(command.Argv) || command.Argv[i+1] == "" {
-					out.markPartial(IssueUnknownOperandGrammar)
+					if out != nil {
+						out.markPartial(IssueUnknownOperandGrammar)
+					}
 					continue
 				}
 				i++
@@ -5179,6 +5194,35 @@ func classifySCP(out *parseOutput, command *CommandFact) {
 			continue
 		}
 		operands = append(operands, arg)
+	}
+	return operands, false
+}
+
+func scpLocalUploadSourceOperands(command CommandFact) []string {
+	operands, help := collectSCPOperands(nil, &command)
+	if help || len(operands) < 2 {
+		return nil
+	}
+	_, firstRemote := scpRemoteHost(operands[0])
+	_, lastRemote := scpRemoteHost(operands[len(operands)-1])
+	if firstRemote || !lastRemote {
+		return nil
+	}
+	var sources []string
+	for _, source := range operands[:len(operands)-1] {
+		if _, remote := scpRemoteHost(source); remote {
+			continue
+		}
+		sources = append(sources, source)
+	}
+	return sources
+}
+
+func classifySCP(out *parseOutput, command *CommandFact) {
+	operands, help := collectSCPOperands(out, command)
+	if help {
+		command.Effect = EffectPreview
+		return
 	}
 	if len(operands) < 2 {
 		out.markPartial(IssueUnknownOperandGrammar)
@@ -9308,6 +9352,8 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		if !parsed.complete {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "bundle":
+		classifyGitBundleProducer(out, command, index)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
@@ -11935,6 +11981,10 @@ func deduplicateFacts(out *parseOutput) {
 		return strconv.FormatInt(fact.FromCommandID, 10) + "\x00" +
 			strconv.FormatInt(fact.ToCommandID, 10) + "\x00" +
 			string(fact.From) + "\x00" + string(fact.To)
+	})
+	out.artifacts = deduplicate(out.artifacts, func(fact ArtifactFact) string {
+		return strconv.FormatInt(fact.CommandID, 10) + "\x00" +
+			string(fact.Role) + "\x00" + string(fact.Kind) + "\x00" + fact.Value
 	})
 }
 
