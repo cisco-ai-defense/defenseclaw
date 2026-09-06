@@ -278,6 +278,10 @@ func classifyCompressArchiveProducer(out *parseOutput, command *CommandFact) {
 	for i := 1; i < len(command.Argv); i++ {
 		controls.consume(command, command.Argv[i])
 	}
+	if controls.help {
+		command.Effect = EffectPreview
+		return
+	}
 	if !controls.valid || command.Effect == EffectUncertain {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
