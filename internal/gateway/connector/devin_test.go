@@ -93,7 +93,7 @@ func TestDevinWindowsHookCommandMigratesExactPowerShellPredecessor(t *testing.T)
 	opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw")}
 	current := windowsDevinBashHookCommand(hookBinary)
 	predecessors := []string{
-		legacyWindowsDevinDirectBashHookCommandForBinary(hookBinary),
+		legacyWindowsDevinEncodedPowerShellHookCommandForBinary(hookBinary),
 		legacyWindowsDevinUnquotedPowerShellHookCommandForBinary(hookBinary),
 		legacyWindowsDevinPowerShellHookCommandForBinary(hookBinary),
 	}

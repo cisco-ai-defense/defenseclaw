@@ -1008,22 +1008,19 @@ func TestHookInvocationCommand(t *testing.T) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", hermes)
 	}
 
-	// Devin feeds its command field to bash on Windows. The immutable system
-	// PowerShell path is a POSIX literal and the encoded script synchronously
-	// waits for the GUI-subsystem hook while preserving its standard handles.
+	// Devin feeds its command field to bash on Windows. Invoke the stable native
+	// launcher directly; the live client preserves JSON stdio and the blocking
+	// exit code, while unwrapping PowerShell EncodedCommand would break in bash.
 	devin := hookInvocationCommandFor("windows", "devin", unix)
 	wantDevin := windowsDevinBashHookCommand(windowsExe)
 	if devin != wantDevin {
 		t.Errorf("devin command = %q, want %q", devin, wantDevin)
 	}
-	wantOuter := "'" + strings.ReplaceAll(windowsSystemPowerShellExe(), `\`, "/") + "' -NoLogo"
-	if !strings.HasPrefix(devin, wantOuter) || strings.Contains(devin, "& ") ||
-		strings.Contains(strings.ToLower(devin), "bash") || strings.Contains(devin, ".ps1") {
+	if !strings.HasPrefix(devin, "'") || !strings.HasSuffix(devin, " "+nativeHookFlag+"devin") ||
+		strings.Contains(devin, "& ") || strings.Contains(strings.ToLower(devin), "powershell") ||
+		strings.Contains(strings.ToLower(devin), "bash") || strings.Contains(devin, ".ps1") ||
+		strings.Contains(devin, "-EncodedCommand") {
 		t.Errorf("devin command contains an invalid awaited wrapper: %q", devin)
-	}
-	decodedDevin := decodePowerShellEncodedCommandForTest(t, devin)
-	if want := windowsNativePowerShellStartForTest(windowsExe, "devin"); !strings.Contains(decodedDevin, want) {
-		t.Errorf("decoded devin command = %q, want invocation %q", decodedDevin, want)
 	}
 	if !isNativeHookCommand(devin) {
 		t.Errorf("isNativeHookCommand(%q) = false, want true", devin)
@@ -1122,12 +1119,10 @@ func TestWindowsHermesDirectHookCommandQuotesAndRejectsUnsafePaths(t *testing.T)
 	}
 }
 
-func TestWindowsDevinBashHookCommandUsesAwaitedPowerShellBoundaryAndRejectsUnsafePaths(t *testing.T) {
+func TestWindowsDevinDirectBashHookCommandQuotesAndRejectsUnsafePaths(t *testing.T) {
 	valid := `C:\Users\Kevin O'Brien\Defense Claw $Preview\defenseclaw-hook.exe`
 	setHookBinaryOverride(t, valid)
-	inner := windowsNativePowerShellHookCommandForBinary("devin", valid)
-	powershell := windowsSystemPowerShellExe()
-	want := "'" + strings.ReplaceAll(powershell, `\`, "/") + "'" + inner[len(powershell):]
+	want := `'C:/Users/Kevin O'\''Brien/Defense Claw $Preview/defenseclaw-hook.exe' hook --connector devin`
 	if got := windowsDevinBashHookCommand(valid); got != want {
 		t.Fatalf("Devin awaited command = %q, want %q", got, want)
 	}
@@ -1145,7 +1140,7 @@ func TestWindowsDevinBashHookCommandUsesAwaitedPowerShellBoundaryAndRejectsUnsaf
 	}
 }
 
-func TestWindowsDevinBashHookCommandAwaitsGUIHookWithStdio(t *testing.T) {
+func TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio(t *testing.T) {
 	if runtime.GOOS != "windows" {
 		t.Skip("native Windows hook integration is Windows-specific")
 	}
