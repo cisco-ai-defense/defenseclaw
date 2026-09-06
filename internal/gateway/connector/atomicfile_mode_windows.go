@@ -12,8 +12,16 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
+
+	"golang.org/x/sys/windows"
 
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
+)
+
+const (
+	atomicFileRenameMaxAttempts = 100
+	atomicFileRenameRetryDelay  = 5 * time.Millisecond
 )
 
 func atomicFileProtectionMatches(file *os.File, info os.FileInfo, perm os.FileMode) bool {
@@ -154,7 +162,9 @@ func atomicFilePublishPrivateBound(
 	// already-private staged inode. Unlike ReplaceFileW, changed writes do not
 	// retain destination metadata such as alternate data streams, EFS state, or
 	// its DACL. Identical writes return before this point and preserve metadata.
-	if err := renameAtomicTransformBoundFilePlatform(parent, stage, filepath.Base(destination), true); err != nil {
+	if err := renameAtomicTransformBoundFileWithBusyRetry(
+		parent, stage, filepath.Base(destination), true,
+	); err != nil {
 		return err
 	}
 	if preserveExactHookProtection {
@@ -211,4 +221,46 @@ func atomicFilePublishPrivateBound(
 		return fmt.Errorf("close published private file: %w", closeErr)
 	}
 	return nil
+}
+
+func atomicFileRenameBusy(err error) bool {
+	return errors.Is(err, windows.ERROR_ACCESS_DENIED) ||
+		errors.Is(err, windows.ERROR_SHARING_VIOLATION) ||
+		errors.Is(err, windows.ERROR_LOCK_VIOLATION) ||
+		errors.Is(err, windows.STATUS_ACCESS_DENIED) ||
+		errors.Is(err, windows.STATUS_SHARING_VIOLATION)
+}
+
+func renameAtomicTransformBoundFileWithBusyRetry(
+	parent, source *os.File, targetName string, replace bool,
+) error {
+	return renameAtomicTransformBoundFileWithBusyRetryUsing(
+		parent, source, targetName, replace,
+		renameAtomicTransformBoundFilePlatform,
+		time.Sleep,
+	)
+}
+
+func renameAtomicTransformBoundFileWithBusyRetryUsing(
+	parent, source *os.File,
+	targetName string,
+	replace bool,
+	rename func(*os.File, *os.File, string, bool) error,
+	sleep func(time.Duration),
+) error {
+	var err error
+	for attempt := 0; attempt < atomicFileRenameMaxAttempts; attempt++ {
+		err = rename(parent, source, targetName, replace)
+		if err == nil {
+			return nil
+		}
+		if !atomicFileRenameBusy(err) {
+			return err
+		}
+		if attempt+1 == atomicFileRenameMaxAttempts {
+			return err
+		}
+		sleep(atomicFileRenameRetryDelay)
+	}
+	return err
 }
