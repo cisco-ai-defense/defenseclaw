@@ -62,14 +62,27 @@ const (
 // test exists to catch would show up.
 func identityHeaderLineCountForHost(t *testing.T) int {
 	t.Helper()
+	if !hookAccountNamePattern.MatchString(hostAccountName(t)) {
+		return identityHeaderLinesIDOnly
+	}
+	return identityHeaderLinesWithName
+}
+
+// hostAccountName reports `id -un` with the command's own line ending removed
+// and nothing else.
+//
+// The helper applies its allowlist to the account name as the OS reports it,
+// so an account whose name carries a leading or trailing space is one the
+// helper refuses. Trimming that space here would predict a name header the
+// helper never emits, and the test would fail against the account rather than
+// against the defect it exists to catch.
+func hostAccountName(t *testing.T) string {
+	t.Helper()
 	out, err := exec.Command("id", "-un").Output()
 	if err != nil {
 		t.Fatalf("id -un: %v", err)
 	}
-	if !hookAccountNamePattern.MatchString(strings.TrimSpace(string(out))) {
-		return identityHeaderLinesIDOnly
-	}
-	return identityHeaderLinesWithName
+	return strings.TrimRight(string(out), "\r\n")
 }
 
 // TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell runs the helper under
@@ -109,9 +122,14 @@ func TestUserIdentityArgsEmitBothHeadersUnderTheSystemShell(t *testing.T) {
 			t.Fatalf("line %d = %q, want %q (all lines: %q)", i, lines[i], expected, lines)
 		}
 	}
-	if wantLines == identityHeaderLinesWithName &&
-		!strings.HasPrefix(lines[3], "X-DefenseClaw-User-Name: ") {
-		t.Fatalf("line 3 = %q, want an account-name header", lines[3])
+	if wantLines == identityHeaderLinesWithName {
+		// Compared whole rather than by prefix: a header naming the wrong
+		// account attributes the event to the wrong person, and reads as a
+		// pass against a prefix check.
+		wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
+		if lines[3] != wantName {
+			t.Fatalf("line 3 = %q, want %q", lines[3], wantName)
+		}
 	}
 	for _, line := range lines {
 		if strings.ContainsAny(line, "\r") {
@@ -178,6 +196,12 @@ printf '%s\n' "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}"
 			}
 			if !strings.Contains(string(out), "X-DefenseClaw-User-Id: "+strconv.Itoa(os.Geteuid())) {
 				t.Fatalf("%s did not carry the caller's uid: %q", script, string(out))
+			}
+			if identityHeaderLineCountForHost(t) == identityHeaderLinesWithName {
+				wantName := "X-DefenseClaw-User-Name: " + hostAccountName(t)
+				if !strings.Contains(string(out), wantName) {
+					t.Fatalf("%s did not carry %q: %q", script, wantName, string(out))
+				}
 			}
 
 			// Collecting the arguments and never passing them to curl fails
