@@ -264,9 +264,16 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 		return
 	}
 	fileIndex := index + 2
-	for fileIndex < len(command.Argv) &&
-		gitBundleCreateOnlyOption(command.Argv[fileIndex]) {
+	for fileIndex < len(command.Argv) {
+		arg := command.Argv[fileIndex]
+		if !gitBundleCreateOnlyOption(arg) {
+			break
+		}
 		fileIndex++
+		if arg == "--version" && fileIndex < len(command.Argv) &&
+			!strings.HasPrefix(command.Argv[fileIndex], "-") {
+			fileIndex++
+		}
 	}
 	if fileIndex >= len(command.Argv) {
 		out.markPartial(IssueUnknownOperandGrammar)
@@ -327,10 +334,11 @@ func gitBundleRevisionListArg(arg string) bool {
 
 func gitBundleCreateOnlyOption(arg string) bool {
 	switch arg {
-	case "-q", "--quiet", "--progress", "--all-progress", "--all-progress-implied":
+	case "-q", "--quiet", "--progress", "--all-progress", "--all-progress-implied",
+		"--version":
 		return true
 	default:
-		return strings.HasPrefix(arg, "--version")
+		return strings.HasPrefix(arg, "--version=")
 	}
 }
 

@@ -465,6 +465,7 @@ func TestGitBundleCreateOptionsBeforeFileStillProduce(t *testing.T) {
 		{"git", "bundle", "create", "--progress", "repo.bundle", "HEAD"},
 		{"git", "bundle", "create", "-q", "repo.bundle", "HEAD"},
 		{"git", "bundle", "create", "--version=3", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version", "3", "dump.bundle", "--all"},
 	}
 	for _, argv := range cases {
 		facts := Analyze(Input{
@@ -475,15 +476,38 @@ func TestGitBundleCreateOptionsBeforeFileStillProduce(t *testing.T) {
 		if facts.Parse.Status == StatusInvalid {
 			t.Fatalf("%q caused an invalid parse: %#v", argv, facts.Parse)
 		}
+		want := "repo.bundle"
+		if argv[len(argv)-2] == "dump.bundle" {
+			want = "dump.bundle"
+		}
 		found := false
 		for _, artifact := range facts.Artifacts {
-			if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+			if artifact.Role == ArtifactProduce && artifact.Value == want {
 				found = true
 				break
 			}
 		}
 		if !found {
-			t.Fatalf("%q missed ArtifactProduce: %#v", argv, facts.Artifacts)
+			t.Fatalf("%q missed ArtifactProduce %s: %#v", argv, want, facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateVersionedPrefixDoesNotSkipPath(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "--versioned", "repo.bundle", "HEAD"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("git bundle --versioned caused an invalid parse: %#v", facts.Parse)
+	}
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce &&
+			(artifact.Value == "--versioned" || artifact.Value == "repo.bundle") {
+			t.Fatalf("--versioned prefix minted ArtifactProduce: %#v", facts.Artifacts)
 		}
 	}
 }
