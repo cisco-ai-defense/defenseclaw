@@ -287,10 +287,8 @@ func classifyArchiveArtifactConsumers(out *parseOutput, command *CommandFact) {
 		if !artifactCommandHasOperation(*command, OperationUpload) {
 			return
 		}
-		for _, fact := range out.paths {
-			if fact.CommandID == command.ID && fact.Access == PathAccessRead {
-				appendArchiveArtifact(out, command.ID, ArtifactConsume, fact.Value)
-			}
+		for _, source := range scpLocalUploadSourceOperands(*command) {
+			appendArchiveArtifact(out, command.ID, ArtifactConsume, source)
 		}
 	}
 }
