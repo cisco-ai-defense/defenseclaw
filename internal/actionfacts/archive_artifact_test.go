@@ -505,9 +505,35 @@ func TestGitBundleCreateVersionedPrefixDoesNotSkipPath(t *testing.T) {
 		t.Fatalf("git bundle --versioned caused an invalid parse: %#v", facts.Parse)
 	}
 	for _, artifact := range facts.Artifacts {
-		if artifact.Role == ArtifactProduce &&
-			(artifact.Value == "--versioned" || artifact.Value == "repo.bundle") {
+		if artifact.Role == ArtifactProduce {
 			t.Fatalf("--versioned prefix minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateInvalidVersionDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	cases := [][]string{
+		{"git", "bundle", "create", "--version=", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version=1", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version=invalid", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version", "repo.bundle", "HEAD"},
+		{"git", "bundle", "create", "--version"},
+	}
+	for _, argv := range cases {
+		facts := Analyze(Input{
+			Argv:        argv,
+			CWD:         "/tmp/work",
+			DialectHint: DialectArgv,
+		})
+		if facts.Parse.Status == StatusInvalid {
+			t.Fatalf("%q caused an invalid parse: %#v", argv, facts.Parse)
+		}
+		for _, artifact := range facts.Artifacts {
+			if artifact.Role == ArtifactProduce {
+				t.Fatalf("%q minted ArtifactProduce: %#v", argv, facts.Artifacts)
+			}
 		}
 	}
 }
