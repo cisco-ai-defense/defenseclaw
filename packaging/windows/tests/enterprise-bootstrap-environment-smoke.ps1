@@ -319,9 +319,18 @@ function Invoke-SuppliedBootstrapParentProbe {
         # The probe requires elevation to construct the protected parent.
         # Match the pattern used by the other probes: skip cleanly under
         # a non-elevated harness rather than failing closed.
+        #
+        # Return the full result-shape (all three contract fields as
+        # $false) so downstream property reads under
+        # `Set-StrictMode -Version Latest` do not throw when the report
+        # emitter walks $suppliedBootstrapParent.supplied_parent_honored
+        # et al.
         return [pscustomobject]@{
             skipped = $true
             reason = 'requires elevation to create a protected parent'
+            supplied_parent_honored = $false
+            untrusted_ancestor_rejected = $false
+            reparse_point_rejected = $false
         }
     }
 
