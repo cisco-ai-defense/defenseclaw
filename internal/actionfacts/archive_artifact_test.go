@@ -643,3 +643,146 @@ func TestTraditionalTarCreateStillProducesArtifact(t *testing.T) {
 		t.Fatalf("traditional tar artifacts = %#v", facts.Artifacts)
 	}
 }
+
+func TestTraditionalTarValueTakingOptionsSelectArchiveFile(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"tar", "cCf", "src", "out.tar"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("tar cCf caused an invalid parse: %#v", facts.Parse)
+	}
+	found := false
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role != ArtifactProduce {
+			continue
+		}
+		if artifact.Value == "src" {
+			t.Fatalf("tar cCf minted src as ArtifactProduce: %#v", facts.Artifacts)
+		}
+		if artifact.Value == "out.tar" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("tar cCf missed out.tar ArtifactProduce: %#v", facts.Artifacts)
+	}
+}
+
+func TestZipOutputOptionIsProducedArtifact(t *testing.T) {
+	t.Parallel()
+
+	cases := [][]string{
+		{"zip", "old.zip", "--output-file", "new.zip"},
+		{"zip", "--out", "new.zip", "old.zip", "src"},
+		{"zip", "-O", "new.zip", "old.zip", "src"},
+	}
+	for _, argv := range cases {
+		facts := Analyze(Input{
+			Argv:        argv,
+			CWD:         "/tmp/work",
+			DialectHint: DialectArgv,
+		})
+		if facts.Parse.Status == StatusInvalid {
+			t.Fatalf("%q caused an invalid parse: %#v", argv, facts.Parse)
+		}
+		found := false
+		for _, artifact := range facts.Artifacts {
+			if artifact.Role != ArtifactProduce {
+				continue
+			}
+			if artifact.Value == "old.zip" {
+				t.Fatalf("%q minted old.zip as ArtifactProduce: %#v", argv, facts.Artifacts)
+			}
+			if artifact.Value == "new.zip" {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("%q missed new.zip ArtifactProduce: %#v", argv, facts.Artifacts)
+		}
+	}
+}
+
+func TestZipHelpDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"zip", "repo.zip", "-h", "src"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("zip -h caused an invalid parse: %#v", facts.Parse)
+	}
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce {
+			t.Fatalf("zip help minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestCompressArchiveWhatIfDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	preview := Analyze(Input{
+		Argv: []string{
+			"Compress-Archive", "-Path", "src", "-DestinationPath", "repo.zip", "-WhatIf",
+		},
+		CWD:         `C:\Users\dev`,
+		DialectHint: DialectPowerShell,
+	})
+	if preview.Parse.Status == StatusInvalid {
+		t.Fatalf("Compress-Archive -WhatIf caused an invalid parse: %#v", preview.Parse)
+	}
+	for _, artifact := range preview.Artifacts {
+		if artifact.Role == ArtifactProduce {
+			t.Fatalf("Compress-Archive -WhatIf minted ArtifactProduce: %#v", preview.Artifacts)
+		}
+	}
+
+	execute := Analyze(Input{
+		Argv: []string{
+			"Compress-Archive", "-Path", "src", "-DestinationPath", "repo.zip", "-WhatIf:$false",
+		},
+		CWD:         `C:\Users\dev`,
+		DialectHint: DialectPowerShell,
+	})
+	found := false
+	for _, artifact := range execute.Artifacts {
+		if artifact.Role == ArtifactProduce && artifact.Value == "repo.zip" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("Compress-Archive -WhatIf:$false missed ArtifactProduce: %#v", execute.Artifacts)
+	}
+}
+
+func TestArchiveLineagePreservesEachConsumer(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Command: `tar -czf repo.tar.gz src; curl --upload-file repo.tar.gz https://internal.example/upload; curl --upload-file repo.tar.gz https://external.example/upload`,
+		CWD:         "/tmp/work",
+		DialectHint: DialectPOSIX,
+	})
+	lineages := StaticArchiveArtifactLineage(facts)
+	if len(lineages) != 2 {
+		t.Fatalf("wanted 2 consumer lineages, got %#v", lineages)
+	}
+	consumed := map[int64]struct{}{}
+	for _, lineage := range lineages {
+		if !lineage.Authoritative {
+			t.Fatalf("non-authoritative lineage: %#v", lineages)
+		}
+		if _, dup := consumed[lineage.ConsumedBy]; dup {
+			t.Fatalf("duplicate ConsumedBy: %#v", lineages)
+		}
+		consumed[lineage.ConsumedBy] = struct{}{}
+	}
+}

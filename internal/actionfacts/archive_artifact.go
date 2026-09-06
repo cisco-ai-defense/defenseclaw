@@ -19,6 +19,7 @@ package actionfacts
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"strconv"
 	"strings"
 )
 
@@ -179,6 +180,7 @@ func traditionalTarCreateArchiveFile(argv []string) (file string, created, compl
 		return "", false, false
 	}
 	fileIndex := -1
+	operandIndex := 2
 	for i := 0; i < len(cluster); i++ {
 		switch cluster[i] {
 		case 'c':
@@ -186,12 +188,18 @@ func traditionalTarCreateArchiveFile(argv []string) (file string, created, compl
 		case 't', 'x', 'u', 'r', 'd':
 			created = false
 		case 'f':
-			if fileIndex >= 0 {
+			if fileIndex >= 0 || operandIndex >= len(argv) || argv[operandIndex] == "" {
 				return "", false, false
 			}
-			fileIndex = 2
+			fileIndex = operandIndex
+			operandIndex++
+		case 'C', 'X':
+			if operandIndex >= len(argv) || argv[operandIndex] == "" {
+				return "", false, false
+			}
+			operandIndex++
 		case 'z', 'j', 'J', 'a', 'v', 'p', 'P', 'h', 'k', 'm', 'o', 's', 'w',
-			'B', 'C', 'H', 'L', 'S', 'W', 'X', 'Z':
+			'B', 'S', 'W', 'Z':
 		default:
 			return "", false, false
 		}
@@ -209,8 +217,8 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 	parsed := parseOwnedPOSIXOptions(
 		command.Argv,
 		exactOptionSet(
-			"-b", "-n", "-t", "-tt", "-x", "-i", "-P",
-			"--output-file",
+			"-b", "-n", "-t", "-tt", "-x", "-i", "-P", "-O",
+			"--out", "--output-file",
 		),
 		exactOptionSet(
 			"-r", "-q", "-1", "-2", "-3", "-4", "-5", "-6", "-7", "-8", "-9",
@@ -218,15 +226,19 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 		),
 		exactOptionSet("-h", "-hh", "--help"),
 	)
-	if parsed.preview && len(parsed.positionals) == 0 {
+	if parsed.preview {
 		command.Effect = EffectPreview
 		return
 	}
-	if !parsed.complete || len(parsed.positionals) == 0 {
+	if !parsed.complete {
 		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
-	file := parsed.positionals[0]
+	file, ok := zipProducedArchive(parsed)
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
 	if !staticArchiveArtifactPath(file) {
 		out.markPartial(IssueUnsupportedConstruct)
 		return
@@ -236,8 +248,41 @@ func classifyZipArchiveProducer(out *parseOutput, command *CommandFact) {
 	appendArchiveArtifact(out, command.ID, ArtifactProduce, file)
 }
 
+func zipProducedArchive(parsed ownedPOSIXOptionParse) (string, bool) {
+	var outputs []string
+	for _, key := range []string{"--output-file", "--out", "-O"} {
+		if value, ok := parsed.values[key]; ok {
+			outputs = append(outputs, value)
+		}
+	}
+	if len(outputs) > 0 {
+		first := outputs[0]
+		for _, value := range outputs[1:] {
+			if value != first {
+				return "", false
+			}
+		}
+		return first, first != ""
+	}
+	if len(parsed.positionals) == 0 {
+		return "", false
+	}
+	return parsed.positionals[0], true
+}
+
 func classifyCompressArchiveProducer(out *parseOutput, command *CommandFact) {
 	if !requireCommandDialect(out, command, DialectPowerShell) {
+		return
+	}
+	controls := newStructuredPowerShellControlState()
+	for i := 1; i < len(command.Argv); i++ {
+		controls.consume(command, command.Argv[i])
+	}
+	if !controls.valid || command.Effect == EffectUncertain {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if command.Effect == EffectPreview {
 		return
 	}
 	destination := powerShellNamedValue(command.Argv, "-DestinationPath", "-destinationpath")
@@ -543,7 +588,8 @@ func joinArchiveArtifactFacts(
 			continue
 		}
 		key := fact.Identity + "\x00" +
-			strings.TrimSpace(producer.Normalized)
+			strings.TrimSpace(producer.Normalized) + "\x00" +
+			strconv.FormatInt(fact.CommandID, 10)
 		if _, duplicate := seen[key]; duplicate {
 			continue
 		}
