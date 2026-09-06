@@ -335,8 +335,25 @@ function Invoke-SuppliedBootstrapParentProbe {
     }
 
     $originalBootstrapParent = $script:BootstrapParent
+    # Stage the protected parent under %ProgramData%, not %TEMP%. The
+    # Assert-DefenseClawBootstrapExternalParentTrust walk climbs the
+    # ANCESTOR chain from the leaf to the drive root and refuses any
+    # ancestor that grants an untrusted principal replacement rights.
+    # On CI runners %TEMP% resolves to C:\Users\runneradmin\..., whose
+    # ancestor C:\Users\runneradmin is owned by the runner user — so a
+    # leaf under %TEMP% fails the ancestor check even when the leaf's
+    # own SDDL is admin-only. %ProgramData% is SYSTEM-owned with the
+    # Users CreateFiles+AppendData ACE that the walk deliberately
+    # tolerates, so the ancestor chain is admin-clean from C:\ down.
+    $programData = [Environment]::GetFolderPath(
+        [Environment+SpecialFolder]::CommonApplicationData
+    )
+    if ([string]::IsNullOrWhiteSpace($programData) -or
+        -not [IO.Directory]::Exists($programData)) {
+        $programData = 'C:\ProgramData'
+    }
     $protectedParent = [IO.Path]::Combine(
-        [IO.Path]::GetTempPath(),
+        $programData,
         "DefenseClaw-BootstrapParentSmoke-$([Guid]::NewGuid().ToString('N'))"
     )
     $parentSecurity = [Security.AccessControl.DirectorySecurity]::new()
@@ -352,15 +369,15 @@ function Invoke-SuppliedBootstrapParentProbe {
     }
 
     # Dedicated untrusted fixture: a directory whose DACL explicitly grants
-    # BUILTIN\Users (S-1-5-32-545) modify access. Under a LocalSystem-
-    # elevated harness, ambient system-profile paths like LocalApplicationData
-    # resolve to Admins/SYSTEM ownership — the trust walk would ACCEPT them
-    # and the probe would spuriously succeed on rejection. Staging our own
-    # fixture with a planted Users:Modify ACE guarantees the ancestor-chain
-    # walk finds an untrusted principal with replacement rights regardless
-    # of what identity the harness runs under.
+    # BUILTIN\Users (S-1-5-32-545) modify access. Staged under
+    # %ProgramData% for the same reason as the protected parent — the
+    # ancestor chain must be admin-clean so the assert reaches the leaf's
+    # own DACL, where the planted Users:Modify ACE is what we want to
+    # trip on. Under %TEMP% the walk would reject on the user-owned
+    # ancestor before ever reading our planted ACE, masking whether the
+    # planted-ACE rejection actually works.
     $untrustedFixture = [IO.Path]::Combine(
-        [IO.Path]::GetTempPath(),
+        $programData,
         "DefenseClaw-BootstrapUntrustedFixture-$([Guid]::NewGuid().ToString('N'))"
     )
     $untrustedSecurity = [Security.AccessControl.DirectorySecurity]::new()
@@ -494,8 +511,9 @@ function Invoke-SuppliedBootstrapParentProbe {
                     [IO.Directory]::Delete($fixture, $true)
                 }
                 catch {
-                    # Best-effort cleanup; the fixture paths live under
-                    # %TEMP% and will be reclaimed regardless.
+                    # Best-effort cleanup; log-and-ignore is intentional
+                    # so a probe reporting a real failure does not have
+                    # its stack overwritten by a cleanup exception.
                 }
             }
         }

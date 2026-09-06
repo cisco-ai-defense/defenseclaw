@@ -1254,7 +1254,14 @@ targets:
                 [switch]$PreserveManagedHooksTeardownJournal,
                 [switch]$RecoverLegacyManagedHooksLifecycleJournal,
                 [switch]$InstallRootCreatedForTransaction,
-                [switch]$StateRootCreatedForTransaction
+                [switch]$StateRootCreatedForTransaction,
+                # Mirrors the production function's uninstall-only switch
+                # (added when the teardown lane learned to tolerate a
+                # third-party-drifted redaction-key DACL by skipping its
+                # preimage capture). The smoke harness does not need to
+                # branch on it; accepting the parameter keeps the mock
+                # signature-compatible with Invoke-DefenseClawUninstall...
+                [switch]$SkipRedactionKeySnapshot
             )
             if (-not $PSBoundParameters.ContainsKey(
                     'PriorDeploymentActive'
