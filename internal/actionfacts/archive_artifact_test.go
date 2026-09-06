@@ -245,6 +245,21 @@ func TestArchiveArtifactLineageCorpus(t *testing.T) {
 			wantMatch: true,
 			reason:    "TP git bundle --stdin then scp upload",
 		},
+		{
+			name: "git bundle create --stdin is not a bundle path",
+			produced: Input{
+				Argv:        []string{"git", "bundle", "create", "--stdin"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			consumed: Input{
+				Argv:        []string{"scp", "--stdin", "host.example:repo.bundle"},
+				CWD:         "/tmp/work",
+				DialectHint: DialectArgv,
+			},
+			wantMatch: false,
+			reason:    "TN --stdin is revision input, not the bundle path",
+		},
 	}
 
 	var tp, tn, fp, fn int
@@ -397,9 +412,48 @@ func TestIncompleteGitBundleCreateDoesNotProduceArtifact(t *testing.T) {
 		CWD:         "/tmp/work",
 		DialectHint: DialectArgv,
 	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("incomplete git bundle caused an invalid parse: %#v", facts.Parse)
+	}
 	for _, artifact := range facts.Artifacts {
 		if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
 			t.Fatalf("incomplete git bundle minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateStdinAsPathDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "--stdin"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("git bundle create --stdin caused an invalid parse: %#v", facts.Parse)
+	}
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce {
+			t.Fatalf("git bundle create --stdin minted ArtifactProduce: %#v", facts.Artifacts)
+		}
+	}
+}
+
+func TestGitBundleCreateProgressOnlyDoesNotProduceArtifact(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Argv:        []string{"git", "bundle", "create", "repo.bundle", "--progress"},
+		CWD:         "/tmp/work",
+		DialectHint: DialectArgv,
+	})
+	if facts.Parse.Status == StatusInvalid {
+		t.Fatalf("git bundle --progress caused an invalid parse: %#v", facts.Parse)
+	}
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactProduce && artifact.Value == "repo.bundle" {
+			t.Fatalf("create-only --progress minted ArtifactProduce: %#v", facts.Artifacts)
 		}
 	}
 }
