@@ -264,8 +264,8 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 		return
 	}
 	file := command.Argv[index+2]
-	if !staticArchiveArtifactPath(file) {
-		out.markPartial(IssueUnsupportedConstruct)
+	if strings.HasPrefix(file, "-") || !staticArchiveArtifactPath(file) {
+		out.markPartial(IssueUnknownOperandGrammar)
 		return
 	}
 	if !gitBundleCreateHasRevisionInput(command.Argv, index+2) {
@@ -278,18 +278,44 @@ func classifyGitBundleProducer(out *parseOutput, command *CommandFact, index int
 }
 
 func gitBundleCreateHasRevisionInput(argv []string, fileIndex int) bool {
-	if fileIndex < 0 || fileIndex >= len(argv) {
+	if fileIndex < 0 || fileIndex >= len(argv)-1 {
 		return false
 	}
-	for i, arg := range argv {
-		if arg == "--stdin" {
-			return true
-		}
-		if i > fileIndex && arg != "" {
+	for _, arg := range argv[fileIndex+1:] {
+		if gitBundleRevisionListArg(arg) {
 			return true
 		}
 	}
 	return false
+}
+
+func gitBundleRevisionListArg(arg string) bool {
+	if arg == "" || gitBundleCreateOnlyOption(arg) {
+		return false
+	}
+	switch {
+	case arg == "--stdin", arg == "--all", arg == "--not":
+		return true
+	case strings.HasPrefix(arg, "--branches"),
+		strings.HasPrefix(arg, "--tags"),
+		strings.HasPrefix(arg, "--remotes"):
+		return true
+	case strings.HasPrefix(arg, "^") && arg != "^":
+		return true
+	case !strings.HasPrefix(arg, "-"):
+		return true
+	default:
+		return false
+	}
+}
+
+func gitBundleCreateOnlyOption(arg string) bool {
+	switch arg {
+	case "-q", "--quiet", "--progress", "--all-progress", "--all-progress-implied":
+		return true
+	default:
+		return strings.HasPrefix(arg, "--version")
+	}
 }
 
 func classifyArchiveArtifactConsumers(out *parseOutput, command *CommandFact) {
