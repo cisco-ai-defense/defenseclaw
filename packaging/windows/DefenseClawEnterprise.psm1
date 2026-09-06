@@ -5976,6 +5976,16 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
             throw 'pending transaction has incomplete redaction-key security metadata'
         }
     }
+    # Uninstall/purge placeholder: New-DefenseClawTransaction
+    # -SkipRedactionKeySnapshot skipped the DACL preimage capture because
+    # the file is being deleted. If rollback still fires, there is
+    # nothing to restore — the correlation key stays in whatever state
+    # it was already in, which matches "we never touched its DACL".
+    # Kept behind the schema-shape guard above so a corrupted snapshot
+    # cannot smuggle 'skipped_teardown' past the presence check.
+    if ([string]$recorded.preimage_class -ceq 'skipped_teardown') {
+        return
+    }
     if ([int]$recorded.schema_version -ne 2 -or
         $recorded.existed -isnot [bool]) {
         throw 'pending transaction has invalid redaction-key security metadata'
@@ -7191,7 +7201,19 @@ function New-DefenseClawTransaction {
         [switch]$PreserveManagedHooksTeardownJournal,
         [switch]$RecoverLegacyManagedHooksLifecycleJournal,
         [switch]$InstallRootCreatedForTransaction,
-        [switch]$StateRootCreatedForTransaction
+        [switch]$StateRootCreatedForTransaction,
+        # Uninstall/purge opens the transaction to delete the redaction
+        # correlation key file, not to preserve its DACL through the
+        # transaction. Capturing a preimage that only matters for
+        # rollback restoration is dead weight — and, per AVC repro,
+        # actively harmful on hosts where a third-party (EDR baseline,
+        # GPO security template, backup agent) has rewritten the DACL
+        # after the daemon's canonical write, tripping the classifier's
+        # exact-form check. When this switch is set, snapshot records a
+        # 'skipped_teardown' placeholder and Restore-DefenseClaw... treats
+        # it as a no-op. Every trust check downstream of the transaction
+        # still runs; only the DACL preimage capture is bypassed.
+        [switch]$SkipRedactionKeySnapshot
     )
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
@@ -7345,10 +7367,43 @@ function New-DefenseClawTransaction {
         else {
             ''
         }
-        $redactionKeySecurity =
+        $redactionKeySecurity = if ($SkipRedactionKeySnapshot) {
+            # Purge-mode placeholder. The teardown branch of the
+            # lifecycle sets -SkipRedactionKeySnapshot because it is
+            # going to delete the redaction correlation key file
+            # regardless of what its current DACL looks like — capturing
+            # a preimage only to fail-closed on a third-party rewrite
+            # (Defender ATP / GPO / EDR baseline) adds no rollback
+            # value. Kept schema-2 shape so Restore- can identify and
+            # no-op on it without teaching every downstream code path
+            # about a nil snapshot. restore_kind mirrors the same
+            # priorDeploymentActive-derived value used on the normal
+            # path so the schema check at
+            # Restore-DefenseClawRedactionKeySecuritySnapshot:5996 does
+            # not trip before the early-out check fires.
+            [ordered]@{
+                schema_version = 2
+                path = [IO.Path]::GetFullPath(
+                    [string]$Layout.RedactionCorrelationKeyPath
+                ).TrimEnd('\')
+                existed = $false
+                file_identity = ''
+                preimage_class = 'skipped_teardown'
+                security_descriptor = ''
+                restore_kind = if ([string]::IsNullOrWhiteSpace(
+                        $redactionKeyGatewaySID)) {
+                    'AdminFile'
+                }
+                else {
+                    'RuntimeSecretFile'
+                }
+            }
+        }
+        else {
             Get-DefenseClawRedactionKeySecuritySnapshot `
                 -Layout $Layout `
                 -GatewayServiceSID $redactionKeyGatewaySID
+        }
 
         $files = [Collections.Generic.List[object]]::new()
     $legacyManagedHooksLifecyclePreimage = $null
@@ -20364,7 +20419,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
-            -PreserveManagedHooksTeardownJournal
+            -PreserveManagedHooksTeardownJournal `
+            -SkipRedactionKeySnapshot
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
