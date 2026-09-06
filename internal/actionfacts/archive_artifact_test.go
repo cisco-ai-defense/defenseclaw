@@ -193,6 +193,28 @@ func TestArchiveArtifactLineageCorpus(t *testing.T) {
 			wantMatch: false,
 			reason:    "TN artifact-store download is not that consume",
 		},
+		{
+			name: "scp upload ignores redirected stdin archive",
+			produced: Input{
+				Command:     `tar -czf archive.tar src; scp local.txt host.example:dest < archive.tar`,
+				CWD:         "/tmp/work",
+				DialectHint: DialectPOSIX,
+			},
+			sameCall:  true,
+			wantMatch: false,
+			reason:    "TN redirected stdin is not an SCP upload operand",
+		},
+		{
+			name: "scp upload of produced archive still joins",
+			produced: Input{
+				Command:     `tar -czf archive.tar src; scp archive.tar host.example:dest`,
+				CWD:         "/tmp/work",
+				DialectHint: DialectPOSIX,
+			},
+			sameCall:  true,
+			wantMatch: true,
+			reason:    "TP SCP operand still consumes the produced archive",
+		},
 	}
 
 	var tp, tn, fp, fn int
@@ -334,6 +356,31 @@ func TestJoinArchiveArtifactFactsRequiresPrecedingProducer(t *testing.T) {
 		true,
 	); len(got) != 0 {
 		t.Fatalf("reversed command IDs joined: %#v", got)
+	}
+}
+
+func TestSCPUploadDoesNotConsumeRedirectedArchive(t *testing.T) {
+	t.Parallel()
+
+	facts := Analyze(Input{
+		Command:     `scp local.txt host.example:dest < archive.tar`,
+		CWD:         "/tmp/work",
+		DialectHint: DialectPOSIX,
+	})
+	for _, artifact := range facts.Artifacts {
+		if artifact.Role == ArtifactConsume && artifact.Value == "archive.tar" {
+			t.Fatalf("redirected stdin minted ArtifactConsume: %#v", facts.Artifacts)
+		}
+	}
+	sawRedirect := false
+	for _, path := range facts.Paths {
+		if path.Access == PathAccessRead && path.Value == "archive.tar" {
+			sawRedirect = true
+			break
+		}
+	}
+	if !sawRedirect {
+		t.Fatalf("redirected stdin lost PathAccessRead: %#v", facts.Paths)
 	}
 }
 
