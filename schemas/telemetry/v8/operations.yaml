@@ -4088,6 +4088,14 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.inventory.item.description
     requirement_level: recommended
+  - ref: user.id
+    requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
+  - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.email
+    requirement_level: recommended
   - ref: defenseclaw.inventory.connector.source
     requirement_level: recommended
   - ref: defenseclaw.inventory.connector.tool_inspection_mode

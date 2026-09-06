@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -38,6 +38,14 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        directories could re-admit an agent-planted binary. Windows no
 #        longer uses these bash hooks (it runs the hook natively in the Go
 #        binary), so the Git Bash /mingw64 workaround is no longer needed.
+#   v7 — adds defenseclaw_user_identity_args, which the connector hooks
+#        call to attach the real user's OS identity to the gateway
+#        request. Call sites guard on the function being defined, so a
+#        hook rendered by this build against an older helper loses the
+#        per-user attribution rather than failing the hook. The bump is
+#        how an operator tells "telemetry unattributed because the
+#        helper predates it" from "unattributed because the lookup
+#        failed".
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -1013,4 +1021,55 @@ defenseclaw_extract_trace_context() {
         response "${FAIL_MODE:-open}"
     fi
   fi
+}
+
+# defenseclaw_user_identity_args
+#
+# Emits curl arguments carrying the OS identity of the user this hook is
+# running as, one argument per line, in the same shape as
+# defenseclaw_extract_trace_context.
+#
+# Callers must read this with a `while IFS= read -r` loop rather than
+# `mapfile`. macOS ships bash 3.2, where mapfile does not exist, so a mapfile
+# reader leaves the argument array empty and the endpoint silently sends no
+# identity at all — on every stock macOS host, which is most of them.
+#
+# Identity has to be read here. These hooks reach the gateway over HTTP, and
+# under a managed install the gateway runs as a service account with its own
+# token and home directory; asking it who the user is would attribute every
+# event on the endpoint to that one service identity. Only the hook runs as
+# the real user.
+#
+# The gateway accepts these headers from loopback only, and treats them as
+# attribution evidence rather than an authenticated assertion: any local
+# process can reach the loopback listener and claim any value. Never use them
+# for an authorization decision.
+#
+# Both values are rejected unless they match a conservative character class.
+# A header value carrying CR or LF would let an account name append a second
+# header or a request line to every hook call this endpoint makes.
+#
+# Every failure path is silent and returns success: this is called from a
+# guardrail hook under errexit, where a nonzero return would convert a missing
+# telemetry field into a blocked or allowed tool call.
+defenseclaw_user_identity_args() {
+  command -v id >/dev/null 2>&1 || return 0
+
+  local uid name
+  uid="$(id -u 2>/dev/null)" || uid=""
+  case "$uid" in
+    '' | *[!0-9]*) ;;
+    *)
+      printf '%s\n' "-H"
+      printf '%s\n' "X-DefenseClaw-User-Id: $uid"
+      ;;
+  esac
+
+  name="$(id -un 2>/dev/null)" || name=""
+  case "$name" in
+    '' | *[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s\n' "-H"
+  printf '%s\n' "X-DefenseClaw-User-Name: $name"
+  return 0
 }

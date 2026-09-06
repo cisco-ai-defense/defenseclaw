@@ -337,14 +337,22 @@ type AIDiscoveryConfig struct {
 	// this list from the same eligible-users enumeration that renders
 	// targets.yaml, so per-user detectors and per-user hook wiring stay
 	// in lockstep.
-	HomeDirs                    []string `mapstructure:"home_dirs"                 yaml:"home_dirs,omitempty"`
-	SignaturePacks              []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
-	AllowWorkspaceSignatures    bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
-	DisabledSignatureIDs        []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
-	IncludeShellHistory         bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
-	IncludePackageManifests     bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
-	IncludeEnvVarNames          bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
-	IncludeNetworkDomains       bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	HomeDirs                 []string `mapstructure:"home_dirs"                 yaml:"home_dirs,omitempty"`
+	SignaturePacks           []string `mapstructure:"signature_packs"           yaml:"signature_packs,omitempty"`
+	AllowWorkspaceSignatures bool     `mapstructure:"allow_workspace_signatures" yaml:"allow_workspace_signatures"`
+	DisabledSignatureIDs     []string `mapstructure:"disabled_signature_ids"    yaml:"disabled_signature_ids,omitempty"`
+	IncludeShellHistory      bool     `mapstructure:"include_shell_history"     yaml:"include_shell_history"`
+	IncludePackageManifests  bool     `mapstructure:"include_package_manifests" yaml:"include_package_manifests"`
+	IncludeEnvVarNames       bool     `mapstructure:"include_env_var_names"     yaml:"include_env_var_names"`
+	IncludeNetworkDomains    bool     `mapstructure:"include_network_domains"   yaml:"include_network_domains"`
+	// IncludeUserEmail adds the signed-in email address DefenseClaw can read
+	// from a connector's own account file to identity telemetry: the per-user
+	// inventory rows and the hook lifecycle records. Off by default. The uid
+	// or SID it would accompany identifies an account on one endpoint, while
+	// the address identifies a person across every system they use and is
+	// emitted as plaintext, so collecting it is a deliberate privacy decision
+	// for the deployment rather than a consequence of enabling discovery.
+	IncludeUserEmail            bool     `mapstructure:"include_user_email"        yaml:"include_user_email"`
 	LookupModelProvenanceOnline bool     `mapstructure:"lookup_model_provenance_online" yaml:"lookup_model_provenance_online"`
 	MaxFilesPerScan             int      `mapstructure:"max_files_per_scan"        yaml:"max_files_per_scan"`
 	MaxFileBytes                int      `mapstructure:"max_file_bytes"            yaml:"max_file_bytes"`
