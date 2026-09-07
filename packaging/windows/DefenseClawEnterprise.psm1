@@ -4765,7 +4765,7 @@ function Get-DefenseClawGuardianReconcileID {
 function Get-DefenseClawGuardianStateIdentity {
     param([Parameter(Mandatory)][hashtable]$Layout)
     $path = Microsoft.PowerShell.Management\Join-Path `
-        $Layout.StateRoot `
+        $Layout.RuntimeDirectory `
         'hook_guardian_state.json'
     if (-not (Microsoft.PowerShell.Management\Test-Path `
             -LiteralPath $path `
@@ -4774,7 +4774,7 @@ function Get-DefenseClawGuardianStateIdentity {
     }
     [void](Assert-DefenseClawDescendant `
         -Path $path `
-        -Root $Layout.StateRoot `
+        -Root $Layout.RuntimeDirectory `
         -Label 'hook guardian state')
     Assert-DefenseClawNoReparsePath -Path $path
     return Get-DefenseClawFileIdentity -Path $path

@@ -1676,6 +1676,17 @@ def test_bootstrap_compiler_environment_is_one_shot_and_protected() -> None:
     assert "Restore-DefenseClawBootstrapEnvironment -Context $context" in bootstrap
 
 
+def test_guardian_state_identity_uses_runtime_directory() -> None:
+    module = read(MODULE)
+    guardian_identity = module[
+        module.index("function Get-DefenseClawGuardianStateIdentity") : module.index(
+            "function Wait-DefenseClawServiceFailureRestartQuiescence"
+        )
+    ]
+    assert "$Layout.RuntimeDirectory" in guardian_identity
+    assert "$Layout.StateRoot" not in guardian_identity
+
+
 def test_lifecycle_reauthenticates_volumes_and_sources_at_last_use() -> None:
     module = read(MODULE)
 
