@@ -6115,6 +6115,16 @@ function Restore-DefenseClawRedactionKeySecuritySnapshot {
             throw 'pending transaction has incomplete redaction-key security metadata'
         }
     }
+    # Uninstall/purge placeholder: New-DefenseClawTransaction
+    # -SkipRedactionKeySnapshot skipped the DACL preimage capture because
+    # the file is being deleted. If rollback still fires, there is
+    # nothing to restore — the correlation key stays in whatever state
+    # it was already in, which matches "we never touched its DACL".
+    # Kept behind the schema-shape guard above so a corrupted snapshot
+    # cannot smuggle 'skipped_teardown' past the presence check.
+    if ([string]$recorded.preimage_class -ceq 'skipped_teardown') {
+        return
+    }
     if ([int]$recorded.schema_version -ne 2 -or
         $recorded.existed -isnot [bool]) {
         throw 'pending transaction has invalid redaction-key security metadata'
@@ -7349,7 +7359,19 @@ function New-DefenseClawTransaction {
         [switch]$PreserveManagedHooksTeardownJournal,
         [switch]$RecoverLegacyManagedHooksLifecycleJournal,
         [switch]$InstallRootCreatedForTransaction,
-        [switch]$StateRootCreatedForTransaction
+        [switch]$StateRootCreatedForTransaction,
+        # Uninstall/purge opens the transaction to delete the redaction
+        # correlation key file, not to preserve its DACL through the
+        # transaction. Capturing a preimage that only matters for
+        # rollback restoration is dead weight — and, per AVC repro,
+        # actively harmful on hosts where a third-party (EDR baseline,
+        # GPO security template, backup agent) has rewritten the DACL
+        # after the daemon's canonical write, tripping the classifier's
+        # exact-form check. When this switch is set, snapshot records a
+        # 'skipped_teardown' placeholder and Restore-DefenseClaw... treats
+        # it as a no-op. Every trust check downstream of the transaction
+        # still runs; only the DACL preimage capture is bypassed.
+        [switch]$SkipRedactionKeySnapshot
     )
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.PendingPath) {
         throw 'refusing to open a lifecycle transaction while protected recovery state already exists'
@@ -7503,10 +7525,43 @@ function New-DefenseClawTransaction {
         else {
             ''
         }
-        $redactionKeySecurity =
+        $redactionKeySecurity = if ($SkipRedactionKeySnapshot) {
+            # Purge-mode placeholder. The teardown branch of the
+            # lifecycle sets -SkipRedactionKeySnapshot because it is
+            # going to delete the redaction correlation key file
+            # regardless of what its current DACL looks like — capturing
+            # a preimage only to fail-closed on a third-party rewrite
+            # (Defender ATP / GPO / EDR baseline) adds no rollback
+            # value. Kept schema-2 shape so Restore- can identify and
+            # no-op on it without teaching every downstream code path
+            # about a nil snapshot. restore_kind mirrors the same
+            # priorDeploymentActive-derived value used on the normal
+            # path so the schema check at
+            # Restore-DefenseClawRedactionKeySecuritySnapshot:5996 does
+            # not trip before the early-out check fires.
+            [ordered]@{
+                schema_version = 2
+                path = [IO.Path]::GetFullPath(
+                    [string]$Layout.RedactionCorrelationKeyPath
+                ).TrimEnd('\')
+                existed = $false
+                file_identity = ''
+                preimage_class = 'skipped_teardown'
+                security_descriptor = ''
+                restore_kind = if ([string]::IsNullOrWhiteSpace(
+                        $redactionKeyGatewaySID)) {
+                    'AdminFile'
+                }
+                else {
+                    'RuntimeSecretFile'
+                }
+            }
+        }
+        else {
             Get-DefenseClawRedactionKeySecuritySnapshot `
                 -Layout $Layout `
                 -GatewayServiceSID $redactionKeyGatewaySID
+        }
 
         $files = [Collections.Generic.List[object]]::new()
     $legacyManagedHooksLifecyclePreimage = $null
@@ -11112,10 +11167,31 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         'cursor',
         'selector_targets'
     )
+    # Required = the strict-authenticated identity core. Anything whose
+    # absence means "this connector was not a target" is deliberately
+    # OPTIONAL so a journal written by a deployment that never targeted
+    # (say) codex still parses on uninstall. Every optional property is
+    # still whitelisted above — an unknown key is still rejected — and
+    # every trust-critical binding (manifest-SHA256, hook-binary path,
+    # gateway service name, activation record, target fingerprint) stays
+    # in the required set, so an attacker cannot substitute a foreign
+    # journal by omitting fields. Matches the macOS uninstall's
+    # existence-first tolerance for connector-optional state without
+    # loosening the identity contract. Reported by AVC dry-run: an
+    # activation record with a codex_targets-less journal was blocking
+    # every uninstall retry through the committed-uninstall cleanup path.
     $required = @(
-        $allowed | Microsoft.PowerShell.Core\Where-Object {
-            $_ -cne 'pending_targets'
-        }
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_sha256',
+        'manifest_fingerprint',
+        'activation_state',
+        'deployment_generation_id',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets'
     )
     [void](Assert-DefenseClawManagedHooksTeardownJsonObject `
         -Value $Journal `
@@ -11142,8 +11218,13 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
             throw "schema-6 managed-hook teardown journal $name is not a string"
         }
     }
-    if ($Journal.codex_policy_active -isnot [bool]) {
-        throw 'schema-6 managed-hook teardown codex_policy_active is not Boolean'
+    # codex_policy_active is connector-optional per the relaxed $required
+    # list above. Only enforce the boolean type check when the property is
+    # present; absence is treated as "codex was not a target".
+    $codexPolicyProperty = $Journal.PSObject.Properties['codex_policy_active']
+    if ($null -ne $codexPolicyProperty -and
+        $codexPolicyProperty.Value -isnot [bool]) {
+        throw 'schema-6 managed-hook teardown codex_policy_active is not Boolean when present'
     }
     Assert-DefenseClawManagedHooksTeardownProtectedAdminFile `
         -Path $Layout.ManagedHooksTeardownJournalPath
@@ -11199,6 +11280,7 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
             throw "schema-6 managed-hook teardown journal $($pair[0]) does not match this scope"
         }
     }
+    $codexPolicyPresent = $null -ne $codexPolicyProperty
     if (-not [string]::Equals(
             [string]$Journal.gateway_service_name,
             $GatewayServiceName,
@@ -11207,7 +11289,8 @@ function Assert-DefenseClawManagedHooksTeardownSchema6Journal {
         [string]::IsNullOrWhiteSpace([string]$Journal.gateway_addr) -or
         [string]$Journal.gateway_addr -match '[\x00-\x1f\x7f]' -or
         ([string]$Journal.gateway_addr).Length -gt 4096 -or
-        $Journal.codex_policy_active -isnot [bool]) {
+        ($codexPolicyPresent -and
+            $codexPolicyProperty.Value -isnot [bool])) {
         throw 'schema-6 managed-hook teardown journal has an invalid protected identity'
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -11496,12 +11579,27 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         'cursor',
         'selector_targets'
     )
+    # Required = strict identity core only. Connector-optional fields
+    # match the schema-6 relaxation (see above): whitelisted for
+    # unknown-property rejection but not presence-required, so a
+    # legacy journal from a deployment that never targeted a given
+    # connector can still be retired on uninstall.
+    $legacyRequired = @(
+        'schema_version',
+        'phase',
+        'manifest_path',
+        'manifest_fingerprint',
+        'hook_binary',
+        'gateway_addr',
+        'gateway_service_name',
+        'targets'
+    )
     foreach ($property in @($journal.PSObject.Properties)) {
         if ([string]$property.Name -notin $legacyProperties) {
             throw 'legacy managed-hook teardown journal contains an unexpected property'
         }
     }
-    foreach ($name in $legacyProperties) {
+    foreach ($name in $legacyRequired) {
         if ($null -eq $journal.PSObject.Properties[$name]) {
             throw "legacy managed-hook teardown journal is missing $name"
         }
@@ -11542,10 +11640,24 @@ function Get-DefenseClawManagedHooksTeardownJournalPhase {
         throw 'legacy managed-hook teardown journal has an invalid protected identity'
     }
     $targets = @($journal.targets)
+    # Connector-optional target arrays are legitimately absent when the
+    # deployment never targeted that connector. Read via PSObject.Properties
+    # so StrictMode's missing-property throw doesn't fire before the count
+    # cap can even be checked.
+    $legacyOptionalTargetCounts = @{}
+    foreach ($name in @('claude_target_sids', 'cursor_targets', 'selector_targets')) {
+        $property = $journal.PSObject.Properties[$name]
+        $legacyOptionalTargetCounts[$name] = if ($null -eq $property) {
+            0
+        }
+        else {
+            @($property.Value).Count
+        }
+    }
     if ($targets.Count -gt 384 -or
-        @($journal.claude_target_sids).Count -gt 384 -or
-        @($journal.cursor_targets).Count -gt 384 -or
-        @($journal.selector_targets).Count -gt 384) {
+        $legacyOptionalTargetCounts['claude_target_sids'] -gt 384 -or
+        $legacyOptionalTargetCounts['cursor_targets'] -gt 384 -or
+        $legacyOptionalTargetCounts['selector_targets'] -gt 384) {
         throw 'legacy managed-hook teardown journal exceeds its target bound'
     }
     if (-not (Microsoft.PowerShell.Management\Test-Path `
@@ -16163,9 +16275,17 @@ function Wait-DefenseClawFreshGuardianReconcile {
 
 function Assert-DefenseClawManagedInstallTree {
     param([Parameter(Mandatory)][hashtable]$Layout)
+    # ManagedIPCDirectory and ManagedIPCSocketPath live under InstallRoot
+    # per spec 004 REQ-02 (path parity with internal/ipc/paths_windows.go).
+    # The gateway creates <InstallRoot>\ipc\ on service start and binds
+    # the AF_UNIX socket <InstallRoot>\ipc\defenseclaw_ipc.sock inside it;
+    # the graceful stop removes the socket file but not the directory, so
+    # uninstall MUST accept both in its inventory or the tree walk trips
+    # on the empty ipc\ dir before rename/removal can proceed.
     $allowedDirectories = @(
         $Layout.BinDirectory,
-        $Layout.LibexecDirectory
+        $Layout.LibexecDirectory,
+        $Layout.ManagedIPCDirectory
     )
     $allowedFiles = @(
         $Layout.BrokerPath,
@@ -16174,13 +16294,35 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
         $Layout.InstallerPath,
-        $Layout.ModulePath
+        $Layout.ModulePath,
+        $Layout.ManagedIPCSocketPath
+    )
+    $expectedIPCSocket = [IO.Path]::GetFullPath(
+        [string]$Layout.ManagedIPCSocketPath
     )
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.InstallRoot -Recurse -Force) {
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        $full = [IO.Path]::GetFullPath($item.FullName)
+        $isReparse = (
+            ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
+        )
+        # Windows backs AF_UNIX socket files with an NTFS reparse point
+        # (IO_REPARSE_TAG_AF_UNIX 0x80000023). A stale socket left after
+        # an unclean guardian stop surfaces with the ReparsePoint
+        # attribute, so exempt exactly one leaf file at the AVC-contract
+        # socket path from the reparse-point veto. Every other reparse
+        # point still aborts: an attacker who plants a junction anywhere
+        # else inside the managed tree pre-uninstall is still refused.
+        if ($isReparse -and
+            (
+                $item.PSIsContainer -or
+                -not [string]::Equals(
+                    $full,
+                    $expectedIPCSocket,
+                    [StringComparison]::OrdinalIgnoreCase
+                )
+            )) {
             throw "refusing to remove managed install tree containing a reparse point: $($item.FullName)"
         }
-        $full = [IO.Path]::GetFullPath($item.FullName)
         if ($item.PSIsContainer) {
             if ($full -notin $allowedDirectories) {
                 throw "refusing to remove unexpected directory from managed install root: $full"
@@ -16193,10 +16335,39 @@ function Assert-DefenseClawManagedInstallTree {
 }
 
 function Assert-DefenseClawManagedTreeNoReparse {
-    param([Parameter(Mandatory)][string]$Root)
+    # -AllowAFUnixSocketAt is the exact-path exemption for the managed
+    # IPC AF_UNIX socket file. Windows backs AF_UNIX socket files with
+    # an NTFS reparse point (IO_REPARSE_TAG_AF_UNIX 0x80000023), so a
+    # stale socket left after an unclean guardian stop surfaces with
+    # the ReparsePoint attribute. Callers walking a tree that MAY
+    # contain that socket (InstallRoot pre-rename, retired sibling
+    # post-rename) supply the expected full path; every other reparse
+    # point still aborts. Callers walking trees that never contain the
+    # socket (StateRoot, transaction envelopes, lifecycle receipts)
+    # leave the parameter empty and get the strict pre-existing
+    # behavior — no reparse point tolerated anywhere.
+    param(
+        [Parameter(Mandatory)][string]$Root,
+        [string]$AllowAFUnixSocketAt = ''
+    )
     Assert-DefenseClawNoReparsePath -Path $Root
+    $exemptSocket = ''
+    if (-not [string]::IsNullOrWhiteSpace($AllowAFUnixSocketAt)) {
+        $exemptSocket = [IO.Path]::GetFullPath(
+            $AllowAFUnixSocketAt
+        ).TrimEnd('\')
+    }
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Root -Recurse -Force) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            if (-not $item.PSIsContainer -and
+                $exemptSocket -ne '' -and
+                [string]::Equals(
+                    [IO.Path]::GetFullPath($item.FullName).TrimEnd('\'),
+                    $exemptSocket,
+                    [StringComparison]::OrdinalIgnoreCase
+                )) {
+                continue
+            }
             throw "managed tree contains a reparse point: $($item.FullName)"
         }
     }
@@ -16350,13 +16521,21 @@ function Remove-DefenseClawManagedTree {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string]$RequiredBase,
-        [Parameter(Mandatory)][string]$Label
+        [Parameter(Mandatory)][string]$Label,
+        # Pass-through to Assert-DefenseClawManagedTreeNoReparse. Callers
+        # tearing down the install tree (canonical or retired sibling)
+        # specify the AF_UNIX socket's exact full path so a stale
+        # socket-reparse-point does not trip the pre-remove reparse
+        # veto. Callers on other trees leave it empty for strict mode.
+        [string]$AllowAFUnixSocketAt = ''
     )
     $safe = Assert-DefenseClawSafeRoot -Path $Path -Label $Label -RequiredBase $RequiredBase
     if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $safe)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse -Root $safe
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $safe `
+        -AllowAFUnixSocketAt $AllowAFUnixSocketAt
     Microsoft.PowerShell.Management\Remove-Item -LiteralPath $safe -Recurse -Force
 }
 
@@ -16503,7 +16682,15 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
     $directories = @(
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents'),
-        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec')
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec'),
+        # <RetiredRoot>\ipc\ is the renamed-sibling counterpart of the
+        # managed IPC directory <InstallRoot>\ipc\. When the CLI self-
+        # uninstalls it renames InstallRoot to the RetiredRoot sibling
+        # for delayed teardown by an out-of-tree helper, and the ipc
+        # directory rides along. Accept it here or the retired-tree
+        # verifier trips on the identical empty-container shape that
+        # the canonical validator was tripping on pre-fix.
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc')
     )
     $files = @(
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw-cmid-broker.exe'),
@@ -16512,7 +16699,12 @@ function Get-DefenseClawRetiredInstallTreeAllowlist {
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'bin\defenseclaw.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'agents\codex.exe'),
         (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\install-enterprise.ps1'),
-        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1')
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'libexec\DefenseClawEnterprise.psm1'),
+        # Retired counterpart of the AF_UNIX socket file. Absent after a
+        # graceful guardian stop; if a stale socket survived an unclean
+        # stop and rode along on the rename, this allowlist entry is
+        # what keeps the retired-tree verifier from rejecting it.
+        (Microsoft.PowerShell.Management\Join-Path $RetiredRoot 'ipc\defenseclaw_ipc.sock')
     )
     return @{
         directories = @(
@@ -16542,7 +16734,12 @@ function Assert-DefenseClawRetiredInstallTree {
     $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
         -Layout $Layout `
         -RetiredRoot $retired
-    Assert-DefenseClawManagedTreeNoReparse -Root $retired
+    $retiredIPCSocket = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc\defenseclaw_ipc.sock'
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $retired `
+        -AllowAFUnixSocketAt $retiredIPCSocket
     $objects = @(
         Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $retired `
@@ -16658,7 +16855,9 @@ function Assert-DefenseClawInstallTreeRetirementState {
     $allowlist = Get-DefenseClawRetiredInstallTreeAllowlist `
         -Layout $Layout `
         -RetiredRoot $root
-    Assert-DefenseClawManagedTreeNoReparse -Root $root
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $root `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     $objects = @(
         Microsoft.PowerShell.Management\Get-Item `
             -LiteralPath $root `
@@ -17593,12 +17792,25 @@ function Remove-DefenseClawRetiredInstallTree {
     $modulePath = Microsoft.PowerShell.Management\Join-Path `
         $retired `
         'libexec\DefenseClawEnterprise.psm1'
+    # AF_UNIX socket: skip the per-file no-reparse gate below (the socket
+    # is an IO_REPARSE_TAG_AF_UNIX reparse point by design) and delete it
+    # separately at the end alongside its ipc\ container.
+    $retiredIPCSocket = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc\defenseclaw_ipc.sock'
     foreach ($path in @(
         $allowlist.files |
             Microsoft.PowerShell.Core\Where-Object {
                 -not [string]::Equals(
                     [string]$_,
                     $modulePath,
+                    [StringComparison]::OrdinalIgnoreCase
+                ) -and
+                -not [string]::Equals(
+                    [string]$_,
+                    (
+                        [IO.Path]::GetFullPath($retiredIPCSocket).TrimEnd('\')
+                    ),
                     [StringComparison]::OrdinalIgnoreCase
                 )
             }
@@ -17611,6 +17823,27 @@ function Remove-DefenseClawRetiredInstallTree {
                 -LiteralPath $path `
                 -Force
         }
+    }
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $retiredIPCSocket `
+        -PathType Leaf) {
+        # Remove-Item -Force deletes the reparse point itself (no target
+        # follow) which is exactly the right primitive for AF_UNIX
+        # sockets — the "target" is the socket, there is nothing else
+        # behind it.
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $retiredIPCSocket `
+            -Force
+    }
+    $retiredIPCDirectory = Microsoft.PowerShell.Management\Join-Path `
+        $retired `
+        'ipc'
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $retiredIPCDirectory `
+        -PathType Container) {
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $retiredIPCDirectory `
+            -Force
     }
     foreach ($directory in @(
         (Microsoft.PowerShell.Management\Join-Path $retired 'agents'),
@@ -18406,24 +18639,49 @@ function Remove-DefenseClawCommittedEmptyInstallRoot {
             -LiteralPath $Layout.InstallRoot)) {
         return
     }
-    Assert-DefenseClawManagedTreeNoReparse -Root $Layout.InstallRoot
+    Assert-DefenseClawManagedTreeNoReparse `
+        -Root $Layout.InstallRoot `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     $allowed = @(
         [IO.Path]::GetFullPath($Layout.BinDirectory).TrimEnd('\'),
-        [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\')
+        [IO.Path]::GetFullPath($Layout.LibexecDirectory).TrimEnd('\'),
+        # Guardian-stop leaves the empty <InstallRoot>\ipc\ container
+        # behind after removing defenseclaw_ipc.sock. The post-service-
+        # teardown cleanup must accept it as a known-empty directory or
+        # this validator trips before Remove-DefenseClawManagedTree ever
+        # runs.
+        [IO.Path]::GetFullPath($Layout.ManagedIPCDirectory).TrimEnd('\')
     )
+    $expectedSocket = [IO.Path]::GetFullPath(
+        $Layout.ManagedIPCSocketPath
+    ).TrimEnd('\')
     foreach ($item in Microsoft.PowerShell.Management\Get-ChildItem `
         -LiteralPath $Layout.InstallRoot `
         -Recurse `
         -Force) {
         $full = [IO.Path]::GetFullPath($item.FullName).TrimEnd('\')
-        if (-not $item.PSIsContainer -or $full -notin $allowed) {
+        # The AF_UNIX socket file at the AVC-contract path is the ONLY
+        # non-directory leaf tolerated here — an unclean guardian stop
+        # can leave it behind, and pre-remove cleanup must not fail
+        # closed on that residue.
+        if ($item.PSIsContainer) {
+            if ($full -notin $allowed) {
+                throw "committed uninstall left unexpected InstallRoot content: $full"
+            }
+        }
+        elseif (-not [string]::Equals(
+                $full,
+                $expectedSocket,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
             throw "committed uninstall left unexpected InstallRoot content: $full"
         }
     }
     Remove-DefenseClawManagedTree `
         -Path $Layout.InstallRoot `
         -RequiredBase $script:ProgramFiles `
-        -Label 'InstallRoot'
+        -Label 'InstallRoot' `
+        -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
 }
 
 function Publish-DefenseClawStatePurgeIntent {
@@ -18635,7 +18893,8 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
         Remove-DefenseClawManagedTree `
             -Path $Layout.InstallRoot `
             -RequiredBase $script:ProgramFiles `
-            -Label 'InstallRoot'
+            -Label 'InstallRoot' `
+            -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
     }
     [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
         -Layout $Layout `
@@ -20387,7 +20646,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             -GuardianServiceName $GuardianServiceName `
             -PriorDeploymentActive `
             -IncludeCodexMachineState:$Layout.CodexTargetEnabled `
-            -PreserveManagedHooksTeardownJournal
+            -PreserveManagedHooksTeardownJournal `
+            -SkipRedactionKeySnapshot
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -20602,7 +20862,8 @@ function Invoke-DefenseClawUninstallLifecycle {
             Remove-DefenseClawManagedTree `
                 -Path $Layout.InstallRoot `
                 -RequiredBase $script:ProgramFiles `
-                -Label 'InstallRoot'
+                -Label 'InstallRoot' `
+                -AllowAFUnixSocketAt $Layout.ManagedIPCSocketPath
         }
     }
     catch {
