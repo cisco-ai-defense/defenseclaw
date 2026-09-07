@@ -76,6 +76,16 @@ param(
     # enrolled user runtimes before any service activation.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
+    # Protected parent directory for the installer's one-shot bootstrap
+    # environment. When set (the outer signed DefenseClawSetup EXE passes
+    # its own protected %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch
+    # path here), the bootstrap directory is created inside it INSTEAD of
+    # C:\Windows\Temp — which on Azure-AD-joined hosts carries an Allow ACE
+    # for the interactive AAD principal with Delete/DeleteSubdirectoriesAndFiles
+    # rights, failing the module's later trusted-ancestor walk on rendered
+    # config/targets YAML. Empty falls back to C:\Windows\Temp for
+    # direct-caller compatibility on stock Windows.
+    [string]$BootstrapParent = '',
     [switch]$Json
 )
 
@@ -972,25 +982,149 @@ function Get-DefenseClawBootstrapSecuritySDDL {
     return $Security.GetSecurityDescriptorSddlForm($sections)
 }
 
+function Assert-DefenseClawBootstrapExternalParentTrust {
+    # Called only when the caller passed a non-empty -BootstrapParent. The
+    # outer signed DefenseClawSetup EXE hands its own protected
+    # %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch path here
+    # (SDDL O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)); this validator
+    # rejects anything whose ancestor chain grants an untrusted principal
+    # replacement rights, so an attacker cannot redirect the bootstrap into
+    # a directory they can retake. Mirrors the ancestor-walk rule the
+    # module's Assert-DefenseClawTrustedAncestor applies to managed content
+    # later, so if this passes, the later content-trust check also passes.
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path) -or
+        $Path.Contains('"') -or
+        $Path -match '[\x00-\x1f]') {
+        throw '-BootstrapParent is empty or contains an invalid character'
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    if (-not [IO.Path]::IsPathRooted($full) -or
+        $full.StartsWith('\\') -or
+        $full.StartsWith('//') -or
+        $full.StartsWith('\\?\') -or
+        $full.StartsWith('\\.\') -or
+        ($full.Length -gt 2 -and $full.Substring(2).Contains(':'))) {
+        throw "-BootstrapParent must be an absolute local Win32 drive path: $full"
+    }
+    if (-not [IO.Directory]::Exists($full)) {
+        throw "-BootstrapParent directory does not exist: $full"
+    }
+    $attributes = [IO.File]::GetAttributes($full)
+    if (($attributes -band [IO.FileAttributes]::Directory) -eq 0 -or
+        ($attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "-BootstrapParent must be a real non-reparse directory: $full"
+    }
+
+    $nativePathType = Initialize-DefenseClawBootstrapNativePath
+    $driveRoot = [IO.Path]::GetPathRoot($full)
+    $driveID = $driveRoot.TrimEnd('\')
+    $driveType = $nativePathType::GetDriveType($driveRoot)
+    $fileSystem = $nativePathType::GetFileSystem($driveRoot)
+    $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
+    if ([int]$driveType -ne 3 -or
+        -not [string]::Equals(
+            $fileSystem,
+            'NTFS',
+            [StringComparison]::OrdinalIgnoreCase
+        )) {
+        throw "-BootstrapParent must be on a local fixed NTFS volume: $full"
+    }
+
+    $trustedSIDs = @(
+        'S-1-5-18',
+        'S-1-5-32-544',
+        'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+    )
+    $chain = [Collections.Generic.List[string]]::new()
+    $current = $full
+    while (-not [string]::IsNullOrWhiteSpace($current)) {
+        $chain.Add($current)
+        $parent = [IO.Path]::GetDirectoryName($current)
+        if ([string]::IsNullOrWhiteSpace($parent) -or
+            [string]::Equals(
+                $parent,
+                $current,
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            break
+        }
+        $current = $parent
+    }
+    for ($index = $chain.Count - 1; $index -ge 0; $index--) {
+        $candidate = $chain[$index]
+        $item = Microsoft.PowerShell.Management\Get-Item `
+            -LiteralPath $candidate `
+            -Force `
+            -ErrorAction Stop
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw "-BootstrapParent path contains a reparse point: $candidate"
+        }
+        if (-not $item.PSIsContainer) {
+            throw "-BootstrapParent path ancestor is not a directory: $candidate"
+        }
+        $acl = Microsoft.PowerShell.Security\Get-Acl `
+            -LiteralPath $candidate `
+            -ErrorAction Stop
+        $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::Access
+        )
+        if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
+            -not $accessSDDL.StartsWith(
+                'D:',
+                [StringComparison]::OrdinalIgnoreCase
+            )) {
+            throw "-BootstrapParent path has an absent or null DACL: $candidate"
+        }
+        $ownerSID = ConvertTo-DefenseClawBootstrapSID -Identity $acl.Owner
+        if ($ownerSID -notin $trustedSIDs) {
+            throw "-BootstrapParent path has untrusted owner $ownerSID`: $candidate"
+        }
+        foreach ($rule in $acl.Access) {
+            if ($rule.AccessControlType -ne
+                [Security.AccessControl.AccessControlType]::Allow -or
+                (($rule.PropagationFlags -band
+                    [Security.AccessControl.PropagationFlags]::InheritOnly) -ne
+                    0)) {
+                continue
+            }
+            $sid = ConvertTo-DefenseClawBootstrapSID `
+                -Identity $rule.IdentityReference
+            if ($sid -in $trustedSIDs) {
+                continue
+            }
+            if (Test-DefenseClawBootstrapReplacementRights `
+                    -Rights $rule.FileSystemRights) {
+                throw (
+                    "-BootstrapParent path has untrusted principal $sid " +
+                    "with replacement rights: $candidate"
+                )
+            }
+        }
+    }
+    $nativePathType::AssertCanonicalDriveRoot($driveRoot, $driveID)
+    return $full
+}
+
 function Assert-DefenseClawBootstrapOneShotRoot {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)]
         [Security.AccessControl.DirectorySecurity]$ExpectedSecurity,
+        [Parameter(Mandatory)][string]$ExpectedParent,
         [switch]$RequireEmpty
     )
     $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
-    $windowsTemp = [IO.Path]::GetFullPath(
-        [IO.Path]::Combine($trustedWindows, 'Temp')
-    ).TrimEnd('\')
+    $expectedParentFull =
+        [IO.Path]::GetFullPath($ExpectedParent).TrimEnd('\')
     if (-not [string]::Equals(
             [IO.Path]::GetDirectoryName($full),
-            $windowsTemp,
+            $expectedParentFull,
             [StringComparison]::OrdinalIgnoreCase
         ) -or
         [IO.Path]::GetFileName($full) -cnotmatch
             '^DefenseClaw-Bootstrap-[a-f0-9]{32}$') {
-        throw "bootstrap environment is outside its exact Windows Temp capability scope: $full"
+        throw "bootstrap environment is outside its exact protected parent scope ($expectedParentFull): $full"
     }
     if (-not [IO.Directory]::Exists($full)) {
         throw "bootstrap environment directory is missing: $full"
@@ -1172,7 +1306,8 @@ function Remove-DefenseClawBootstrapEnvironment {
     param([Parameter(Mandatory)]$Context)
     $root = Assert-DefenseClawBootstrapOneShotRoot `
         -Path ([string]$Context.Path) `
-        -ExpectedSecurity $Context.Security
+        -ExpectedSecurity $Context.Security `
+        -ExpectedParent ([string]$Context.BootstrapParent)
     $directories = [Collections.Generic.List[string]]::new()
     $files = [Collections.Generic.List[string]]::new()
     $pending = [Collections.Generic.Stack[string]]::new()
@@ -1291,10 +1426,26 @@ function New-DefenseClawBootstrapEnvironment {
     $allowedOwnerSIDs.Add('S-1-5-32-544')
     $allowedOwnerSIDs.Add($identity.User.Value)
 
-    $windowsTemp = [IO.Path]::GetFullPath(
-        [IO.Path]::Combine($trustedWindows, 'Temp')
-    ).TrimEnd('\')
-    foreach ($trustedDirectory in @($trustedWindows, $windowsTemp)) {
+    # Resolve the protected bootstrap parent. When the outer signed
+    # DefenseClawSetup EXE passes -BootstrapParent (a protected
+    # %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch directory it
+    # created and locked down to SYSTEM+Administrators only), route the
+    # bootstrap into it. Falling back to C:\Windows\Temp is retained for
+    # direct-caller compatibility on stock Windows, but on Azure-AD-joined
+    # hosts C:\Windows\Temp carries an Allow ACE for the interactive AAD
+    # principal with replacement rights, so the trusted-ancestor walk on
+    # the rendered YAML content fails later; direct callers on those hosts
+    # MUST pass -BootstrapParent.
+    if (-not [string]::IsNullOrWhiteSpace($BootstrapParent)) {
+        $resolvedBootstrapParent = Assert-DefenseClawBootstrapExternalParentTrust `
+            -Path $BootstrapParent
+    }
+    else {
+        $resolvedBootstrapParent = [IO.Path]::GetFullPath(
+            [IO.Path]::Combine($trustedWindows, 'Temp')
+        ).TrimEnd('\')
+    }
+    foreach ($trustedDirectory in @($trustedWindows, $resolvedBootstrapParent)) {
         if (-not [IO.Directory]::Exists($trustedDirectory)) {
             throw "trusted bootstrap parent directory is missing: $trustedDirectory"
         }
@@ -1316,7 +1467,7 @@ function New-DefenseClawBootstrapEnvironment {
                 ''
             ).ToLowerInvariant()
             $candidate = [IO.Path]::Combine(
-                $windowsTemp,
+                $resolvedBootstrapParent,
                 "DefenseClaw-Bootstrap-$capability"
             )
             if (Test-DefenseClawBootstrapPathExists -Path $candidate) {
@@ -1340,6 +1491,7 @@ function New-DefenseClawBootstrapEnvironment {
             $path = Assert-DefenseClawBootstrapOneShotRoot `
                 -Path $candidate `
                 -ExpectedSecurity $security `
+                -ExpectedParent $resolvedBootstrapParent `
                 -RequireEmpty
             break
         }
@@ -1366,6 +1518,7 @@ function New-DefenseClawBootstrapEnvironment {
         AllowedAccessSIDs = $allowedAccessSIDs.ToArray()
         AllowedOwnerSIDs = $allowedOwnerSIDs.ToArray()
         OriginalEnvironment = $originalEnvironment
+        BootstrapParent = $resolvedBootstrapParent
     }
     try {
         foreach ($name in @(
@@ -1402,6 +1555,7 @@ function New-DefenseClawBootstrapEnvironment {
         [void](Assert-DefenseClawBootstrapOneShotRoot `
             -Path $path `
             -ExpectedSecurity $security `
+            -ExpectedParent $resolvedBootstrapParent `
             -RequireEmpty)
         return $context
     }

@@ -31,6 +31,7 @@ func TestEnterpriseLifecycleArgumentsUsePublicMachineTransaction(t *testing.T) {
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),
 		"--config", opts.Config,
 		"--manifest", opts.Manifest,
+		"--bootstrap-parent", filepath.Join(stage, enterpriseSetupScratchDirName),
 		"--no-start", "--json",
 		"--attest-agent-application-control",
 		"--attest-claude-effective-policy",
@@ -46,9 +47,40 @@ func TestEnterpriseLifecycleReadOnlyDoesNotSupplyReplacementArtifacts(t *testing
 	want := []string{
 		"enterprise", "windows", "status",
 		"--installer", filepath.Join(stage, "install-enterprise.ps1"),
+		"--bootstrap-parent", filepath.Join(stage, enterpriseSetupScratchDirName),
 		"--json",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("enterpriseLifecycleArguments() = %#v, want %#v", got, want)
+	}
+}
+
+// The outer signed DefenseClawSetup EXE always forwards its own protected
+// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch directory as
+// install-enterprise.ps1's -BootstrapParent, so the one-shot bootstrap
+// dir does not land under C:\Windows\Temp. On Azure-AD-joined hosts,
+// C:\Windows\Temp carries an inherited Allow ACE for the interactive AAD
+// principal with replacement rights, which fails the module's later
+// trusted-ancestor walk on rendered YAML content.
+func TestEnterpriseLifecycleArgumentsAlwaysForwardsBootstrapParent(t *testing.T) {
+	stage := `C:\ProgramData\DefenseClaw-Enterprise-Setup-0123456789abcdef0123456789abcdef`
+	wantParent := filepath.Join(stage, enterpriseSetupScratchDirName)
+	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"} {
+		t.Run(action, func(t *testing.T) {
+			got := enterpriseLifecycleArguments(stage, enterpriseSetupOptions{Action: action})
+			foundIndex := -1
+			for index := 0; index < len(got)-1; index++ {
+				if got[index] == "--bootstrap-parent" {
+					foundIndex = index
+					break
+				}
+			}
+			if foundIndex < 0 {
+				t.Fatalf("%s: --bootstrap-parent missing from args: %#v", action, got)
+			}
+			if got[foundIndex+1] != wantParent {
+				t.Fatalf("%s: --bootstrap-parent value = %q, want %q", action, got[foundIndex+1], wantParent)
+			}
+		})
 	}
 }

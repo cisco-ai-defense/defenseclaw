@@ -37,6 +37,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		gatewayServiceName:            "DefenseClawGateway",
 		guardianServiceName:           "DefenseClawHookGuardian",
 		certificationCodexHome:        `C:\certification\codex-home`,
+		bootstrapParent:               `C:\ProgramData\DefenseClaw-Enterprise-Setup-00112233445566778899aabbccddeeff\scratch`,
 		attestAgentApplicationControl: true,
 		attestClaudeEffectivePolicy:   true,
 		noStart:                       true,
@@ -58,6 +59,7 @@ func TestWindowsEnterprisePowerShellArgsLifecycleParity(t *testing.T) {
 		"-GatewayServiceName", opts.gatewayServiceName,
 		"-GuardianServiceName", opts.guardianServiceName,
 		"-CertificationCodexHome", opts.certificationCodexHome,
+		"-BootstrapParent", opts.bootstrapParent,
 		"-AttestAgentApplicationControl",
 		"-AttestClaudeEffectivePolicy",
 		"-NoStart",
@@ -268,6 +270,50 @@ func TestWindowsEnterprisePowerShellArgsPurgeIsExplicit(t *testing.T) {
 	got = windowsEnterprisePowerShellArgs("status", &windowsEnterpriseLifecycleOptions{})
 	if !reflect.DeepEqual(got, []string{"-Action", "Status"}) {
 		t.Fatalf("status args = %#v", got)
+	}
+}
+
+// The outer signed DefenseClawSetup EXE forwards a protected admin-only
+// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch path here so
+// install-enterprise.ps1's one-shot bootstrap directory does not land under
+// C:\Windows\Temp. On Azure-AD-joined hosts, C:\Windows\Temp carries an
+// inherited Allow ACE for the interactive AAD principal (S-1-12-1-...) that
+// includes replacement rights; the module's later trusted-ancestor walk on
+// rendered YAML content rejects it. Assert the value round-trips as
+// -BootstrapParent for all actions (status is a read-only lifecycle where
+// the bootstrap dir is still created for its isolated PowerShell execution
+// environment, so the parameter must be forwarded there too).
+func TestWindowsEnterprisePowerShellArgsBootstrapParentRoundTripsForAllActions(t *testing.T) {
+	const scratch = `C:\ProgramData\DefenseClaw-Enterprise-Setup-00112233445566778899aabbccddeeff\scratch`
+	for _, action := range []string{"install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall"} {
+		t.Run(action, func(t *testing.T) {
+			opts := &windowsEnterpriseLifecycleOptions{bootstrapParent: scratch}
+			got := windowsEnterprisePowerShellArgs(action, opts)
+			foundIndex := -1
+			for index := 0; index < len(got)-1; index++ {
+				if got[index] == "-BootstrapParent" {
+					foundIndex = index
+					break
+				}
+			}
+			if foundIndex < 0 {
+				t.Fatalf("%s: -BootstrapParent missing from args: %#v", action, got)
+			}
+			if got[foundIndex+1] != scratch {
+				t.Fatalf("%s: -BootstrapParent value = %q, want %q", action, got[foundIndex+1], scratch)
+			}
+		})
+	}
+}
+
+// Empty bootstrapParent must NOT emit the flag so direct callers preserve
+// their existing C:\Windows\Temp fallback behavior.
+func TestWindowsEnterprisePowerShellArgsBootstrapParentOmittedWhenEmpty(t *testing.T) {
+	got := windowsEnterprisePowerShellArgs("status", &windowsEnterpriseLifecycleOptions{})
+	for _, arg := range got {
+		if arg == "-BootstrapParent" {
+			t.Fatalf("empty bootstrapParent unexpectedly emitted -BootstrapParent: %#v", got)
+		}
 	}
 }
 

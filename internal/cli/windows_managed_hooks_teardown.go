@@ -1386,10 +1386,22 @@ func windowsManagedHooksTeardownExpectedEnrollment(
 			[]connector.WindowsCodexManagedRuntimeTarget{},
 			[]enterprisehooks.WindowsCursorManagedRuntimeTarget{}
 	}
-	return append([]string(nil), claudeTargets...),
-		codexPolicyActive,
-		append([]connector.WindowsCodexManagedRuntimeTarget(nil), codexTargets...),
-		append([]enterprisehooks.WindowsCursorManagedRuntimeTarget(nil), cursorTargets...)
+	// append([]T(nil), src...) returns nil when src has length zero, which
+	// then marshals as JSON `null` and used to trip the reader's presence
+	// check on retry. Guarantee an empty-non-nil slice for each connector
+	// target list so the journal always writes `[]` even for connectors
+	// that had no eligible interactive users at install time on a given
+	// box (single-user VMs, deployments with connector-uses-nobody, etc.).
+	claudeCopy := append([]string{}, claudeTargets...)
+	codexCopy := append(
+		[]connector.WindowsCodexManagedRuntimeTarget{},
+		codexTargets...,
+	)
+	cursorCopy := append(
+		[]enterprisehooks.WindowsCursorManagedRuntimeTarget{},
+		cursorTargets...,
+	)
+	return claudeCopy, codexPolicyActive, codexCopy, cursorCopy
 }
 
 func equalWindowsManagedHooksCodexTargets(
@@ -1743,22 +1755,52 @@ func readWindowsManagedHooksTeardownJournal(
 	if err := file.Close(); err != nil {
 		return journal, err
 	}
+	return parseWindowsManagedHooksTeardownJournalBody(body)
+}
+
+// parseWindowsManagedHooksTeardownJournalBody is the ACL-independent
+// JSON layer of readWindowsManagedHooksTeardownJournal. Split out so
+// the schema/tolerance contract can be unit-tested without the
+// trusted-owner ACL walk, which requires SYSTEM/Admins ownership on
+// the input file — impractical inside a Go test running under a CI
+// runner user. readWindowsManagedHooksTeardownJournal is the only
+// production entry point and always enforces the ACL walk first via
+// managed.ValidateTrustedFilePath before calling this helper.
+func parseWindowsManagedHooksTeardownJournalBody(
+	body []byte,
+) (windowsManagedHooksTeardownJournal, error) {
+	var journal windowsManagedHooksTeardownJournal
 	var properties map[string]json.RawMessage
 	if err := json.Unmarshal(body, &properties); err != nil {
 		return journal, err
 	}
+	// Trust-critical identity fields: presence-required and non-null.
+	// These bind the journal to a specific activation record and manifest
+	// bytes; a missing or nulled value would let a foreign journal pass
+	// validation and redirect subsequent teardown/rollback at attacker-
+	// controlled state.
 	for _, name := range []string{
 		"manifest_sha256",
 		"activation_state",
 		"deployment_generation_id",
-		"codex_policy_active",
-		"codex_targets",
 	} {
 		value, ok := properties[name]
 		if !ok || bytes.Equal(bytes.TrimSpace(value), []byte("null")) {
 			return journal, fmt.Errorf("managed-hook teardown journal is missing %s", name)
 		}
 	}
+	// Connector-optional fields (codex_policy_active, codex_targets,
+	// cursor_targets, claude_target_sids) were previously strict-required
+	// too. The writer's append([]T(nil), src...) pattern for the activated
+	// state emits "null" instead of "[]" when the input slice has length
+	// zero — a legitimate state whenever a deployment's connector had no
+	// eligible interactive users at install time. Downstream code paths
+	// use len() semantics that are nil-safe, so decoding a null field
+	// into a nil slice is functionally identical to decoding an empty
+	// array. Do not require presence here; json.Decoder below still
+	// enforces DisallowUnknownFields, so a foreign extra key still fails
+	// closed, and validateWindowsManagedHooksTeardownJournal still binds
+	// every target list to the recomputed activation identity.
 	decoder := json.NewDecoder(bytes.NewReader(body))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&journal); err != nil {
