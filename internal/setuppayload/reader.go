@@ -6,6 +6,7 @@ package setuppayload
 import (
 	"bytes"
 	"crypto/sha256"
+	"debug/pe"
 	"errors"
 	"fmt"
 	"hash/crc32"
@@ -17,6 +18,17 @@ import (
 	"testing/fstest"
 	"time"
 )
+
+// authenticodeMaxAlignPadding is the maximum number of alignment bytes
+// signtool can insert between an appended trailer and the certificate
+// table. Authenticode's Attribute Certificate Table is 8-byte aligned,
+// so the padding is 0..7 bytes.
+const authenticodeMaxAlignPadding = 7
+
+// imageDirectoryEntrySecurity is the index of the Attribute Certificate
+// Table entry inside the PE Optional Header's Data Directory array.
+// Not exported as a named constant by debug/pe.
+const imageDirectoryEntrySecurity = 4
 
 // ReadResult holds the trailer contents pulled off the tail of a Setup
 // EXE. Fields are shared by the assembler (to round-trip a trailer it
@@ -32,11 +44,21 @@ type ReadResult struct {
 	Entries []Entry
 }
 
-// Read pulls the trailer off the end of ra. `size` is the total byte
-// length of the underlying artefact (`ra.Size()` for an *os.File, or
+// Read pulls the trailer off ra. `size` is the total byte length of
+// the underlying artefact (`ra.Size()` for an *os.File, or
 // stat().Size() for a caller that has the value already). Runtime code
 // under cmd/defenseclaw-enterprise-setup calls this with the running
 // EXE's own file handle.
+//
+// The trailer is located by findFooterOffset, which is Authenticode-
+// aware: for an assembled-but-unsigned Setup EXE (produced by the
+// assembler before AVC's signtool step) the trailer sits at the very
+// end of the file and the magic starts at `size - FooterSize`; for a
+// signed EXE, signtool has appended the Attribute Certificate Table to
+// the file's end with 0..7 bytes of alignment padding between the
+// trailer and the cert table, so the magic is at
+// `certVA - padding - FooterSize` where certVA is the file offset of
+// the cert table (PE Optional Header data-directory entry 4).
 //
 // Failure modes are surfaced as sentinel errors so callers can
 // distinguish the "no trailer at all" case (ErrTrailerMissing — the EXE
@@ -48,9 +70,14 @@ func Read(ra io.ReaderAt, size int64) (ReadResult, error) {
 		return ReadResult{}, ErrTrailerMissing
 	}
 
-	// Read the fixed 24-byte footer at the very tail.
+	footerStart, err := findFooterOffset(ra, size)
+	if err != nil {
+		return ReadResult{}, err
+	}
+
+	// Read the fixed 24-byte footer starting at footerStart.
 	footerBuf := make([]byte, FooterSize)
-	if _, err := ra.ReadAt(footerBuf, size-FooterSize); err != nil {
+	if _, err := ra.ReadAt(footerBuf, footerStart); err != nil {
 		return ReadResult{}, fmt.Errorf("setuppayload: read footer: %w", err)
 	}
 	footer, err := DecodeFooter(footerBuf)
@@ -64,15 +91,16 @@ func Read(ra io.ReaderAt, size int64) (ReadResult, error) {
 	if footer.ArchiveLen > uint64(MaxArchiveBytes) {
 		return ReadResult{}, fmt.Errorf("setuppayload: archive length %d exceeds cap %d: %w", footer.ArchiveLen, MaxArchiveBytes, ErrTrailerCorrupt)
 	}
-	// archive_start + archive_len + manifest_len + FooterSize must equal `size`.
-	// If any component is corrupt, this arithmetic prevents an out-of-
-	// range ReadAt that could panic or read into unrelated PE bytes.
-	trailerLen := int64(footer.ArchiveLen) + int64(footer.ManifestLen) + int64(FooterSize)
-	if trailerLen > size {
-		return ReadResult{}, fmt.Errorf("setuppayload: trailer length %d exceeds artefact size %d: %w", trailerLen, size, ErrTrailerCorrupt)
+	// The trailer occupies [footerStart - archiveLen - manifestLen, footerStart + FooterSize).
+	// Compute the archive/manifest offsets relative to footerStart, not to
+	// EOF — for a signed EXE, EOF is past the cert table, not past the
+	// trailer.
+	manifestStart := footerStart - int64(footer.ManifestLen)
+	archiveStart := manifestStart - int64(footer.ArchiveLen)
+	if archiveStart < 0 {
+		return ReadResult{}, fmt.Errorf("setuppayload: trailer length %d exceeds available bytes before footer at %d: %w",
+			int64(footer.ArchiveLen)+int64(footer.ManifestLen)+int64(FooterSize), footerStart, ErrTrailerCorrupt)
 	}
-	archiveStart := size - trailerLen
-	manifestStart := archiveStart + int64(footer.ArchiveLen)
 
 	archive := make([]byte, footer.ArchiveLen)
 	if _, err := ra.ReadAt(archive, archiveStart); err != nil {
@@ -96,6 +124,130 @@ func Read(ra io.ReaderAt, size int64) (ReadResult, error) {
 		return ReadResult{}, err
 	}
 	return ReadResult{Manifest: manifest, Entries: entries}, nil
+}
+
+// findFooterOffset returns the file offset of the DCLWAVC1 magic bytes.
+//
+// Handles two file shapes:
+//
+//  1. Unsigned trailer (assembler output before AVC's signtool sign,
+//     and the DefenseClaw dev-loop --allow-unsigned path): the trailer
+//     sits at the very end of the file, so the magic is at
+//     `size - FooterSize`.
+//
+//  2. Signed trailer (AVC's post-signtool output — what runs on the
+//     tester's box): signtool has appended the Authenticode Attribute
+//     Certificate Table to the end of the file, with 0..7 bytes of
+//     alignment padding between the trailer and the cert table. The
+//     PE Optional Header's data-directory entry 4 gives the cert
+//     table's file offset. The magic lives at
+//     `certVA - padding - FooterSize`.
+//
+// Falls back to case (1) when the file is not a valid PE (test fixtures
+// that use arbitrary bytes) or when the PE has no Attribute Certificate
+// Table (unsigned, but structurally-PE files).
+func findFooterOffset(ra io.ReaderAt, size int64) (int64, error) {
+	if size < FooterSize {
+		return 0, ErrTrailerMissing
+	}
+	certVA, err := peCertificateTableStart(ra)
+	if err == nil && certVA > 0 && certVA <= size {
+		// Signed path: search the alignment-padding window immediately
+		// before the certificate table for the magic.
+		buf, readErr := readAuthenticodePaddingWindow(ra, certVA)
+		if readErr != nil {
+			return 0, readErr
+		}
+		if off, ok := scanFooterMagicWindow(buf); ok {
+			return certVA - int64(len(buf)) + int64(off), nil
+		}
+		// PE has a cert table but no trailer in the padding window —
+		// this file was signed without ever being assembled. Fall
+		// through to the EOF path; if the EOF check also fails to
+		// find the magic, DecodeFooter will surface ErrTrailerMissing.
+	}
+	// Unsigned / non-PE / signed-without-trailer path: footer at EOF.
+	return size - int64(FooterSize), nil
+}
+
+// peCertificateTableStart returns the file offset of the Authenticode
+// certificate table, or 0 if the file has no certificate table or is
+// not a well-formed PE. Uses debug/pe rather than hand-rolled parsing
+// so the file-format quirks (DOS stub, e_lfanew, PE32 vs. PE32+
+// optional-header layout) are handled by the stdlib.
+func peCertificateTableStart(ra io.ReaderAt) (int64, error) {
+	f, err := pe.NewFile(ra)
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	switch oh := f.OptionalHeader.(type) {
+	case *pe.OptionalHeader64:
+		if imageDirectoryEntrySecurity < len(oh.DataDirectory) {
+			dir := oh.DataDirectory[imageDirectoryEntrySecurity]
+			if dir.Size == 0 {
+				return 0, nil
+			}
+			return int64(dir.VirtualAddress), nil
+		}
+	case *pe.OptionalHeader32:
+		if imageDirectoryEntrySecurity < len(oh.DataDirectory) {
+			dir := oh.DataDirectory[imageDirectoryEntrySecurity]
+			if dir.Size == 0 {
+				return 0, nil
+			}
+			return int64(dir.VirtualAddress), nil
+		}
+	}
+	return 0, nil
+}
+
+// readAuthenticodePaddingWindow returns the (FooterSize + 7)-byte slice
+// ending at certVA — the exact byte range where the DCLWAVC1 footer
+// could live given Authenticode's 8-byte alignment padding.
+func readAuthenticodePaddingWindow(ra io.ReaderAt, certVA int64) ([]byte, error) {
+	windowLen := int(FooterSize) + authenticodeMaxAlignPadding
+	windowStart := certVA - int64(windowLen)
+	if windowStart < 0 {
+		return nil, ErrTrailerMissing
+	}
+	buf := make([]byte, windowLen)
+	if _, err := ra.ReadAt(buf, windowStart); err != nil {
+		return nil, fmt.Errorf("setuppayload: read authenticode padding window: %w", err)
+	}
+	return buf, nil
+}
+
+// scanFooterMagicWindow searches the padding-window buffer for the
+// DCLWAVC1 magic. The buffer is exactly (FooterSize + 7) bytes ending
+// at the certificate-table start. The magic can appear at offsets
+// [len(buf) - FooterSize - 7, len(buf) - FooterSize] — 8 candidate
+// positions. Returns the offset within the buffer of the magic's first
+// byte, or (0, false) if not found.
+//
+// Pure function; tested directly against synthetic buffers so the PE
+// parsing on the surrounding code path can be exercised end-to-end
+// without needing a real PE fixture.
+func scanFooterMagicWindow(buf []byte) (int, bool) {
+	if len(buf) < int(FooterSize) {
+		return 0, false
+	}
+	// Iterate padding from 0 upward — signtool typically emits 0 or a
+	// small padding on 8-byte-aligned files, so the low end is the
+	// common case.
+	for padding := 0; padding <= authenticodeMaxAlignPadding; padding++ {
+		offset := len(buf) - int(FooterSize) - padding
+		if offset < 0 {
+			break
+		}
+		if offset+len(Magic) > len(buf) {
+			continue
+		}
+		if string(buf[offset:offset+len(Magic)]) == Magic {
+			return offset, true
+		}
+	}
+	return 0, false
 }
 
 // ReadFile is a thin wrapper that opens path, statss it, and invokes
@@ -189,14 +341,20 @@ func (r ReadResult) AsPayloadFS() fs.FS {
 // HasTrailer is a cheap probe used by tools that want to check whether
 // an existing EXE already carries a trailer (e.g. a rerun of the
 // assembler against an already-assembled artefact should refuse to
-// double-append). Returns true only when the footer magic is present at
-// the tail; a corrupt trailer body still returns true.
+// double-append). Delegates to findFooterOffset so the probe is
+// Authenticode-aware: a signed EXE with the trailer positioned before
+// the certificate table still reports true. A corrupt trailer body
+// still returns true (magic present at a valid position is enough).
 func HasTrailer(ra io.ReaderAt, size int64) bool {
 	if size < FooterSize {
 		return false
 	}
+	footerStart, err := findFooterOffset(ra, size)
+	if err != nil {
+		return false
+	}
 	footerBuf := make([]byte, FooterSize)
-	if _, err := ra.ReadAt(footerBuf, size-FooterSize); err != nil {
+	if _, err := ra.ReadAt(footerBuf, footerStart); err != nil {
 		if errors.Is(err, io.EOF) {
 			return false
 		}
