@@ -27,6 +27,7 @@ type findingProofKind uint8
 const (
 	findingProofNone findingProofKind = iota
 	findingProofActionFactsSemantic
+	findingProofActionFactsSubgraph
 	findingProofExactCodeGuard
 	findingProofExactFallback
 	findingProofParserShadow
@@ -64,6 +65,22 @@ func newActionFactsSemanticFindingProof(
 			input.ProjectionComplete &&
 			input.EvaluationComplete &&
 			input.Matched,
+	)
+}
+
+// newActionFactsSubgraphFindingProof is for a code-owned bounded proof over
+// individually projected ActionFacts nodes. It may authorize one reviewed
+// subgraph when unrelated outer shell structure is incomplete, but only when
+// the subgraph itself proves every required node, ordering, and join.
+func newActionFactsSubgraphFindingProof(
+	ruleID string,
+	subgraphComplete bool,
+	exactMatch bool,
+) findingProof {
+	return newFindingProof(
+		findingProofActionFactsSubgraph,
+		ruleID,
+		subgraphComplete && exactMatch,
 	)
 }
 
@@ -130,6 +147,7 @@ func (p findingProof) authorizes(ruleID string) bool {
 	}
 	switch p.kind {
 	case findingProofActionFactsSemantic,
+		findingProofActionFactsSubgraph,
 		findingProofExactCodeGuard,
 		findingProofExactFallback:
 		return true
@@ -157,6 +175,12 @@ func applyTrustedActionProofBoundary(
 			continue
 		}
 		if finding.enforcement == findingEnforcementDetectionOnly {
+			continue
+		}
+		if finding.enforcement == findingEnforcementAlertOnly {
+			// Alert-only owners have already passed their exact semantic
+			// prerequisite. They deliberately cannot authorize confirm/block,
+			// so they do not require an enforcement-eligible command projection.
 			continue
 		}
 		if finding.proof.authorizes(finding.RuleID) {

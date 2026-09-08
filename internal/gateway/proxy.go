@@ -5121,15 +5121,9 @@ func (p *GuardrailProxy) inspectToolCalls(ctx context.Context, toolCallsJSON jso
 	severity := HighestSeverity(allFindings)
 	confidence := HighestConfidence(allFindings, severity)
 
-	enforceable := enforceableRuleFindings(allFindings)
-	action := guardrailActionAllow
-	if len(enforceable) > 0 {
-		action = guardrailRuntimeActionForGuardrail(
-			p.cfg,
-			HighestSeverity(enforceable),
-			false,
-		)
-	}
+	action := guardrailRuntimeActionForGuardrailFindings(
+		p.cfg, allFindings, false,
+	)
 	if action == guardrailActionConfirm {
 		action = guardrailActionAlert
 	}

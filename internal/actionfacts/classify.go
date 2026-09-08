@@ -72,6 +72,9 @@ func classifyOutput(out *parseOutput) {
 			continue
 		}
 		classifyCommand(out, &out.commands[i])
+		if out.commands[i].Program == "echo" {
+			classifyPAMPasswordCapture(out, &out.commands[i])
+		}
 		if out.status == StatusLimitExceeded {
 			return
 		}
@@ -395,13 +398,34 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 				addOperation(command, OperationWrite)
 				out.markPartial(IssueUnknownOperandGrammar)
 			}
+		} else if command.Dialect == DialectCMD &&
+			classifyEndpointSecurityControl(out, command) {
+			// Bare sc is accepted only for the exact WinDefend sequence owned by
+			// ExactEndpointSecurityProductDisable. Other CMD sc grammars remain
+			// deliberately non-authoritative.
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
 	case "sc.exe":
 		classifyWindowsServiceControl(out, command)
+		classifyEndpointSecurityControl(out, command)
+	case "sysmon", "sysmon.exe":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "mdatp":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "iptables":
+		if !classifyCompleteFirewallRelaxationStep(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "tee":
 		classifyTee(out, command)
+	case "sed":
+		classifyPOSIXSedInPlace(out, command)
+		classifyPOSIXLoggingHardeningControl(out, command)
 	case "add-content":
 		classifyStructuredPowerShellPathMutator(out, command, program)
 	case "ac":
@@ -548,6 +572,18 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		)
 	case "sudo":
 		classifySudo(out, command)
+	case "log":
+		classifyMacOSUnifiedLog(out, command)
+	case "osascript":
+		classifyMacOSUpdateCredentialPrompt(out, command)
+	case "auditctl", "setenforce":
+		classifyLinuxSecurityControl(out, command)
+	case "service", "sysrc", "sysctl", "ufw":
+		if !classifyPOSIXLoggingHardeningControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "halt":
+		classifyPOSIXHostHalt(out, command)
 	case "doas", "su", "pkexec":
 		classifyPOSIXPrivilegeShell(out, command)
 	case "runas":
@@ -561,8 +597,20 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 			DialectCMD,
 			DialectPowerShell,
 		)
+	case "procdump", "procdump.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyLSASSDump,
+			DialectCMD,
+			DialectPowerShell,
+			DialectArgv,
+		)
 	case "crontab", "at", "schtasks", "launchctl", "systemctl":
 		classifySchedule(out, command, program)
+		if program == "launchctl" || program == "systemctl" {
+			classifyEndpointSecurityControl(out, command)
+		}
 	case "register-scheduledtask":
 		classifyStructuredPowerShellRegisterScheduledTask(out, command)
 	case "useradd", "usermod", "adduser", "net", "net1", "new-localuser", "gpasswd",
@@ -586,6 +634,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyChroot(out, command)
 	case "kubectl", "oc":
 		classifyWorkload(out, command, program)
+	case "terraform", "tofu", "pulumi":
+		classifyInfrastructureAsCode(out, command, program)
 	case "git":
 		classifyGit(out, command)
 	case "codex", "claude", "gemini", "opencode":
@@ -594,6 +644,10 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyAgentPackageRunner(out, command, program)
 	case "aws", "gcloud", "az", "vault", "op", "pass", "security", "cmdkey":
 		classifyCredentialCLI(out, command, program)
+		classifyCloudAuditControlDestruction(command)
+		classifyCloudIAMPrincipalAdministration(command)
+	case "psql", "mysql", "mariadb", "sqlcmd", "snowsql":
+		classifySQLClient(out, command, program)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
 		classifyShellInvocation(out, command)
 	case "python", "python2", "python3", "perl", "ruby":
@@ -673,6 +727,9 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 	}
 	sawClear := false
 	allowsFile := false
+	lastClear := -1
+	lastRead := -1
+	operationIndex := 0
 	options := true
 	operands := 0
 	for _, argument := range argv[1:] {
@@ -688,11 +745,16 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 				switch option {
 				case 'c':
 					sawClear = true
+					lastClear = operationIndex
 				case 'a', 'n', 'r', 'w':
 					allowsFile = true
+					if option == 'r' {
+						lastRead = operationIndex
+					}
 				default:
 					return false
 				}
+				operationIndex++
 			}
 			continue
 		}
@@ -702,7 +764,10 @@ func exactPOSIXHistoryClearArguments(argv []string) bool {
 			return false
 		}
 	}
-	return sawClear && (operands == 0 || allowsFile)
+	// A read after the final clear immediately repopulates the in-memory
+	// history list. Treat that closed reload form as maintenance rather than
+	// anti-forensic clearing. A later clear (history -rc) still proves tamper.
+	return sawClear && lastRead < lastClear && (operands == 0 || allowsFile)
 }
 
 func classifyPOSIXUnset(out *parseOutput, command *CommandFact) {
@@ -2070,7 +2135,15 @@ func classifyStructuredPowerShellRegistryProperty(
 			continue
 		}
 		if arg == "" || !strings.HasPrefix(arg, "-") {
-			valid = false
+			// Path is positional parameter zero for the registry-property
+			// cmdlets. Accept only the first literal argv operand so later
+			// positionals cannot be misbound as Name or Value.
+			if index == 1 && pathValue == "" &&
+				structuredPowerShellStaticOperand(arg) {
+				pathValue = arg
+			} else {
+				valid = false
+			}
 			continue
 		}
 		key, joinedValue, joined := powerShellParameter(arg)
@@ -2106,7 +2179,7 @@ func classifyStructuredPowerShellRegistryProperty(
 			} else {
 				valueSeen = true
 			}
-		case "-type", "-credential", "-filter", "-include", "-exclude",
+		case "-type", "-propertytype", "-credential", "-filter", "-include", "-exclude",
 			"-erroraction", "-errorvariable", "-warningaction",
 			"-warningvariable":
 			if _, ok := consume(); !ok {
@@ -2155,6 +2228,16 @@ func classifyStructuredPowerShellRegistryProperty(
 		access = PathAccessDelete
 	}
 	appendCommandPath(out, command, access, pathValue)
+	if _, _, disabled, ok := exactWindowsRegistrySecuritySetting(*command); ok && disabled {
+		addOperation(command, OperationPolicyBypass)
+	}
+	if exactWindowsTelemetryMutation(*command) ||
+		exactWindowsAMSIRegistryDisable(*command) {
+		addOperation(command, OperationPolicyBypass)
+	}
+	if _, _, ok := exactWindowsCredentialProtectionMutation(*command); ok {
+		addOperation(command, OperationPolicyBypass)
+	}
 }
 
 func classifyStructuredPowerShellRegisterScheduledTask(
@@ -2960,6 +3043,118 @@ func classifyTee(out *parseOutput, command *CommandFact) {
 	for _, operand := range parsed.positionals {
 		appendCommandPath(out, command, access, operand)
 	}
+}
+
+// StaticPOSIXSedInPlaceLiteralMutation returns the literal line and exact
+// target for the deliberately small sed -i grammar ActionFacts owns. The
+// grammar is limited to one static absolute target and either a literal final
+// line append or a literal substitution with no flags or escapes. This keeps
+// sed's command-execution, multi-file, backup-suffix, and dynamic forms outside
+// authoritative enforcement.
+func StaticPOSIXSedInPlaceLiteralMutation(
+	command CommandFact,
+) (line string, target string, ok bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!command.ArgvComplete || len(command.Argv) != 4 ||
+		len(command.Arguments) != len(command.Argv) ||
+		command.Program != "sed" ||
+		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Argv[1] != "-i" && command.Argv[1] != "--in-place") ||
+		!staticAbsolutePOSIXPath(command.Argv[3]) {
+		return "", "", false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == QuoteMixed {
+			return "", "", false
+		}
+	}
+
+	script := command.Argv[2]
+	if len(script) == 0 || len(script) > 4096 ||
+		strings.ContainsAny(script, "\x00\r\n") {
+		return "", "", false
+	}
+	switch {
+	case strings.HasPrefix(script, "$ a "):
+		line = script[len("$ a "):]
+	case strings.HasPrefix(script, "$a "):
+		line = script[len("$a "):]
+	case strings.HasPrefix(script, "s/") && strings.Count(script, "/") == 3:
+		parts := strings.Split(script, "/")
+		if len(parts) != 4 || parts[0] != "s" || parts[1] == "" ||
+			parts[2] == "" || parts[3] != "" ||
+			strings.ContainsAny(parts[1], "\\") ||
+			strings.ContainsAny(parts[2], "\\&") {
+			return "", "", false
+		}
+		line = parts[2]
+	default:
+		return "", "", false
+	}
+	if line == "" || strings.TrimSpace(line) != line {
+		return "", "", false
+	}
+	return line, command.Argv[3], true
+}
+
+// ApplyStaticPOSIXSedInPlaceLiteralMutation applies the same closed sed -i
+// grammar to bounded literal bytes. It is intended for private lineage proofs;
+// it never interprets general sed syntax. Substitution replaces the first
+// literal occurrence on each line, matching sed's default address behavior,
+// and requires at least one actual replacement.
+func ApplyStaticPOSIXSedInPlaceLiteralMutation(
+	command CommandFact,
+	content string,
+) (mutated string, target string, ok bool) {
+	const maximumLiteralMutationBytes = 4096
+	if len(content) > maximumLiteralMutationBytes || strings.ContainsRune(content, '\x00') {
+		return "", "", false
+	}
+	_, target, ok = StaticPOSIXSedInPlaceLiteralMutation(command)
+	if !ok {
+		return "", "", false
+	}
+	script := command.Argv[2]
+	switch {
+	case strings.HasPrefix(script, "$ a "):
+		line := script[len("$ a "):]
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return content + line + "\n", target, true
+	case strings.HasPrefix(script, "$a "):
+		line := script[len("$a "):]
+		if content != "" && !strings.HasSuffix(content, "\n") {
+			content += "\n"
+		}
+		return content + line + "\n", target, true
+	default:
+		parts := strings.Split(script, "/")
+		if len(parts) != 4 || parts[0] != "s" {
+			return "", "", false
+		}
+		lines := strings.Split(content, "\n")
+		changed := false
+		for index, line := range lines {
+			replaced := strings.Replace(line, parts[1], parts[2], 1)
+			changed = changed || replaced != line
+			lines[index] = replaced
+		}
+		if !changed {
+			return "", "", false
+		}
+		return strings.Join(lines, "\n"), target, true
+	}
+}
+
+func classifyPOSIXSedInPlace(out *parseOutput, command *CommandFact) {
+	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
+	if !ok {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationWrite)
+	appendCommandPath(out, command, PathAccessWrite, target)
 }
 
 func classifyPOSIXPermissionChange(
@@ -9159,9 +9354,163 @@ func classifyWorkload(out *parseOutput, command *CommandFact, program string) {
 		addOperation(command, OperationList)
 	case "logs":
 		addOperation(command, OperationRead)
+	case "delete":
+		parsed := parseOwnedPOSIXOptions(
+			command.Argv[index:],
+			exactOptionSet(
+				"-n", "--namespace", "--context", "--kubeconfig",
+				"-f", "--filename", "-l", "--selector", "--field-selector",
+				"--grace-period", "--timeout", "--cascade", "--dry-run",
+				"-o", "--output",
+			),
+			exactOptionSet(
+				"--all", "--force", "--now", "--ignore-not-found",
+				"--wait", "--raw", "--recursive",
+			),
+			exactOptionSet("-h", "--help"),
+		)
+		if dryRun, present := parsed.values["--dry-run"]; present &&
+			dryRun != "none" {
+			command.Effect = EffectPreview
+			return
+		}
+		if parsed.preview {
+			command.Effect = EffectPreview
+			return
+		}
+		if !parsed.complete || len(parsed.positionals) == 0 {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		addOperation(command, OperationDelete)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func classifyInfrastructureAsCode(
+	out *parseOutput,
+	command *CommandFact,
+	program string,
+) {
+	if informationalInvocation(command) {
+		command.Effect = EffectPreview
+		return
+	}
+	if program == "pulumi" {
+		classifyPulumi(out, command)
+		return
+	}
+	index := 1
+	for index < len(command.Argv) && strings.HasPrefix(command.Argv[index], "-") {
+		argument := command.Argv[index]
+		if strings.HasPrefix(argument, "-chdir=") &&
+			len(strings.TrimPrefix(argument, "-chdir=")) != 0 {
+			index++
+			continue
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if index >= len(command.Argv) {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	subcommand := strings.ToLower(command.Argv[index])
+	valid, destroy, preview := classifyTerraformArguments(
+		subcommand,
+		command.Argv[index+1:],
+	)
+	if preview {
+		command.Effect = EffectPreview
+		return
+	}
+	if !valid {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if destroy {
+		addOperation(command, OperationDelete)
+	} else if !preview {
+		addOperation(command, OperationConfigChange)
+	}
+}
+
+func classifyTerraformArguments(subcommand string, arguments []string) (bool, bool, bool) {
+	if subcommand != "destroy" && subcommand != "apply" && subcommand != "plan" {
+		return false, false, false
+	}
+	destroy := subcommand == "destroy"
+	for _, argument := range arguments {
+		switch {
+		case argument == "-destroy":
+			destroy = true
+		case argument == "-auto-approve", argument == "-compact-warnings",
+			argument == "-no-color", argument == "-input=false",
+			argument == "-input=true", argument == "-lock=false",
+			argument == "-lock=true", argument == "-refresh=false",
+			argument == "-refresh=true":
+		case strings.HasPrefix(argument, "-parallelism="),
+			strings.HasPrefix(argument, "-lock-timeout="),
+			strings.HasPrefix(argument, "-state="),
+			strings.HasPrefix(argument, "-target="),
+			strings.HasPrefix(argument, "-var="),
+			strings.HasPrefix(argument, "-var-file="):
+			if strings.HasSuffix(argument, "=") {
+				return false, false, false
+			}
+		case subcommand == "apply" && argument != "" &&
+			!strings.HasPrefix(argument, "-"):
+		default:
+			return false, false, false
+		}
+	}
+	return true, destroy, subcommand == "plan"
+}
+
+func classifyPulumi(out *parseOutput, command *CommandFact) {
+	if len(command.Argv) < 2 || strings.ToLower(command.Argv[1]) != "destroy" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	preview := false
+	for index := 2; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		switch argument {
+		case "--yes", "--skip-preview", "--refresh", "--continue-on-error",
+			"--remove", "--exclude-protected", "--suppress-outputs":
+		case "--preview-only":
+			preview = true
+		case "--stack", "--cwd", "--target", "--parallel", "--message",
+			"--exec-kind":
+			index++
+			if index >= len(command.Argv) || command.Argv[index] == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+		default:
+			key, value, joined := strings.Cut(argument, "=")
+			if !joined || value == "" ||
+				!hasString(key, "--stack", "--cwd", "--target", "--parallel", "--message", "--exec-kind") {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+		}
+	}
+	if preview {
+		command.Effect = EffectPreview
+		return
+	}
+	addOperation(command, OperationDelete)
+}
+
+func hasString(value string, candidates ...string) bool {
+	for _, candidate := range candidates {
+		if value == candidate {
+			return true
+		}
+	}
+	return false
 }
 
 func classifyGit(out *parseOutput, command *CommandFact) {
@@ -10106,6 +10455,8 @@ func classifyCredentialCLI(
 	switch program {
 	case "aws", "aws.exe", "aws.cmd":
 		valueOptions := exactOptionSet(
+			"--bucket", "--db-instance-identifier", "--delete",
+			"--instance-ids", "--stack-name", "--table-name",
 			"--ca-bundle", "--cli-connect-timeout", "--cli-read-timeout",
 			"--cli-binary-format", "--cli-input-json", "--cli-input-yaml",
 			"--color", "--endpoint-url", "--output", "--profile", "--query",
@@ -10116,6 +10467,8 @@ func classifyCredentialCLI(
 			"--role-session-name", "--secret-id", "--secret-id-list",
 			"--serial-number", "--source-identity", "--starting-token",
 			"--tags", "--token-code", "--transitive-tag-keys",
+			"--user-name", "--role-name", "--path",
+			"--assume-role-policy-document", "--policy-arn",
 			"--version-id", "--version-stage", "--web-identity-token",
 		)
 		parsed := parseOwnedPOSIXOptions(
@@ -10126,8 +10479,10 @@ func classifyCredentialCLI(
 				"--no-cli-auto-prompt", "--no-cli-pager",
 				"--no-include-planned-deletion", "--no-paginate",
 				"--no-recursive", "--no-sign-request",
+				"--no-retain-automated-backups", "--no-skip-final-snapshot",
 				"--no-verify-ssl", "--no-with-decryption",
-				"--recursive", "--with-decryption",
+				"--recursive", "--retain-automated-backups",
+				"--skip-final-snapshot", "--with-decryption",
 			),
 			exactOptionSet("--help", "--version"),
 		)
@@ -10241,6 +10596,11 @@ func classifyCredentialCLI(
 			match = true
 		}
 	case "security":
+		if exactMacOSLoginKeychainDumpArgv(command.Argv) &&
+			staticArguments(command.Arguments) {
+			addOperation(command, OperationCredentialRead)
+			break
+		}
 		consumes := optionValues(
 			"-a", "-c", "-d", "-j", "-l", "-p", "-s", "-t",
 		)
@@ -10265,6 +10625,110 @@ func classifyCredentialCLI(
 	}
 	if match {
 		addOperation(command, OperationCredentialRead)
+	}
+}
+
+// classifySQLClient admits only the closed command-line subset whose static
+// query operands are consumed by the high-assurance SQL semantic owners. A
+// client option that could redirect input, change parsing, or otherwise alter
+// execution remains partial instead of borrowing authority from the shell
+// parser alone.
+func classifySQLClient(out *parseOutput, command *CommandFact, program string) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	var valueOptions, joinedShort, flagOptions map[string]struct{}
+	maxPositionals := 0
+	switch program {
+	case "psql":
+		valueOptions = exactOptionSet(
+			"-c", "--command", "-d", "--dbname", "-h", "--host",
+			"-p", "--port", "-U", "--username", "-v", "--set",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet(
+			"-1", "--single-transaction", "-X", "--no-psqlrc", "-q", "--quiet",
+			"-w", "--no-password", "-W", "--password", "--no-readline",
+		)
+		maxPositionals = 2
+	case "mysql", "mariadb":
+		valueOptions = exactOptionSet(
+			"-e", "--execute", "-h", "--host", "-P", "--port",
+			"-u", "--user", "-p", "--password", "--protocol", "--socket",
+			"--ssl-mode",
+		)
+		// mysql documents -pPASSWORD as a single static argv operand. Retain
+		// authority for that exact source-observed form; bare -p remains a
+		// value option and every other joined short option stays unsupported.
+		joinedShort = exactOptionSet("-p")
+		flagOptions = exactOptionSet(
+			"-B", "--batch", "-N", "--skip-column-names", "-s", "--silent",
+			"--skip-ssl", "--compress",
+		)
+		maxPositionals = 1
+	case "sqlcmd":
+		valueOptions = exactOptionSet(
+			"-Q", "-q", "-S", "-d", "-U", "-P", "-l", "-t", "-v",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet("-b", "-C", "-E", "-N", "-X")
+	case "snowsql":
+		valueOptions = exactOptionSet(
+			"-q", "--query", "-a", "--accountname", "-u", "--username",
+			"-d", "--dbname", "-s", "--schemaname", "-w", "--warehouse",
+			"-r", "--rolename", "-c", "--connection", "-o", "--option",
+		)
+		joinedShort = exactOptionSet()
+		flagOptions = exactOptionSet()
+	default:
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+
+	positionals := 0
+	for index := 1; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		if argument == "--" {
+			positionals += len(command.Argv) - index - 1
+			break
+		}
+		if _, ok := flagOptions[argument]; ok {
+			continue
+		}
+		if _, ok := valueOptions[argument]; ok {
+			if index+1 >= len(command.Argv) || command.Argv[index+1] == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			index++
+			continue
+		}
+		if strings.HasPrefix(argument, "--") {
+			name, value, joined := strings.Cut(argument, "=")
+			if _, ok := valueOptions[name]; !ok || !joined || value == "" {
+				out.markPartial(IssueUnknownOperandGrammar)
+				return
+			}
+			continue
+		}
+		joined := false
+		for option := range joinedShort {
+			if strings.HasPrefix(argument, option) && len(argument) > len(option) {
+				joined = true
+				break
+			}
+		}
+		if joined {
+			continue
+		}
+		if strings.HasPrefix(argument, "-") {
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		positionals++
+	}
+	if positionals > maxPositionals {
+		out.markPartial(IssueUnknownOperandGrammar)
 	}
 }
 
@@ -10598,6 +11062,12 @@ func classifySudo(out *parseOutput, command *CommandFact) {
 	}
 	if len(command.Argv) > 1 {
 		addOperation(command, OperationPrivilege)
+		if len(command.Argv) == 4 && command.Argv[1] == "log" &&
+			exactMacOSUnifiedLogEraseArgv(command.Argv[1:]) &&
+			staticArguments(command.Arguments) {
+			addOperation(command, OperationDelete)
+			addOperation(command, OperationPolicyBypass)
+		}
 		return
 	}
 	out.markPartial(IssueUnknownOperandGrammar)
@@ -10803,6 +11273,10 @@ func classifySchedule(out *parseOutput, command *CommandFact, program string) {
 					appendPath(out, command.ID, PathAccessRead, candidate)
 				}
 				appendFileToProcessFlow(out, command.ID)
+			}
+			if disabled, _, ok := exactLinuxSecurityControlState(command); ok && disabled {
+				addOperation(command, OperationConfigChange)
+				addOperation(command, OperationPolicyBypass)
 			}
 		case "status", "show", "list-units", "list-unit-files", "is-active",
 			"is-enabled", "cat":

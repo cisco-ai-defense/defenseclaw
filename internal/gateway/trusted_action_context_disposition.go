@@ -44,6 +44,26 @@ func applyTrustedActionContextDisposition(
 	for index := range adjusted {
 		finding := adjusted[index]
 
+		if canonicalTrustedRuleID(finding.RuleID) ==
+			"PRIVILEGE.CONTAINER_RUNTIME_SOCKET_ACCESS" {
+			if trustedActionProvesContainerRuntimeSocketUse(enforcementFacts) {
+				finding = finding.withTrustedActionProof(
+					trustedActionContextFindingProof(
+						finding.RuleID,
+						enforcementFacts,
+					),
+				)
+			} else {
+				// Merely reading, listing, stating, or lexically mentioning a
+				// runtime socket is useful local telemetry, but it does not prove
+				// use of the privileged API. Partial parses remain visible here
+				// without gaining alert or enforcement authority.
+				finding = trustedActionAuditFinding(finding)
+			}
+			adjusted[index] = finding
+			continue
+		}
+
 		if trustedActionSensitivePathRule(finding.RuleID) {
 			switch trustedActionClassifySensitivePathRisk(enforcementFacts, finding.RuleID) {
 			case trustedActionSensitivePathUncertain:
@@ -101,6 +121,37 @@ func applyTrustedActionContextDisposition(
 		)
 	}
 	return adjusted
+}
+
+func trustedActionProvesContainerRuntimeSocketUse(
+	facts actionfacts.Facts,
+) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if !matchesContainerRuntimeSocket(semanticPathValue(candidate)) ||
+			!slices.Contains(
+				[]actionfacts.PathAccess{
+					actionfacts.PathAccessConnect,
+					actionfacts.PathAccessWrite,
+					actionfacts.PathAccessAppend,
+				},
+				candidate.Access,
+			) ||
+			!trustedActionExecutingCommand(facts, candidate.CommandID) {
+			continue
+		}
+		for _, command := range facts.Commands {
+			if command.ID != candidate.CommandID {
+				continue
+			}
+			return slices.Contains(command.Operations, actionfacts.OperationConnect) ||
+				slices.Contains(command.Operations, actionfacts.OperationWrite) ||
+				slices.Contains(command.Operations, actionfacts.OperationAppend)
+		}
+	}
+	return false
 }
 
 func trustedActionContextFindingProof(

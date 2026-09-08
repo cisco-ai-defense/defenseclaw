@@ -2,6 +2,7 @@
   "title": "Policies",
   "pages": [
     "index",
+    "deterministic-detection",
     "cel",
     "rulepack-validation",
     "creator",

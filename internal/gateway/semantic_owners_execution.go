@@ -23,9 +23,10 @@ const (
 	// pipeline. The CEL surface intentionally stays at the source-operation
 	// level so the whole shipped catalog remains below its bounded static-cost
 	// ceiling, matching the other command-specific semantic owners.
-	semanticCurlDownloadExecExpression = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
-	semanticWgetDownloadExecExpression = `f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
-	semanticBase64DecodeExecExpression = `f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)`
+	semanticCurlDownloadExecExpression   = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
+	semanticWgetDownloadExecExpression   = `f.commands.exists(c, c.argv_complete && c.program in ['wget', 'wget.exe'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))`
+	semanticBase64DecodeExecExpression   = `f.commands.exists(c, c.argv_complete && c.program in ['base64', 'base64.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DECODE in c.operations)`
+	semanticRemoteIPStagedExecExpression = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'wget'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations)`
 )
 
 func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {
@@ -54,4 +55,8 @@ func base64DecodeExecPrerequisite(facts actionfacts.Facts) bool {
 		"base64",
 		"base64.exe",
 	)
+}
+
+func remoteIPStagedExecPrerequisite(facts actionfacts.Facts) bool {
+	return actionfacts.StaticRemoteIPDownloadExecuteSameArtifact(facts)
 }

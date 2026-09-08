@@ -106,6 +106,27 @@ func TestTrustedActionProofBoundaryAllowsSemanticAndExactProof(t *testing.T) {
 	}
 }
 
+func TestTrustedActionProofBoundaryAllowsBoundedActionFactsSubgraph(t *testing.T) {
+	finding := RuleFinding{
+		RuleID: "CMD-REMOTE-PAYLOAD-EXEC-CLEANUP", Severity: "CRITICAL",
+		enforcement: findingEnforcementAllowed,
+	}.withTrustedActionProof(newActionFactsSubgraphFindingProof(
+		"CMD-REMOTE-PAYLOAD-EXEC-CLEANUP", true, true,
+	))
+	got := applyTrustedActionProofBoundary([]RuleFinding{finding}, true)
+	if len(got) != 1 || !got[0].contributesToEnforcement() {
+		t.Fatalf("bounded ActionFacts subgraph proof was rejected: %#v", got)
+	}
+
+	incomplete := finding.withTrustedActionProof(newActionFactsSubgraphFindingProof(
+		"CMD-REMOTE-PAYLOAD-EXEC-CLEANUP", false, true,
+	))
+	got = applyTrustedActionProofBoundary([]RuleFinding{incomplete}, true)
+	if len(got) != 1 || got[0].contributesToEnforcement() {
+		t.Fatalf("incomplete bounded subgraph proof was authorized: %#v", got)
+	}
+}
+
 func TestTrustedSemanticOwnerFindingProofRequiresCompleteOuterAction(t *testing.T) {
 	for _, test := range []struct {
 		name    string

@@ -8,6 +8,7 @@
     "setup",
     "connectors",
     "capability-matrix",
+    "benchmarks",
     "ai-discovery",
     "hitl",
     "---Policies & Defaults---",

@@ -538,7 +538,7 @@ func (sp spec) decide(opts Options, body []byte) int {
 	}
 
 	action, ok := rawString(fields, "action")
-	if !ok || (action != "allow" && action != "block" && action != "confirm") {
+	if !ok || (action != "allow" && action != "alert" && action != "block" && action != "confirm") {
 		if sp.style == styleClaudeCode || sp.style == styleCodex || sp.style == styleActionStderr {
 			return failResponse(opts, sp, normalizeFailMode(opts.FailMode), "invalid or missing action in gateway response")
 		}

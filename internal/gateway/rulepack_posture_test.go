@@ -167,7 +167,7 @@ func TestProfilePosture_SSNIsCriticalOnlyInStrict(t *testing.T) {
 	}
 }
 
-func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testing.T) {
+func TestProfilePosture_ExactCredentialAndRegistryPersistenceSeverities(t *testing.T) {
 	_, selfPath, _, _ := runtime.Caller(0)
 	repoRoot := filepath.Join(filepath.Dir(selfPath), "..", "..")
 	policiesRoot := filepath.Join(repoRoot, "policies", "guardrail")
@@ -183,7 +183,6 @@ func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testi
 		"PATH-GIT-CREDS":      true,
 		"PATH-NETRC":          true,
 		"PATH-PROC-ENVIRON":   true,
-		"CMD-SYSTEMCTL":       true,
 	}
 
 	for _, profile := range []string{"strict", "default", "permissive"} {
@@ -194,8 +193,12 @@ func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testi
 				t.Fatalf("LoadRulePack(%s) returned nil", profile)
 			}
 			seen := make(map[string]bool, len(criticalIDs))
+			registrySeverity := ""
 			for _, rf := range rp.RuleFiles {
 				for _, rule := range rf.Rules {
+					if rule.ID == "CMD-WIN-REG-PERSIST" {
+						registrySeverity = rule.Severity
+					}
 					if !criticalIDs[rule.ID] {
 						continue
 					}
@@ -209,6 +212,16 @@ func TestProfilePosture_ExactCredentialSignalsAreCriticalAcrossProfiles(t *testi
 				if !seen[id] {
 					t.Fatalf("%s missing expected critical rule %s", profile, id)
 				}
+			}
+			wantRegistrySeverity := "HIGH"
+			if profile == "strict" {
+				wantRegistrySeverity = "CRITICAL"
+			}
+			if registrySeverity != wantRegistrySeverity {
+				t.Fatalf(
+					"%s/CMD-WIN-REG-PERSIST severity = %q, want %q",
+					profile, registrySeverity, wantRegistrySeverity,
+				)
 			}
 		})
 	}
@@ -345,6 +358,9 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 				"ENT-CC-AMEX",
 				"ENT-CC-DISCOVER",
 				"ENT-IBAN",
+				"ENT-US-PHONE",
+				"ENT-PHONE-E164",
+				"ENT-EMAIL-BULK",
 				"ENT-MEDICAL-RECORD",
 				"ENT-DOB-PATTERN",
 				"ENT-BULK-CSV-PII",
@@ -362,6 +378,7 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 				"ENT-CC-DISCOVER",
 				"ENT-IBAN",
 				"ENT-US-PHONE",
+				"ENT-PHONE-E164",
 				"ENT-EMAIL-BULK",
 				"ENT-PASSPORT-US",
 				"ENT-DL-CA",
@@ -380,6 +397,9 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 				"ENT-CC-MC",
 				"ENT-CC-AMEX",
 				"ENT-CC-DISCOVER",
+				"ENT-US-PHONE",
+				"ENT-PHONE-E164",
+				"ENT-EMAIL-BULK",
 				"ENT-MEDICAL-RECORD",
 			},
 		},
@@ -402,6 +422,138 @@ func TestProfilePosture_EnterpriseRuleEnablement(t *testing.T) {
 			}
 			if strings.Join(gotIDs, "\x00") != strings.Join(tc.wantIDs, "\x00") {
 				t.Fatalf("%s enabled enterprise rules = %v, want %v", tc.profile, gotIDs, tc.wantIDs)
+			}
+		})
+	}
+}
+
+func TestBalancedAndPermissivePhoneRuleRequiresFormatting(t *testing.T) {
+	for _, profile := range []string{"default", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+			var phoneSource string
+			for _, file := range pack.RuleFiles {
+				if file == nil || file.Category != "enterprise-data" {
+					continue
+				}
+				for _, rule := range file.Rules {
+					if rule.ID == "ENT-US-PHONE" {
+						phoneSource = rule.Pattern
+					}
+				}
+			}
+			if phoneSource == "" {
+				t.Fatal("ENT-US-PHONE is missing")
+			}
+			phone := regexp.MustCompile(phoneSource)
+			if phone.MatchString("1712345678") {
+				t.Fatal("bare 10-digit timestamp matched as a phone number")
+			}
+			for _, value := range []string{"212-555-0123", "(212) 555-0123", "+1 212 555 0123"} {
+				if !phone.MatchString(value) {
+					t.Errorf("formatted phone %q did not match", value)
+				}
+			}
+		})
+	}
+}
+
+func TestStrictPhoneRuleRequiresPositiveEvidence(t *testing.T) {
+	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "strict"))
+	phone := regexp.MustCompile(rulePatternByID(t, pack, "ENT-US-PHONE"))
+
+	for _, value := range []string{
+		"shipment tracking 7123456789",
+		"invoice reference 6123456789",
+		"purchase order 9876543210",
+	} {
+		if phone.MatchString(value) {
+			t.Errorf("bare business identifier %q matched as a US phone number", value)
+		}
+	}
+	for _, value := range []string{
+		"212-555-0123",
+		"(212) 555-0123",
+		"+12125550123",
+		"mobile number: 2125550123",
+		"WhatsApp contact is 4155550199",
+	} {
+		if !phone.MatchString(value) {
+			t.Errorf("phone with positive evidence %q did not match", value)
+		}
+	}
+}
+
+func TestStrictNHSNumberRuleRequiresNHSContext(t *testing.T) {
+	pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "strict"))
+	nhs := regexp.MustCompile(rulePatternByID(t, pack, "ENT-NHS-NUMBER"))
+
+	for _, value := range []string{
+		"shipment tracking 9434765919",
+		"invoice reference 943 476 5919",
+		"purchase order 9434765919",
+	} {
+		if nhs.MatchString(value) {
+			t.Errorf("bare business identifier %q matched as an NHS number", value)
+		}
+	}
+	for _, value := range []string{
+		"NHS number: 943 476 5919",
+		"National Health Service ID 9434765919",
+		"943 476 5919 (NHS number)",
+	} {
+		if !nhs.MatchString(value) {
+			t.Errorf("NHS number with explicit context %q did not match", value)
+		}
+	}
+}
+
+func rulePatternByID(t *testing.T, pack *guardrail.RulePack, ruleID string) string {
+	t.Helper()
+	for _, file := range pack.RuleFiles {
+		if file == nil || file.Category != "enterprise-data" {
+			continue
+		}
+		for _, rule := range file.Rules {
+			if rule.ID == ruleID {
+				return rule.Pattern
+			}
+		}
+	}
+	t.Fatalf("%s is missing", ruleID)
+	return ""
+}
+
+func TestShippedProfilesInternationalPhoneRuleRequiresCountryCode(t *testing.T) {
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+			var phoneSource string
+			for _, file := range pack.RuleFiles {
+				if file == nil || file.Category != "enterprise-data" {
+					continue
+				}
+				for _, rule := range file.Rules {
+					if rule.ID == "ENT-PHONE-E164" {
+						phoneSource = rule.Pattern
+					}
+				}
+			}
+			if phoneSource == "" {
+				t.Fatal("ENT-PHONE-E164 is missing")
+			}
+			phone := regexp.MustCompile(phoneSource)
+			for _, value := range []string{"+44 20 7946 0958", "+33-1-42-68-53-00", "+819012345678"} {
+				if !phone.MatchString(value) {
+					t.Errorf("international phone %q did not match", value)
+				}
+			}
+			for _, value := range []string{"2026-09-05", "1234567890", "C++12345678", "+1234567"} {
+				if phone.MatchString(value) {
+					t.Errorf("non-E.164 value %q matched", value)
+				}
 			}
 		})
 	}

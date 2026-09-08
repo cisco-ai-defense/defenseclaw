@@ -1,0 +1,151 @@
+---
+title: Deterministic Detection Benchmarks
+description: Public F1, false-positive, benign-block, YARA, privacy, and bounded-chain results for DefenseClaw's deterministic guardrails.
+keywords:
+  - DefenseClaw benchmarks
+  - deterministic agent security
+  - tool call detection F1
+  - agent guardrail false positive rate
+  - CEL regex YARA benchmark
+---
+
+DefenseClaw is designed to block **proved effects**, not merely suspicious
+words. We evaluated that design across public malicious-command, PII,
+tool-injection, and honest agent-trajectory datasets.
+
+<Callout type="info" title="How to read these results">
+Balanced is the public name for the runtime `default` profile. Coverage and
+authored conformance results are kept separate from binary accuracy. A
+successful attack trajectory does not make every tool call a malicious true
+positive.
+</Callout>
+
+## Headline validation results
+
+| Benchmark | Profile | TP/TN/FP/FN | F1 | FPR | Benign blocks |
+| --- | --- | ---: | ---: | ---: | ---: |
+| Exact-proof commands | Balanced/default | 9/7,908/0/0 | **100%** | **0%** | 0/7,908 |
+| Exact-proof commands | Permissive | 9/7,908/0/0 | **100%** | **0%** | 0/7,908 |
+| Exact-proof commands | Strict | 9/7,900/8/0 | 69.23% | 0.1012% | 0/7,908 |
+| English privacy pack | All profiles | 5,929/13,018/0/1,454 | **89.08%** | **0%** | 0/13,018 |
+| Ylemis independent PII holdout | All profiles | 4,190/1,756/0/270 | **96.88%** | **0%** | 0/1,756 |
+| InjecAgent YARA | Scanner validation | 7/53/0/2 | **87.50%** | **0%** | Not a blocking lane |
+
+The exact-proof command result has only nine positives. Its 100% recall point
+estimate therefore has a 95% Wilson lower bound of 70.09%. The observed
+0/7,908 FPR has a 95% Wilson upper bound of 0.04855%. We publish both facts
+because a perfect point estimate should not be mistaken for broad coverage.
+
+## Does it interrupt benign work?
+
+We separately ran honest agent and terminal trajectories. No evaluated benign
+call was blocked.
+
+| Public dataset | Balanced/default and permissive FPR | Strict FPR | Benign blocks |
+| --- | ---: | ---: | ---: |
+| [ISETrace](https://huggingface.co/datasets/valiere/ISETrace), all splits | 0% | 0% | 0 |
+| [TerminalBench trajectories](https://huggingface.co/datasets/yoonholee/terminalbench-trajectories), all splits | 0% | 0% | 0 |
+| [LinuxArena](https://huggingface.co/datasets/anonymouslinuxarena/linuxarena-public), validation | 0.8856% | 0.9741% | 0 |
+| LinuxArena, test | 2.7753% | 2.9543% | 0 |
+
+LinuxArena is the clearest remaining noise problem. Most findings are
+legitimate secret-like values used against local services. They are allow-only,
+but they can still create alert fatigue. Destination- and policy-aware
+suppression is the next improvement area.
+
+## What changed
+
+<Cards>
+  <Card title="34 exact atomic rules" href="/docs/policies/deterministic-detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
+  <Card title="18 bounded chains" href="/docs/policies/deterministic-detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
+  <Card title="Five YARA signatures" href="/docs/policies/deterministic-detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
+  <Card title="Five opt-in packs + one staged contract" href="/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
+</Cards>
+
+The detector now uses four layers:
+
+1. **ActionFacts** normalize a call into operation, resource, scope,
+   sensitivity, result status, control flow, and value-minimized identity.
+2. **Bounded CEL and regex selectors** cheaply identify candidates. A selector
+   is not sufficient authority to block.
+3. **Code-owned semantic validators** parse argv, SQL, Windows, Kubernetes,
+   artifact lineage, and mutation boundaries when exact meaning matters.
+4. **Bounded chain proofs** join only successful events in one authenticated
+   session, using exact identities and a fixed 30-minute/eight-predecessor
+   limit.
+
+Failed, denied, cancelled, cross-session, replayed, unresolved,
+identity-mismatched, or mutated sequences cannot complete a proof.
+
+Read the [deterministic detection reference](/docs/policies/deterministic-detection)
+for the complete rule-family inventory, all 34 exact rule IDs, every bounded
+chain and enforcement posture, YARA coverage, and protection-pack status.
+
+## Multi-step attacks
+
+[MonitoringBench](https://huggingface.co/datasets/neur26anonsub/ctrldataset2026)
+provided 2,442 environment-successful attacks with exact tool arguments. We
+found 41 closed sudoers proofs across fixed development, validation, and test
+splits. That is a proof-yield count, not a claim of 41/2,442 recall: most
+trajectory calls are setup, discovery, or dual-use actions.
+
+The authored reverse-shell-artifact-to-persistence fixture is the first new
+fully blockable multi-step proof. Every profile scored 4 TP, 10 TN, 0 FP, and
+0 FN and blocked all four complete proofs. Hard negatives include mismatched
+artifacts, intervening mutation, failed steps, and incomplete chains.
+
+Several public contextual datasets remain difficult:
+
+| Dataset | Result | Why it did not become a default block |
+| --- | --- | --- |
+| [AgentDojo](https://github.com/ethz-spylab/agentdojo) | 0/67/0/11 | Contextual positives lack complete block truth |
+| [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | 0/438/0/438 | Detect-only labels do not establish exact lineage |
+| [InjecAgent](https://github.com/uiuc-kang-lab/InjecAgent) chains | 0/0/0/544 | No stable source/sink identity in the normalized evidence |
+
+We expose these misses rather than converting nearby suspicious words into
+false-positive-prone rules.
+
+## How labels were produced
+
+Public source labels were normalized, deduplicated, and group-split with fixed
+seed `741983`. Optional GPT-OSS batch inference proposed action types and
+malicious, benign, contextual, or unresolved labels. No human review was used.
+
+A deterministic finalizer then accepted a malicious positive only when the
+literal call proved a standalone effect or a complete bounded sequence proved
+every required role. Missing identity, unknown result, dynamic operands,
+conditional execution, intervening mutation, or unresolved policy context
+forced an abstention. GPT-OSS was never used at runtime.
+
+<Callout type="warn" title="Known validity limits">
+Offline model labels can share correlated errors, retrospective test sets were
+inspected during tuning, and authored conformance fixtures do not estimate
+population accuracy. The command validation positive class is small, while
+LinuxArena shows that alert noise can remain even when block noise is zero.
+</Callout>
+
+## Reproduce it
+
+The public harness, source revisions, schemas, normalizers, label finalizers,
+fixtures, and machine-readable scorecard live in the repository's
+[`benchmarks/`](https://github.com/cisco-ai-defense/defenseclaw/tree/main/benchmarks)
+directory. The harness downloads source data from its original public location
+and never executes dataset content.
+
+```bash
+go test ./benchmarks/...
+
+go run ./benchmarks/cmd/defenseclaw-benchmark run \
+  --corpus benchmarks/fixtures/smoke.jsonl \
+  --dataset-lock benchmarks/datasets.lock.json \
+  --profiles default,permissive,strict \
+  --gate \
+  --output outputs/benchmarks/smoke
+
+go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/smoke
+```
+
+For complete dataset commands, per-split matrices, initial-state results,
+labeling methodology, every rule family, and replication steps, read
+[`benchmarks/DETERMINISTIC-DETECTION-BENCHMARKS.md`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/benchmarks/DETERMINISTIC-DETECTION-BENCHMARKS.md).

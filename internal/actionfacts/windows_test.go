@@ -2528,6 +2528,24 @@ func TestCMDOwnedScheduleAndLocalGroupGrammar(t *testing.T) {
 		})
 	}
 
+	for _, source := range []string{
+		"schtasks /Delete /TN Demo",
+		"schtasks.exe /Delete /TN Demo /F",
+	} {
+		source := source
+		t.Run("scheduled task delete "+source, func(t *testing.T) {
+			t.Parallel()
+			out := parseCMD(source, 1, 0)
+			classifyOutput(&out)
+			if out.status != StatusComplete || len(out.commands) != 1 ||
+				out.commands[0].Effect != EffectExecute ||
+				!commandHasOperation(out.commands[0], OperationDelete) ||
+				!out.facts("cmd", "").EnforcementEligible() {
+				t.Fatalf("delete output = %#v", out)
+			}
+		})
+	}
+
 	help := parseCMD(`schtasks /Create /?`, 1, 0)
 	classifyOutput(&help)
 	if help.status != StatusComplete || len(help.commands) != 1 ||
@@ -2550,6 +2568,8 @@ func TestCMDOwnedScheduleAndLocalGroupGrammar(t *testing.T) {
 		`schtasks /Create /TN Demo /TR C:\fixture.exe /FutureMode`,
 		`schtasks /Query /TR C:\fixture.exe`,
 		`schtasks /Query /SC ONLOGON`,
+		"schtasks /Delete",
+		"schtasks /Delete /TN Demo /TR C:\\fixture.exe",
 	} {
 		source := source
 		t.Run("invalid schedule "+source, func(t *testing.T) {

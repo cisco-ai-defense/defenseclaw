@@ -11,7 +11,10 @@ import (
 )
 
 func TestDiscoverClassifiesOnlyUnchangedManifestTrackedSkillsBundled(t *testing.T) {
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
 	bundled := writeTestSkill(t, root, filepath.Join("productivity", "vendor-docs"), "vendor-docs")

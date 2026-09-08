@@ -35,14 +35,35 @@ func migrateToolChainPendingState(ex dbExecer) error {
 			parse_status TEXT NOT NULL CHECK (parse_status IN (
 				'not_applicable','complete','partial','unsupported','invalid',
 				'limit_exceeded','ambiguous')),
-			-- Zero is an invocation-only marker; 1365 (0x555) is the
-			-- immutable mask of the six step-one bits.
+			-- Zero is an invocation-only marker; 5461 (0x1555) contains
+			-- the original seven step-one bits, 8192 is the three-step
+			-- chain's middle bit, 32768 is the eighth chain's step one,
+			-- 131072 is the ninth chain's step one, and 524288 is the
+			-- conservative intervening-artifact-mutation barrier, and 1048576
+			-- is the tenth chain's step one. Bits 22 and 23 are the SQL
+			-- terminal-success chain's two pending operation roles, and bit 24
+			-- is its exact same-connection disable barrier. Bits 25 through 27
+			-- are the Kubernetes proof's three success-gated roles and bit 28 is
+			-- its exact manifest-mutation barrier. Bits 29 and 30 are the
+			-- wireless capture/deauthentication success-gated roles. Bits 31
+			-- and 32 are the secretsdump/PsExec success-gated roles. Bits 33 and
+			-- 34 are the cloud IAM principal/admin success-gated roles. Bits 35
+			-- through 37 are the privileged CronJob patch/create roles and its
+			-- exact same-CronJob mutation barrier. Bits 38 through 40 are the SQL
+			-- command-UDF create/invoke roles and its exact-function barrier. Bits 41
+			-- through 43 are the staged reverse-shell write, persistence install, and
+			-- exact same-path rewrite barrier. Bit 63 is permanently reserved because
+			-- SQLite INTEGER is signed.
 			detection_step_mask INTEGER NOT NULL
-				CHECK (detection_step_mask BETWEEN 0 AND 1365 AND
-					(detection_step_mask & ~1365) = 0),
+				CHECK (detection_step_mask BETWEEN 0 AND 17592183600469 AND
+					(detection_step_mask & ~17592183600469) = 0),
 			enforcement_step_mask INTEGER NOT NULL
-				CHECK (enforcement_step_mask BETWEEN 0 AND 1365 AND
+				CHECK (enforcement_step_mask BETWEEN 0 AND 17592183600469 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
+			enforcement_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(enforcement_join_digests) <= 791),
+			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(enforcement_output_join_digests) <= 791),
 			prepared_time_unix_nano INTEGER NOT NULL
 				CHECK (prepared_time_unix_nano > 0),
 			expires_time_unix_nano INTEGER NOT NULL

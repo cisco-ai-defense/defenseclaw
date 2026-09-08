@@ -422,15 +422,9 @@ func buildVerdictWithConfig(ruleFindings []RuleFinding, direction string, cfg *c
 	severity := HighestSeverity(ruleFindings)
 	confidence := HighestConfidence(ruleFindings, severity)
 
-	enforceable := enforceableRuleFindings(ruleFindings)
-	action := guardrailActionAllow
-	if len(enforceable) > 0 {
-		action = guardrailRuntimeAction(
-			cfg,
-			HighestSeverity(enforceable),
-			confirmable,
-		)
-	}
+	action := guardrailRuntimeActionForFindings(
+		cfg, "", ruleFindings, confirmable,
+	)
 
 	reasons := make([]string, 0, minInt(len(ruleFindings), 5))
 	for i, f := range ruleFindings {

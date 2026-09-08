@@ -212,6 +212,26 @@ func analyze(input Input) Facts {
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	facts.SensitiveEgressArtifactWrites =
+		projectSensitiveEgressArtifactWrites(input)
+	facts.StructuredTextReplacements =
+		projectStructuredTextReplacements(input)
+	facts.SQLServerCommandExecutions =
+		projectSQLServerCommandExecutions(input)
+	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
+	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
+	facts.PrivilegedKubernetesOperations =
+		projectPrivilegedKubernetesOperations(input, facts)
+	facts.KubernetesCronJobOperations =
+		projectKubernetesCronJobOperations(input, facts)
+	facts.WirelessCaptureDeauthOperations =
+		projectWirelessCaptureDeauthOperations(input)
+	facts.CloudIAMPrincipalOperations =
+		projectCloudIAMPrincipalOperations(input, facts)
+	facts.CredentialRemoteExecutionOperations =
+		projectCredentialRemoteExecutionOperations(input)
+	facts.StagedPayloadPersistenceOperations =
+		projectStagedPayloadPersistenceOperations(input)
 	return facts
 }
 
@@ -1042,9 +1062,12 @@ func argsExecutionTool(tool string) bool {
 		return true
 	}
 	switch name {
+	case "aws_cli":
+		return true
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe",
 		"cmd", "cmd.exe",
-		"bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
+		"bash", "sh", "zsh", "dash", "ksh", "mksh", "fish",
+		"persist":
 		return true
 	default:
 		return false
@@ -1283,6 +1306,13 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		return transferPathToolSemantics(OperationCopy, toolPathCopy), true
 	case "movefile", "move_file", "move-file":
 		return transferPathToolSemantics(OperationMove, toolPathMove), true
+	case "decodefile", "decode_file", "decode-file":
+		// This schema is deliberately byte-to-byte, with one exact input and
+		// one exact output. Archive extraction is excluded because a destination
+		// directory does not prove any member's derived identity.
+		return transferPathToolSemantics(OperationDecode, toolPathCopy), true
+	case "executefile", "execute_file", "execute-file":
+		return pathToolSemantics(PathAccessExecute, OperationExecute), true
 	case "webfetch", "web_fetch", "web-fetch",
 		"httpfetch", "http_fetch", "http-fetch",
 		"fetch",
@@ -1753,6 +1783,9 @@ func equivalentCommandFact(left, right CommandFact) bool {
 		) ||
 		left.Program != right.Program ||
 		left.ArgvComplete != right.ArgvComplete ||
+		left.LiteralStdin != right.LiteralStdin ||
+		left.LiteralStdinComplete != right.LiteralStdinComplete ||
+		left.LiteralStdinAmbiguous != right.LiteralStdinAmbiguous ||
 		!equivalentCommandArgv(left.Argv, right.Argv, left.Dialect) ||
 		!equalComparableSlices(left.Operations, right.Operations) ||
 		!equalComparableSlices(left.Redirects, right.Redirects) ||

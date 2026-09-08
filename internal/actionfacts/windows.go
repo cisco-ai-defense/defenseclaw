@@ -106,6 +106,11 @@ func parseWindows(source string, startID int64, wrapperDepth int, dialect window
 		out.markLimit(IssueWrapperLimit)
 		return out
 	}
+	if dialect == windowsPowerShell {
+		if exact, ok := parseExactPowerShellAMSIReflection(source, startID); ok {
+			return exact
+		}
+	}
 
 	if wrapper, ok := windowsExactWrapper(source, dialect); ok {
 		if wrapperDepth == maxWrapperDepth {
@@ -668,7 +673,7 @@ func windowsLex(source string, dialect windowsDialect, out *parseOutput) ([]wind
 		}
 
 		if dialect == windowsPowerShell && r == '$' {
-			if literal, end, ok := powerShellStaticSwitchBoolean(
+			if literal, end, ok := powerShellStaticBooleanConstant(
 				runes,
 				i,
 				value.String(),
@@ -920,12 +925,15 @@ func windowsExtendedPathPrefixQuestion(
 		(runes[index+1] == '\\' || runes[index+1] == '/')
 }
 
-func powerShellStaticSwitchBoolean(
+func powerShellStaticBooleanConstant(
 	runes []rune,
 	start int,
 	prefix string,
 ) (literal string, end int, ok bool) {
-	if !strings.HasSuffix(prefix, ":") || start < 0 || start >= len(runes) {
+	// PowerShell's automatic boolean constants are static both as standalone
+	// parameter values and in the joined -Switch:$true form.
+	if prefix != "" && !strings.HasSuffix(prefix, ":") ||
+		start < 0 || start >= len(runes) {
 		return "", 0, false
 	}
 	for _, candidate := range []string{"$true", "$false"} {
@@ -1660,6 +1668,9 @@ func windowsClassifyPowerShell(
 	builder *windowsFactBuilder,
 ) {
 	name := command.Program
+	if classifyEndpointSecurityControl(builder.out, command) {
+		return
+	}
 	if name != "stop-process" &&
 		!windowsScannerProgram(name) &&
 		!((name == "reg" || name == "reg.exe") &&
@@ -1726,6 +1737,10 @@ func windowsClassifyPowerShell(
 			false,
 			builder,
 		)
+		if exactWindowsAMSIProviderRemoval(*command) {
+			windowsAddOperation(command, OperationConfigChange)
+			windowsAddOperation(command, OperationPolicyBypass)
+		}
 	case "get-childitem", "gci", "ls", "dir":
 		filesystem, environment := windowsAddPowerShellPaths(
 			"get-childitem",
@@ -1780,6 +1795,20 @@ func windowsClassifyPowerShell(
 		windowsClassifyWeb(command, args, true, builder)
 	case "reg", "reg.exe":
 		windowsClassifyRegistry(command, args, builder)
+	case "procdump", "procdump.exe":
+		windowsClassifyLSASSDump(command, args, builder)
+	case "fsutil", "fsutil.exe":
+		windowsClassifyFSUtil(command, args, builder)
+	case "vssadmin", "vssadmin.exe":
+		windowsClassifyVSSAdmin(command, args, builder)
+	case "bcdedit", "bcdedit.exe":
+		windowsClassifyBCDEdit(command, args, builder)
+	case "auditpol", "auditpol.exe":
+		windowsClassifyAuditPol(command, args, builder)
+	case "set-mppreference":
+		windowsClassifySetMPPreference(command, args, builder)
+	case "wbadmin", "wbadmin.exe", "wmic", "wmic.exe":
+		windowsClassifyRecoveryStore(command, args, builder)
 	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
 		windowsClassifyNetworkScanner(command, args, builder)
 	case "naabu", "naabu.exe":
@@ -1790,6 +1819,9 @@ func windowsClassifyPowerShell(
 		windowsClassifySSH(command, args, builder)
 	case "git", "git.exe":
 		windowsClassifyGit(command, args, builder)
+	case "aws", "gcloud":
+		classifyCredentialCLI(builder.out, command, command.Program)
+		classifyCloudAuditControlDestruction(command)
 	case "openssl", "openssl.exe":
 		classifyOpenSSLDecode(builder.out, command)
 	case "format":
@@ -1930,6 +1962,9 @@ func windowsClassifyCMD(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
+	if classifyEndpointSecurityControl(builder.out, command) {
+		return
+	}
 	if command.Program != "taskkill" && command.Program != "taskkill.exe" &&
 		!windowsScannerProgram(command.Program) &&
 		!((command.Program == "certutil" ||
@@ -1971,6 +2006,18 @@ func windowsClassifyCMD(
 		windowsClassifyCertutil(command, args, builder)
 	case "reg", "reg.exe":
 		windowsClassifyRegistry(command, args, builder)
+	case "procdump", "procdump.exe":
+		windowsClassifyLSASSDump(command, args, builder)
+	case "fsutil", "fsutil.exe":
+		windowsClassifyFSUtil(command, args, builder)
+	case "vssadmin", "vssadmin.exe":
+		windowsClassifyVSSAdmin(command, args, builder)
+	case "bcdedit", "bcdedit.exe":
+		windowsClassifyBCDEdit(command, args, builder)
+	case "auditpol", "auditpol.exe":
+		windowsClassifyAuditPol(command, args, builder)
+	case "wbadmin", "wbadmin.exe", "wmic", "wmic.exe":
+		windowsClassifyRecoveryStore(command, args, builder)
 	case "icacls", "icacls.exe":
 		windowsClassifyICACLS(command, args, builder)
 	case "takeown", "takeown.exe":
@@ -1991,6 +2038,9 @@ func windowsClassifyCMD(
 		windowsClassifySSH(command, args, builder)
 	case "git", "git.exe":
 		windowsClassifyGit(command, args, builder)
+	case "aws", "gcloud":
+		classifyCredentialCLI(builder.out, command, command.Program)
+		classifyCloudAuditControlDestruction(command)
 	case "openssl", "openssl.exe":
 		classifyOpenSSLDecode(builder.out, command)
 	case "format":
@@ -2580,7 +2630,7 @@ func windowsClassifySchtasks(
 				continue
 			}
 			help = true
-		case "/create", "/query":
+		case "/create", "/query", "/delete":
 			if mode != "" {
 				valid = false
 				continue
@@ -2649,7 +2699,7 @@ func windowsClassifySchtasks(
 	if help {
 		if valid && taskName == "" && taskRun == "" && schedule == "" &&
 			format == "" && !force && !verbose && !noHeader &&
-			(mode == "" || mode == "/create" || mode == "/query") {
+			(mode == "" || mode == "/create" || mode == "/query" || mode == "/delete") {
 			command.Effect = EffectPreview
 			return
 		}
@@ -2673,6 +2723,15 @@ func windowsClassifySchtasks(
 		if valid {
 			command.Effect = EffectPreview
 			windowsAddOperation(command, OperationList)
+			return
+		}
+	case "/delete":
+		if taskName == "" || taskRun != "" || schedule != "" ||
+			format != "" || verbose || noHeader {
+			valid = false
+		}
+		if valid {
+			windowsAddOperation(command, OperationDelete)
 			return
 		}
 	default:
@@ -4455,7 +4514,8 @@ func windowsMutatingProgram(program string) bool {
 		"register-scheduledtask",
 		"xcopy", "xcopy.exe", "robocopy", "robocopy.exe",
 		"icacls", "icacls.exe", "takeown", "takeown.exe",
-		"taskkill", "taskkill.exe":
+		"taskkill", "taskkill.exe", "vssadmin", "vssadmin.exe",
+		"bcdedit", "bcdedit.exe", "auditpol", "auditpol.exe":
 		return true
 	default:
 		return false
@@ -5125,6 +5185,10 @@ func windowsClassifyRegistry(
 		return
 	}
 	verb := strings.ToLower(args[0].value)
+	if verb == "save" || verb == "export" {
+		windowsClassifyRegistryExport(command, args, builder)
+		return
+	}
 	access := PathAccessMetadata
 	switch verb {
 	case "add":
@@ -5232,6 +5296,58 @@ func windowsClassifyRegistry(
 				builder.out.markPartial(IssueUnknownOperandGrammar)
 			}
 		}
+	}
+	if _, _, disabled, ok := exactWindowsRegistrySecuritySetting(*command); ok && disabled {
+		windowsAddOperation(command, OperationPolicyBypass)
+	}
+	if exactWindowsTelemetryMutation(*command) ||
+		exactWindowsAMSIRegistryDisable(*command) {
+		windowsAddOperation(command, OperationPolicyBypass)
+	}
+	if _, _, ok := exactWindowsCredentialProtectionMutation(*command); ok {
+		windowsAddOperation(command, OperationPolicyBypass)
+	}
+}
+
+func windowsClassifyRegistryExport(
+	command *CommandFact,
+	args []windowsWord,
+	builder *windowsFactBuilder,
+) {
+	if len(args) < 3 || len(args) > 4 || args[1].expands ||
+		args[1].wildcard || args[1].value == "" || args[2].value == "" {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	if len(args) == 4 && (args[3].expands || args[3].wildcard ||
+		!strings.EqualFold(args[3].value, "/y")) {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	windowsAddOperation(command, OperationRead)
+	windowsAddOperation(command, OperationWrite)
+	if registryCredentialHive(args[1].value) {
+		windowsAddOperation(command, OperationCredentialRead)
+	}
+	builder.addPath(command.ID, PathAccessRead, args[1].value)
+	// Environment-expanded destinations do not weaken the exact registry
+	// source identity. Preserve the operation while abstaining from inventing
+	// a concrete filesystem path for that destination.
+	if !args[2].expands && !args[2].wildcard {
+		builder.addPath(command.ID, PathAccessWrite, args[2].value)
+	}
+}
+
+func registryCredentialHive(value string) bool {
+	canonical, ok := canonicalRegistryPath(value)
+	if !ok {
+		return false
+	}
+	switch strings.ToUpper(canonical) {
+	case "HKLM/SAM", "HKLM/SYSTEM", "HKLM/SECURITY":
+		return true
+	default:
+		return false
 	}
 }
 

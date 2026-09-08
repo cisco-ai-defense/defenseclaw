@@ -62,7 +62,10 @@ func TestBundledSkillScanPathDoesNotTrustArbitrarySystemDirectory(t *testing.T) 
 }
 
 func TestHandleSkillScanRejectsOnlySourceBoundHermesBundle(t *testing.T) {
-	home := t.TempDir()
+	home, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Setenv("HERMES_HOME", home)
 	root := filepath.Join(home, "skills")
 	target := filepath.Join(root, "productivity", "vendor-docs")

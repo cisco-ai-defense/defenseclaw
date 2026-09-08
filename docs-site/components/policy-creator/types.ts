@@ -194,9 +194,9 @@ export interface CustomRegoSnippet {
 
 // --- Session correlator (Layer 5) ------------------------------------------
 //
-// The cross-event layer that fires when a sequence of findings in the same
-// session matches a known attack pattern (lethal trifecta, escalation chain,
-// destructive flow). Mirrors internal/guardrail/correlator.go.
+// The configurable cross-event layer that fires when findings in the same
+// session complete a lethal-trifecta pattern. This is separate from the
+// fixed, code-owned ActionFacts bounded-chain catalog.
 
 export const DATA_AXES = [
   'ingress_untrusted',
@@ -362,15 +362,26 @@ export interface PresetsFile {
   presets: PresetBundle[];
 }
 
+export interface UseCasePack {
+  id: string;
+  title: string;
+  status: 'selectable' | 'staged';
+  summary: string;
+  files: RulesFile[];
+}
+
+export interface UseCasePacksFile {
+  packs: UseCasePack[];
+}
+
 export interface RecipeKindMap {
-  'rule:secrets': RuleDef;
+  'rule:secret': RuleDef;
   'rule:injection': RuleDef;
-  'rule:exfiltration': RuleDef;
   'rule:command': RuleDef;
-  'rule:path': RuleDef;
+  'rule:sensitive-path': RuleDef;
   'rule:enterprise-data': RuleDef;
   'rule:trust-exploit': RuleDef;
-  'rule:cognitive': RuleDef;
+  'rule:cognitive-file': RuleDef;
   'rule:c2': RuleDef;
   pre_judge_strip: PreJudgeStrip;
   finding_suppression: FindingSuppressionDef;

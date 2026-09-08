@@ -23,7 +23,7 @@ import (
 
 func TestInspectToolShimRequestBodies(t *testing.T) {
 	const connector = "trusted-shim-contract"
-	installDefaultProfileConnector(t, connector)
+	installToolCallCorpusProfileConnector(t, connector, "strict")
 
 	tests := []struct {
 		name    string

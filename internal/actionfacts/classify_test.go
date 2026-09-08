@@ -61,6 +61,50 @@ func TestClassifyStructuredCommands(t *testing.T) {
 	}
 }
 
+func TestClassifyPOSIXSedInPlaceLiteralMutation(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		argv   []string
+		line   string
+		target string
+		want   bool
+	}{
+		{
+			name: "append",
+			argv: []string{"sed", "-i", "$ a restricted-service ALL=(ALL) NOPASSWD: ALL", "/etc/sudoers"},
+			line: "restricted-service ALL=(ALL) NOPASSWD: ALL", target: "/etc/sudoers", want: true,
+		},
+		{
+			name: "substitution",
+			argv: []string{"sed", "--in-place", "s/# USER/restricted-service ALL=(ALL) NOPASSWD: ALL/", "/etc/sudoers.d/service"},
+			line: "restricted-service ALL=(ALL) NOPASSWD: ALL", target: "/etc/sudoers.d/service", want: true,
+		},
+		{name: "not in place", argv: []string{"sed", "s/a/b/", "/etc/sudoers"}},
+		{name: "backup suffix", argv: []string{"sed", "-i.bak", "s/a/b/", "/etc/sudoers"}},
+		{name: "multiple targets", argv: []string{"sed", "-i", "s/a/b/", "/etc/sudoers", "/etc/sudoers.d/service"}},
+		{name: "command execution", argv: []string{"sed", "-i", "e id", "/etc/sudoers"}},
+		{name: "replacement backreference", argv: []string{"sed", "-i", `s/a/& ALL=(ALL) NOPASSWD: ALL/`, "/etc/sudoers"}},
+		{name: "relative target", argv: []string{"sed", "-i", "s/a/b/", "sudoers"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out := classifyTestArgv(test.argv)
+			line, target, ok := StaticPOSIXSedInPlaceLiteralMutation(out.commands[0])
+			if ok != test.want || line != test.line || target != test.target {
+				t.Fatalf("mutation=(%q, %q, %t), want (%q, %q, %t); output=%#v", line, target, ok, test.line, test.target, test.want, out)
+			}
+			if test.want {
+				if out.status != StatusComplete ||
+					!commandHasOperation(out.commands[0], OperationWrite) ||
+					!outputHasPath(out, PathAccessWrite, test.target) {
+					t.Fatalf("authoritative mutation output=%#v", out)
+				}
+			} else if out.status == StatusComplete {
+				t.Fatalf("unsupported sed grammar became authoritative: %#v", out)
+			}
+		})
+	}
+}
+
 func TestDDInputIsReadNotDiskWrite(t *testing.T) {
 	out := newParseOutput(DialectArgv, 1)
 	out.appendCommand(commandFromArgv(out.nextCommandID(), []string{"dd", "if=/dev/sda", "of=/tmp/image"}))
@@ -503,6 +547,22 @@ func TestPOSIXHistoryTamperBuiltinGrammars(t *testing.T) {
 		if out.status != StatusPartial ||
 			!containsIssue(out.issues, IssueUnknownOperandGrammar) {
 			t.Fatalf("argv=%v output=%#v", argv, out)
+		}
+	}
+}
+
+func TestPOSIXHistoryClearReloadOrdering(t *testing.T) {
+	for _, test := range []struct {
+		argv []string
+		want bool
+	}{
+		{[]string{"history", "-cr"}, false},
+		{[]string{"history", "-c", "-r"}, false},
+		{[]string{"history", "-rc"}, true},
+		{[]string{"history", "-r", "-c"}, true},
+	} {
+		if got := exactPOSIXHistoryClearArguments(test.argv); got != test.want {
+			t.Fatalf("argv=%v proof=%t want=%t", test.argv, got, test.want)
 		}
 	}
 }
@@ -4924,6 +4984,14 @@ func TestOwnedWorkloadAndScheduleVerbsAreClosed(t *testing.T) {
 		{argv: []string{"kubectl", "get", "pods"}, want: OperationList},
 		{argv: []string{"oc", "logs", "pod/api"}, want: OperationRead},
 		{
+			argv: []string{"kubectl", "delete", "pod", "production-api"},
+			want: OperationDelete,
+		},
+		{
+			argv: []string{"oc", "delete", "pod", "production-api"},
+			want: OperationDelete,
+		},
+		{
 			argv: []string{"systemctl", "enable", "api.service"},
 			want: OperationSchedule,
 		},
@@ -4948,9 +5016,7 @@ func TestOwnedWorkloadAndScheduleVerbsAreClosed(t *testing.T) {
 	}
 
 	for _, argv := range [][]string{
-		{"kubectl", "delete", "pod", "production-api"},
 		{"kubectl", "GET", "pods"},
-		{"oc", "delete", "pod", "production-api"},
 		{"systemctl", "poweroff"},
 		{"systemctl", "STATUS", "api.service"},
 		{"launchctl", "reboot", "system"},
@@ -4960,6 +5026,39 @@ func TestOwnedWorkloadAndScheduleVerbsAreClosed(t *testing.T) {
 		if out.status != StatusPartial ||
 			out.facts("argv", "").EnforcementEligible() {
 			t.Fatalf("unowned argv=%v output=%#v", argv, out)
+		}
+	}
+}
+
+func TestInfrastructureAsCodeDestructionGrammar(t *testing.T) {
+	for _, argv := range [][]string{
+		{"terraform", "destroy", "-auto-approve"},
+		{"tofu", "apply", "-destroy", "-auto-approve"},
+		{"pulumi", "destroy", "--yes", "--stack", "production"},
+	} {
+		out := classifyTestArgv(argv)
+		if out.status != StatusComplete ||
+			!commandHasOperation(out.commands[0], OperationDelete) {
+			t.Fatalf("destructive argv=%v output=%#v", argv, out)
+		}
+	}
+	for _, argv := range [][]string{
+		{"terraform", "plan", "-destroy"},
+		{"pulumi", "destroy", "--preview-only", "--stack", "production"},
+	} {
+		out := classifyTestArgv(argv)
+		if out.status != StatusComplete || out.commands[0].Effect != EffectPreview ||
+			commandHasOperation(out.commands[0], OperationDelete) {
+			t.Fatalf("preview argv=%v output=%#v", argv, out)
+		}
+	}
+	for _, argv := range [][]string{
+		{"terraform", "destroy", "-unknown"},
+		{"pulumi", "destroy", "--unknown"},
+	} {
+		out := classifyTestArgv(argv)
+		if out.status != StatusPartial || out.facts("argv", "").EnforcementEligible() {
+			t.Fatalf("unsupported argv=%v output=%#v", argv, out)
 		}
 	}
 }

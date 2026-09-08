@@ -22,6 +22,21 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import yaml from 'js-yaml';
 
 import {
   decodePolicyFromHash,
@@ -37,7 +52,13 @@ import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
 import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
-import type { CorrelationPattern, Policy } from '../components/policy-creator/types.js';
+import { BLOCK_CARDS } from '../components/policy-creator/quick-start/questions.js';
+import {
+  BOUNDED_CHAINS,
+  HIGH_ASSURANCE_PACKS,
+  YARA_RULES,
+} from '../components/policy-creator/deterministic-coverage-catalog.js';
+import type { CorrelationPattern, Policy, UseCasePacksFile } from '../components/policy-creator/types.js';
 
 // ── fixtures ────────────────────────────────────────────────────────
 
@@ -98,11 +119,234 @@ function makePolicy(overrides: Partial<Policy> = {}): Policy {
   return base;
 }
 
+// Keep this test-side reader intentionally narrow. RULE_RECIPE_KINDS is a
+// component-local constant (and importing rules.tsx would pull React into this
+// pure Node suite), so the audit reads only that array declaration. If the UI
+// later exports the constant from a non-React module, prefer importing it.
+function visibleRuleRecipeKinds(): Set<string> {
+  const source = readFileSync(
+    new URL('../components/policy-creator/sections/rules.tsx', import.meta.url),
+    'utf8',
+  );
+  const declaration = source.match(
+    /const\s+RULE_RECIPE_KINDS[^=]*=\s*\[([\s\S]*?)\];/,
+  );
+  assert.ok(
+    declaration,
+    'could not find RULE_RECIPE_KINDS in sections/rules.tsx; export it from a non-React module and update this test',
+  );
+  return new Set(
+    Array.from(declaration[1].matchAll(/['"](rule:[^'"]+)['"]/g), (match) => match[1]),
+  );
+}
+
+function generatedRuleRecipeKinds(): Set<string> {
+  const raw = readFileSync(
+    new URL('../data/policy-recipes.json', import.meta.url),
+    'utf8',
+  );
+  const decoded = JSON.parse(raw) as {
+    recipes?: Array<{ kind?: unknown }>;
+  };
+  assert.ok(Array.isArray(decoded.recipes), 'policy-recipes.json must contain a recipes array');
+  return new Set(
+    decoded.recipes
+      .map((recipe) => recipe.kind)
+      .filter((kind): kind is string => typeof kind === 'string' && kind.startsWith('rule:')),
+  );
+}
+
+// ── generated catalog / Quick Start integrity ─────────────────────
+
+test('quick start: every rule ID resolves in every selectable base preset', () => {
+  const references = BLOCK_CARDS.flatMap((card) =>
+    card.ruleIds.map((ruleId) => ({ cardId: card.id, ruleId })),
+  );
+  assert.ok(references.length > 0, 'Quick Start must exercise at least one bundled rule');
+
+  for (const presetName of ['default', 'permissive', 'strict'] as const) {
+    const preset = policyFromPreset(presetName);
+    const available = new Set(
+      preset.rule_pack.files.flatMap((file) => file.rules.map((rule) => rule.id)),
+    );
+    const missing = references
+      .filter(({ ruleId }) => !available.has(ruleId))
+      .map(({ cardId, ruleId }) => `${cardId}:${ruleId}`)
+      .sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `Quick Start references rules absent from the ${presetName} preset: ${missing.join(', ')}`,
+    );
+  }
+});
+
+test('quick start: every correlator ID resolves in every selectable base preset', () => {
+  const references = BLOCK_CARDS.flatMap((card) =>
+    (card.correlatorPatternIds ?? []).map((patternId) => ({ cardId: card.id, patternId })),
+  );
+  assert.ok(references.length > 0, 'Quick Start must exercise at least one correlator pattern');
+
+  for (const presetName of ['default', 'permissive', 'strict'] as const) {
+    const preset = policyFromPreset(presetName);
+    const available = new Set(preset.correlator.map((pattern) => pattern.id));
+    const missing = references
+      .filter(({ patternId }) => !available.has(patternId))
+      .map(({ cardId, patternId }) => `${cardId}:${patternId}`)
+      .sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `Quick Start references correlators absent from the ${presetName} preset: ${missing.join(', ')}`,
+    );
+  }
+});
+
+test('recipe picker: every generated rule recipe kind is visible', () => {
+  const generated = generatedRuleRecipeKinds();
+  const visible = visibleRuleRecipeKinds();
+  assert.ok(generated.size > 0, 'generated recipe catalog must contain rule recipes');
+  assert.ok(visible.size > 0, 'recipe picker must expose at least one rule recipe kind');
+
+  const hidden = [...generated].filter((kind) => !visible.has(kind)).sort();
+  assert.deepEqual(
+    hidden,
+    [],
+    `generated rule recipe kinds hidden by RULE_RECIPE_KINDS: ${hidden.join(', ')}`,
+  );
+});
+
+test('deterministic inventory: fixed chain and YARA IDs match runtime sources', () => {
+  const chainSource = readFileSync(
+    new URL('../../internal/guardrail/tool_chain.go', import.meta.url),
+    'utf8',
+  );
+  const sourceChainIds = Array.from(
+    chainSource.matchAll(/ToolChain\w+\s+=\s+"(chain\.[^"]+)"/g),
+    (match) => match[1],
+  ).sort();
+  assert.deepEqual(
+    BOUNDED_CHAINS.map((chain) => chain.id).sort(),
+    sourceChainIds,
+  );
+  assert.equal(sourceChainIds.length, 18);
+
+  const yaraSource = readFileSync(
+    new URL('../../policies/yara/mcp-tools/description_injection.yara', import.meta.url),
+    'utf8',
+  );
+  const sourceYaraIds = Array.from(
+    yaraSource.matchAll(/^rule\s+([A-Za-z0-9_]+)\b/gm),
+    (match) => match[1],
+  ).sort();
+  assert.deepEqual(
+    YARA_RULES.map((rule) => rule.id).sort(),
+    sourceYaraIds,
+  );
+  assert.equal(sourceYaraIds.length, 5);
+});
+
+test('use-case packs: generated selectable rules match canonical YAML', () => {
+  const generated = JSON.parse(
+    readFileSync(new URL('../data/policy-use-case-packs.json', import.meta.url), 'utf8'),
+  ) as UseCasePacksFile;
+  const sourceRoot = new URL('../../policies/guardrail-use-cases/', import.meta.url);
+  const sourceIds = readdirSync(sourceRoot).filter((entry) =>
+    statSync(new URL(entry, sourceRoot)).isDirectory(),
+  );
+  assert.deepEqual(
+    generated.packs.map((pack) => pack.id).sort(),
+    sourceIds.sort(),
+  );
+
+  for (const pack of generated.packs) {
+    const expected = HIGH_ASSURANCE_PACKS.find((item) => item.id === pack.id);
+    assert.ok(expected, `missing inventory metadata for ${pack.id}`);
+    assert.equal(pack.status, expected.status);
+    const generatedRuleCount = pack.files.reduce((count, file) => count + file.rules.length, 0);
+    assert.equal(generatedRuleCount, expected.ruleCount);
+
+    for (const file of pack.files) {
+      const sourcePath = new URL(
+        `${pack.id}/rules/${file.filename}.yaml`,
+        sourceRoot,
+      );
+      const source = yaml.load(readFileSync(sourcePath, 'utf8')) as {
+        category: string;
+        rules: unknown[];
+      };
+      assert.deepEqual(file.category, source.category);
+      assert.deepEqual(file.rules, source.rules);
+    }
+  }
+});
+
+test('validators accept code-owned dotted semantic rule IDs', () => {
+  const policy = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{
+        filename: 'commands',
+        category: 'commands',
+        rules: [{
+          id: 'impact.fork_bomb',
+          enabled: true,
+          pattern: 'a^',
+          title: 'Fork bomb',
+          severity: 'CRITICAL',
+          confidence: 0.99,
+          tags: ['impact'],
+        }],
+      }],
+    },
+  });
+  assert.equal(validatePolicy(policy).some((finding) => finding.code === 'ID_FORMAT'), false);
+});
+
 test('install script honors DEFENSECLAW_HOME with the standard home fallback', () => {
   const script = emitInstallScript(makePolicy());
   assert.match(script, /DC_ROOT="\$\{DEFENSECLAW_HOME:-\$\{HOME\}\/\.defenseclaw\}"/);
   assert.match(script, /POLICIES_ROOT="\$\{DC_ROOT\}\/policies"/);
   assert.doesNotMatch(script, /POLICIES_ROOT="\$\{HOME\}\/\.defenseclaw\/policies"/);
+});
+
+test('install script executes idempotently and activates the emitted policy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'defenseclaw-policy-studio-'));
+  try {
+    const policyHome = join(root, 'policy-home');
+    const binDir = join(root, 'bin');
+    const scriptPath = join(root, 'install-studio-e2e.sh');
+    const shimPath = join(binDir, 'defenseclaw');
+    const policy = policyFromPreset('default');
+    policy.name = 'studio-e2e';
+    policy.rule_pack.name = policy.name;
+
+    mkdirSync(binDir, { recursive: true, mode: 0o700 });
+    writeFileSync(scriptPath, emitInstallScript(policy), { mode: 0o700 });
+    writeFileSync(
+      shimPath,
+      `#!/usr/bin/env bash\nset -euo pipefail\ntest "$1" = policy\ntest "$2" = activate\ntest "$3" = studio-e2e\nprintf '%s\\n' "$*" > "\${DEFENSECLAW_HOME}/activation-call"\n`,
+      { mode: 0o700 },
+    );
+    chmodSync(shimPath, 0o700);
+
+    const env = {
+      ...process.env,
+      DEFENSECLAW_HOME: policyHome,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+    execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
+    execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
+
+    assert.ok(existsSync(join(policyHome, 'policies', 'studio-e2e.yaml')));
+    assert.ok(existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
+    assert.equal(
+      readFileSync(join(policyHome, 'activation-call'), 'utf8').trim(),
+      'policy activate studio-e2e',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('regex tester supports the shipped Go Unicode scalar syntax', () => {

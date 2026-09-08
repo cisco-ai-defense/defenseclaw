@@ -1,0 +1,27 @@
+version: 1
+category: kubernetes-production-protection
+rules:
+  - id: impact.kubernetes_namespace_delete
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['kubectl', 'oc'] && 'delete' in c.argv &&
+      (('namespace' in c.argv) || ('namespaces' in c.argv) ||
+      ('ns' in c.argv)))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Deletion of a Kubernetes namespace"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, kubernetes, production-safety]
+
+  - id: impact.kubernetes_bulk_delete
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['kubectl', 'oc'] && 'delete' in c.argv &&
+      '--all' in c.argv)
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Bulk deletion of Kubernetes workloads"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, kubernetes, production-safety]

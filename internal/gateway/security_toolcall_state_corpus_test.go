@@ -31,12 +31,14 @@ const (
 )
 
 type toolCallStateCorpusCase struct {
-	ID                  string                           `json:"id"`
-	Pair                string                           `json:"pair"`
-	Platforms           []string                         `json:"platforms"`
-	ExpectedDisposition toolCallStateExpectedDisposition `json:"expected_disposition"`
-	ExpectedRule        string                           `json:"expected_rule"`
-	Steps               []toolCallStateCorpusStep        `json:"steps"`
+	ID                  string                                      `json:"id"`
+	Pair                string                                      `json:"pair"`
+	Platforms           []string                                    `json:"platforms"`
+	IsAttack            *bool                                       `json:"is_attack"`
+	ExpectedDisposition toolCallStateExpectedDisposition            `json:"expected_disposition"`
+	ProfileDispositions map[string]toolCallStateExpectedDisposition `json:"profile_dispositions,omitempty"`
+	ExpectedRule        string                                      `json:"expected_rule"`
+	Steps               []toolCallStateCorpusStep                   `json:"steps"`
 }
 
 type toolCallStateCorpusStep struct {
@@ -87,13 +89,28 @@ func (matrix toolCallStateConfusionMatrix) metrics() (precision, recall, f1 floa
 func TestSecuritySuiteToolCallState(t *testing.T) {
 	const connectorName = "claudecode"
 	installCorrelationHMACForTest()
-	installDefaultProfileConnector(t, connectorName)
 	cases := readJSONL[toolCallStateCorpusCase](t, "toolcall", "stateful.jsonl")
-	if len(cases) == 0 || len(cases) > 12 {
-		t.Fatalf("stateful corpus size=%d, want 1..12", len(cases))
+	if len(cases) == 0 || len(cases) > 16 {
+		t.Fatalf("stateful corpus size=%d, want 1..16", len(cases))
 	}
 	validateToolCallStateCorpus(t, cases)
 
+	for _, profile := range toolCallCorpusProfiles {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			installToolCallCorpusProfileConnector(t, connectorName, profile)
+			runToolCallStateCorpusProfile(t, connectorName, profile, cases)
+		})
+	}
+}
+
+func runToolCallStateCorpusProfile(
+	t *testing.T,
+	connectorName string,
+	profile string,
+	cases []toolCallStateCorpusCase,
+) {
+	t.Helper()
 	fixture := newSidecarRuntimeFixture(t, true)
 	logger := audit.NewLogger(fixture.store)
 	logger.SetRuntimeV8Emitter(&sidecarOwnedObservabilityV8Runtime{runtime: fixture.runtime})
@@ -106,7 +123,7 @@ func TestSecuritySuiteToolCallState(t *testing.T) {
 		cfg := &config.Config{}
 		cfg.Guardrail.Mode = mode
 		cfg.Guardrail.Connector = connectorName
-		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), "strict")
+		cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
 		api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, fixture.store, logger, cfg)
 		return http.HandlerFunc(api.handleAgentHook(connectorName))
 	}
@@ -115,13 +132,19 @@ func TestSecuritySuiteToolCallState(t *testing.T) {
 
 	blockEligiblePairs := make(map[string]bool)
 	for _, corpusCase := range cases {
-		if corpusCase.ExpectedDisposition == toolCallStateDispositionBlock {
+		if toolCallStateDispositionForProfile(corpusCase, profile) == toolCallStateDispositionBlock {
 			blockEligiblePairs[corpusCase.Pair] = true
 		}
 	}
 	var detection, blocking toolCallStateConfusionMatrix
 	applicableCases := 0
 	applicablePairs := make(map[string]struct{})
+	attacks := 0
+	benign := 0
+	attackDetections := 0
+	attackBlocks := 0
+	benignDetections := 0
+	benignBlocks := 0
 	for _, corpusCase := range cases {
 		corpusCase := corpusCase
 		t.Run(corpusCase.ID, func(t *testing.T) {
@@ -136,26 +159,39 @@ func TestSecuritySuiteToolCallState(t *testing.T) {
 				handler = actionHandler
 			}
 			targetSeen, targetBlocked := runToolCallStateCorpusCase(t, handler, queryDB, corpusCase, targetRule)
-			expectedDetection := corpusCase.ExpectedDisposition != toolCallStateDispositionNone
+			expectedDisposition := toolCallStateDispositionForProfile(corpusCase, profile)
+			expectedDetection := expectedDisposition != toolCallStateDispositionNone
 			detection.observe(expectedDetection, targetSeen)
-			if blockEligiblePairs[corpusCase.Pair] {
-				blocking.observe(
-					corpusCase.ExpectedDisposition == toolCallStateDispositionBlock,
-					targetBlocked,
-				)
+			blocking.observe(expectedDisposition == toolCallStateDispositionBlock, targetBlocked)
+			if *corpusCase.IsAttack {
+				attacks++
+				if targetSeen {
+					attackDetections++
+				}
+				if targetBlocked {
+					attackBlocks++
+				}
+			} else {
+				benign++
+				if targetSeen {
+					benignDetections++
+				}
+				if targetBlocked {
+					benignBlocks++
+				}
 			}
-			switch corpusCase.ExpectedDisposition {
+			switch expectedDisposition {
 			case toolCallStateDispositionBlock:
 				if !targetSeen || !targetBlocked {
-					t.Errorf("target=%q want=block seen=%t blocked=%t", targetRule, targetSeen, targetBlocked)
+					t.Errorf("profile=%s target=%q want=block seen=%t blocked=%t", profile, targetRule, targetSeen, targetBlocked)
 				}
 			case toolCallStateDispositionDetect:
 				if !targetSeen || targetBlocked {
-					t.Errorf("target=%q want=detect seen=%t blocked=%t", targetRule, targetSeen, targetBlocked)
+					t.Errorf("profile=%s target=%q want=detect seen=%t blocked=%t", profile, targetRule, targetSeen, targetBlocked)
 				}
 			case toolCallStateDispositionNone:
 				if targetSeen || targetBlocked {
-					t.Errorf("target=%q want=none seen=%t blocked=%t", targetRule, targetSeen, targetBlocked)
+					t.Errorf("profile=%s target=%q want=none seen=%t blocked=%t", profile, targetRule, targetSeen, targetBlocked)
 				}
 			}
 		})
@@ -164,29 +200,47 @@ func TestSecuritySuiteToolCallState(t *testing.T) {
 	detectionPrecision, detectionRecall, detectionF1 := detection.metrics()
 	blockPrecision, blockRecall, blockF1 := blocking.metrics()
 	t.Logf(
-		"experimental target-detection corpus: TP=%d TN=%d FP=%d FN=%d precision=%.3f recall=%.3f F1=%.3f",
+		"profile=%s stateful posture detection: TP=%d TN=%d FP=%d FN=%d precision=%.3f recall=%.3f F1=%.3f",
+		profile,
 		detection.truePositive, detection.trueNegative,
 		detection.falsePositive, detection.falseNegative,
 		detectionPrecision, detectionRecall, detectionF1,
 	)
 	t.Logf(
-		"experimental target-blocking corpus (block-eligible pairs only): TP=%d TN=%d FP=%d FN=%d precision=%.3f recall=%.3f F1=%.3f",
+		"profile=%s stateful posture blocking: TP=%d TN=%d FP=%d FN=%d precision=%.3f recall=%.3f F1=%.3f",
+		profile,
 		blocking.truePositive, blocking.trueNegative,
 		blocking.falsePositive, blocking.falseNegative,
 		blockPrecision, blockRecall, blockF1,
 	)
 	t.Logf(
-		"scope: %d/%d applicable cases across %d/%d pairs on %s; paired curated regression, not a production-rate estimate",
-		applicableCases, len(cases), len(applicablePairs), len(cases)/2, runtime.GOOS,
+		"profile=%s source-label coverage: malicious=%d detected=%d blocked=%d; benign=%d detected=%d blocked=%d detection_FPR=%.3f block_FPR=%.3f",
+		profile, attacks, attackDetections, attackBlocks, benign, benignDetections, benignBlocks,
+		corpusRatio(benignDetections, benign), corpusRatio(benignBlocks, benign),
+	)
+	t.Logf(
+		"profile=%s scope: %d/%d applicable cases across %d/%d pairs on %s; paired curated regression, not a production-rate estimate",
+		profile, applicableCases, len(cases), len(applicablePairs), len(cases)/2, runtime.GOOS,
 	)
 	if detection.falsePositive != 0 || detection.falseNegative != 0 ||
 		blocking.falsePositive != 0 || blocking.falseNegative != 0 {
 		t.Fatalf(
-			"stateful corpus regression: detection FP=%d FN=%d; blocking FP=%d FN=%d",
+			"profile=%s stateful posture regression: detection FP=%d FN=%d; blocking FP=%d FN=%d",
+			profile,
 			detection.falsePositive, detection.falseNegative,
 			blocking.falsePositive, blocking.falseNegative,
 		)
 	}
+}
+
+func toolCallStateDispositionForProfile(
+	corpusCase toolCallStateCorpusCase,
+	profile string,
+) toolCallStateExpectedDisposition {
+	if disposition := corpusCase.ProfileDispositions[profile]; disposition != "" {
+		return disposition
+	}
+	return corpusCase.ExpectedDisposition
 }
 
 func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) {
@@ -194,8 +248,8 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 	seen := make(map[string]struct{}, len(cases))
 	type pairSummary struct {
 		positiveDisposition toolCallStateExpectedDisposition
-		positiveCount       int
-		negativeCount       int
+		attackCount         int
+		benignCount         int
 		rule                string
 		platforms           []string
 	}
@@ -204,6 +258,7 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 		if strings.TrimSpace(corpusCase.ID) == "" ||
 			strings.TrimSpace(corpusCase.Pair) == "" ||
 			strings.TrimSpace(corpusCase.ExpectedRule) == "" ||
+			corpusCase.IsAttack == nil ||
 			len(corpusCase.Platforms) == 0 || len(corpusCase.Steps) == 0 {
 			t.Fatalf("invalid stateful corpus case: %+v", corpusCase)
 		}
@@ -211,6 +266,16 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 		case toolCallStateDispositionBlock, toolCallStateDispositionDetect, toolCallStateDispositionNone:
 		default:
 			t.Fatalf("case %q has invalid expected disposition %q", corpusCase.ID, corpusCase.ExpectedDisposition)
+		}
+		for profile, disposition := range corpusCase.ProfileDispositions {
+			if !slices.Contains(toolCallCorpusProfiles, profile) {
+				t.Fatalf("case %q has invalid profile disposition key %q", corpusCase.ID, profile)
+			}
+			switch disposition {
+			case toolCallStateDispositionBlock, toolCallStateDispositionDetect, toolCallStateDispositionNone:
+			default:
+				t.Fatalf("case %q has invalid %s disposition %q", corpusCase.ID, profile, disposition)
+			}
 		}
 		platformSet := make(map[string]struct{}, len(corpusCase.Platforms))
 		for _, platform := range corpusCase.Platforms {
@@ -234,11 +299,14 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 			!slices.Equal(summary.platforms, corpusCase.Platforms) {
 			t.Fatalf("pair %q must use one target rule and platform set", corpusCase.Pair)
 		}
-		if corpusCase.ExpectedDisposition == toolCallStateDispositionNone {
-			summary.negativeCount++
-		} else {
-			summary.positiveCount++
+		if *corpusCase.IsAttack {
+			summary.attackCount++
 			summary.positiveDisposition = corpusCase.ExpectedDisposition
+		} else {
+			summary.benignCount++
+			if corpusCase.ExpectedDisposition != toolCallStateDispositionNone || len(corpusCase.ProfileDispositions) != 0 {
+				t.Fatalf("benign case %q must expect no finding in every profile", corpusCase.ID)
+			}
 		}
 		pairs[corpusCase.Pair] = summary
 	}
@@ -246,10 +314,10 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 		t.Fatalf("stateful corpus has %d cases across %d pairs", len(cases), len(pairs))
 	}
 	for pair, summary := range pairs {
-		if summary.positiveCount != 1 || summary.negativeCount != 1 {
+		if summary.attackCount != 1 || summary.benignCount != 1 {
 			t.Fatalf(
-				"pair %q has positive=%d negative=%d, want one of each",
-				pair, summary.positiveCount, summary.negativeCount,
+				"pair %q has attacks=%d benign=%d, want one of each",
+				pair, summary.attackCount, summary.benignCount,
 			)
 		}
 	}
@@ -276,7 +344,11 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 			platforms: []string{"posix"},
 		},
 		"secret-read-egress": {
-			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionDetect,
+			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionBlock,
+			platforms: []string{"posix"},
+		},
+		"shadow-read-egress": {
+			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionBlock,
 			platforms: []string{"posix"},
 		},
 		"workload-identity-lateral": {

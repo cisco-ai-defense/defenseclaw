@@ -53,6 +53,7 @@ from defenseclaw.config import (
     MCPServerEntry,
 )
 from defenseclaw.models import Finding, ScanResult
+from defenseclaw.paths import bundled_mcp_yara_rules_dir
 from defenseclaw.registries.ssrf import (
     SSRFError,
     analyzer_dns_resolution,
@@ -70,6 +71,27 @@ if TYPE_CHECKING:
     pass
 
 _T = TypeVar("_T")
+
+
+def _supplemental_yara_analyzers(yara_analyzer_cls: type) -> list[object]:
+    """Load DefenseClaw rules alongside, never instead of, SDK YARA rules."""
+    rules_dir = bundled_mcp_yara_rules_dir()
+    if rules_dir is None:
+        print(
+            "warning: bundled DefenseClaw MCP YARA rules are unavailable; "
+            "continuing with upstream YARA rules",
+            file=sys.stderr,
+        )
+        return []
+    try:
+        return [yara_analyzer_cls(rules_dir=rules_dir)]
+    except Exception as exc:
+        print(
+            "warning: bundled DefenseClaw MCP YARA rules could not be loaded; "
+            f"continuing with upstream YARA rules: {exc}",
+            file=sys.stderr,
+        )
+        return []
 
 
 # env vars whose names contain any of these
@@ -1060,15 +1082,29 @@ class MCPScannerWrapper:
             llm_max_retries=llm.effective_max_retries(),
         )
 
-        scanner = MCPSDKScanner(sdk_config)
+        analyzers = self._parse_analyzers(AnalyzerEnum)
+        supplemental_analyzers: list[object] = []
+        if analyzers is None or AnalyzerEnum.YARA in analyzers:
+            try:
+                from mcpscanner.core.analyzers.yara_analyzer import YaraAnalyzer
+            except ImportError:
+                print(
+                    "warning: MCP Scanner does not expose its YARA analyzer; "
+                    "continuing with upstream YARA rules",
+                    file=sys.stderr,
+                )
+            else:
+                supplemental_analyzers = _supplemental_yara_analyzers(YaraAnalyzer)
+        scanner = MCPSDKScanner(
+            sdk_config,
+            custom_analyzers=supplemental_analyzers,
+        )
         _scope_network_analyzer_dns(
             scanner,
             api_endpoint=aid.endpoint,
             llm_base_url=llm.base_url,
             llm_uses_local_default=llm.is_local_provider(),
         )
-        analyzers = self._parse_analyzers(AnalyzerEnum)
-
         start = time.monotonic()
 
         if is_local:

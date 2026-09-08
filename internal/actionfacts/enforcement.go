@@ -35,6 +35,10 @@ func (f Facts) EnforcementProjection() Facts {
 		ActiveAgentFilesCaseInsensitive:          cloneSlice(f.ActiveAgentFilesCaseInsensitive),
 		ActiveAgentFilesCaseInsensitiveUncertain: f.ActiveAgentFilesCaseInsensitiveUncertain,
 		ActiveAgentFilesUncertain:                f.ActiveAgentFilesUncertain,
+		CloudIAMPrincipalOperations: append(
+			[]CloudIAMPrincipalOperationFact(nil),
+			f.CloudIAMPrincipalOperations...,
+		),
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,

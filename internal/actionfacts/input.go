@@ -101,6 +101,29 @@ func extractArgs(raw json.RawMessage) extractedInput {
 }
 
 func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
+	if strings.EqualFold(tool, "persist") {
+		return extractExactPersistenceArgs(raw)
+	}
+	if tool == "sql_query" {
+		if _, _, _, ok := exactSQLQueryArgs(raw); ok {
+			// sql_query is a closed structured schema. The query remains private
+			// to the reviewed SQL recognizers and is never reinterpreted as a
+			// shell command or projected into CEL-visible argv.
+			return extractedInput{status: StatusComplete}
+		}
+	}
+	if strings.EqualFold(tool, "aws_cli") {
+		// aws_cli is an execution-capable schema only for the closed IAM
+		// productions owned by cloud_iam_principal.go. Never feed an unrelated
+		// provider command through generic command-field extraction.
+		return extractExactAWSCLIArgs(raw)
+	}
+	if strings.EqualFold(tool, "kubectl") && exactKubernetesCronJobInputSchema(raw) {
+		// The reviewed CronJob recognizer owns this closed structured schema.
+		// Patch bytes remain private to it and are never reinterpreted as a
+		// generic shell command or projected into CEL-visible argv.
+		return extractedInput{status: StatusComplete}
+	}
 	return extractArgsAtSchema(raw, 0, isApplyPatchTool(tool))
 }
 
