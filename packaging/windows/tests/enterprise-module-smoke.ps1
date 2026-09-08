@@ -927,6 +927,32 @@ if ($elevated) {
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -Algorithm SHA256).Hash
 
+            # Model an older successful AVC uninstall that retained the exact
+            # zero-byte lock but re-enabled inheritance. A fresh install must
+            # repair only this already-trusted residual object in place.
+            $legacyLockAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            $legacyLockAcl.SetAccessRuleProtection($false, $true)
+            [void]$legacyLockAcl.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new(
+                        $script:UsersSID
+                    ),
+                    [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            Set-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -AclObject $legacyLockAcl `
+                -ErrorAction Stop
+            if ((Get-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -ErrorAction Stop).AreAccessRulesProtected) {
+                throw 'legacy residual lifecycle lock did not inherit before reinstall'
+            }
+
             $lock = Enter-DefenseClawLifecycleLock `
                 -Layout $lockLayout `
                 -TimeoutSeconds 2
@@ -948,11 +974,62 @@ if ($elevated) {
             $afterHash = (Get-FileHash `
                 -LiteralPath $lockLayout.LifecycleLockPath `
                 -Algorithm SHA256).Hash
-            if ([int64]$beforeItem.Length -ne 0 -or
+            $afterAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            if (-not $afterAcl.AreAccessRulesProtected -or
+                [int64]$beforeItem.Length -ne 0 -or
                 [int64]$afterItem.Length -ne 0 -or
                 $afterHash -cne $beforeHash -or
                 $afterSDDL -cne $beforeSDDL) {
-                throw 'persistent lifecycle file lock changed across consecutive acquisitions'
+                throw 'persistent lifecycle file lock was not canonically repaired in place for reinstall'
+            }
+
+            # The compatibility repair must not turn into ACL seizure. Even an
+            # otherwise well-formed inherited lock remains untrusted when a
+            # standard user can write it.
+            $unsafeLockAcl = Get-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -ErrorAction Stop
+            $unsafeLockAcl.SetAccessRuleProtection($false, $true)
+            [void]$unsafeLockAcl.AddAccessRule(
+                [Security.AccessControl.FileSystemAccessRule]::new(
+                    [Security.Principal.SecurityIdentifier]::new(
+                        $script:UsersSID
+                    ),
+                    [Security.AccessControl.FileSystemRights]::FullControl,
+                    [Security.AccessControl.AccessControlType]::Allow
+                )
+            )
+            Set-Acl `
+                -LiteralPath $lockLayout.LifecycleLockPath `
+                -AclObject $unsafeLockAcl `
+                -ErrorAction Stop
+            $unsafeLock = $null
+            $unsafeRejected = $false
+            try {
+                $unsafeLock = Enter-DefenseClawLifecycleLock `
+                    -Layout $lockLayout `
+                    -TimeoutSeconds 2
+            }
+            catch {
+                if ([string]$_.Exception.Message -notmatch
+                    'untrusted principal .* has write-like access') {
+                    throw
+                }
+                $unsafeRejected = $true
+            }
+            finally {
+                if ($null -ne $unsafeLock) {
+                    Exit-DefenseClawLifecycleLock -Lock $unsafeLock
+                }
+                Set-Acl `
+                    -LiteralPath $lockLayout.LifecycleLockPath `
+                    -AclObject $afterAcl `
+                    -ErrorAction Stop
+            }
+            if (-not $unsafeRejected) {
+                throw 'writable inherited lifecycle lock was silently adopted'
             }
         }
         finally {

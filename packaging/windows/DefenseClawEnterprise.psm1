@@ -3582,6 +3582,37 @@ function Enter-DefenseClawLifecycleLock {
         throw "protected lifecycle lock has unexpected content: $path"
     }
     $adminRights = New-DefenseClawRequiredRights -Kind Admin
+    $lockAcl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $path
+    if (-not $lockAcl.AreAccessRulesProtected) {
+        # Older AVC teardown paths could retain the exact zero-byte lifecycle
+        # lock with only trusted inherited SYSTEM/Administrators access. Adopt
+        # that narrow legacy state without deleting/recreating the lock: first
+        # prove the inherited descriptor grants no untrusted write and at most
+        # the ordinary BUILTIN\Users read inherited from ProgramData, then
+        # replace it with the canonical protected admin-file descriptor. Any
+        # other reader, untrusted writer, reparse, non-empty, or untrusted-owner
+        # object still fails closed before its ACL is changed.
+        Assert-DefenseClawPathAcl `
+            -Path $path `
+            -AllowedWriterSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -AllowedReaderSIDs @(
+                $script:SystemSID,
+                $script:AdministratorsSID,
+                $script:TrustedInstallerSID
+            ) `
+            -RequiredRights $adminRights `
+            -AllowUsersRead `
+            -RejectUntrustedRead `
+            -AllowInheritance
+        Set-DefenseClawPathAcl `
+            -Path $path `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+    }
     Assert-DefenseClawPathAcl `
         -Path $path `
         -AllowedWriterSIDs @(

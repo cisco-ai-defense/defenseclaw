@@ -3469,7 +3469,12 @@ def test_certification_accepts_only_the_canonical_persistent_lifecycle_lock() ->
 
     smoke = read(MODULE_SMOKE)
     assert smoke.count("Enter-DefenseClawLifecycleLock `") >= 2
-    assert "persistent lifecycle file lock changed across consecutive acquisitions" in smoke
+    assert "legacy residual lifecycle lock did not inherit before reinstall" in smoke
+    assert (
+        "persistent lifecycle file lock was not canonically repaired in place for reinstall"
+        in smoke
+    )
+    assert "writable inherited lifecycle lock was silently adopted" in smoke
     assert "lifecycle_file_lock_reuse_stable = $elevated" in smoke
 
 

@@ -869,6 +869,10 @@ func TestWindowsLifecycleUsesProtectedFileLockNotSquattableGlobalObject(t *testi
 		"[IO.FileShare]::None",
 		"Assert-DefenseClawNoReparsePath -Path $path",
 		"Assert-DefenseClawPathAcl `",
+		"if (-not $lockAcl.AreAccessRulesProtected)",
+		"-AllowInheritance",
+		"Set-DefenseClawPathAcl `",
+		"-Kind AdminFile",
 	} {
 		if !strings.Contains(lock, contract) {
 			t.Fatalf("protected lifecycle file lock missing %q", contract)
