@@ -465,8 +465,14 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 // ActiveAlerts surface to the same semantic queue operators see and can
 // acknowledge. High-severity audit telemetry alone is not an alert.
 func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
-	store, cleanup := newTestStore(t)
-	defer cleanup()
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Unrelated high-severity telemetry must not inflate ActiveAlerts.
 	if err := store.LogEvent(Event{
@@ -530,12 +536,25 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("LogEvent legacy finding: %v", err)
 	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, enforced
+	) VALUES
+		('canonical-hook-block', ?, 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=HIGH', 'INFO',
+		 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 1),
+		('canonical-hook-clean', ?, 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=action severity=NONE', 'INFO',
+		 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 0)`,
+		stamp, stamp); err != nil {
+		t.Fatalf("insert canonical hook fixtures: %v", err)
+	}
 	if err := store.LogEvent(Event{
 		ID: "reviewed-finding", Action: "scan-finding", Target: "skill:reviewed", Severity: "CRITICAL",
 	}); err != nil {
 		t.Fatalf("LogEvent reviewed finding: %v", err)
 	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
 		alert_id, disposition, actor, disposition_at, projection_version,
 		source, source_event_id, updated_at
@@ -563,11 +582,12 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Two enforced hooks, one legacy finding, one canonical deny, and one
+	// Three enforced hooks (including one canonical v8 hook), one legacy
+	// finding, one canonical deny, and one
 	// important health failure. Clean/unrelated/detection-only/reviewed rows
 	// are excluded.
-	if counts.Alerts != 5 {
-		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
+	if counts.Alerts != 6 {
+		t.Errorf("Alerts = %d, want 6 active actionable alerts", counts.Alerts)
 	}
 }
 

@@ -3462,6 +3462,10 @@ func alertEligibilitySQL(legacyActionPlaceholders string) string {
 			AND UPPER(COALESCE(event.severity,'')) IN ('CRITICAL','HIGH','ERROR')
 		)
 		OR (
+			event.bucket = 'guardrail.evaluation'
+			AND ` + legacyExplicit + `
+		)
+		OR (
 			event.bucket IS NULL
 			AND (
 				(
@@ -3487,6 +3491,8 @@ func alertEffectiveSeveritySQL() string {
 		WHEN event.bucket = 'enforcement.action'
 		 AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
 			THEN 'HIGH'
+		WHEN event.bucket = 'guardrail.evaluation'
+		 AND ` + legacyExplicit + ` THEN 'HIGH'
 		WHEN event.bucket IS NULL AND ` + legacyExplicit + ` THEN 'HIGH'
 		ELSE 'INFO'
 	END`
@@ -3623,7 +3629,7 @@ func (s *Store) ListAlerts(limit int) ([]Event, error) {
 		 FROM audit_events AS event
 		 WHERE (event.bucket IS NULL OR event.bucket IN (
 			'security.finding','enforcement.action','network.egress',
-			'platform.health','diagnostic'
+			'guardrail.evaluation','platform.health','diagnostic'
 		 ))
 		 AND ` + alertEligibilitySQL(placeholders) + `
 		 AND NOT EXISTS (
@@ -3773,7 +3779,7 @@ func (s *Store) GetCounts() (Counts, error) {
 	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
 		WHERE (event.bucket IS NULL OR event.bucket IN (
-			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
+			'security.finding','enforcement.action','network.egress','guardrail.evaluation','platform.health','diagnostic'
 		))
 		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
 		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')

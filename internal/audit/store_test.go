@@ -733,6 +733,12 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', NULL),
 		('malformed-finding', '2026-07-17T12:00:04.5Z', 'scan-finding', 'scanner', '',
 		 'HIGH', 'security.finding', 'finding.observed', '{not-json', NULL),
+		('canonical-hook-block', '2026-07-17T12:00:04.7Z', 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=HIGH',
+		 'INFO', 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 1),
+		('canonical-hook-clean', '2026-07-17T12:00:04.8Z', 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=action severity=NONE',
+		 'INFO', 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 0),
 		('legacy-block', '2026-07-17T12:00:05Z', 'connector-hook', 'gateway',
 		 'connector=codex action=block mode=action severity=INFO',
 		 'INFO', NULL, NULL, NULL, 0),
@@ -745,17 +751,19 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	}
 
 	want := map[string]bool{
-		"blank-severity-deny": true,
-		"canonical-deny":      true,
-		"canonical-egress":    true,
-		"health-error":        true,
-		"malformed-finding":   true,
-		"legacy-block":        true,
+		"blank-severity-deny":  true,
+		"canonical-deny":       true,
+		"canonical-egress":     true,
+		"health-error":         true,
+		"malformed-finding":    true,
+		"canonical-hook-block": true,
+		"legacy-block":         true,
 	}
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
 			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
-			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
+			"detection-only", "malformed-finding", "canonical-hook-block", "canonical-hook-clean",
+			"legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},
 	})
@@ -783,6 +791,18 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 			t.Fatalf("unexpected broad target=%+v", target)
 		}
 	}
+	visible, err := store.ListAlerts(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != len(want) {
+		t.Fatalf("visible alerts=%+v", visible)
+	}
+	for _, event := range visible {
+		if !want[event.ID] {
+			t.Fatalf("unexpected visible alert=%+v", event)
+		}
+	}
 
 	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		Severity: " high ",
@@ -790,9 +810,9 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(high) != 4 || high[0].AlertID != "blank-severity-deny" ||
-		high[1].AlertID != "canonical-deny" || high[2].AlertID != "legacy-block" ||
-		high[3].AlertID != "malformed-finding" {
+	if len(high) != 5 || high[0].AlertID != "blank-severity-deny" ||
+		high[1].AlertID != "canonical-deny" || high[2].AlertID != "canonical-hook-block" ||
+		high[3].AlertID != "legacy-block" || high[4].AlertID != "malformed-finding" {
 		t.Fatalf("HIGH targets=%+v", high)
 	}
 	all, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
@@ -808,8 +828,8 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != 5 {
-		t.Fatalf("actionable alert count=%d, want blank-severity deny promoted into 5 total", counts.Alerts)
+	if counts.Alerts != 6 {
+		t.Fatalf("actionable alert count=%d, want canonical hook block included in 6 total", counts.Alerts)
 	}
 
 }
