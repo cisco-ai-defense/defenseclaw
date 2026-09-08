@@ -38,7 +38,146 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 		return
 	}
 	a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
+	if env.Enforced {
+		a.emitHookEnforcementLogV8(ctx, resp, meta, connectorName)
+	}
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
+}
+
+// emitHookEnforcementLogV8 materializes the enforcement companion declared by
+// the hook_decision producer contract. The guardrail decision describes the
+// evaluation; this separate mandatory enforcement.action occurrence is the
+// durable fact that the connector was actually stopped. Keeping those facts
+// separate also lets the local Active Alerts queue retain and acknowledge an
+// enforced hook block even when ordinary guardrail-evaluation collection is
+// disabled by the managed enterprise routing plan.
+func (a *APIServer) emitHookEnforcementLogV8(
+	ctx context.Context,
+	resp agentHookResponse,
+	meta llmEventMeta,
+	connectorName string,
+) {
+	emitter, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
+	if !ok || emitter == nil {
+		return
+	}
+	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "HIGH"))
+	if !severity.Valid || !severity.Present || severity.CleanEvaluation {
+		return
+	}
+	logLevel := severity.LogLevel
+	if logLevel == "" {
+		logLevel = observability.LogLevelWarn
+	}
+	connectorName = hookDecisionMetricConnector(connectorName)
+	routeConnector := connectorName
+	if routeConnector == "unknown" {
+		routeConnector = ""
+	}
+	observedAt := time.Now().UTC()
+	enforcementID := uuid.NewString()
+	identity := AgentIdentityFromContext(ctx)
+	correlation := observability.Correlation{
+		RunID: proxyV8StableID(meta.RunID), RequestID: proxyV8StableID(meta.RequestID),
+		SessionID: proxyV8StableID(meta.SessionID), TurnID: proxyV8StableID(meta.TurnID),
+		AgentID: proxyV8StableID(meta.AgentID), AgentInstanceID: proxyV8StableID(identity.AgentInstanceID),
+		PolicyID: proxyV8StableID(meta.PolicyID), EvaluationID: proxyV8StableID(resp.EvaluationID),
+		EnforcementActionID: enforcementID, ToolInvocationID: proxyV8StableID(meta.ToolID),
+		ConnectorID: proxyV8StableID(routeConnector), SidecarInstanceID: proxyV8StableID(identity.SidecarInstanceID),
+	}
+	if spanContext := trace.SpanContextFromContext(ctx); spanContext.IsValid() {
+		correlation.TraceID = spanContext.TraceID().String()
+		correlation.SpanID = spanContext.SpanID().String()
+	}
+	classification := observability.ClassificationContext{
+		Bucket:      observability.BucketEnforcementAction,
+		EventName:   observability.EventName(observability.TelemetryEventEnforcementBlockApplied),
+		RawSeverity: string(severity.Severity),
+		Enforced:    true,
+		MandatoryFacts: observability.MandatoryFacts{
+			EnforcedOutcome: true,
+		},
+	}
+	producerKey := observability.ProducerKey(audit.ActionBlock)
+	metadata, err := router.NewClassifiedLogMetadata(
+		observability.ProducerAuditAction,
+		producerKey,
+		classification,
+		observability.SourceConnector,
+		routeConnector,
+		producerKey,
+	)
+	if err != nil {
+		return
+	}
+	_, _ = emitter.Emit(ctx, metadata, func(
+		snapshot observabilityruntime.EmitContext,
+		admission router.Admission,
+	) (observability.Record, error) {
+		if snapshot.Generation() > math.MaxInt64 {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		envelope := observability.FamilyEnvelopeInput{
+			ObservedAt:  observability.Present(observedAt),
+			Source:      observability.SourceConnector,
+			Connector:   routeConnector,
+			Action:      string(audit.ActionBlock),
+			Phase:       "apply",
+			Correlation: correlation,
+			Provenance: observability.FamilyProvenanceInput{
+				Producer:         hookDecisionMetricsV8Producer,
+				BinaryVersion:    version.Current().BinaryVersion,
+				ConfigGeneration: int64(snapshot.Generation()),
+				ConfigDigest:     snapshot.Digest(),
+			},
+		}
+		if admission == router.AdmissionFloor {
+			builder, buildErr := observability.NewRecordBuilder(
+				observability.ClockFunc(func() time.Time { return observedAt }),
+				observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+			)
+			if buildErr != nil {
+				return observability.Record{}, buildErr
+			}
+			return builder.BuildMandatoryFloorLog(observability.MandatoryFloorLogInput{
+				ProducerKind:          observability.ProducerAuditAction,
+				ProducerKey:           producerKey,
+				ClassificationContext: classification,
+				Source:                observability.SourceConnector, Connector: routeConnector,
+				Action: string(audit.ActionBlock), Phase: "apply",
+				Outcome: observability.OutcomeBlocked, Correlation: correlation,
+				Provenance: observability.Provenance{
+					Producer:              hookDecisionMetricsV8Producer,
+					BinaryVersion:         version.Current().BinaryVersion,
+					RegistrySchemaVersion: observability.CurrentRecordSchemaVersion,
+					ConfigGeneration:      int64(snapshot.Generation()),
+					ConfigDigest:          snapshot.Digest(),
+				},
+			})
+		}
+		if admission != router.AdmissionOrdinary {
+			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		}
+		builder, buildErr := observability.NewFamilyBuilder(
+			observability.ClockFunc(func() time.Time { return observedAt }),
+			observability.OccurrenceIDGeneratorFunc(func() (string, error) { return uuid.NewString(), nil }),
+		)
+		if buildErr != nil {
+			return observability.Record{}, buildErr
+		}
+		return builder.BuildLogEnforcementBlockApplied(observability.LogEnforcementBlockAppliedInput{
+			Envelope: envelope,
+			Severity: observability.Present(severity.Severity), LogLevel: observability.Present(logLevel),
+			Outcome:                               observability.OutcomeBlocked,
+			DefenseClawEvaluationID:               hookV8OptionalIdentifier(resp.EvaluationID),
+			DefenseClawPolicyID:                   hookV8OptionalIdentifier(meta.PolicyID),
+			DefenseClawEnforcementID:              enforcementID,
+			DefenseClawEnforcementRequestedAction: observability.Present("block"),
+			DefenseClawEnforcementEffectiveAction: "block",
+			DefenseClawEnforcementInitiator:       observability.Present("connector-hook"),
+			MandatoryEnforcedOutcome:              true,
+		})
+	})
 }
 
 func (a *APIServer) emitHookDecisionLogV8(

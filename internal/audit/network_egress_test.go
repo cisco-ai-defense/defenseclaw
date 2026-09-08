@@ -582,12 +582,12 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Three enforced hooks (including one canonical v8 hook), one legacy
-	// finding, one canonical deny, and one
+	// Two legacy enforced hooks, one legacy finding, one canonical deny, and one
 	// important health failure. Clean/unrelated/detection-only/reviewed rows
-	// are excluded.
-	if counts.Alerts != 6 {
-		t.Errorf("Alerts = %d, want 6 active actionable alerts", counts.Alerts)
+	// are excluded. Guardrail evaluations are not counted because their
+	// enforcement.action companion is the canonical actionable fact.
+	if counts.Alerts != 5 {
+		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
 	}
 }
 
