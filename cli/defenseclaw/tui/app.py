@@ -55,6 +55,7 @@ from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
+from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel, _parse_kv_details
 from defenseclaw.tui.panels.first_run import FirstRunPanelModel
 from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
@@ -294,6 +295,7 @@ PANELS = (
     ("audit", "9", "Audit"),
     ("activity", "A", "Activity"),
     ("ai", "V", "AI Discovery"),
+    ("runtime", "N", "Runtime"),
     ("registries", "R", "Registries"),
     ("setup", "0", "Setup"),
 )
@@ -945,6 +947,7 @@ class DefenseClawTUI(App[None]):
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
+        self.runtime_model = RuntimePanelModel()
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -2137,6 +2140,8 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
+        if panel == "runtime" and not self.runtime_model.snapshot.scanned_at:
+            self.run_worker(self._load_runtime_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
         # visit so the operator sees "Loading…" then the rows, instead
         # of an empty list with a small "press r to refresh" hint
@@ -3391,6 +3396,8 @@ class DefenseClawTUI(App[None]):
             self.audit_model.set_cursor(event.cursor_row)
         elif self.active_panel == "inventory":
             self.inventory_model.set_cursor(event.cursor_row)
+        elif self.active_panel == "runtime":
+            self.runtime_model.cursor = event.cursor_row
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -4087,6 +4094,32 @@ class DefenseClawTUI(App[None]):
                 "Keys: r refresh usage, s scan, t switch table, a all/recommended models, "
                 "Enter detail, / filter. "
                 "Click either table to select a row."
+                f"{filter_prompt}"
+                f"{suffix}"
+            )
+            return self.body_text
+        if self.active_panel == "runtime":
+            self._table_columns = self.runtime_model.data_table_columns()
+            self._table_rows = self.runtime_model.data_table_rows()
+            header = ", ".join(self.runtime_model.header_parts())
+            # The plane strip is rendered unconditionally. A detector reporting
+            # clean because it was never able to look is indistinguishable, on
+            # a dashboard, from a host that is genuinely clean.
+            strip = "\n".join(
+                f"  {rich_escape(line)}" for line in self.runtime_model.plane_strip()
+            )
+            detail = self.runtime_model.detail_text() if self.runtime_model.detail_open else ""
+            empty = self.runtime_model.empty_state()
+            filter_prompt = ""
+            if self.runtime_model.filtering:
+                filter_prompt = f"\nFilter: / {rich_escape(self.runtime_model.filter_text)}"
+            elif self.runtime_model.filter_text:
+                filter_prompt = f"\nFilter: {rich_escape(self.runtime_model.filter_text)}"
+            suffix = f"\n\n{rich_escape(detail)}" if detail else f"\n\n{empty}" if empty else ""
+            self.body_text = (
+                f"[bold #22D3EE]AI Discovery Runtime[/]  {rich_escape(header)}\n"
+                f"{strip}\n"
+                "Keys: r refresh, s poll now, p plane detail, Enter finding detail, / filter."
                 f"{filter_prompt}"
                 f"{suffix}"
             )
@@ -9450,6 +9483,8 @@ class DefenseClawTUI(App[None]):
         ):
             self.run_worker(self._open_mode_picker(), exclusive=False, thread=False)
             return True
+        if self.active_panel == "runtime":
+            return self._apply_runtime_action(self.runtime_model.handle_key(key))
         if self.active_panel == "alerts":
             action = self.alerts_model.handle_key(key)
             return self._apply_alert_action(action)
@@ -9701,6 +9736,24 @@ class DefenseClawTUI(App[None]):
             self._set_status(action.hint)
         if getattr(action, "intent", None) is not None:
             self.run_worker(self._load_inventory_model(), exclusive=False, thread=False)
+        self._render_chrome()
+        return True
+
+    def _apply_runtime_action(self, action: RuntimePanelAction) -> bool:
+        """Apply a Runtime panel keypress."""
+        if action is RuntimePanelAction.NONE:
+            self._update_body_only()
+            return False
+        if action is RuntimePanelAction.REFRESH:
+            self.run_worker(self._load_runtime_model(), exclusive=False, thread=False)
+            return True
+        if action is RuntimePanelAction.SCAN:
+            self._submit_command_text("defenseclaw agent discovery runtime scan")
+            return True
+        if action is RuntimePanelAction.START_FILTER:
+            self._set_status("Filter runtime findings: type to narrow, esc to clear.")
+            self._render_chrome()
+            return True
         self._render_chrome()
         return True
 
@@ -10917,6 +10970,14 @@ class DefenseClawTUI(App[None]):
             self.inventory_model.message = "Could not load inventory for any connector."
         self.inventory_model.set_connector_filter(self._connector_filter())
         self._render_chrome()
+
+    async def _load_runtime_model(self) -> None:
+        """Fetch the runtime-plane snapshot into the panel."""
+        self._set_status("Loading runtime planes...")
+        payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
+        if payload is not None:
+            self.runtime_model.set_snapshot(payload)
+        self._render_body()
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
@@ -12482,6 +12543,41 @@ def _fetch_ai_usage(config: object | None) -> AIUsageSnapshot | None:
         return AIUsageSnapshot.from_mapping(payload)
     except Exception:  # noqa: BLE001
         return None
+
+
+def _fetch_ai_runtime(config: object | None) -> dict | None:
+    """Blocking ``/api/v1/ai-usage/runtime`` fetcher for the Runtime panel.
+
+    Returns None on a transient gateway or auth failure so the previous good
+    snapshot is not cleared during a restart. Clearing it would replace a
+    stale-but-true coverage report with an empty one, which reads as a clean
+    host rather than as a lost connection.
+    """
+    if config is None:
+        return None
+    gateway_cfg = getattr(config, "gateway", None)
+    if gateway_cfg is None:
+        return None
+    try:
+        port = int(getattr(gateway_cfg, "api_port", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    if port <= 0:
+        return None
+    resolve_token = getattr(gateway_cfg, "resolved_token", None)
+    token = resolve_token() if callable(resolve_token) else str(getattr(gateway_cfg, "token", "") or "")
+    try:
+        from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
+    except Exception:  # noqa: BLE001
+        return None
+    host = gateway_api_client_host(config)
+    client = OrchestratorClient(host=host, port=port, token=token, timeout=3)
+    client._session.headers["Accept"] = "application/json"  # noqa: SLF001 - mirrors _fetch_ai_usage.
+    try:
+        payload = client.ai_runtime()
+    except Exception:  # noqa: BLE001
+        return None
+    return payload if isinstance(payload, dict) else None
 
 
 def _resolve_data_dir(config: object | None, data_dir: str | Path | None) -> Path | None:
