@@ -629,13 +629,16 @@ differently: Advanced Audit Policy for the events at all, and the separate
 command-line policy for argv. Without the second, lineage still works and
 argument-vector tactics do not.
 
-```bash
-# Windows: what Plane C needs
+```powershell
+# Windows, elevated: the events themselves
 auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
 auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
 auditpol /set /subcategory:"Sensitive Privilege Use" /success:enable /failure:enable
-reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" ^
-  /v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f
+
+# and, separately, argv on those events
+$audit = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+New-Item -Path $audit -Force | Out-Null
+Set-ItemProperty -Path $audit -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
 ```
 
 ### Naming a peer: DNS capture

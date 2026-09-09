@@ -170,9 +170,11 @@ const (
 	EventHookDecision EventType = "hook_decision"
 
 	// EventAIDiscovery is the classification key the canonical v8 AI discovery
-	// records are emitted under; see internal/gateway/ai_discovery_observability_v8.go.
-	// Unlike the other EventType values it has no envelope payload: the v7
-	// ai_discovery envelope shape was retired, and nothing writes that row.
+	// records are routed under -- observability.ProducerGatewayEvent with
+	// ProducerKey("ai_discovery"), which internal/observability/classification_test.go
+	// pins against these constants. Unlike every other EventType it has no
+	// envelope payload and no envelope row: the v7 ai_discovery envelope shape
+	// was retired, so the schema's event_type enum deliberately omits it.
 	EventAIDiscovery EventType = "ai_discovery"
 )
 

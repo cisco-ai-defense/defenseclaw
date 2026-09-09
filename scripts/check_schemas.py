@@ -45,11 +45,17 @@ OBSERVABILITY_REDACTION_CATALOG_GENERATOR = (
 )
 TELEMETRY_REGISTRY_GENERATOR = ROOT / "scripts" / "generate_telemetry_registry.py"
 
+# The envelope's event_type enum, which is narrower than gatewaylog's EventType
+# constants and deliberately so. "ai_discovery" is absent: the v7 payload was
+# retired, and the envelope's oneOf requires a payload object per event_type, so
+# listing a type with no payload would name a shape nothing can satisfy. The
+# EventAIDiscovery constant survives as an observability classification key --
+# a different contract, pinned by internal/observability/classification_test.go.
 EXPECTED_ENVELOPE_EVENT_TYPES = {
     "verdict", "judge", "lifecycle", "error", "diagnostic",
     "scan", "scan_finding", "activity", "egress",
     "llm_prompt", "llm_response", "tool_invocation",
-    "hook_decision", "ai_discovery",
+    "hook_decision",
     "connector_inventory", "mcp_inventory", "agent_inventory",
 }
 

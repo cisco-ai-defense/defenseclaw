@@ -86,9 +86,12 @@ RULES = (
         re.compile(
             r"\bAIDiscovery(?:Payload|Component|Model|ModelProvenance|Runtime|Factor|Evidence)\b",
         ),
-        "the v7 gateway-event AI discovery payload is retired; emit canonical v8 "
-        "ai.discovery records instead. EventAIDiscovery itself survives as the "
-        "classification key the v8 emitter uses, and is deliberately not matched.",
+        "the v7 gateway-event AI discovery payload and its envelope event_type "
+        "are retired; emit canonical v8 ai.discovery records instead. "
+        "EventAIDiscovery itself survives -- it is the classification key behind "
+        "ProducerGatewayEvent/\"ai_discovery\", pinned by "
+        "internal/observability/classification_test.go -- and is deliberately "
+        "not matched.",
         include_tests=False,
     ),
     Rule(
