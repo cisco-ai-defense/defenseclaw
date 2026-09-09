@@ -36,9 +36,11 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 // InventoryProvider supplies the discovery snapshot the join reads.
@@ -66,6 +68,16 @@ type Options struct {
 	Resolver  Resolver
 	Providers *catalog.Catalog
 	Platform  platform.Platform
+	// HomeDirs are the user homes whose credential and agent-config paths the
+	// host plane watches. Empty means the daemon's own $HOME, which under
+	// launchd or a Windows service is not a real user's -- the caller should
+	// pass AIDiscoveryConfig.HomeDirs, which managed deployments already
+	// populate from the same eligible-users enumeration that renders
+	// targets.yaml.
+	HomeDirs []string
+	// NewPlaneSource builds the Plane C acquisition. Injectable so the host
+	// plane is testable without a kernel event source.
+	NewPlaneSource func(homeDirs []string) plane.Source
 	// Now is injectable so the poll loop is testable without sleeping.
 	Now func() time.Time
 }
@@ -74,10 +86,12 @@ type Options struct {
 type Service struct {
 	options Options
 
-	mu       sync.RWMutex
-	snapshot Snapshot
+	mu                sync.RWMutex
+	snapshot          Snapshot
+	hostPlaneStartErr string
 
-	tracker *agentchain.Tracker
+	tracker   *agentchain.Tracker
+	hostPlane *hostPlane
 	// episodes carries per-process state between polls: the previous CPU
 	// reading, first-seen time, and how many distinct unnamed public peers the
 	// process has reached. Escalation depends on that history, so it cannot be
@@ -117,11 +131,27 @@ func New(options Options) (*Service, error) {
 	if options.Resolver == nil {
 		options.Resolver = NewReverseResolver(options.Providers)
 	}
-	return &Service{
+	if options.NewPlaneSource == nil {
+		options.NewPlaneSource = plane.NewSource
+	}
+	service := &Service{
 		options:  options,
 		tracker:  agentchain.NewTracker(),
 		episodes: make(map[int]*episode),
-	}, nil
+	}
+	for _, selected := range options.Config.EffectivePlanes() {
+		if selected != "c" {
+			continue
+		}
+		service.hostPlane = newHostPlane(
+			options.NewPlaneSource(options.HomeDirs),
+			service.tracker,
+			tactics.Indicators(),
+			options.Config.EffectiveChainWindow(),
+			scoring.KillChainMinStages,
+		)
+	}
+	return service, nil
 }
 
 // Snapshot returns the most recent poll result.
@@ -138,6 +168,17 @@ func (s *Service) Snapshot() Snapshot {
 // the one thing this subsystem must never produce without saying so.
 func (s *Service) Run(ctx context.Context) error {
 	interval := s.options.Config.EffectivePollInterval()
+	if s.hostPlane != nil {
+		// A host plane that cannot start is degraded coverage, not a fatal
+		// error: planes A and B still work, and the reason reaches the
+		// snapshot so an operator sees it rather than an empty row.
+		if err := s.hostPlane.start(ctx); err != nil {
+			s.mu.Lock()
+			s.hostPlaneStartErr = err.Error()
+			s.mu.Unlock()
+		}
+		defer func() { _ = s.hostPlane.close() }()
+	}
 	// Poll once immediately so a freshly enabled sensor has a snapshot before
 	// the first interval elapses, rather than reporting "no data" for a minute.
 	s.Poll(ctx)
@@ -263,6 +304,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			delete(s.episodes, pid)
 		}
 	}
+	findings = append(findings, s.hostPlaneFindings(now, minRisk, correlator)...)
 	sortFindings(findings)
 
 	snapshot := Snapshot{
@@ -343,12 +385,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		case platform.PlaneB:
 			entry.Running = capability.Available && connectionOK
 		case platform.PlaneC:
-			// Plane C has no acquisition wired yet; it reports available-but-
-			// not-running rather than claiming coverage it does not have.
-			entry.Running = false
-			if entry.Reason == "" {
-				entry.Reason = "kernel event acquisition is not started"
-			}
+			entry.Running, entry.Mechanism, entry.Reason = s.hostPlaneHealth(capability)
 		}
 		if entry.Running {
 			entry.ObservedAt = now
@@ -366,6 +403,75 @@ func planeIdleReason(health PlaneHealth) string {
 		return reason
 	}
 	return "not started"
+}
+
+// hostPlaneHealth reports Plane C from the running source rather than from the
+// platform capability alone.
+//
+// The capability says what this host could do; this says what it is actually
+// doing, and the two differ in exactly the cases worth reporting -- a source
+// that failed to start, or one running with only part of its coverage.
+func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool, mechanism, reason string) {
+	if s.hostPlane == nil {
+		return false, capability.Mechanism, "plane c is not selected in ai_discovery.runtime.planes"
+	}
+	s.mu.RLock()
+	startErr := s.hostPlaneStartErr
+	s.mu.RUnlock()
+	if startErr != "" {
+		return false, capability.Mechanism, startErr
+	}
+	_, _, up, coverage := s.hostPlane.stats()
+	if !up {
+		return false, capability.Mechanism, "the kernel event source stopped delivering"
+	}
+	// Partial coverage is running, with the gap named. Reporting it as fully
+	// up would hide a whole missing event class; reporting it as down would
+	// discard the half that works.
+	if !coverage.Complete() {
+		return true, coverage.Mechanism, strings.Join(coverage.Limitations, "; ")
+	}
+	return true, coverage.Mechanism, ""
+}
+
+// hostPlaneFindings scores the accumulated agent sessions.
+//
+// A host-plane finding is per agent session rather than per process: the whole
+// point is that five separate per-process findings for one credential-read-to-
+// exfiltration sequence would be five alerts nobody joins up.
+func (s *Service) hostPlaneFindings(
+	now time.Time, minRisk int, correlator *correlate.Correlator,
+) []Finding {
+	if s.hostPlane == nil {
+		return nil
+	}
+	harvested := s.hostPlane.harvest(now, minRisk)
+	findings := make([]Finding, 0, len(harvested))
+	for _, session := range harvested {
+		correlation := correlator.Connector(correlate.Observation{
+			PID: session.RootPID, AgentName: session.AgentName, ExeName: session.AgentName,
+		})
+		findings = append(findings, Finding{
+			FindingID:   hostFindingID(session),
+			PID:         session.RootPID,
+			Process:     session.AgentName,
+			AgentName:   session.AgentName,
+			Score:       session.Score,
+			Severity:    scoring.SeverityFor(session.Score),
+			Signals:     session.Signals,
+			Correlation: correlation,
+			FirstSeen:   session.FirstSeen,
+			LastSeen:    session.LastSeen,
+		})
+	}
+	return findings
+}
+
+// hostFindingID is stable for an agent session so repeated emissions update
+// rather than accumulate.
+func hostFindingID(session hostFinding) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("host|%d|%s", session.RootPID, session.AgentName)))
+	return "chain-" + hex.EncodeToString(digest[:8])
 }
 
 // correlateFinding picks the join most specific to what was observed.
