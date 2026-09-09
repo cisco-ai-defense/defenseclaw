@@ -34,11 +34,17 @@ import (
 // Every host-plane signal is gated on agent lineage: a generic python3 reading
 // ~/.aws/credentials is ordinary developer tooling; the same read by a child of
 // claude is not. Without that gate this would be a mediocre EDR.
+// The trailing extension group is load-bearing rather than cosmetic: on
+// Windows every one of these ships as an .exe, and an executable-name pattern
+// that does not tolerate the extension gates the entire host plane on that
+// platform. A real Windows host proved it -- every kernel observation was
+// discarded for having no agent above it, because the agent was "claude.exe".
 var agentProcessPattern = regexp.MustCompile(
 	`(?i)^(claude|codex|cursor|cursor-agent|aider|goose|crush|opencode|continue|` +
 		`cline|windsurf|copilot|copilot-language-server|gh-copilot|` +
 		`amp|devin|openhands|swe-agent|autogpt|agentgpt|babyagi|` +
-		`gptme|interpreter|open-interpreter|smol.*|langgraph.*|crewai.*)$`)
+		`gptme|interpreter|open-interpreter|smol.*|langgraph.*|crewai.*)` +
+		`(\.(exe|cmd|bat|com|ps1))?$`)
 
 // agentCmdlinePatterns recognise an agent running inside a generic
 // interpreter, where the executable name alone gives nothing away.

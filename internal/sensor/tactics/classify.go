@@ -101,6 +101,11 @@ var encodedPayloadCommands = []struct {
 	{regexp.MustCompile(`(?i)\bopenssl\s+enc\b`), "openssl encryption"},
 	{regexp.MustCompile(`(?i)\bCompress-Archive\b`), "PowerShell archive created"},
 	{regexp.MustCompile(`(?i)\[Convert\]::ToBase64String`), "PowerShell base64 encoding"},
+	// certutil -encode is the standard Windows base64 tool and a long-known
+	// living-off-the-land staging step. -decode is included because an agent
+	// unpacking a payload it fetched is the same chain stage in reverse.
+	{regexp.MustCompile(`(?i)\bcertutil(\.exe)?\b.*\s-(encode|decode)(hex)?\b`), "certutil encoding"},
+	{regexp.MustCompile(`(?i)\bmakecab(\.exe)?\b`), "cabinet archive created"},
 }
 
 // exfilHosts are public drop points: paste services, anonymous file drops,

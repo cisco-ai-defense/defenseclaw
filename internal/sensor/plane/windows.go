@@ -48,14 +48,31 @@ const (
 	eventPrivilegedUse  = 4673 // A privileged service was called
 )
 
-// securityQuery selects only the ids above. Filtering in the query rather than
-// after the fact matters: the Security channel on a domain-joined host is
+// eventIDPredicate selects only the ids above. Filtering in the query rather
+// than after the fact matters: the Security channel on a domain-joined host is
 // thousands of events a second, almost none of them these.
-var securityQuery = fmt.Sprintf(
-	"*[System[(EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d)]]",
+var eventIDPredicate = fmt.Sprintf(
+	"EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d or EventID=%d",
 	eventProcessCreated, eventProcessExited, eventObjectAccessed,
 	eventAccountCreated, eventMemberAdded, eventSpecialPrivs, eventPrivilegedUse,
 )
+
+// securityQuery builds the XPath for matching events written in the last
+// windowMS milliseconds.
+//
+// Two things force this shape. An EvtQuery handle is a snapshot of the result
+// set at the moment it was created -- EvtNext on it never yields an event
+// written afterwards -- so each poll must open a fresh query. And the query
+// must be bounded by time rather than by "everything, then filter", because
+// the Security channel on a real host holds hundreds of thousands of records
+// and rendering all of them once per poll would make the sensor the most
+// expensive process on the machine.
+//
+// timediff is the documented Event Log XPath function for exactly this.
+func securityQuery(windowMS int64) string {
+	return fmt.Sprintf("*[System[(%s) and TimeCreated[timediff(@SystemTime) <= %d]]]",
+		eventIDPredicate, windowMS)
+}
 
 var (
 	modWevtapi    = windows.NewLazySystemDLL("wevtapi.dll")
@@ -63,21 +80,32 @@ var (
 	procEvtNext   = modWevtapi.NewProc("EvtNext")
 	procEvtRender = modWevtapi.NewProc("EvtRender")
 	procEvtClose  = modWevtapi.NewProc("EvtClose")
-	procEvtSeek   = modWevtapi.NewProc("EvtSeek")
 )
 
 // EvtQuery flags and render types.
 const (
-	evtQueryChannelPath   = 0x1
-	evtQueryForwardDir    = 0x100
-	evtRenderEventXML     = 1
-	evtSeekRelativeToLast = 0x2
+	evtQueryChannelPath = 0x1
+	evtQueryForwardDir  = 0x100
+	evtRenderEventXML   = 1
 )
 
 // pollInterval is how often the channel is drained. The Security log is a
 // pull API with no usable blocking read from Go, so this trades latency for
 // not spinning a core. A kill chain is measured in minutes, not milliseconds.
-const pollInterval = 2 * time.Second
+const (
+	pollInterval = 2 * time.Second
+	// pollWindow deliberately exceeds pollInterval so an event written between
+	// two polls falls inside the next one.
+	pollWindow = 30 * time.Second
+	// probeWindow is how far back the coverage probe looks for evidence that
+	// process auditing is on at all. Wider than a poll because a quiet host
+	// may not have created a process in the last few seconds, and reporting
+	// "coverage unknown" because of that is the answer least useful to an
+	// operator.
+	probeWindow = 24 * time.Hour
+	// maxSeenRecords bounds the dedup set.
+	maxSeenRecords = 16384
+)
 
 // windowsSource is Plane C on Windows, over the Security event log.
 //
@@ -98,6 +126,9 @@ type windowsSource struct {
 	closed   bool
 	stop     chan struct{}
 	wg       sync.WaitGroup
+	// seen holds the record ids already delivered, so the overlapping poll
+	// window does not deliver an event twice.
+	seen map[uint64]struct{}
 }
 
 // NewSource returns the Windows Plane C source. homeDirs is accepted for
@@ -111,29 +142,32 @@ func (s *windowsSource) Events() <-chan Event { return s.buffer.Events() }
 func (s *windowsSource) Coverage() Coverage   { return s.coverage }
 
 func (s *windowsSource) Start(ctx context.Context) error {
-	handle, err := openSecurityQuery()
+	// Prove the channel is readable before claiming the plane is up. An
+	// unelevated token fails here rather than silently delivering nothing.
+	handle, err := openSecurityQuery(int64(pollWindow / time.Millisecond))
 	if err != nil {
 		return fmt.Errorf("plane: Security event log unreadable: %w "+
 			"(the gateway needs an elevated token to read the Security channel)", err)
 	}
+	procEvtClose.Call(uintptr(handle))
 
-	// Seek past the existing backlog. Replaying days of history on startup
-	// would report a chain that completed last week as though it were
-	// happening now.
-	_, _, _ = procEvtSeek.Call(uintptr(handle), 0, 0, 0, evtSeekRelativeToLast)
+	// Everything already on disk is history. Marking it seen means the first
+	// poll delivers only what happens from now on, so a chain that completed
+	// last week is not reported as though it were happening now.
+	s.markExistingSeen()
 
-	probe, commandLines := probeAuditCoverage(handle)
+	hasProcessEvents, hasCommandLines := probeAuditCoverage()
 	coverage := Coverage{
 		Mechanism: "Windows Security event log (wevtapi)",
 		Kinds:     []Kind{KindExec, KindExit, KindFileRead, KindIdentity, KindPrivilege},
 	}
-	if !probe {
+	if !hasProcessEvents {
 		coverage.MissingKinds = append(coverage.MissingKinds, KindExec, KindExit)
 		coverage.Limitations = append(coverage.Limitations,
 			"no process-creation events are present; enable Advanced Audit Policy > "+
 				"Detailed Tracking > Audit Process Creation")
 	}
-	if !commandLines {
+	if hasProcessEvents && !hasCommandLines {
 		coverage.Limitations = append(coverage.Limitations,
 			"process events carry no command line; enable Administrative Templates > System > "+
 				"Audit Process Creation > Include command line in process creation events. "+
@@ -148,12 +182,33 @@ func (s *windowsSource) Start(ctx context.Context) error {
 	s.coverage = coverage
 
 	s.wg.Add(1)
-	go func() { defer s.wg.Done(); s.drain(ctx, handle) }()
+	go func() { defer s.wg.Done(); s.drain(ctx) }()
 	go func() {
 		<-ctx.Done()
 		_ = s.Close()
 	}()
 	return nil
+}
+
+// markExistingSeen records the record ids already in the poll window, so the
+// first real poll does not replay them as if they had just happened.
+func (s *windowsSource) markExistingSeen() {
+	handle, err := openSecurityQuery(int64(pollWindow / time.Millisecond))
+	if err != nil {
+		return
+	}
+	defer procEvtClose.Call(uintptr(handle))
+	for {
+		events, ok := nextEvents(handle, 64, 200)
+		if !ok || len(events) == 0 {
+			return
+		}
+		for _, raw := range events {
+			if record, err := decodeSecurityXML(raw); err == nil {
+				s.markSeen(record.RecordID)
+			}
+		}
+	}
 }
 
 func (s *windowsSource) Close() error {
@@ -170,12 +225,12 @@ func (s *windowsSource) Close() error {
 	return nil
 }
 
-func openSecurityQuery() (windows.Handle, error) {
+func openSecurityQuery(windowMS int64) (windows.Handle, error) {
 	channel, err := windows.UTF16PtrFromString("Security")
 	if err != nil {
 		return 0, err
 	}
-	query, err := windows.UTF16PtrFromString(securityQuery)
+	query, err := windows.UTF16PtrFromString(securityQuery(windowMS))
 	if err != nil {
 		return 0, err
 	}
@@ -194,34 +249,38 @@ func openSecurityQuery() (windows.Handle, error) {
 // probeAuditCoverage reports whether process-creation events exist at all, and
 // whether they carry a command line.
 //
-// It reads the tail of the existing log rather than waiting for a live event,
-// because a host with audit policy off would otherwise report "coverage
-// unknown" forever, which is the answer least useful to an operator.
-func probeAuditCoverage(handle windows.Handle) (hasProcessEvents, hasCommandLines bool) {
-	probe, err := openSecurityQuery()
+// It reads the existing log rather than waiting for a live event, because a
+// host with audit policy off would otherwise report "coverage unknown"
+// forever, which is the answer least useful to an operator.
+func probeAuditCoverage() (hasProcessEvents, hasCommandLines bool) {
+	// A wider window than a poll: a quiet host may not have created a process
+	// in the last few seconds, and reporting "coverage unknown" because of
+	// that would be the answer least useful to an operator.
+	handle, err := openSecurityQuery(int64(probeWindow / time.Millisecond))
 	if err != nil {
 		return false, false
 	}
-	defer procEvtClose.Call(uintptr(probe))
-	// Look at the most recent 64 matching records.
-	_, _, _ = procEvtSeek.Call(uintptr(probe), ^uintptr(63), 0, 0, evtSeekRelativeToLast)
+	defer procEvtClose.Call(uintptr(handle))
 
-	for round := 0; round < 8; round++ {
-		events, ok := nextEvents(probe, 8, 200)
+	// Bounded: a large Security channel must not turn startup into a full-log
+	// scan. A host that audits process creation at all will show one well
+	// inside this many records.
+	const maxProbeRecords = 512
+	scanned := 0
+	for scanned < maxProbeRecords {
+		events, ok := nextEvents(handle, 64, 200)
 		if !ok || len(events) == 0 {
 			break
 		}
 		for _, raw := range events {
+			scanned++
 			record, err := decodeSecurityXML(raw)
-			if err != nil {
+			if err != nil || record.EventID != eventProcessCreated {
 				continue
 			}
-			if record.EventID == eventProcessCreated {
-				hasProcessEvents = true
-				if strings.TrimSpace(record.data("CommandLine")) != "" {
-					hasCommandLines = true
-					return hasProcessEvents, hasCommandLines
-				}
+			hasProcessEvents = true
+			if strings.TrimSpace(record.data("CommandLine")) != "" {
+				return true, true
 			}
 		}
 	}
@@ -271,8 +330,7 @@ func renderEvent(event windows.Handle) (string, error) {
 	return windows.UTF16ToString(buffer), nil
 }
 
-func (s *windowsSource) drain(ctx context.Context, handle windows.Handle) {
-	defer procEvtClose.Call(uintptr(handle))
+func (s *windowsSource) drain(ctx context.Context) {
 	ticker := time.NewTicker(pollInterval)
 	defer ticker.Stop()
 	for {
@@ -283,25 +341,69 @@ func (s *windowsSource) drain(ctx context.Context, handle windows.Handle) {
 			return
 		case <-ticker.C:
 		}
-		for {
-			events, ok := nextEvents(handle, 32, 100)
-			if !ok || len(events) == 0 {
-				break
+		s.pollOnce()
+	}
+}
+
+// pollOnce reads the current window and delivers what has not been seen.
+//
+// The window deliberately overlaps the poll interval so an event written
+// between two polls is never missed; the seen set is what stops the overlap
+// from delivering it twice.
+func (s *windowsSource) pollOnce() {
+	handle, err := openSecurityQuery(int64(pollWindow / time.Millisecond))
+	if err != nil {
+		return
+	}
+	defer procEvtClose.Call(uintptr(handle))
+
+	for {
+		events, ok := nextEvents(handle, 32, 100)
+		if !ok || len(events) == 0 {
+			return
+		}
+		for _, raw := range events {
+			record, err := decodeSecurityXML(raw)
+			if err != nil || !s.markSeen(record.RecordID) {
+				continue
 			}
-			for _, raw := range events {
-				if event, ok := translateSecurityEvent(raw); ok {
-					s.buffer.Push(event)
-				}
+			if event, ok := translateSecurityRecord(record); ok {
+				s.buffer.Push(event)
 			}
 		}
 	}
 }
 
+// markSeen records a record id and reports whether it is new.
+//
+// Bounded: the set is cleared wholesale once it outgrows the window it could
+// possibly need, which is cheaper than an LRU and cannot leak. A cleared set
+// can at worst re-deliver one window's events, and the session dedup upstream
+// absorbs that.
+func (s *windowsSource) markSeen(recordID uint64) bool {
+	if recordID == 0 {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.seen == nil {
+		s.seen = make(map[uint64]struct{}, 1024)
+	}
+	if _, ok := s.seen[recordID]; ok {
+		return false
+	}
+	if len(s.seen) >= maxSeenRecords {
+		s.seen = make(map[uint64]struct{}, 1024)
+	}
+	s.seen[recordID] = struct{}{}
+	return true
+}
+
 // securityRecord is the subset of the Security-channel XML this source reads.
 type securityRecord struct {
-	EventID   int    `xml:"System>EventID"`
-	TimeValue string `xml:"-"`
-	Data      []struct {
+	EventID  int    `xml:"System>EventID"`
+	RecordID uint64 `xml:"System>EventRecordID"`
+	Data     []struct {
 		Name  string `xml:"Name,attr"`
 		Value string `xml:",chardata"`
 	} `xml:"EventData>Data"`
@@ -327,11 +429,7 @@ func decodeSecurityXML(raw string) (securityRecord, error) {
 	return record, nil
 }
 
-func translateSecurityEvent(raw string) (Event, bool) {
-	record, err := decodeSecurityXML(raw)
-	if err != nil {
-		return Event{}, false
-	}
+func translateSecurityRecord(record securityRecord) (Event, bool) {
 	at := parseSystemTime(record.Created.SystemTime)
 
 	switch record.EventID {

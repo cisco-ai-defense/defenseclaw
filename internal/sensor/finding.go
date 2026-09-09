@@ -126,6 +126,17 @@ type Snapshot struct {
 	// difference between a quiet host and a blind sensor.
 	ConnectionsObserved     int
 	ConnectionsUnattributed int
+	// HostPlaneObservations is how many kernel observations the host plane
+	// classified into a tactic, and HostPlaneGated how many it discarded for
+	// having no AI agent above them.
+	//
+	// Reported because the lineage gate is the primary false-positive control,
+	// and a control nobody can measure is a control nobody can trust. A gated
+	// count that stays zero while the classified count also stays zero means
+	// the plane is delivering nothing, which is a different problem from a
+	// quiet host.
+	HostPlaneObservations int64
+	HostPlaneGated        int64
 	// Degraded is true when any plane the platform supports is not running.
 	Degraded bool
 	// DegradedReasons lists why, one entry per affected plane.

@@ -354,6 +354,16 @@ func matrixFor(goos string) []matrixCase {
 				Observation{Kind: KindExec, Cmdline: `[Convert]::ToBase64String($bytes)`},
 				fires(Exfiltration, "agent_encoded_payload"),
 			},
+			matrixCase{
+				"stages a payload with certutil",
+				Observation{Kind: KindExec, Cmdline: `certutil  -encode "C:\Windows\win.ini" "C:\Temp\enc.txt"`},
+				fires(Exfiltration, "agent_encoded_payload"),
+			},
+			matrixCase{
+				"uses certutil for its ordinary certificate purpose",
+				Observation{Kind: KindExec, Cmdline: `certutil -store My`},
+				quiet,
+			},
 		)
 	}
 	return cases

@@ -43,6 +43,8 @@ type aiRuntimeResponse struct {
 	ProcessesSkipped        int                `json:"processes_skipped"`
 	ConnectionsObserved     int                `json:"connections_observed"`
 	ConnectionsUnattributed int                `json:"connections_unattributed"`
+	HostPlaneObservations   int64              `json:"host_plane_observations"`
+	HostPlaneGated          int64              `json:"host_plane_gated"`
 	Degraded                bool               `json:"degraded"`
 	DegradedReasons         []string           `json:"degraded_reasons,omitempty"`
 }
@@ -141,6 +143,8 @@ func renderAIRuntimeSnapshot(snapshot sensor.Snapshot) aiRuntimeResponse {
 		ProcessesSkipped:        snapshot.ProcessesSkipped,
 		ConnectionsObserved:     snapshot.ConnectionsObserved,
 		ConnectionsUnattributed: snapshot.ConnectionsUnattributed,
+		HostPlaneObservations:   snapshot.HostPlaneObservations,
+		HostPlaneGated:          snapshot.HostPlaneGated,
 		Degraded:                snapshot.Degraded,
 	}
 	if !snapshot.ScannedAt.IsZero() {

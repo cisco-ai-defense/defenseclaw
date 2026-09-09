@@ -346,6 +346,11 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		ConnectionsObserved:     len(connections),
 		ConnectionsUnattributed: unattributed,
 	}
+	if s.hostPlane != nil {
+		classified, gated, _, _ := s.hostPlane.stats()
+		snapshot.HostPlaneObservations = classified
+		snapshot.HostPlaneGated = gated
+	}
 	if processErr != nil {
 		snapshot.DegradedReasons = append(snapshot.DegradedReasons,
 			"process table unreadable: "+processErr.Error())

@@ -88,24 +88,20 @@ func TestIsAgentProcessMatchesKnownAgentsOnly(t *testing.T) {
 	t.Parallel()
 	for _, name := range []string{
 		"claude", "Claude", "codex", "cursor-agent", "aider", "devin",
-		"/usr/local/bin/claude", `C:\Program Files\Amp\amp.exe`,
+		"/usr/local/bin/claude",
+		// Windows ships every one of these as an executable. A pattern that
+		// did not tolerate the extension would gate the entire host plane on
+		// that platform, which a real Windows host demonstrated.
+		`C:\Program Files\Amp\amp.exe`, "claude.exe", "CODEX.EXE", "cursor-agent.cmd",
 	} {
-		if name == `C:\Program Files\Amp\amp.exe` {
-			// The Windows image path reaches a Linux gateway unchanged when an
-			// event is forwarded, so the basename split must handle both
-			// separators. amp.exe is not a bare "amp", so this one is expected
-			// to miss; it is here to pin that we do not strip extensions.
-			if IsAgentProcess(name) {
-				t.Errorf("IsAgentProcess(%q) matched; extensions are not stripped", name)
-			}
-			continue
-		}
 		if !IsAgentProcess(name) {
 			t.Errorf("IsAgentProcess(%q) = false, want true", name)
 		}
 	}
 	for _, name := range []string{
 		"python3", "node", "bash", "sh", "", "   ", "claudette", "not-claude",
+		// An extension is tolerated, not a suffix: claude-helper is not claude.
+		"claude-helper.exe", "codexify.exe", "claude.exe.bak",
 	} {
 		if IsAgentProcess(name) {
 			t.Errorf("IsAgentProcess(%q) = true, want false", name)
