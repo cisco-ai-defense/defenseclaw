@@ -570,3 +570,59 @@ func mustRead(t *testing.T, path string) string {
 	}
 	return string(data)
 }
+
+// A prepared journal that still lists targets but has lost its snapshot
+// material must refuse to roll back. Before this guard the rollback found no
+// snapshots, restored nothing, and still reported success -- leaving the host
+// on generation B while the operator was told it had reverted to A.
+func TestWindowsManagedRotationRollbackRefusesWhenSnapshotMaterialIsMissing(t *testing.T) {
+	env := newWindowsManagedRotationTestEnv(t, "alice")
+	req := env.request()
+	prepared, err := executeWindowsManagedRotationPrepare(req)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if prepared.Phase != enterpriseHookRotationPhasePrepared {
+		t.Fatalf("prepare phase = %q", prepared.Phase)
+	}
+	// Simulate a commit that retired generation-A material and then failed to
+	// persist the committed phase.
+	if err := os.RemoveAll(windowsManagedRotationRollbackPath(env.serviceDir)); err != nil {
+		t.Fatalf("remove rollback material: %v", err)
+	}
+	if _, err := executeWindowsManagedRotationRollback(req); err == nil {
+		t.Fatal("rollback reported success with no snapshot material to restore")
+	}
+}
+
+// An interrupted commit can persist the committed phase and still fail before
+// retiring the rollback directory. Re-running commit must finish that cleanup
+// rather than leaving generation-A material on disk.
+func TestWindowsManagedRotationCommitRetiresRollbackMaterialIdempotently(t *testing.T) {
+	env := newWindowsManagedRotationTestEnv(t, "alice")
+	req := env.request()
+	if _, err := executeWindowsManagedRotationPrepare(req); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	journal, exists, err := loadWindowsManagedRotationJournal(env.serviceDir)
+	if err != nil || !exists {
+		t.Fatalf("load journal: %v exists=%v", err, exists)
+	}
+	journal.Phase = enterpriseHookRotationPhaseCommitted
+	if err := writeWindowsManagedRotationJournal(env.serviceDir, journal); err != nil {
+		t.Fatalf("write committed journal: %v", err)
+	}
+	if _, err := os.Lstat(windowsManagedRotationRollbackPath(env.serviceDir)); err != nil {
+		t.Fatalf("expected leftover rollback material: %v", err)
+	}
+	committed, err := executeWindowsManagedRotationCommit(req)
+	if err != nil {
+		t.Fatalf("idempotent commit: %v", err)
+	}
+	if committed.Phase != enterpriseHookRotationPhaseCommitted {
+		t.Fatalf("phase = %q", committed.Phase)
+	}
+	if _, err := os.Lstat(windowsManagedRotationRollbackPath(env.serviceDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback material was not retired: %v", err)
+	}
+}

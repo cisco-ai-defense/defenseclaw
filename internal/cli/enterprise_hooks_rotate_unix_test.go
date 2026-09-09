@@ -322,3 +322,43 @@ func journalHasSecret(t *testing.T, dataDir string, secrets ...string) bool {
 	}
 	return false
 }
+
+// The preflight symlink refusal runs before the rotation lock, so a target
+// user can swap their data directory for a symlink before the privileged
+// write. mkdirEnterpriseHookRotationBound must refuse to traverse it rather
+// than creating directories outside the user's own home.
+func TestEnterpriseHookRotationBoundMkdirRefusesSwappedSymlink(t *testing.T) {
+	home := t.TempDir()
+	outside := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := os.Symlink(outside, dataDir); err != nil {
+		t.Fatalf("symlink data dir: %v", err)
+	}
+	if err := mkdirEnterpriseHookRotationBound(dataDir, "hooks"); err == nil {
+		t.Fatal("bound mkdir traversed a swapped symlink")
+	}
+	if _, err := os.Lstat(filepath.Join(outside, "hooks")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("privileged mkdir escaped the home directory: %v", err)
+	}
+}
+
+// The ordinary case must still work: a real data directory and its hooks
+// subdirectory are created with the expected permissions.
+func TestEnterpriseHookRotationBoundMkdirCreatesRealDirs(t *testing.T) {
+	home := t.TempDir()
+	dataDir := filepath.Join(home, ".defenseclaw")
+	if err := mkdirEnterpriseHookRotationBound(dataDir, "hooks"); err != nil {
+		t.Fatalf("bound mkdir: %v", err)
+	}
+	info, err := os.Lstat(filepath.Join(dataDir, "hooks"))
+	if err != nil {
+		t.Fatalf("hooks dir: %v", err)
+	}
+	if !info.IsDir() {
+		t.Fatal("hooks is not a directory")
+	}
+	// Idempotent: a second call over existing directories must succeed.
+	if err := mkdirEnterpriseHookRotationBound(dataDir, "hooks"); err != nil {
+		t.Fatalf("bound mkdir second call: %v", err)
+	}
+}
