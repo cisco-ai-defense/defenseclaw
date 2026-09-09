@@ -1,0 +1,585 @@
+{
+  "uid": "defenseclaw-ai-runtime",
+  "title": "DefenseClaw \u2014 AI Discovery Runtime Planes",
+  "description": "What actually ran, next to AI Discovery's inventory of what is present. Coverage is the first row on purpose: findings from a blinded host must not be read as a clean result.",
+  "tags": [
+    "defenseclaw",
+    "ai-discovery",
+    "runtime"
+  ],
+  "editable": true,
+  "graphTooltip": 1,
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "30s",
+  "preload": false,
+  "liveNow": false,
+  "timezone": "browser",
+  "weekStart": "",
+  "fiscalYearStartMonth": 0,
+  "time": {
+    "from": "now-6h",
+    "to": "now"
+  },
+  "timepicker": {},
+  "annotations": {
+    "list": []
+  },
+  "templating": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "AI Discovery",
+      "type": "link",
+      "url": "/d/defenseclaw-ai-discovery?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Overview",
+      "type": "link",
+      "url": "/d/defenseclaw-overview?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Agent Identity",
+      "type": "link",
+      "url": "/d/defenseclaw-agent-identity?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "type": "row",
+      "title": "Coverage \u2014 can this host see anything?",
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "stat",
+      "title": "Planes not running",
+      "description": "Selected planes that are not producing observations. Any non-zero value means findings from this host are incomplete. A detector reporting clean because it was never able to look is indistinguishable, on a dashboard, from a host that is genuinely clean \u2014 which is why this tile is first.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 5,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane_running=\"false\")[$__interval]))",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 2
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Unattributable connections",
+      "description": "Outbound connections observed with no owning process. On an unprivileged POSIX host this is how much of the machine's egress cannot be named \u2014 the difference between a quiet host and a blind sensor. Windows reports the owning pid in every row, so a non-zero value there means something else.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 5,
+        "y": 1,
+        "w": 5,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_unattributed)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Processes not fully readable",
+      "description": "Processes this run could see but not fully read. Non-zero is ordinary on an unprivileged run and is a coverage statement rather than an error.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 10,
+        "y": 1,
+        "w": 5,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_skipped)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "blue",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Partial poll cycles",
+      "description": "Cycles reported with outcome `partial` rather than `completed`. A degraded poll is never reported as a complete one, so this counts exactly the cycles whose findings must be read as incomplete.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 15,
+        "y": 1,
+        "w": 9,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | outcome=\"partial\")[$__interval]))",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Plane health \u2014 every plane, every cycle",
+      "description": "One record per plane per cycle, emitted whether the plane is up or down. If health were reported only while a plane worked, a dead subscription would leave no trace, and absence is the hardest thing to alert on. `body_defenseclaw_ai_runtime_plane_reason` names the mechanism when running and the remediation when not.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Findings \u2014 what actually ran",
+      "gridPos": {
+        "x": 0,
+        "y": 15,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Findings by severity",
+      "description": "Scored runtime findings over time, banded. No single host-plane tactic reaches high on its own; a high or critical band means several observations combined, or a kill chain progressed.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (body_defenseclaw_ai_runtime_severity) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.finding\")[$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{body_defenseclaw_ai_runtime_severity}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Inventory agreement",
+      "description": "How the discovery inventory answered each finding. `unaccounted` is the interesting reading: a complete scan that explains none of what the runtime planes are watching. `unobserved` means there was no usable inventory and the score was left untouched in both directions.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (body_defenseclaw_ai_runtime_correlation_verdict) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.finding\")[$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{body_defenseclaw_ai_runtime_correlation_verdict}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Runtime findings",
+      "description": "One record per scored finding. `body_defenseclaw_ai_runtime_signals` is the evidence trail behind the score, rendered signal_id=weight. `body_defenseclaw_ai_runtime_cmdline` and `..._providers` are content-class fields, so whether they appear here depends on the redaction profile this destination selected.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.finding\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "type": "row",
+      "title": "Host plane \u2014 what an agent did to the machine",
+      "gridPos": {
+        "x": 0,
+        "y": 34,
+        "w": 24,
+        "h": 1
+      },
+      "collapsed": false
+    },
+    {
+      "type": "timeseries",
+      "title": "Tactics by stage",
+      "description": "Observed host-plane tactics, in kill-chain order. Every one is gated on an AI agent appearing in the process lineage: a developer running sudo produces nothing here, the same sudo under an agent produces a signal. Renders empty unless the host plane is enabled, which is worth knowing before reading an empty row as a clean host.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (body_defenseclaw_ai_runtime_tactic) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\")[$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{body_defenseclaw_ai_runtime_tactic}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Tactics by responsible agent",
+      "description": "The same observations grouped by the agent the lineage attributed them to, which is what turns \"something read a credential\" into \"this agent read a credential\".",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 35,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "expr": "sum by (body_defenseclaw_ai_runtime_agent) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\")[$__interval]))",
+          "refId": "A",
+          "legendFormat": "{{body_defenseclaw_ai_runtime_agent}}",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "line",
+            "fillOpacity": 10
+          }
+        }
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": true
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "type": "logs",
+      "title": "Agent activity \u2014 one record per tactic",
+      "description": "Each record carries the MITRE ATT&CK technique and the chain stage. The sequence is the finding: reading a credential is a lead, and reading a credential then minting an identity then uploading to a paste site is an incident.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 43,
+        "w": 24,
+        "h": 10
+      },
+      "targets": [
+        {
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.activity\"",
+          "refId": "A",
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    }
+  ]
+}
