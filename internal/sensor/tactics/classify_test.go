@@ -125,6 +125,27 @@ func matrixFor(goos string) []matrixCase {
 			fires(CredentialAccess, "agent_credential_access"),
 		},
 
+		{
+			"reads a credential through an argv, with no file event",
+			Observation{Kind: KindExec, Cmdline: "cat " + home + "/.aws/credentials"},
+			graded(CredentialAccess, "agent_credential_access"),
+		},
+		{
+			"copies a private key through an argv",
+			Observation{Kind: KindExec, Cmdline: "cp " + home + "/.ssh/id_ed25519 /tmp/k"},
+			graded(CredentialAccess, "agent_credential_access"),
+		},
+		{
+			"greps a tree containing a credential path without reading it",
+			Observation{Kind: KindExec, Cmdline: "grep -rl aws_access_key_id " + home},
+			quiet,
+		},
+		{
+			"opens a credential path in an editor, not a reader",
+			Observation{Kind: KindExec, Cmdline: "vim " + home + "/.aws/credentials"},
+			quiet,
+		},
+
 		// --- identity creation -------------------------------------------
 		{
 			"mints an AWS IAM access key",

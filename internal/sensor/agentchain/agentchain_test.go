@@ -134,6 +134,80 @@ func TestBootPersistentIsDistinguishedFromOrphaned(t *testing.T) {
 	}
 }
 
+// TestAForkedAgentIsOneSessionNotMany reproduces what a real Linux host
+// showed: an agent that is a shell script forks children which inherit its
+// argv, so each child independently looks like the agent. Rooting each at
+// itself splits one agent session into one session per command it ran, which
+// is exactly the fragmentation this package exists to prevent.
+func TestAForkedAgentIsOneSessionNotMany(t *testing.T) {
+	t.Parallel()
+	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
+	tracker := newTracker(lineageTTL, clock)
+
+	// /tmp/claude is a bash script; every command it runs is first a fork that
+	// still carries the script's own command line.
+	tracker.ObserveExec(700, InitPID, InitPID, "claude", "/bin/bash /tmp/claude")
+	for _, pid := range []int{701, 702, 703} {
+		tracker.ObserveExec(pid, 700, 700, "claude", "/bin/bash /tmp/claude")
+	}
+	// And a grandchild fork, to prove the walk reaches the outermost ancestor
+	// rather than stopping one level up.
+	tracker.ObserveExec(704, 703, 703, "claude", "/bin/bash /tmp/claude")
+
+	roots := map[int]bool{}
+	for _, pid := range []int{700, 701, 702, 703, 704} {
+		attribution, ok := tracker.Attribute(pid)
+		if !ok {
+			t.Fatalf("pid %d was not attributed", pid)
+		}
+		if attribution.AgentName != "claude" {
+			t.Fatalf("pid %d attributed to %q", pid, attribution.AgentName)
+		}
+		roots[attribution.RootPID] = true
+	}
+	if len(roots) != 1 {
+		t.Fatalf("one agent produced %d session roots: %v", len(roots), roots)
+	}
+	if !roots[700] {
+		t.Fatalf("session root = %v, want the outermost agent at pid 700", roots)
+	}
+}
+
+// TestDistinctAgentsKeepDistinctSessions pins that the same-name walk does not
+// over-merge: two unrelated agents of the same kind are two sessions.
+func TestDistinctAgentsKeepDistinctSessions(t *testing.T) {
+	t.Parallel()
+	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
+	tracker := newTracker(lineageTTL, clock)
+	tracker.ObserveExec(800, InitPID, InitPID, "claude", "claude")
+	tracker.ObserveExec(900, InitPID, InitPID, "claude", "claude")
+
+	first, _ := tracker.Attribute(800)
+	second, _ := tracker.Attribute(900)
+	if first.RootPID == second.RootPID {
+		t.Fatalf("two unrelated agents merged into one session at pid %d", first.RootPID)
+	}
+}
+
+// TestANestedDifferentAgentIsNotMergedUpward pins that the walk stops at the
+// first ancestor with a different identity: an agent that launches a different
+// agent is two sessions, not one.
+func TestANestedDifferentAgentIsNotMergedUpward(t *testing.T) {
+	t.Parallel()
+	clock, _ := fixedClock(time.Unix(1_760_000_000, 0))
+	tracker := newTracker(lineageTTL, clock)
+	tracker.ObserveExec(1000, InitPID, InitPID, "claude", "claude")
+	tracker.ObserveExec(1001, 1000, 1000, "codex", "codex exec")
+
+	nested, ok := tracker.Attribute(1001)
+	if !ok {
+		t.Fatal("the nested agent was not attributed")
+	}
+	if nested.AgentName != "codex" || nested.RootPID != 1001 {
+		t.Fatalf("nested attribution = %+v, want codex rooted at itself", nested)
+	}
+}
+
 // TestAncestryWalkTerminatesOnACycle guards against a pid table that contains
 // a loop after pid reuse.
 func TestAncestryWalkTerminatesOnACycle(t *testing.T) {

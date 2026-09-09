@@ -121,6 +121,14 @@ var exfilHosts = []string{
 // exfilCommand recognises a transfer to a public drop point in one argv.
 var exfilCommand = regexp.MustCompile(`(?i)\b(curl|wget|nc|ncat|scp|rsync|Invoke-WebRequest|iwr|Invoke-RestMethod)\b`)
 
+// credentialReader recognises the commands that read a file, so a path in an
+// argv is only treated as credential access when something is actually reading
+// it. Without this an editor opening a config, or a grep across a tree, would
+// classify as a credential read.
+var credentialReader = regexp.MustCompile(
+	`(?i)\b(cat|head|tail|less|more|strings|xxd|od|base64|cp|scp|rsync|dd|` +
+		`type|Get-Content|gc|Copy-Item|awk|sed|python3?|node|jq)\b`)
+
 // localMCPCommand recognises an agent starting a local MCP tool server, which
 // is how it reaches the filesystem, a database, or a cloud API.
 var localMCPCommand = regexp.MustCompile(`(?i)(mcp[-_]server|server[-_]mcp|@modelcontextprotocol/)`)
@@ -152,7 +160,7 @@ func Classify(observation Observation, indicators IndicatorSet) (Match, bool) {
 			Confidence: 1.0,
 		}, true
 	case KindExec:
-		return classifyExec(observation)
+		return classifyExec(observation, indicators)
 	}
 	return Match{}, false
 }
@@ -214,7 +222,7 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 	return Match{}, false
 }
 
-func classifyExec(observation Observation) (Match, bool) {
+func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool) {
 	cmdline := strings.TrimSpace(observation.Cmdline)
 	if cmdline == "" {
 		return Match{}, false
@@ -251,6 +259,26 @@ func classifyExec(observation Observation) (Match, bool) {
 			Tactic: Exfiltration, SignalID: "agent_public_exfil_surface",
 			Title: "agent referenced a public drop point", Detail: host, Confidence: 0.5,
 		}, true
+	}
+	// A command line that names a secret at rest is credential access even
+	// when no file event was observed. This is what keeps the tactic reachable
+	// on an unprivileged Linux host, which has cn_proc but not fanotify, and on
+	// Windows, where object access needs a SACL that is almost never
+	// configured. Graded slightly down against a kernel file event: argv says
+	// what a process was asked to do, a file event says what it did.
+	if credentialReader.MatchString(cmdline) {
+		if match, ok := containsAny(cmdline, indicators.HighConfidenceCredentials); ok {
+			return Match{
+				Tactic: CredentialAccess, SignalID: "agent_credential_access",
+				Title: "agent read a secret at rest", Detail: match, Confidence: 0.9,
+			}, true
+		}
+		if match, ok := containsAny(cmdline, indicators.CredentialPaths); ok {
+			return Match{
+				Tactic: CredentialAccess, SignalID: "agent_credential_access",
+				Title: "agent read a credential-adjacent file", Detail: match, Confidence: 0.6,
+			}, true
+		}
 	}
 	if localMCPCommand.MatchString(cmdline) {
 		return Match{

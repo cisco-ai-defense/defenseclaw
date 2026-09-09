@@ -200,8 +200,18 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 		return Attribution{}, false
 	}
 	if record.agentName != "" {
+		// The process is itself an agent. Walk to the outermost ancestor
+		// carrying the same agent identity before calling it the root.
+		//
+		// This matters for any agent that is a shell script or a supervisor:
+		// its forked children inherit its argv, so each one independently
+		// looks like the agent. Rooting each at itself would split one agent
+		// session into one session per command it ran -- which is exactly the
+		// fragmentation this package exists to prevent, since the sequence is
+		// the finding.
 		return Attribution{
-			RootPID: pid, AgentName: record.agentName, Depth: 0,
+			RootPID:   t.outermostSameAgentLocked(pid, record.agentName),
+			AgentName: record.agentName, Depth: 0,
 			Via: record.via, State: StateAttributed,
 		}, true
 	}
@@ -235,6 +245,32 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 		current = parent
 	}
 	return Attribution{}, false
+}
+
+// outermostSameAgentLocked walks up from pid while each ancestor carries the
+// same agent name, and returns the last one that does.
+//
+// Bounded by the same walk limit as attribution, because a pid table can
+// contain a cycle after pid reuse.
+func (t *Tracker) outermostSameAgentLocked(pid int, agentName string) int {
+	root := pid
+	current, ok := t.records[pid]
+	if !ok {
+		return root
+	}
+	for depth := 0; depth < maxAncestryWalk; depth++ {
+		next := current.ppid
+		if next <= 0 || next == InitPID || next == current.pid {
+			return root
+		}
+		parent, ok := t.records[next]
+		if !ok || parent.agentName != agentName {
+			return root
+		}
+		root = next
+		current = parent
+	}
+	return root
 }
 
 // AttributionState classifies a pid that has no agent above it, so the absence

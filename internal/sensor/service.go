@@ -354,22 +354,40 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 		snapshot.DegradedReasons = append(snapshot.DegradedReasons,
 			"connection table unreadable: "+connectionErr.Error())
 	}
-	for _, health := range snapshot.Planes {
-		if health.Available && !health.Running {
-			snapshot.DegradedReasons = append(snapshot.DegradedReasons,
-				health.Plane.Name()+" available but not running: "+planeIdleReason(health))
-		}
-		if !health.Available {
-			snapshot.DegradedReasons = append(snapshot.DegradedReasons,
-				health.Plane.Name()+" unavailable: "+health.Reason)
-		}
-	}
+	snapshot.DegradedReasons = append(snapshot.DegradedReasons, degradedReasonsFor(snapshot)...)
 	snapshot.Degraded = len(snapshot.DegradedReasons) > 0
 
 	s.mu.Lock()
 	s.snapshot = snapshot
 	s.mu.Unlock()
 	return snapshot
+}
+
+// degradedReasonsFor renders one operator-facing line per plane that is not
+// delivering everything it could.
+//
+// Three states are distinguished because they need three different fixes:
+// unavailable is a platform or grant problem, stopped is a runtime failure,
+// and partially covered is a privilege gap that leaves the plane useful but
+// incomplete.
+func degradedReasonsFor(snapshot Snapshot) []string {
+	reasons := make([]string, 0, len(snapshot.Planes))
+	for _, health := range snapshot.Planes {
+		switch {
+		case !health.Available:
+			reasons = append(reasons, health.Plane.Name()+" unavailable: "+planeIdleReason(health))
+		case !health.Running:
+			reasons = append(reasons,
+				health.Plane.Name()+" available but not running: "+planeIdleReason(health))
+		case health.Reason != "":
+			// Running with a stated limitation is partial coverage, not full.
+			// A plane delivering process events but not file events is missing
+			// a whole tactic class, and a snapshot that called that complete
+			// would let an operator read reduced coverage as a clean host.
+			reasons = append(reasons, health.Plane.Name()+" partially covered: "+health.Reason)
+		}
+	}
+	return reasons
 }
 
 func (s *Service) episodeFor(pid int, now time.Time) *episode {
