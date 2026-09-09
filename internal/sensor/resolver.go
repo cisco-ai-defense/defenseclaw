@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/dnscapture"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 )
 
@@ -174,4 +175,39 @@ func (s StaticResolver) Resolve(connection netprobe.Connection) (string, float64
 		source = "static"
 	}
 	return hostname, confidence, source
+}
+
+// CapturingResolver names a peer from a captured DNS answer when one exists,
+// and falls back to reverse DNS when it does not.
+//
+// The ordering is the point. A captured answer is a direct observation of the
+// name this host actually resolved to that address; a PTR record is controlled
+// by whoever owns the address and frequently names infrastructure rather than
+// the service. Preferring the observation is what earns the full-confidence
+// weight, and the fallback is what keeps the plane useful before the cache has
+// seen anything.
+type CapturingResolver struct {
+	cache    *dnscapture.Cache
+	fallback Resolver
+}
+
+// NewCapturingResolver layers a DNS-answer cache over a fallback resolver.
+func NewCapturingResolver(cache *dnscapture.Cache, fallback Resolver) *CapturingResolver {
+	return &CapturingResolver{cache: cache, fallback: fallback}
+}
+
+// Resolve implements Resolver.
+func (r *CapturingResolver) Resolve(connection netprobe.Connection) (string, float64, string) {
+	if connection.RemoteIP == nil || !connection.Public() {
+		return "", 0, ""
+	}
+	if r.cache != nil {
+		if hostname, ok := r.cache.Lookup(connection.RemoteIP.String()); ok {
+			return hostname, ConfidenceDNSAnswer, "dns_answer"
+		}
+	}
+	if r.fallback == nil {
+		return "", 0, ""
+	}
+	return r.fallback.Resolve(connection)
 }

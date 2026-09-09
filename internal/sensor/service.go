@@ -35,6 +35,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/dnscapture"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
@@ -89,9 +90,12 @@ type Service struct {
 	mu                sync.RWMutex
 	snapshot          Snapshot
 	hostPlaneStartErr string
+	dnsCaptureErr     string
 
 	tracker   *agentchain.Tracker
 	hostPlane *hostPlane
+	dnsCache  *dnscapture.Cache
+	dnsCap    dnscapture.Capturer
 	// episodes carries per-process state between polls: the previous CPU
 	// reading, first-seen time, and how many distinct unnamed public peers the
 	// process has reached. Escalation depends on that history, so it cannot be
@@ -128,8 +132,21 @@ func New(options Options) (*Service, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	var (
+		dnsCache *dnscapture.Cache
+		dnsCap   dnscapture.Capturer
+	)
+	if options.Config.DNSCapture {
+		dnsCache = dnscapture.NewCache()
+		dnsCap = dnscapture.New()
+	}
 	if options.Resolver == nil {
-		options.Resolver = NewReverseResolver(options.Providers)
+		reverse := NewReverseResolver(options.Providers)
+		if dnsCache != nil {
+			options.Resolver = NewCapturingResolver(dnsCache, reverse)
+		} else {
+			options.Resolver = reverse
+		}
 	}
 	if options.NewPlaneSource == nil {
 		options.NewPlaneSource = plane.NewSource
@@ -138,6 +155,8 @@ func New(options Options) (*Service, error) {
 		options:  options,
 		tracker:  agentchain.NewTracker(),
 		episodes: make(map[int]*episode),
+		dnsCache: dnsCache,
+		dnsCap:   dnsCap,
 	}
 	for _, selected := range options.Config.EffectivePlanes() {
 		if selected != "c" {
@@ -168,6 +187,17 @@ func (s *Service) Snapshot() Snapshot {
 // the one thing this subsystem must never produce without saying so.
 func (s *Service) Run(ctx context.Context) error {
 	interval := s.options.Config.EffectivePollInterval()
+	if s.dnsCap != nil {
+		// A capture that cannot start is degraded coverage, not fatal: the
+		// reverse resolver still names peers, less confidently, and the reason
+		// reaches the snapshot instead of the plane going quiet.
+		if err := s.dnsCap.Start(ctx, s.dnsCache); err != nil {
+			s.mu.Lock()
+			s.dnsCaptureErr = err.Error()
+			s.mu.Unlock()
+		}
+		defer func() { _ = s.dnsCap.Close() }()
+	}
 	if s.hostPlane != nil {
 		// A host plane that cannot start is degraded coverage, not a fatal
 		// error: planes A and B still work, and the reason reaches the
@@ -384,6 +414,11 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 			entry.Running = capability.Available && processOK
 		case platform.PlaneB:
 			entry.Running = capability.Available && connectionOK
+			if reason := s.dnsCaptureStatus(); reason != "" {
+				// The plane still runs on reverse DNS; naming is just less
+				// direct, and saying so beats silently downgrading confidence.
+				entry.Reason = reason
+			}
 		case platform.PlaneC:
 			entry.Running, entry.Mechanism, entry.Reason = s.hostPlaneHealth(capability)
 		}
@@ -403,6 +438,26 @@ func planeIdleReason(health PlaneHealth) string {
 		return reason
 	}
 	return "not started"
+}
+
+// dnsCaptureStatus reports what DNS capture is or is not contributing.
+//
+// Returns "" when capture is off and was never asked for, because an operator
+// who did not enable it does not need to be told it is not running.
+func (s *Service) dnsCaptureStatus() string {
+	if !s.options.Config.DNSCapture {
+		return ""
+	}
+	s.mu.RLock()
+	captureErr := s.dnsCaptureErr
+	s.mu.RUnlock()
+	if captureErr != "" {
+		return "dns capture unavailable, peers named by reverse DNS only: " + captureErr
+	}
+	if s.dnsCache != nil && s.dnsCache.Observed() == 0 {
+		return "dns capture running but has observed no answers yet"
+	}
+	return ""
 }
 
 // hostPlaneHealth reports Plane C from the running source rather than from the
