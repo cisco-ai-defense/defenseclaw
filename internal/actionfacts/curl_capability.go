@@ -274,10 +274,17 @@ func curlURLSchemeToken(value string) string {
 		return ""
 	}
 	scheme := strings.ToLower(value[:delimiter])
-	for _, char := range scheme {
-		if char < 'a' || char > 'z' {
-			return ""
+	for i, char := range scheme {
+		// RFC 3986 schemes start with a letter and may then contain digits;
+		// rejecting digits collapsed socks5:// and socks5h:// to "http",
+		// which wrongly demanded HTTP protocol attestation for a SOCKS proxy.
+		if char >= 'a' && char <= 'z' {
+			continue
 		}
+		if i > 0 && char >= '0' && char <= '9' {
+			continue
+		}
+		return ""
 	}
 	return scheme
 }

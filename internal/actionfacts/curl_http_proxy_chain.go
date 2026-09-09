@@ -235,8 +235,12 @@ func staticCurlPreproxyDestinationHostnameComponents(
 		components = append(components, candidate)
 	}
 	if _, err := netip.ParseAddr(chain.MainProxy.Host); err != nil {
+		// A missing capability must not mint a trusted hostname proof:
+		// curlCommandAllowsHTTPSProxyScheme treats a nil capability as allowed,
+		// which would let a SOCKS5h preproxy receive a projected HTTPS
+		// main-proxy hostname with no attested https-proxy support.
 		httpsMainAllowed := chain.MainProxy.Scheme == "https" &&
-			curlCommandAllowsHTTPSProxyScheme(command, chain.MainProxy.Scheme)
+			curlCommandAttestsHTTPSProxy(command)
 		if httpsMainAllowed ||
 			(chain.MainProxy.Scheme != "https" &&
 				curlProxyResolvesTargetHostname(chain.PreproxyCanonical, chain.PreproxyValue)) {

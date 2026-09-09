@@ -175,6 +175,7 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 		rejectHost   string
 		wantRequest  string
 		wantObserver string
+		caps         []CurlCapability
 	}{
 		{
 			name: "SOCKS5h observes HTTP main-proxy hostname",
@@ -205,6 +206,7 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 			},
 			wantHost:     "proxy.example",
 			wantObserver: "preproxy.example",
+			caps:         []CurlCapability{testCurlHTTPSProxyCapability()},
 		},
 		{
 			name: "Host override still copies forward-proxy origin hostname onto SOCKS5",
@@ -237,6 +239,7 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 			wantHost:     "proxy.example",
 			rejectHost:   "origin.example",
 			wantObserver: "preproxy.example",
+			caps:         []CurlCapability{testCurlHTTPSProxyCapability()},
 		},
 		{
 			name: "HTTPS origin SNI is visible to SOCKS when main is HTTP",
@@ -267,6 +270,18 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 			wantHost:     "proxy.example",
 			rejectHost:   "origin.example",
 			wantObserver: "ext.example",
+			caps:         []CurlCapability{testCurlHTTPSProxyCapability()},
+		},
+		{
+			// Regression: a nil capability must not mint a trusted HTTPS
+			// main-proxy hostname proof for the SOCKS preproxy observer.
+			name: "unattested HTTPS main proxy projects no hostname",
+			argv: []string{
+				"curl", "--preproxy", "socks5://ext.example",
+				"--proxy", "https://proxy.example", "http://origin.example/",
+			},
+			rejectHost:   "proxy.example",
+			wantObserver: "ext.example",
 		},
 		{
 			name: "remote SOCKS5h does not expose numeric HTTP main-proxy host",
@@ -282,7 +297,9 @@ func TestStaticCurlPreproxyObserverComponents(t *testing.T) {
 		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			facts := Analyze(Input{Tool: "exec", Argv: test.argv})
+			facts := Analyze(Input{
+				Tool: "exec", Argv: test.argv, CurlCapabilities: test.caps,
+			})
 			if len(facts.Commands) != 1 {
 				t.Fatalf("commands = %#v", facts.Commands)
 			}
