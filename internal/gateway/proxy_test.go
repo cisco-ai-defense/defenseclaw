@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -2038,6 +2039,13 @@ func TestHandlePassthrough_OllamaSystemAndPromptInspectsPrompt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"model":"llama3.2","response":"","done":true}`))
 		}))
 		defer upstream.Close()
+		// inferProviderFromURL keys off the target host, so the httptest host
+		// must be registered as ollama or the Ollama inspection path is skipped.
+		if u, perr := url.Parse(upstream.URL); perr == nil {
+			registerProviderDomainForTest(t, u.Hostname(), "ollama")
+		} else {
+			t.Fatalf("parse upstream URL: %v", perr)
+		}
 
 		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
@@ -2071,6 +2079,11 @@ func TestHandlePassthrough_OllamaSystemAndPromptInspectsPrompt(t *testing.T) {
 			_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant"}`))
 		}))
 		defer upstream.Close()
+		if u, perr := url.Parse(upstream.URL); perr == nil {
+			registerProviderDomainForTest(t, u.Hostname(), "anthropic")
+		} else {
+			t.Fatalf("parse upstream URL: %v", perr)
+		}
 
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
