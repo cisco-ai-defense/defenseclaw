@@ -90,6 +90,13 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	s.aiRuntimeMu.Lock()
 	s.aiRuntime = service
 	s.aiRuntimeMu.Unlock()
+	// The API server is constructed in its own goroutine and wires whatever
+	// services exist at that moment. This one is created here, asynchronously,
+	// so it has to push itself in rather than wait to be collected -- otherwise
+	// the endpoint reports the planes disabled for as long as the process
+	// lives, which is indistinguishable from an operator having turned them
+	// off. runAPI's own wiring covers the reverse order.
+	s.apiSnapshot().SetAIRuntimeService(service)
 
 	s.health.SetAIRuntime(StateStarting, "", map[string]interface{}{
 		"planes":             runtimeConfig.EffectivePlanes(),

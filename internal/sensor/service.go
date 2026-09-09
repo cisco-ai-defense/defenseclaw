@@ -285,7 +285,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	for _, health := range snapshot.Planes {
 		if health.Available && !health.Running {
 			snapshot.DegradedReasons = append(snapshot.DegradedReasons,
-				string(health.Plane)+" is available but not running")
+				health.Plane.Name()+" available but not running: "+planeIdleReason(health))
 		}
 		if !health.Available {
 			snapshot.DegradedReasons = append(snapshot.DegradedReasons,
@@ -356,6 +356,16 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		health = append(health, entry)
 	}
 	return health
+}
+
+// planeIdleReason explains a plane that could run and is not. Falls back to a
+// plain statement rather than an empty string, because a degradation entry
+// with no reason is the thing this subsystem refuses to emit.
+func planeIdleReason(health PlaneHealth) string {
+	if reason := strings.TrimSpace(health.Reason); reason != "" {
+		return reason
+	}
+	return "not started"
 }
 
 // correlateFinding picks the join most specific to what was observed.
