@@ -77,6 +77,23 @@ class ContextualJudgePrepareTests(unittest.TestCase):
             "pinned",
         )
 
+    def test_extended_lock_validates_every_row_and_rejects_conflicts(self) -> None:
+        first = row("a", "action", "attack")
+        second = row("b", "action", "attack")
+        provenance = {
+            "revision": "pinned",
+            "license": "approved",
+            "redistribution": "private",
+        }
+        first["source"].update(provenance)
+
+        with self.assertRaisesRegex(ValueError, "missing provenance fields"):
+            prepare.selected_source_provenance([first, second])
+
+        second["source"].update(provenance | {"revision": "other"})
+        with self.assertRaisesRegex(ValueError, "conflicting provenance fields: revision"):
+            prepare.selected_source_provenance([first, second])
+
     def test_surface_filter_prevents_stateful_call_expansion(self) -> None:
         rows = [row("a", "action", "attack"), row("b", "stateful", "attack")]
         selected, available = prepare.select_rows(

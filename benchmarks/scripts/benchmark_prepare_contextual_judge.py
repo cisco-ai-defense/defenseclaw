@@ -234,13 +234,20 @@ def selected_source_provenance(selected: list[dict[str, Any]]) -> dict[str, dict
     first_by_dataset: dict[str, dict[str, Any]] = {}
     for row in selected:
         source = row["source"]
-        first_by_dataset.setdefault(source["dataset"], source)
-    for dataset, source in sorted(first_by_dataset.items()):
+        dataset = source.get("dataset")
+        if not dataset:
+            raise ValueError("selected row is missing source.dataset")
         required = ("revision", "license", "redistribution")
         missing = [field for field in required if field not in source or source[field] in (None, "")]
         if missing:
             raise ValueError(
                 f"dataset {dataset!r} is missing provenance fields: {', '.join(missing)}"
+            )
+        first = first_by_dataset.setdefault(dataset, source)
+        conflicting = [field for field in required if first[field] != source[field]]
+        if conflicting:
+            raise ValueError(
+                f"dataset {dataset!r} has conflicting provenance fields: {', '.join(conflicting)}"
             )
     return first_by_dataset
 
