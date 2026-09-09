@@ -6667,25 +6667,101 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
-	// Data Exfiltration alone → HIGH/block (structural signal, no benign interpretation).
-	t.Run("data exfiltration alone is high block", func(t *testing.T) {
+	// A structural label without a strong-signal rating remains an alert. This
+	// is the low-interruption fallback for models that omit or hedge strength.
+	t.Run("data exfiltration without strong signal is medium alert", func(t *testing.T) {
 		v := toolInjectionToVerdict(clean("Data Exfiltration"))
-		if v.Action != "block" {
-			t.Errorf("action = %q, want block", v.Action)
+		if v.Action != "alert" {
+			t.Errorf("action = %q, want alert", v.Action)
 		}
-		if v.Severity != "HIGH" {
-			t.Errorf("severity = %q, want HIGH", v.Severity)
+		if v.Severity != "MEDIUM" {
+			t.Errorf("severity = %q, want MEDIUM", v.Severity)
 		}
 	})
 
-	// Destructive Commands alone → HIGH/block (structural signal).
-	t.Run("destructive commands alone is high block", func(t *testing.T) {
+	t.Run("destructive commands without strong signal is medium alert", func(t *testing.T) {
 		v := toolInjectionToVerdict(clean("Destructive Commands"))
-		if v.Action != "block" {
-			t.Errorf("action = %q, want block", v.Action)
+		if v.Action != "alert" {
+			t.Errorf("action = %q, want alert", v.Action)
 		}
-		if v.Severity != "HIGH" {
-			t.Errorf("severity = %q, want HIGH", v.Severity)
+		if v.Severity != "MEDIUM" {
+			t.Errorf("severity = %q, want MEDIUM", v.Severity)
+		}
+	})
+
+	t.Run("strong data exfiltration is critical block", func(t *testing.T) {
+		data := clean("Data Exfiltration")
+		data["Data Exfiltration"].(map[string]interface{})["signal_strength"] = "strong_signal"
+		v := toolInjectionToVerdict(data)
+		if v.Action != "block" || v.Severity != "CRITICAL" {
+			t.Fatalf("verdict = action:%q severity:%q, want block/CRITICAL", v.Action, v.Severity)
+		}
+	})
+
+	t.Run("compact findings preserve strongest duplicate", func(t *testing.T) {
+		data := map[string]interface{}{
+			"findings": []interface{}{
+				map[string]interface{}{
+					"category": "Data Exfiltration", "reasoning": "possible transfer", "signal_strength": "needs_review",
+				},
+				map[string]interface{}{
+					"category": "Data Exfiltration", "reasoning": "secret sent outbound", "signal_strength": "strong_signal",
+				},
+				map[string]interface{}{
+					"category": "Unknown Category", "reasoning": "ignored", "signal_strength": "strong_signal",
+				},
+			},
+		}
+		v := toolInjectionToVerdict(data)
+		if v.Action != "block" || v.Severity != "CRITICAL" {
+			t.Fatalf("verdict = action:%q severity:%q, want block/CRITICAL", v.Action, v.Severity)
+		}
+		if len(v.Findings) != 1 || v.Findings[0] != "JUDGE-TOOL-INJ-EXFIL" {
+			t.Fatalf("findings = %v", v.Findings)
+		}
+		if !strings.Contains(v.Reason, "secret sent outbound") || strings.Contains(v.Reason, "possible transfer") {
+			t.Fatalf("reason = %q", v.Reason)
+		}
+	})
+
+	t.Run("forced checklist maps signal values", func(t *testing.T) {
+		data := map[string]interface{}{}
+		for category := range toolInjectionCategories {
+			data[category] = "none"
+		}
+		data["Security Control Change"] = "needs_review"
+		data["Remote or Hidden Code Execution"] = "signal"
+		v := toolInjectionToVerdict(data)
+		if v.Action != "block" || v.Severity != "HIGH" {
+			t.Fatalf("verdict = action:%q severity:%q, want block/HIGH", v.Action, v.Severity)
+		}
+		if len(v.Findings) != 2 {
+			t.Fatalf("findings = %v, want two checklist findings", v.Findings)
+		}
+	})
+
+	t.Run("weak checklist signal is non-actionable", func(t *testing.T) {
+		data := map[string]interface{}{}
+		for category := range toolInjectionCategories {
+			data[category] = "none"
+		}
+		data["Obfuscation"] = "weak_signal"
+		v := toolInjectionToVerdict(data)
+		if v.Action != "allow" || v.Severity != "NONE" {
+			t.Fatalf("verdict = action:%q severity:%q, want allow/NONE", v.Action, v.Severity)
+		}
+	})
+
+	t.Run("review-only checklist signals alert without blocking", func(t *testing.T) {
+		data := map[string]interface{}{}
+		for category := range toolInjectionCategories {
+			data[category] = "none"
+		}
+		data["Sensitive Data Access"] = "needs_review"
+		data["Security Control Change"] = "needs_review"
+		v := toolInjectionToVerdict(data)
+		if v.Action != "alert" || v.Severity != "MEDIUM" {
+			t.Fatalf("verdict = action:%q severity:%q, want alert/MEDIUM", v.Action, v.Severity)
 		}
 	})
 

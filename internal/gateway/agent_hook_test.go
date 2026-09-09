@@ -1066,6 +1066,50 @@ func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 	}
 }
 
+func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
+	intentEvents := []string{
+		// Codex, Claude Code, Devin, and OmniGent.
+		"UserPromptSubmit",
+		// Cursor, Windsurf, Copilot, OpenHands, Gemini CLI,
+		// Antigravity, Hermes, and Amp.
+		"beforeSubmitPrompt", "pre_user_prompt", "userPromptSubmitted",
+		"user_prompt_submit", "BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
+	}
+	for _, event := range intentEvents {
+		if !isToolJudgeIntentEvent(event) {
+			t.Errorf("isToolJudgeIntentEvent(%q) = false, want true", event)
+		}
+	}
+
+	// These surfaces may carry model-generated or expanded content and must
+	// not overwrite the authenticated user task retained for tool judging.
+	for _, event := range []string{
+		"UserPromptTransformed", "UserPromptExpansion", "BeforeModel",
+		"SubagentStart", "PostToolUse", "tool.execute.before",
+	} {
+		if isToolJudgeIntentEvent(event) {
+			t.Errorf("isToolJudgeIntentEvent(%q) = true, want false", event)
+		}
+	}
+}
+
+func TestToolJudgeSessionBoundariesCoverConnectorSpellings(t *testing.T) {
+	for _, event := range []string{
+		"SessionStart", "SessionEnd", "session.start", "session_end",
+		"session.created", "session.deleted", "on_session_start",
+		"on_session_end", "on_session_finalize", "on_session_reset",
+	} {
+		if !isToolJudgeSessionBoundaryEvent(event) {
+			t.Errorf("isToolJudgeSessionBoundaryEvent(%q) = false, want true", event)
+		}
+	}
+	for _, event := range []string{"agent.start", "agent.end", "Stop", "PreToolUse"} {
+		if isToolJudgeSessionBoundaryEvent(event) {
+			t.Errorf("isToolJudgeSessionBoundaryEvent(%q) = true, want false", event)
+		}
+	}
+}
+
 // TestConnectorReason_PreservesUpstreamReason pins the contract
 // that operator-authored reasons (e.g. policy.reason from a
 // regex-match or asset-policy verdict) flow through unchanged.

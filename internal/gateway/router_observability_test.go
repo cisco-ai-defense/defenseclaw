@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -163,6 +164,27 @@ func TestScanInboundPromptBalancedHighDoesNotEnforce(t *testing.T) {
 
 	if msg := r.notify.FormatSystemMessage(); msg != "" {
 		t.Fatalf("observational HIGH prompt scan queued enforcement notification: %q", msg)
+	}
+}
+
+func TestScanInboundPromptSeedsBoundedJudgeSessionIntent(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	r := NewEventRouter(nil, store, logger, false)
+	judge := &LLMJudge{}
+	r.SetJudge(judge)
+
+	const sessionID = "agent:main:judge-context"
+	r.scanInboundPrompt(sessionID, "msg-context-1", "gpt-5.5",
+		"inspect the password fixture in this workspace")
+
+	sample := judge.toolJudgeContextSample(
+		ContextWithSessionID(t.Context(), sessionID),
+		"shell",
+		`{"command":"grep password fixture.bin"}`,
+	)
+	if !strings.Contains(sample, "<SESSION_USER_INTENT") ||
+		!strings.Contains(sample, "inspect the password fixture in this workspace") {
+		t.Fatalf("stream prompt did not seed judge session intent: %q", sample)
 	}
 }
 

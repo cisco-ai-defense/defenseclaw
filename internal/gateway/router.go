@@ -766,6 +766,9 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	if content == "" {
 		return
 	}
+	if r.judge != nil {
+		r.judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
+	}
 	start := time.Now()
 
 	verdict := scanLocalPatterns("prompt", content)
@@ -1309,7 +1312,8 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 		go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage) {
 			r.judgeSem <- struct{}{}
 			defer func() { <-r.judgeSem }()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+			judgeCtx := ContextWithSessionID(context.Background(), sessionID)
+			ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
 			defer cancel()
 			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
 			if verdict.Severity != "NONE" {
