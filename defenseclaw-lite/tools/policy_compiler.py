@@ -71,6 +71,16 @@ ESCALATION_MAP = {
     "speculative": 1,
 }
 
+# Content category name → enum value
+CONTENT_CATEGORY_MAP = {
+    "secret": 1,
+    "pii": 2,
+    "credential": 3,
+    "exfil": 4,
+    "injection": 5,
+    "command": 6,
+}
+
 
 def parse_policy(yaml_path: Path) -> dict:
     """Parse a DefenseClaw YAML policy file."""
@@ -158,6 +168,85 @@ def extract_canary_baseline(policy: dict) -> int:
     return canary.get("baseline_blocks_per_min", 5)
 
 
+def extract_content_inspection(policy: dict) -> dict:
+    """Extract content inspection configuration from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    content_inspection = iot_ext.get("content_inspection", {})
+
+    result = {
+        "enabled": content_inspection.get("enabled", False),
+        "rules": []
+    }
+
+    if not result["enabled"]:
+        return result
+
+    categories = content_inspection.get("categories", {})
+    for cat_name, config in categories.items():
+        if not config.get("enabled", False):
+            continue
+
+        cat_val = CONTENT_CATEGORY_MAP.get(cat_name)
+        if cat_val is None:
+            print(f"WARNING: unknown content category '{cat_name}', skipping",
+                  file=sys.stderr)
+            continue
+
+        sev_val = SEVERITY_MAP.get(config.get("severity", "high"), 3)
+        act_val = ACTION_MAP.get(config.get("action", "block"), 1)
+
+        result["rules"].append({
+            "category": cat_val,
+            "severity": sev_val,
+            "action": act_val,
+            "enabled": 1
+        })
+
+    result["rules"].sort(key=lambda x: x["category"])
+    return result
+
+
+def extract_ssrf_protection(policy: dict) -> dict:
+    """Extract SSRF protection configuration from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    ssrf = iot_ext.get("ssrf_protection", {})
+
+    return {
+        "enabled": ssrf.get("enabled", False),
+        "block_private_ranges": ssrf.get("block_private_ranges", False),
+        "block_loopback": ssrf.get("block_loopback", False),
+        "block_link_local": ssrf.get("block_link_local", False),
+        "block_cloud_metadata": ssrf.get("block_cloud_metadata", False),
+    }
+
+
+def extract_cloud_escalation(policy: dict) -> dict:
+    """Extract cloud escalation configuration from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    cloud_esc = iot_ext.get("cloud_escalation", {})
+
+    return {
+        "max_payload_bytes": cloud_esc.get("max_payload_bytes", 1024),
+        "include_content": cloud_esc.get("include_content", True),
+        "include_local_findings": cloud_esc.get("include_local_findings", True),
+    }
+
+
+def extract_trust_boundaries(policy: dict) -> dict:
+    """Extract trust boundary configuration from iot_extensions."""
+    iot_ext = policy.get("iot_extensions", {})
+    trust = iot_ext.get("trust_boundaries", {})
+
+    return {
+        "infer_from_context": trust.get("infer_from_context", True),
+        "strict_user_input": trust.get("strict_user_input", True),
+        "user_input_block_threshold": SEVERITY_MAP.get(
+            trust.get("user_input_block_threshold", "medium"), 2),
+        "system_block_threshold": SEVERITY_MAP.get(
+            trust.get("system_block_threshold", "high"), 3),
+    }
+
+
 def generate_c_header(policy: dict, version: int) -> str:
     """Generate C header with compiled policy tables."""
     severity_rules = extract_severity_rules(policy)
@@ -166,6 +255,10 @@ def generate_c_header(policy: dict, version: int) -> str:
     rate_limits = extract_rate_limits(policy)
     escalation_modes = extract_escalation_modes(policy)
     canary_baseline = extract_canary_baseline(policy)
+    content_inspection = extract_content_inspection(policy)
+    ssrf_protection = extract_ssrf_protection(policy)
+    cloud_escalation = extract_cloud_escalation(policy)
+    trust_boundaries = extract_trust_boundaries(policy)
 
     lines = [
         '#ifndef DCLAW_POLICY_TABLES_H',
@@ -253,6 +346,49 @@ def generate_c_header(policy: dict, version: int) -> str:
     lines.append(f'static const uint16_t policy_rate_network_per_min = {rate_limits.get("network_requests_per_minute", 30)};')
     lines.append(f'static const uint16_t policy_rate_actuations_per_min = {rate_limits.get("actuations_per_minute", 10)};')
     lines.append('')
+
+    # Content inspection rules
+    lines.append('/* === Content Inspection Categories === */')
+    lines.append('')
+    lines.append('typedef struct {')
+    lines.append('    uint8_t category;')
+    lines.append('    uint8_t severity;')
+    lines.append('    uint8_t action;')
+    lines.append('    uint8_t enabled;')
+    lines.append('} dclaw_content_rule_t;')
+    lines.append('')
+    lines.append('static const dclaw_content_rule_t content_rules[] = {')
+    for rule in content_inspection["rules"]:
+        lines.append(f'    {{ {rule["category"]}, {rule["severity"]}, {rule["action"]}, {rule["enabled"]} }},')
+    lines.append('};')
+    lines.append(f'static const size_t content_rules_count = {len(content_inspection["rules"])};')
+    lines.append(f'static const uint8_t content_inspection_enabled = {1 if content_inspection["enabled"] else 0};')
+    lines.append('')
+
+    # SSRF protection
+    lines.append('/* === SSRF Protection === */')
+    lines.append(f'static const uint8_t ssrf_enabled = {1 if ssrf_protection["enabled"] else 0};')
+    lines.append(f'static const uint8_t ssrf_block_private = {1 if ssrf_protection["block_private_ranges"] else 0};')
+    lines.append(f'static const uint8_t ssrf_block_loopback = {1 if ssrf_protection["block_loopback"] else 0};')
+    lines.append(f'static const uint8_t ssrf_block_link_local = {1 if ssrf_protection["block_link_local"] else 0};')
+    lines.append(f'static const uint8_t ssrf_block_cloud_metadata = {1 if ssrf_protection["block_cloud_metadata"] else 0};')
+    lines.append('')
+
+    # Cloud escalation
+    lines.append('/* === Cloud Escalation === */')
+    lines.append(f'static const uint16_t escalation_max_payload = {cloud_escalation["max_payload_bytes"]};')
+    lines.append(f'static const uint8_t escalation_include_content = {1 if cloud_escalation["include_content"] else 0};')
+    lines.append(f'static const uint8_t escalation_include_findings = {1 if cloud_escalation["include_local_findings"] else 0};')
+    lines.append('')
+
+    # Trust boundaries
+    lines.append('/* === Trust Boundaries === */')
+    lines.append(f'static const uint8_t trust_infer_from_context = {1 if trust_boundaries["infer_from_context"] else 0};')
+    lines.append(f'static const uint8_t trust_strict_user_input = {1 if trust_boundaries["strict_user_input"] else 0};')
+    lines.append(f'static const uint8_t trust_user_input_block_threshold = {trust_boundaries["user_input_block_threshold"]};')
+    lines.append(f'static const uint8_t trust_system_block_threshold = {trust_boundaries["system_block_threshold"]};')
+    lines.append('')
+
     lines.append('#endif /* DCLAW_POLICY_TABLES_H */')
     lines.append('')
 
@@ -265,6 +401,8 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
     sequence_rules = extract_sequence_rules(policy)
     dest_allowlist = extract_dest_allowlist(policy)
     canary_baseline = extract_canary_baseline(policy)
+    content_inspection = extract_content_inspection(policy)
+    ssrf_protection = extract_ssrf_protection(policy)
 
     # Build payload
     payload = bytearray()
@@ -286,6 +424,27 @@ def generate_binary_blob(policy: dict, version: int) -> bytes:
         encoded = dest.encode('ascii')[:67]  # max 64 + 3 overhead
         payload.append(len(encoded))
         payload.extend(encoded)
+
+    # Content inspection rules
+    payload.append(1 if content_inspection["enabled"] else 0)
+    payload.append(len(content_inspection["rules"]))
+    for rule in content_inspection["rules"]:
+        payload.extend(struct.pack('BBBB', rule["category"], rule["severity"],
+                                   rule["action"], rule["enabled"]))
+
+    # SSRF protection flags
+    ssrf_flags = 0
+    if ssrf_protection["enabled"]:
+        ssrf_flags |= 0x01
+    if ssrf_protection["block_private_ranges"]:
+        ssrf_flags |= 0x02
+    if ssrf_protection["block_loopback"]:
+        ssrf_flags |= 0x04
+    if ssrf_protection["block_link_local"]:
+        ssrf_flags |= 0x08
+    if ssrf_protection["block_cloud_metadata"]:
+        ssrf_flags |= 0x10
+    payload.append(ssrf_flags)
 
     # Header: version(2) + payload_len(2) + canary_baseline(2) + reserved(2)
     header = struct.pack('>HHHxx', version, len(payload), canary_baseline)
