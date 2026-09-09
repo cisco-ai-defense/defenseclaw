@@ -129,6 +129,52 @@ static void test_json_parse_oversized_rejected(void) {
     printf("  PASS: oversized payload (>512B) rejected\n");
 }
 
+static void test_parse_with_direction_and_content(void) {
+    const char *json = "{\"jsonrpc\":\"2.0\",\"method\":\"evaluate\",\"params\":{"
+        "\"tool_name\":\"read_sensor\","
+        "\"tool_hash\":\"aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd\","
+        "\"capabilities\":64,\"session_id\":1,"
+        "\"direction\":0,"
+        "\"content\":\"temperature=72.5\"}"
+        ",\"id\":1}";
+    dclaw_tool_request_t req;
+    int rc = dclaw_ipc_parse_request(json, strlen(json), &req);
+    assert(rc == 0);
+    assert(req.direction == 0);
+    assert(req.content_len == 16);
+    assert(memcmp(req.content, "temperature=72.5", 16) == 0);
+    printf("  PASS: parse with direction and content\n");
+}
+
+static void test_parse_without_new_fields_backward_compat(void) {
+    const char *json = "{\"jsonrpc\":\"2.0\",\"method\":\"evaluate\",\"params\":{"
+        "\"tool_name\":\"read_sensor\","
+        "\"tool_hash\":\"aabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccddaabbccdd\","
+        "\"capabilities\":64,\"session_id\":1}"
+        ",\"id\":1}";
+    dclaw_tool_request_t req;
+    int rc = dclaw_ipc_parse_request(json, strlen(json), &req);
+    assert(rc == 0);
+    assert(req.direction == 0);
+    assert(req.content == NULL);
+    assert(req.content_len == 0);
+    printf("  PASS: backward compat without new fields\n");
+}
+
+static void test_parse_direction_response(void) {
+    const char *json = "{\"jsonrpc\":\"2.0\",\"method\":\"evaluate\",\"params\":{"
+        "\"tool_name\":\"tool_result\","
+        "\"tool_hash\":\"1122334411223344112233441122334411223344112233441122334411223344\","
+        "\"capabilities\":1,\"session_id\":2,"
+        "\"direction\":1}"
+        ",\"id\":2}";
+    dclaw_tool_request_t req;
+    int rc = dclaw_ipc_parse_request(json, strlen(json), &req);
+    assert(rc == 0);
+    assert(req.direction == 1);
+    printf("  PASS: parse direction=1 (response)\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 1};
@@ -147,7 +193,10 @@ int main(void) {
     test_json_parse_missing_field();
     test_json_parse_bad_hash_length();
     test_json_parse_oversized_rejected();
-    printf("  ALL PASSED (12 tests)\n");
+    test_parse_with_direction_and_content();
+    test_parse_without_new_fields_backward_compat();
+    test_parse_direction_response();
+    printf("  ALL PASSED (15 tests)\n");
 
     dclaw_shutdown();
     return 0;

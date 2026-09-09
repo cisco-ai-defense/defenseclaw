@@ -9,9 +9,10 @@
  *
  * {"jsonrpc":"2.0","method":"evaluate","params":{
  *   "tool_name":"...", "tool_hash":"...", "capabilities":N,
- *   "destination":"...", "session_id":N},"id":N}
+ *   "destination":"...", "session_id":N, "direction":N, "content":"..."},"id":N}
  *
  * Strict validation: rejects anything that doesn't exactly match.
+ * direction and content are optional (Phase 1B extension).
  */
 
 static const char *skip_whitespace(const char *p) {
@@ -133,6 +134,27 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                 } else if (strcmp(key_buf, "destination") == 0) {
                     p = parse_string(p, out->destination, DCLAW_DESTINATION_MAX);
                     if (!p) return -1;
+                } else if (strcmp(key_buf, "direction") == 0) {
+                    uint32_t v;
+                    p = parse_uint(p, &v);
+                    if (!p || v > 1) return -1;
+                    out->direction = (uint8_t)v;
+                } else if (strcmp(key_buf, "content") == 0) {
+                    /* Point directly into source buffer, don't copy */
+                    if (*p != '"') return -1;
+                    const char *content_start = p + 1;
+                    /* Find closing quote */
+                    const char *scan = content_start;
+                    while (*scan != '"' && *scan != '\0') {
+                        if (*scan == '\\') scan++;
+                        scan++;
+                    }
+                    if (*scan != '"') return -1;
+                    uint16_t clen = (uint16_t)(scan - content_start);
+                    if (clen > DCLAW_CONTENT_MAX) clen = DCLAW_CONTENT_MAX;
+                    out->content = content_start;
+                    out->content_len = clen;
+                    p = scan + 1;
                 } else {
                     /* Skip unknown value */
                     if (*p == '"') {
