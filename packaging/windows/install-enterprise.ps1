@@ -399,6 +399,22 @@ namespace $nativeNamespace
             }
         }
 
+        public static bool IsInteractiveUserSID(SecurityIdentifier sid)
+        {
+            if (sid == null)
+                return false;
+            string value = sid.Value;
+            int componentCount = value.Split('-').Length;
+            return (value.StartsWith(
+                        "S-1-5-21-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount >= 8) ||
+                (value.StartsWith(
+                        "S-1-12-1-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount == 8);
+        }
+
         public static string[] GetActiveSessionSIDs()
         {
             IntPtr sessions = IntPtr.Zero;
@@ -448,9 +464,7 @@ namespace $nativeNamespace
                         : new NTAccount(domain, user);
                     SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
                         typeof(SecurityIdentifier));
-                    if (sid.Value.StartsWith(
-                            "S-1-5-21-",
-                            StringComparison.OrdinalIgnoreCase))
+                    if (IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
                 List<string> ordered = new List<string>(active);
@@ -1817,6 +1831,25 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     return $sb.ToString()
 }
 
+function Test-DefenseClawInteractiveUserSID {
+    param(
+        [AllowNull()]
+        [Security.Principal.SecurityIdentifier]$SID
+    )
+
+    if ($null -eq $SID) { return $false }
+    $value = $SID.Value
+    $componentCount = $value.Split('-').Length
+    return ($value.StartsWith(
+            'S-1-5-21-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -ge 8) -or
+        ($value.StartsWith(
+            'S-1-12-1-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -eq 8)
+}
+
 function Select-DefenseClawActiveInteractiveUserProfiles {
     param(
         [AllowEmptyCollection()][object[]]$Profiles = @(),
@@ -1834,10 +1867,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($candidate.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
+        if (Test-DefenseClawInteractiveUserSID -SID $candidate) {
             [void]$active.Add($candidate.Value)
         }
     }
@@ -1854,10 +1884,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($profileSID.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            ) -and
+        if ((Test-DefenseClawInteractiveUserSID -SID $profileSID) -and
             $active.Contains($profileSID.Value)) {
             $selected.Add($profile)
         }
@@ -1882,9 +1909,9 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
-    # and return one PSCustomObject per eligible interactive user (SID starts
-    # with S-1-5-21-, has a resolvable ProfileImagePath that exists on disk, and
-    # the SID translates to a live NTAccount).
+    # and return one PSCustomObject per eligible local/domain or Microsoft Entra
+    # ID interactive user with a resolvable on-disk ProfileImagePath whose SID
+    # translates to a live NTAccount.
     $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
     $out = [Collections.Generic.List[psobject]]::new()
     if (-not (Test-Path -LiteralPath $rootKey)) {
@@ -1892,7 +1919,11 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
         $sid = $sub.PSChildName
-        if (-not $sid.StartsWith('S-1-5-21-')) { continue }
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new($sid)
+        }
+        catch { continue }
+        if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID)) { continue }
         $image = $null
         try {
             $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
@@ -1904,7 +1935,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
         if (-not [IO.Directory]::Exists($image)) { continue }
         $account = $null
         try {
-            $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+            $account = $profileSID.Translate(
                 [Security.Principal.NTAccount]
             ).Value
         }

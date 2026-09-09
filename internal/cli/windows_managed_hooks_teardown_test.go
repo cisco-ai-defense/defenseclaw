@@ -108,6 +108,34 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 	}
 }
 
+func TestWindowsManagedHooksTeardownTargetsAcceptEntraIDForAllConnectors(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	home := filepath.Clean(`C:\Users\entra-user`)
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{SID: entraSID, UserHome: home, Connector: "claudecode", AgentVersion: "2.1.152"},
+		{SID: entraSID, UserHome: home, Connector: "codex", AgentVersion: "0.131.0"},
+		{SID: entraSID, UserHome: home, Connector: "cursor", AgentVersion: "1.7.0"},
+	}}
+
+	targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 3 || len(claude) != 1 || claude[0] != entraSID ||
+		len(codex) != 1 || codex[0].SID != entraSID ||
+		len(cursor) != 1 || cursor[0].SID != entraSID {
+		t.Fatalf(
+			"Microsoft Entra ID teardown targets = all:%+v claude:%v codex:%+v cursor:%+v",
+			targets, claude, codex, cursor,
+		)
+	}
+	wantDataDir := filepath.Join(home, ".defenseclaw")
+	if !sameWindowsEnterprisePathCLI(codex[0].DataDir, wantDataDir) ||
+		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, wantDataDir) {
+		t.Fatalf("Microsoft Entra ID teardown data dirs = codex:%q cursor:%q, want %q", codex[0].DataDir, cursor[0].DataDir, wantDataDir)
+	}
+}
+
 func TestWindowsManagedHooksTeardownPendingTargetsAreNarrow(t *testing.T) {
 	active := windowsManagedHooksTeardownTarget{
 		Connector: "codex",

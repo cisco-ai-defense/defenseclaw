@@ -101,15 +101,13 @@ type EnumerateOptions struct {
 // Filter chain (each step drops the profile with a logf line if opts.Logger is set):
 //
 //  1. SID must be a syntactically-valid Windows SID string.
-//  2. SID must be an interactive-user SID: `S-1-5-21-…` (NT
-//     AUTHORITY, SECURITY_NT_NON_UNIQUE base RID) with at least 5
-//     sub-authorities so the SID names a specific user (the trailing
-//     RID), not the bare domain (`S-1-5-21-A-B-C` has 4 sub-auths
-//     and is rejected). Refuses well-known SIDs (Everyone S-1-1-0,
-//     Anonymous S-1-5-7, SYSTEM S-1-5-18, Authenticated Users
-//     S-1-5-11, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by
-//     construction. Belt-and-braces on top of the CLI-input filter
-//     at spec 005 REQ-15.
+//  2. SID must be an interactive-user SID: either `S-1-5-21-…` (local
+//     or domain user) or `S-1-12-1-…` (Microsoft Entra ID user).
+//     Refuses well-known SIDs (Everyone S-1-1-0, Anonymous S-1-5-7,
+//     SYSTEM S-1-5-18, Authenticated Users S-1-5-11, BUILTIN
+//     S-1-5-32-*, NT SERVICE S-1-5-80-*, etc.) by construction.
+//     Belt-and-braces on top of the CLI-input filter at spec 005
+//     REQ-15.
 //  3. ProfileImagePath registry value must resolve to an absolute
 //     path under the local filesystem.
 //  4. Home directory must exist as a real directory (not a reparse
@@ -538,7 +536,7 @@ func listWindowsUserProfiles(ctx context.Context, logf EnumerationLogger) ([]win
 			continue
 		}
 		if !sidIsInteractiveUser(sid) {
-			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-…); refusing well-known / machine-scoped principals")
+			logfSafely(logf, name, "not an interactive-user SID (S-1-5-21-… or S-1-12-1-…); refusing well-known / machine-scoped principals")
 			continue
 		}
 		home, err := readAndExpandProfileImagePath(name)
@@ -659,22 +657,19 @@ func expandProfileImagePathSystemDrive(profile string) (string, error) {
 	return expanded, nil
 }
 
-// sidIsInteractiveUser reports whether `sid` is an interactive local
-// or domain user SID — i.e. lives under NT AUTHORITY (identifier
-// authority 5) with SubAuthority[0] == SECURITY_NT_NON_UNIQUE (21)
-// and at least 5 sub-authorities so the SID names a specific user
-// (the trailing RID), not the bare domain. A user SID has the shape
-// `S-1-5-21-A-B-C-RID` (five sub-authorities: 21, A, B, C, RID). The
-// bare domain SID without the RID (`S-1-5-21-A-B-C`) has four
-// sub-authorities and MUST be rejected — enumerating a bare domain
-// as an interactive user would emit garbage manifest rows. See
-// CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// sidIsInteractiveUser reports whether `sid` is an interactive local,
+// domain, or Microsoft Entra ID user SID. Local and domain users have
+// the shape `S-1-5-21-A-B-C-RID`; the bare domain SID without the RID
+// (`S-1-5-21-A-B-C`) is rejected. Entra ID users have the canonical
+// shape `S-1-12-1-A-B-C-D`, where A-D encode the account identifier.
+// Classification depends only on SID shape, not administrator group
+// membership or token elevation.
 //
 // Every well-known / machine-scoped principal (SYSTEM S-1-5-18,
 // Authenticated Users S-1-5-11, Everyone S-1-1-0, Anonymous
 // S-1-5-7, BUILTIN S-1-5-32-*, NT SERVICE S-1-5-80-*, LocalService
 // S-1-5-19, NetworkService S-1-5-20, IIS_IUSRS S-1-5-17, etc.) fails
-// the SubAuthority[0] == 21 check.
+// both accepted authority-and-shape checks.
 //
 // Matches spec 005 REQ-11 and — together with the CLI-input
 // validator at spec 005 REQ-15 — provides belt-and-braces coverage.
@@ -685,14 +680,17 @@ func sidIsInteractiveUser(sid *windows.SID) bool {
 	if sid == nil {
 		return false
 	}
-	if sid.IdentifierAuthority().Value != [6]byte{0, 0, 0, 0, 0, 5} {
+	authority := sid.IdentifierAuthority().Value
+	switch authority {
+	case [6]byte{0, 0, 0, 0, 0, 5}:
+		const securityNTNonUnique uint32 = 21
+		return sid.SubAuthorityCount() >= 5 && sid.SubAuthority(0) == securityNTNonUnique
+	case [6]byte{0, 0, 0, 0, 0, 12}:
+		const entraIDUserSubAuthority uint32 = 1
+		return sid.SubAuthorityCount() == 5 && sid.SubAuthority(0) == entraIDUserSubAuthority
+	default:
 		return false
 	}
-	const securityNTNonUnique uint32 = 21
-	if sid.SubAuthorityCount() < 5 {
-		return false
-	}
-	return sid.SubAuthority(0) == securityNTNonUnique
 }
 
 // effectiveWindowsHookConnectors returns the connector names for
