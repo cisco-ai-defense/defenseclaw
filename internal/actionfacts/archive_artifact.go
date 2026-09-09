@@ -99,20 +99,6 @@ func staticArchiveArtifactPath(value string) bool {
 	return true
 }
 
-func classifyArchiveArtifactProducers(out *parseOutput, command *CommandFact) {
-	if out == nil || command == nil {
-		return
-	}
-	switch strings.ToLower(command.Program) {
-	case "tar", "tar.exe":
-		classifyTarArchiveProducer(out, command)
-	case "zip", "zip.exe":
-		classifyZipArchiveProducer(out, command)
-	case "compress-archive":
-		classifyCompressArchiveProducer(out, command)
-	}
-}
-
 func classifyTarArchiveProducer(out *parseOutput, command *CommandFact) {
 	if len(command.Argv) < 3 {
 		out.markPartial(IssueUnknownOperandGrammar)
