@@ -89,6 +89,52 @@ static void test_invalid_input_blocks(void) {
     printf("  PASS: invalid cap_flags -> BLOCK with INVALID_INPUT\n");
 }
 
+static void test_content_scan_blocks_secret_in_pipeline(void) {
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.tool_name, "read_data", DCLAW_TOOL_NAME_MAX);
+    memset(req.tool_hash, 0xAA, 32);
+    req.cap_flags = DCLAW_CAP_READ_FS;
+    req.session_id = 99;
+    req.content = "api_key = sk-proj-abcdefghijklmnopqrstuvwxyz1234567890";
+    req.content_len = (uint16_t)strlen(req.content);
+
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_CONTENT_BLOCK);
+    printf("  PASS: content scan blocks secret in pipeline\n");
+}
+
+static void test_ssrf_blocks_private_ip_in_pipeline(void) {
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.tool_name, "fetch_url", DCLAW_TOOL_NAME_MAX);
+    memset(req.tool_hash, 0xBB, 32);
+    req.cap_flags = DCLAW_CAP_NET_FETCH;
+    req.session_id = 100;
+    strncpy(req.destination, "169.254.169.254", DCLAW_DESTINATION_MAX);
+
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    assert(v.reason == DCLAW_REASON_SSRF_BLOCK);
+    printf("  PASS: SSRF blocks metadata IP in pipeline\n");
+}
+
+static void test_no_content_field_backward_compat(void) {
+    dclaw_tool_request_t req;
+    memset(&req, 0, sizeof(req));
+    strncpy(req.tool_name, "read_sensor", DCLAW_TOOL_NAME_MAX);
+    memset(req.tool_hash, 0xCC, 32);
+    req.cap_flags = DCLAW_CAP_SENSOR_READ;
+    req.session_id = 101;
+    /* content is NULL, content_len is 0 — Phase 1 behavior */
+
+    dclaw_verdict_t v = dclaw_evaluate(&req);
+    /* Should NOT be CONTENT_BLOCK — should proceed to later stages */
+    assert(v.reason != DCLAW_REASON_CONTENT_BLOCK);
+    printf("  PASS: no content field = backward compatible (no content block)\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 42, .tenant_id = 1, .fleet_id = 1};
@@ -102,7 +148,10 @@ int main(void) {
     test_capability_sequence_block();
     test_rate_limit_triggers();
     test_invalid_input_blocks();
-    printf("  ALL PASSED (7 tests)\n");
+    test_content_scan_blocks_secret_in_pipeline();
+    test_ssrf_blocks_private_ip_in_pipeline();
+    test_no_content_field_backward_compat();
+    printf("  ALL PASSED (10 tests)\n");
 
     dclaw_shutdown();
     return 0;

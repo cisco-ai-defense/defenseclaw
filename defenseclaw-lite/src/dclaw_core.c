@@ -1,6 +1,7 @@
 #include "defenseclaw.h"
 #include "platform.h"
 #include "policy_tables.h"
+#include "content_scanner.h"
 #include <string.h>
 
 static dclaw_state_t g_state;
@@ -110,16 +111,42 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 3: Deny-list hash check */
+    /* Step 3: Content scan (if content provided) */
+#if DCLAW_CONTENT_SCAN
+    if (req->content && req->content_len > 0) {
+        dclaw_scan_context_t scan_ctx;
+        dclaw_content_scope_t scope = req->content_scope ?
+            (dclaw_content_scope_t)req->content_scope :
+            dclaw_infer_content_scope((dclaw_direction_t)req->direction);
+        dclaw_content_scan(req->content, req->content_len, scope, &scan_ctx);
+        dclaw_action_t scan_action = dclaw_content_scan_worst_action(&scan_ctx);
+        if (scan_action == DCLAW_ACTION_BLOCK) {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
+                              target_hash, req->session_id);
+            return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
+                                DCLAW_VERDICT_SYNC);
+        }
+    }
+#endif
+
+    /* Step 4: Deny-list hash check */
     if (dclaw_policy_check_hash(req->tool_hash) == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY,
                           target_hash, req->session_id);
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY, DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 4: Destination allow/deny (if network capability) */
+    /* Step 5: Destination allow/deny + SSRF check (if network capability) */
     if ((req->cap_flags & (DCLAW_CAP_NET_FETCH | DCLAW_CAP_SEND_MSG)) &&
         req->destination[0] != '\0') {
+#if DCLAW_CONTENT_SCAN
+        if (dclaw_ssrf_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
+            dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
+                              target_hash, req->session_id);
+            return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
+                                DCLAW_VERDICT_SYNC);
+        }
+#endif
         if (dclaw_policy_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
@@ -127,7 +154,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         }
     }
 
-    /* Step 5: Capability sequence correlation */
+    /* Step 6: Capability sequence correlation */
     dclaw_action_t seq_result = dclaw_correlator_evaluate(req->session_id, req->cap_flags);
     if (seq_result == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
@@ -135,14 +162,14 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
 
-    /* Step 6: Verdict cache lookup */
+    /* Step 7: Verdict cache lookup */
     dclaw_verdict_t cached;
     if (dclaw_cache_lookup(req->tool_hash, &cached)) {
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
         return cached;
     }
 
-    /* Step 7: No local decision — need cloud escalation */
+    /* Step 8: No local decision — need cloud escalation */
 #if DCLAW_SPECULATIVE_EXECUTION
     if (!is_sync_block_required(req->cap_flags)) {
         /* Speculative: return PENDING, agent can proceed */
