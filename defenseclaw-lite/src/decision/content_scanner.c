@@ -347,9 +347,134 @@ void dclaw_ssrf_init_tables(void) {
     /* Phase 1B stub: no DFA tables to initialize yet */
 }
 
+/**
+ * Helper: Check if a string starts with a digit (for IP detection).
+ */
+static bool starts_with_digit(const char *s) {
+    return s && isdigit((unsigned char)s[0]);
+}
+
+/**
+ * Helper: Parse an IPv4 address and return true if valid.
+ * Sets octets[0..3] if valid.
+ */
+static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
+    uint16_t values[4] = {0};
+    uint8_t octet_idx = 0;
+    uint16_t pos = 0;
+
+    while (dest[pos] && octet_idx < 4) {
+        if (!isdigit((unsigned char)dest[pos])) {
+            return false;
+        }
+
+        /* Parse decimal number */
+        values[octet_idx] = 0;
+        while (isdigit((unsigned char)dest[pos])) {
+            values[octet_idx] = values[octet_idx] * 10 + (dest[pos] - '0');
+            if (values[octet_idx] > 255) {
+                return false; /* Octet overflow */
+            }
+            pos++;
+        }
+
+        octet_idx++;
+
+        /* Expect dot after first 3 octets */
+        if (octet_idx < 4) {
+            if (dest[pos] != '.') {
+                return false;
+            }
+            pos++;
+        }
+    }
+
+    /* Must have exactly 4 octets and reach end or port separator */
+    if (octet_idx != 4 || (dest[pos] != '\0' && dest[pos] != ':')) {
+        return false;
+    }
+
+    /* Store octets */
+    octets[0] = (uint8_t)values[0];
+    octets[1] = (uint8_t)values[1];
+    octets[2] = (uint8_t)values[2];
+    octets[3] = (uint8_t)values[3];
+
+    return true;
+}
+
 dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
-    (void)dest; /* Unused in stub */
-    /* Phase 1B stub: always allow */
+    if (!dest) {
+        return DCLAW_ACTION_ALLOW;
+    }
+
+    /* Check for inline credentials (user:pass@host pattern) */
+    for (uint16_t i = 0; dest[i] != '\0'; i++) {
+        if (dest[i] == '@') {
+            return DCLAW_ACTION_BLOCK;
+        }
+    }
+
+    /* Check for "localhost" literal */
+    if (strcmp(dest, "localhost") == 0) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for IPv6 loopback */
+    if (strcmp(dest, "::1") == 0) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* If not starting with digit, assume it's a hostname - pass through */
+    if (!starts_with_digit(dest)) {
+        return DCLAW_ACTION_ALLOW;
+    }
+
+    /* Try to parse as IPv4 */
+    uint8_t octets[4];
+    if (!parse_ipv4(dest, octets)) {
+        /* Not a valid IPv4, treat as hostname */
+        return DCLAW_ACTION_ALLOW;
+    }
+
+    /* Check for loopback: 127.x.x.x */
+    if (octets[0] == 127) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for 0.0.0.0 */
+    if (octets[0] == 0 && octets[1] == 0 && octets[2] == 0 && octets[3] == 0) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for cloud metadata: 169.254.169.254 */
+    if (octets[0] == 169 && octets[1] == 254 && octets[2] == 169 && octets[3] == 254) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for link-local: 169.254.x.x */
+    if (octets[0] == 169 && octets[1] == 254) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for RFC1918 private ranges:
+     * - 10.x.x.x
+     * - 172.16.x.x - 172.31.x.x
+     * - 192.168.x.x
+     */
+    if (octets[0] == 10) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    if (octets[0] == 172 && octets[1] >= 16 && octets[1] <= 31) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    if (octets[0] == 192 && octets[1] == 168) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Public IP - allow */
     return DCLAW_ACTION_ALLOW;
 }
 

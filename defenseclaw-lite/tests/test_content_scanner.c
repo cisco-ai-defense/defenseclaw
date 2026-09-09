@@ -173,6 +173,37 @@ static void test_detect_shell_command(void) {
     printf("  PASS: detect shell command\n");
 }
 
+/* === SSRF Tests === */
+
+static void test_ssrf_blocks_loopback(void) {
+    assert(dclaw_ssrf_check_destination("127.0.0.1") == DCLAW_ACTION_BLOCK);
+    assert(dclaw_ssrf_check_destination("localhost") == DCLAW_ACTION_BLOCK);
+    printf("  PASS: SSRF blocks loopback\n");
+}
+
+static void test_ssrf_blocks_metadata(void) {
+    assert(dclaw_ssrf_check_destination("169.254.169.254") == DCLAW_ACTION_BLOCK);
+    printf("  PASS: SSRF blocks cloud metadata IP\n");
+}
+
+static void test_ssrf_blocks_rfc1918(void) {
+    assert(dclaw_ssrf_check_destination("10.0.0.1") == DCLAW_ACTION_BLOCK);
+    assert(dclaw_ssrf_check_destination("192.168.1.1") == DCLAW_ACTION_BLOCK);
+    assert(dclaw_ssrf_check_destination("172.16.0.1") == DCLAW_ACTION_BLOCK);
+    printf("  PASS: SSRF blocks RFC1918 private ranges\n");
+}
+
+static void test_ssrf_allows_public(void) {
+    assert(dclaw_ssrf_check_destination("8.8.8.8") == DCLAW_ACTION_ALLOW);
+    assert(dclaw_ssrf_check_destination("api.openai.com") == DCLAW_ACTION_ALLOW);
+    printf("  PASS: SSRF allows public addresses\n");
+}
+
+static void test_ssrf_blocks_inline_credentials(void) {
+    assert(dclaw_ssrf_check_destination("user:pass@api.example.com") == DCLAW_ACTION_BLOCK);
+    printf("  PASS: SSRF blocks inline credentials\n");
+}
+
 /* === Worst Action Tests === */
 
 static void test_high_severity_returns_block(void) {
@@ -223,10 +254,17 @@ int main(void) {
     test_detect_path_traversal_injection();
     test_detect_shell_command();
 
+    /* SSRF tests */
+    test_ssrf_blocks_loopback();
+    test_ssrf_blocks_metadata();
+    test_ssrf_blocks_rfc1918();
+    test_ssrf_allows_public();
+    test_ssrf_blocks_inline_credentials();
+
     /* Worst action tests */
     test_high_severity_returns_block();
     test_medium_severity_returns_warn();
 
-    printf("  ALL PASSED (17 tests)\n");
+    printf("  ALL PASSED (22 tests)\n");
     return 0;
 }
