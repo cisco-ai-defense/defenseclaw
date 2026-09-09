@@ -19,6 +19,7 @@
 package cli
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -32,11 +33,31 @@ func withEnterpriseHookRotationLock(
 	fn func() (enterpriseHookRotationJournal, error),
 ) (enterpriseHookRotationJournal, error) {
 	var empty enterpriseHookRotationJournal
+	// The authorization directory resolves to a sibling of dataDir
+	// (dataDir + "-hook-guardian"), not to the dataDir/hooks path guarded
+	// elsewhere. Creating and opening the lock by plain path let a swapped
+	// symlink redirect it, so two concurrent rotations could each flock a
+	// *different* file and bypass mutual exclusion entirely. Bind the traversal
+	// to the authorization directory's parent so no component can be swapped.
 	lockPath := enterpriseHookRotationLockPath(dataDir)
-	if err := os.MkdirAll(filepath.Dir(lockPath), 0o750); err != nil {
+	lockDir := filepath.Dir(lockPath)
+	if err := refuseEnterpriseHookRotationSymlink(lockDir, "rotation lock directory"); err != nil {
+		return empty, err
+	}
+	lockRoot, err := os.OpenRoot(filepath.Dir(lockDir))
+	if err != nil {
+		return empty, fmt.Errorf("enterprise hooks rotate: bind lock directory parent: %w", err)
+	}
+	defer func() { _ = lockRoot.Close() }()
+	lockLeaf := filepath.Base(lockDir)
+	if err := lockRoot.Mkdir(lockLeaf, 0o750); err != nil && !errors.Is(err, os.ErrExist) {
 		return empty, fmt.Errorf("enterprise hooks rotate: create lock directory: %w", err)
 	}
-	file, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := lockRoot.OpenFile(
+		filepath.Join(lockLeaf, filepath.Base(lockPath)),
+		os.O_CREATE|os.O_RDWR,
+		0o600,
+	)
 	if err != nil {
 		return empty, fmt.Errorf("enterprise hooks rotate: open lock: %w", err)
 	}

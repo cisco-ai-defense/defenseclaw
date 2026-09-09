@@ -651,7 +651,7 @@ func publishEnterpriseHookRotationCurrent(plan enterpriseHookRotationPlan) error
 }
 
 func publishEnterpriseHookRotationRestoredCurrent(dataDir string, journal enterpriseHookRotationJournal, targets []enterpriseHookRotationTarget) error {
-	rows, err := restoredEnterpriseHookRotationAttestationRows(dataDir, targets)
+	rows, failures, err := restoredEnterpriseHookRotationAttestationRows(dataDir, targets)
 	if err != nil {
 		return err
 	}
@@ -661,28 +661,50 @@ func publishEnterpriseHookRotationRestoredCurrent(dataDir string, journal enterp
 		journal.ManifestSHA256,
 		"",
 		rows,
-		0,
+		failures,
 		true,
 	)
 }
 
-func restoredEnterpriseHookRotationAttestationRows(dataDir string, targets []enterpriseHookRotationTarget) ([]enterpriseHookReconcileRow, error) {
+// restoredEnterpriseHookRotationAttestationRows reports the restored rows and
+// how many targets could not be attested. A target whose generation-A snapshot
+// recorded an absent artifact (Present == false) is a legitimate capture, not
+// an error: restore correctly leaves no file, so there is no token to re-read.
+// Returning an error for it aborted rollback before the journal could reach
+// rolled_back, which left enterpriseHookRotationBusy asserted forever and
+// blocked runEnterpriseHookReconcileOnce with the host stranded on generation
+// B and no recovery path. Such a target now yields a non-OK row and a failure,
+// so no attestation is published and Current.OK stays false while the rollback
+// journal still advances.
+func restoredEnterpriseHookRotationAttestationRows(dataDir string, targets []enterpriseHookRotationTarget) ([]enterpriseHookReconcileRow, int, error) {
 	rows := make([]enterpriseHookReconcileRow, 0, len(targets))
+	failures := 0
+	unattested := func(target enterpriseHookRotationTarget) {
+		failures++
+		rows = append(rows, enterpriseHookReconcileRow{
+			User:      target.User,
+			UserHome:  target.UserHome,
+			SID:       target.SID,
+			Connector: target.Connector,
+			OK:        false,
+		})
+	}
 	for _, target := range targets {
 		snapshot, err := decodeEnterpriseHookRotationSnapshotSidecar(locateEnterpriseHookRotationSnapshot(dataDir, target))
 		if err != nil {
-			return nil, fmt.Errorf("enterprise hooks rotate rollback: load A snapshot for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+			return nil, 0, fmt.Errorf("enterprise hooks rotate rollback: load A snapshot for %s: %w", enterpriseHookRotationTargetLabel(target), err)
 		}
 		if !snapshot.Present {
-			return nil, fmt.Errorf("enterprise hooks rotate rollback: restored A snapshot missing for %s", enterpriseHookRotationTargetLabel(target))
+			unattested(target)
+			continue
 		}
 		token, err := enterpriseHookRotationReadPublished(enterpriseHookRotationUserDataDir(target), target.Connector)
 		if err != nil {
-			return nil, fmt.Errorf("enterprise hooks rotate rollback: re-read A for %s: %w", enterpriseHookRotationTargetLabel(target), err)
+			return nil, 0, fmt.Errorf("enterprise hooks rotate rollback: re-read A for %s: %w", enterpriseHookRotationTargetLabel(target), err)
 		}
 		fingerprint := managed.ScopedTokenFingerprint(token)
 		if !managed.ValidScopedTokenFingerprint(fingerprint) {
-			return nil, fmt.Errorf("enterprise hooks rotate rollback: restored A fingerprint missing for %s", enterpriseHookRotationTargetLabel(target))
+			return nil, 0, fmt.Errorf("enterprise hooks rotate rollback: restored A fingerprint missing for %s", enterpriseHookRotationTargetLabel(target))
 		}
 		rows = append(rows, enterpriseHookReconcileRow{
 			User:             target.User,
@@ -693,7 +715,7 @@ func restoredEnterpriseHookRotationAttestationRows(dataDir string, targets []ent
 			TokenFingerprint: fingerprint,
 		})
 	}
-	return rows, nil
+	return rows, failures, nil
 }
 
 func markEnterpriseHookRotationUnready(dataDir string) error {

@@ -439,3 +439,45 @@ func mustReadRotationSnapshot(t *testing.T, env *enterpriseHookRotationTestEnv, 
 	}
 	return string(data)
 }
+
+// An absent generation-A artifact is a legitimate snapshot (Present == false):
+// restore correctly leaves no file, so there is no token to re-read. Returning
+// an error for it aborted rollback before the journal could reach rolled_back,
+// which left enterpriseHookRotationBusy asserted forever and blocked
+// reconciliation with the host stranded on generation B. The builder must
+// instead report a non-OK row and a failure so the journal can still advance.
+func TestEnterpriseHookRotationAbsentSnapshotYieldsFailureNotError(t *testing.T) {
+	env := newEnterpriseHookRotationTestEnv(t, "alice")
+	target := enterpriseHookRotationTarget{
+		User: "alice", UserHome: env.homes["alice"], Connector: "codex",
+	}
+	// Remove the published token so the capture records an absent artifact.
+	tokenPath, err := connector.HookAPITokenFilePath(
+		enterpriseHookRotationUserDataDir(target), target.Connector,
+	)
+	if err != nil {
+		t.Fatalf("token path: %v", err)
+	}
+	if err := os.Remove(tokenPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("remove token: %v", err)
+	}
+	if err := snapshotEnterpriseHookRotationTarget(env.serviceDir, target); err != nil {
+		t.Fatalf("snapshot absent artifact: %v", err)
+	}
+
+	rows, failures, err := restoredEnterpriseHookRotationAttestationRows(
+		env.serviceDir, []enterpriseHookRotationTarget{target},
+	)
+	if err != nil {
+		t.Fatalf("absent snapshot returned an error instead of a failure: %v", err)
+	}
+	if failures != 1 {
+		t.Fatalf("failures = %d, want 1", failures)
+	}
+	if len(rows) != 1 || rows[0].OK {
+		t.Fatalf("rows = %#v, want one non-OK row", rows)
+	}
+	if rows[0].TokenFingerprint != "" {
+		t.Fatalf("unattested row carried a fingerprint: %q", rows[0].TokenFingerprint)
+	}
+}
