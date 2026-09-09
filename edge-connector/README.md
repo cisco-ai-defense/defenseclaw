@@ -11,8 +11,8 @@ policy engines, the Edge Connector inspects the actual content of tool call argu
 responses to detect secrets, PII, credential leakage, data exfiltration, prompt injection, and
 dangerous commands before they leave the device.
 
-**Architecture:** See `docs/architecture/defenseclaw-lite-iot-proposal.md` (v1.2)  
-**Spec:** See `docs/specs/001-defenseclaw-lite-phase1/`
+**Architecture:** See `docs/architecture/edge-connector-iot-proposal.md` (v1.2)  
+**Spec:** See `docs/specs/001-edge-connector-phase1/`
 
 ## Features
 

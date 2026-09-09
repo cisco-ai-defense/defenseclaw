@@ -13,7 +13,7 @@ verdict request/response protocol. It is not a smaller gateway — it is a fast
 enforcement point that executes pre-compiled decisions locally and escalates unknowns
 to the cloud.
 
-**Source of truth:** `docs/architecture/defenseclaw-lite-iot-proposal.md` (v1.2, approved)
+**Source of truth:** `docs/architecture/edge-connector-iot-proposal.md` (v1.2, approved)
 
 **Actors:**
 - IoT device AI agent runtime (untrusted — the thing being secured)

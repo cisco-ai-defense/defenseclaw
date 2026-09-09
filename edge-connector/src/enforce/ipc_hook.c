@@ -2,7 +2,7 @@
 #include "platform.h"
 #include <string.h>
 
-#define IPC_SOCKET_PATH "/var/run/defenseclaw-lite.sock"
+#define IPC_SOCKET_PATH "/var/run/edge-connector.sock"
 
 extern dclaw_state_t *dclaw_get_state(void);
 

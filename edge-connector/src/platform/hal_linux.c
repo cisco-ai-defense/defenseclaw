@@ -14,7 +14,7 @@
 
 static const char *get_flash_path(void) {
     const char *env = getenv("DCLAW_FLASH_PATH");
-    return env ? env : "/tmp/defenseclaw-lite-flash.bin";
+    return env ? env : "/tmp/edge-connector-flash.bin";
 }
 
 static int flash_fd = -1;
@@ -136,7 +136,7 @@ int hal_random_bytes(void *buf, size_t len) {
 }
 
 int hal_load_device_cert(uint8_t *cert_buf, size_t *cert_len, size_t max_len) {
-    int fd = open("/etc/defenseclaw-lite/device.crt", O_RDONLY);
+    int fd = open("/etc/edge-connector/device.crt", O_RDONLY);
     if (fd < 0) return -1;
     ssize_t n = read(fd, cert_buf, max_len);
     close(fd);
@@ -146,7 +146,7 @@ int hal_load_device_cert(uint8_t *cert_buf, size_t *cert_len, size_t max_len) {
 }
 
 int hal_load_device_key(uint8_t *key_buf, size_t *key_len, size_t max_len) {
-    int fd = open("/etc/defenseclaw-lite/device.key", O_RDONLY);
+    int fd = open("/etc/edge-connector/device.key", O_RDONLY);
     if (fd < 0) return -1;
     ssize_t n = read(fd, key_buf, max_len);
     close(fd);
@@ -156,7 +156,7 @@ int hal_load_device_key(uint8_t *key_buf, size_t *key_len, size_t max_len) {
 }
 
 int hal_load_ca_cert(uint8_t *cert_buf, size_t *cert_len, size_t max_len) {
-    int fd = open("/etc/defenseclaw-lite/ca.crt", O_RDONLY);
+    int fd = open("/etc/edge-connector/ca.crt", O_RDONLY);
     if (fd < 0) return -1;
     ssize_t n = read(fd, cert_buf, max_len);
     close(fd);

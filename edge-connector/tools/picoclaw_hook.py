@@ -33,12 +33,12 @@ from typing import Any
 
 LIBDCLAW_PATH = os.environ.get(
     "DCLAW_LIB_PATH",
-    str(Path.home() / "defenseclaw-lite" / "build" / "libdclaw_core.so")
+    str(Path.home() / "edge-connector" / "build" / "libdclaw_core.so")
 )
 
 LOG_FILE = os.environ.get(
     "DCLAW_LOG_PATH",
-    str(Path.home() / "defenseclaw-lite" / "dclaw_hook.log")
+    str(Path.home() / "edge-connector" / "dclaw_hook.log")
 )
 
 # Capability flags (must match defenseclaw.h)
@@ -467,7 +467,7 @@ def handle_after_llm(params: dict[str, Any]) -> dict[str, Any]:
 
 def handle_request(method: str, params: dict[str, Any]) -> dict[str, Any]:
     if method == "hook.hello":
-        return {"ok": True, "name": "defenseclaw-lite-gate"}
+        return {"ok": True, "name": "edge-connector-gate"}
     if method == "hook.before_tool":
         return handle_before_tool(params)
     if method == "hook.before_llm":
@@ -506,7 +506,7 @@ def main() -> int:
         get_engine()
     except Exception as exc:
         log(f"FATAL: Failed to load engine: {exc}")
-        print(f"defenseclaw-lite hook: failed to load engine: {exc}",
+        print(f"edge-connector hook: failed to load engine: {exc}",
               file=sys.stderr)
         return 1
 

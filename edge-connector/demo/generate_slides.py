@@ -99,6 +99,6 @@ add_text(slide,
 add_text(slide, "Cisco AI Defense", Inches(6.5), size=Pt(18), color=CISCO_BLUE, bold=False)
 
 # ============================================================
-output_path = "/Users/nghodki/workspace/defenseclaw-workspace/defenseclaw/defenseclaw-lite/demo/DefenseClaw-Lite-Demo.pptx"
+output_path = "/Users/nghodki/workspace/defenseclaw-workspace/defenseclaw/edge-connector/demo/DefenseClaw-Lite-Demo.pptx"
 prs.save(output_path)
 print(f"Saved: {output_path} ({len(prs.slides)} slides)")

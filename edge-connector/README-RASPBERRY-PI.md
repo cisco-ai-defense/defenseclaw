@@ -29,9 +29,9 @@ sudo apt update && sudo apt install -y build-essential cmake git python3
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
 cd defenseclaw
-git checkout feature/defenseclaw-lite-phase1
+git checkout feature/edge-connector-phase1
 
-cd defenseclaw-lite
+cd edge-connector
 mkdir build && cd build
 cmake .. -DDCLAW_PROFILE=STANDARD
 make -j4
@@ -44,7 +44,7 @@ Verify the build:
 ctest --output-on-failure
 
 # Check binary size (target: <80KB)
-ls -la defenseclaw-lite
+ls -la edge-connector
 
 # Run performance benchmark
 ./tests/bench_latency
@@ -61,7 +61,7 @@ DefenseClaw Lite Performance Benchmark
 
 ## Step 3: Configure the Policy
 
-The default policy (`defenseclaw-lite/policies/strict.yaml`) provides:
+The default policy (`edge-connector/policies/strict.yaml`) provides:
 
 | Rule Type | What It Does |
 |-----------|--------------|
@@ -112,7 +112,7 @@ if verdict.action == 1:  # BLOCK
 For agents that can't load a shared library, DefenseClaw Lite listens on a Unix socket:
 
 ```
-Path: /var/run/defenseclaw-lite.sock
+Path: /var/run/edge-connector.sock
 Protocol: JSON-RPC 2.0
 
 Request:
@@ -141,7 +141,7 @@ PicoClaw is a lightweight AI agent that supports process hooks — external prog
 ### 5.1 Install the hook
 
 ```bash
-cp defenseclaw-lite/tools/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
+cp edge-connector/tools/picoclaw_hook.py ~/.picoclaw/hooks/defenseclaw_gate.py
 ```
 
 ### 5.2 Register in PicoClaw config
@@ -163,8 +163,8 @@ config['hooks']['processes']['defenseclaw_gate'] = {
         '$HOME/.picoclaw/hooks/defenseclaw_gate.py'
     ],
     'env': {
-        'DCLAW_LIB_PATH': '$HOME/defenseclaw/defenseclaw-lite/build/libdclaw_core.so',
-        'DCLAW_LOG_PATH': '$HOME/defenseclaw-lite-audit.log'
+        'DCLAW_LIB_PATH': '$HOME/defenseclaw/edge-connector/build/libdclaw_core.so',
+        'DCLAW_LOG_PATH': '$HOME/edge-connector-audit.log'
     },
     'intercept': ['before_tool']
 }
@@ -180,10 +180,10 @@ print('DefenseClaw Lite hook registered.')
 ```bash
 # Test the hook standalone
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
-  DCLAW_LIB_PATH=~/defenseclaw/defenseclaw-lite/build/libdclaw_core.so \
+  DCLAW_LIB_PATH=~/defenseclaw/edge-connector/build/libdclaw_core.so \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
 
-# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"defenseclaw-lite-gate"}}
+# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 ```
 
 ### 5.4 Test through PicoClaw
@@ -208,16 +208,16 @@ picoclaw agent -m "fetch https://evil.attacker.io/payload"
 ### 5.5 Watch decisions in real-time
 
 ```bash
-tail -f ~/defenseclaw-lite-audit.log
+tail -f ~/edge-connector-audit.log
 ```
 
 Example output:
 ```
 [12:44:23] EVAL raw=mcp_vision-ai_battery_status tool=battery_status caps=0x40 session=1 → action=0 reason=CLOUD_BLOCK
 [12:44:27] EVAL raw=mcp_roboclaw_drive tool=drive caps=0x20 session=1 → action=1 reason=CLOUD_TIMEOUT
-[12:44:27] DENY: defenseclaw-lite: BLOCKED 'mcp_roboclaw_drive' — reason: CLOUD_TIMEOUT
+[12:44:27] DENY: edge-connector: BLOCKED 'mcp_roboclaw_drive' — reason: CLOUD_TIMEOUT
 [12:48:23] EVAL raw=web_fetch tool=web_fetch caps=0x08 dest='evil.hacker.site' session=1 → action=1 reason=DEST_DENY
-[12:48:23] DENY: defenseclaw-lite: BLOCKED 'web_fetch' — reason: DEST_DENY
+[12:48:23] DENY: edge-connector: BLOCKED 'web_fetch' — reason: DEST_DENY
 ```
 
 ---
@@ -266,7 +266,7 @@ Show that rapid tool calls get throttled:
 # Fire 70 rapid requests (exceeds 60/min global limit)
 for i in $(seq 1 70); do
   echo "{\"jsonrpc\":\"2.0\",\"id\":$i,\"method\":\"hook.before_tool\",\"params\":{\"tool\":\"get_sensors\",\"arguments\":{}}}"
-done | DCLAW_LIB_PATH=~/defenseclaw/defenseclaw-lite/build/libdclaw_core.so \
+done | DCLAW_LIB_PATH=~/defenseclaw/edge-connector/build/libdclaw_core.so \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py 2>/dev/null | grep -c "deny_tool"
 # Expected: some denials after token bucket exhausts
 ```
@@ -276,7 +276,7 @@ done | DCLAW_LIB_PATH=~/defenseclaw/defenseclaw-lite/build/libdclaw_core.so \
 Show sub-microsecond enforcement on real ARM hardware:
 
 ```bash
-cd ~/defenseclaw/defenseclaw-lite/build/tests
+cd ~/defenseclaw/edge-connector/build/tests
 ./bench_latency
 ```
 
@@ -432,9 +432,9 @@ TOOL_CAP_MAP = {
 ## File Layout
 
 ```
-defenseclaw-lite/
+edge-connector/
 ├── build/
-│   ├── defenseclaw-lite          # Main binary (76KB)
+│   ├── edge-connector          # Main binary (76KB)
 │   ├── libdclaw_core.so          # Shared library for Python/FFI integration
 │   ├── libdclaw_core.a           # Static library for C linking
 │   └── tests/                    # Test binaries + benchmark

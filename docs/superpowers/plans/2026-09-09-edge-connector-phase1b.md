@@ -8,7 +8,7 @@
 
 **Tech Stack:** C11 (edge connector), Python 3.10+ (policy compiler), CMake 3.22+
 
-**Spec:** `docs/specs/001-defenseclaw-lite-phase1/design.md` (Sections: Content Scanner Module, SSRF/Network Validation, Trust Boundary Inference, Enriched Cloud Escalation, Response Interception)
+**Spec:** `docs/specs/001-edge-connector-phase1/design.md` (Sections: Content Scanner Module, SSRF/Network Validation, Trust Boundary Inference, Enriched Cloud Escalation, Response Interception)
 
 ## Global Constraints
 
@@ -25,11 +25,11 @@
 ### Task 1: Content Scanner Data Structures and Header
 
 **Files:**
-- Create: `defenseclaw-lite/include/content_scanner.h`
-- Modify: `defenseclaw-lite/include/defenseclaw.h` (add new enums and extend `dclaw_tool_request_t`)
-- Modify: `defenseclaw-lite/include/config.h.in` (add `DCLAW_CONTENT_SCAN` toggle)
-- Modify: `defenseclaw-lite/CMakeLists.txt` (add `DCLAW_CONTENT_SCAN` per profile)
-- Test: `defenseclaw-lite/tests/test_content_scanner.c`
+- Create: `edge-connector/include/content_scanner.h`
+- Modify: `edge-connector/include/defenseclaw.h` (add new enums and extend `dclaw_tool_request_t`)
+- Modify: `edge-connector/include/config.h.in` (add `DCLAW_CONTENT_SCAN` toggle)
+- Modify: `edge-connector/CMakeLists.txt` (add `DCLAW_CONTENT_SCAN` per profile)
+- Test: `edge-connector/tests/test_content_scanner.c`
 
 **Interfaces:**
 - Consumes: existing `dclaw_action_t`, `dclaw_severity_t`, `dclaw_reason_t` enums from `defenseclaw.h`
@@ -37,7 +37,7 @@
 
 - [ ] **Step 1: Add new enums to defenseclaw.h**
 
-Open `defenseclaw-lite/include/defenseclaw.h`. After the existing `dclaw_se_failure_mode_t` enum (line 68), add:
+Open `edge-connector/include/defenseclaw.h`. After the existing `dclaw_se_failure_mode_t` enum (line 68), add:
 
 ```c
 typedef enum {
@@ -90,7 +90,7 @@ typedef struct {
 
 - [ ] **Step 3: Add config toggle**
 
-In `defenseclaw-lite/include/config.h.in`, add after `DCLAW_SPECULATIVE_EXECUTION`:
+In `edge-connector/include/config.h.in`, add after `DCLAW_SPECULATIVE_EXECUTION`:
 
 ```c
 #cmakedefine01 DCLAW_CONTENT_SCAN
@@ -124,7 +124,7 @@ set(DCLAW_ESCALATION_PAYLOAD_MAX 2048)
 
 - [ ] **Step 4: Create content_scanner.h**
 
-Create `defenseclaw-lite/include/content_scanner.h`:
+Create `edge-connector/include/content_scanner.h`:
 
 ```c
 #ifndef DCLAW_CONTENT_SCANNER_H
@@ -173,7 +173,7 @@ dclaw_content_scope_t dclaw_infer_content_scope(uint16_t session_id,
 
 - [ ] **Step 5: Write the failing test**
 
-Create `defenseclaw-lite/tests/test_content_scanner.c`:
+Create `edge-connector/tests/test_content_scanner.c`:
 
 ```c
 #include "defenseclaw.h"
@@ -226,7 +226,7 @@ int main(void) {
 
 - [ ] **Step 6: Register the test in CMakeLists**
 
-In `defenseclaw-lite/tests/CMakeLists.txt`, add:
+In `edge-connector/tests/CMakeLists.txt`, add:
 
 ```cmake
 add_executable(test_content_scanner test_content_scanner.c)
@@ -234,7 +234,7 @@ target_link_libraries(test_content_scanner PRIVATE dclaw_core)
 add_test(NAME content_scanner COMMAND test_content_scanner)
 ```
 
-In `defenseclaw-lite/CMakeLists.txt`, add the new source file to `CORE_SOURCES` (gated behind `DCLAW_CONTENT_SCAN`):
+In `edge-connector/CMakeLists.txt`, add the new source file to `CORE_SOURCES` (gated behind `DCLAW_CONTENT_SCAN`):
 
 ```cmake
 if(DCLAW_CONTENT_SCAN)
@@ -246,7 +246,7 @@ endif()
 
 - [ ] **Step 7: Create stub content_scanner.c to make tests compile**
 
-Create `defenseclaw-lite/src/decision/content_scanner.c`:
+Create `edge-connector/src/decision/content_scanner.c`:
 
 ```c
 #include "content_scanner.h"
@@ -290,7 +290,7 @@ dclaw_content_scope_t dclaw_infer_content_scope(uint16_t session_id,
 - [ ] **Step 8: Build and run tests**
 
 ```bash
-cd defenseclaw-lite/build
+cd edge-connector/build
 cmake .. -DDCLAW_PROFILE=STANDARD
 make -j$(nproc)
 ctest --output-on-failure
@@ -301,13 +301,13 @@ Expected: all existing tests pass, `test_content_scanner` passes with 3 tests.
 - [ ] **Step 9: Commit**
 
 ```bash
-git add defenseclaw-lite/include/content_scanner.h \
-        defenseclaw-lite/include/defenseclaw.h \
-        defenseclaw-lite/include/config.h.in \
-        defenseclaw-lite/CMakeLists.txt \
-        defenseclaw-lite/src/decision/content_scanner.c \
-        defenseclaw-lite/tests/test_content_scanner.c \
-        defenseclaw-lite/tests/CMakeLists.txt
+git add edge-connector/include/content_scanner.h \
+        edge-connector/include/defenseclaw.h \
+        edge-connector/include/config.h.in \
+        edge-connector/CMakeLists.txt \
+        edge-connector/src/decision/content_scanner.c \
+        edge-connector/tests/test_content_scanner.c \
+        edge-connector/tests/CMakeLists.txt
 git commit -m "feat(edge-connector): add content scanner data structures and stub (Phase 1B Task 1)"
 ```
 
@@ -316,8 +316,8 @@ git commit -m "feat(edge-connector): add content scanner data structures and stu
 ### Task 2: Secret and Credential Pattern Detection
 
 **Files:**
-- Modify: `defenseclaw-lite/src/decision/content_scanner.c` (implement pattern matching)
-- Modify: `defenseclaw-lite/tests/test_content_scanner.c` (add detection tests)
+- Modify: `edge-connector/src/decision/content_scanner.c` (implement pattern matching)
+- Modify: `edge-connector/tests/test_content_scanner.c` (add detection tests)
 
 **Interfaces:**
 - Consumes: `dclaw_content_scan()`, `dclaw_scan_context_t`, `dclaw_content_finding_t` from Task 1
@@ -325,7 +325,7 @@ git commit -m "feat(edge-connector): add content scanner data structures and stu
 
 - [ ] **Step 1: Write failing tests for secret detection**
 
-Append to `defenseclaw-lite/tests/test_content_scanner.c`, before `main()`:
+Append to `edge-connector/tests/test_content_scanner.c`, before `main()`:
 
 ```c
 static void test_detects_api_key_assignment(void) {
@@ -404,7 +404,7 @@ Update `main()` to call all new tests and update the count.
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd defenseclaw-lite/build && make -j$(nproc) && ctest -R content_scanner -V
+cd edge-connector/build && make -j$(nproc) && ctest -R content_scanner -V
 ```
 
 Expected: the new secret/credential tests FAIL (finding_count == 0 because the stub doesn't scan).
@@ -597,7 +597,7 @@ dclaw_content_scope_t dclaw_infer_content_scope(uint16_t session_id,
 - [ ] **Step 4: Run tests to verify they pass**
 
 ```bash
-cd defenseclaw-lite/build && cmake .. -DDCLAW_PROFILE=STANDARD && make -j$(nproc) && ctest -R content_scanner -V
+cd edge-connector/build && cmake .. -DDCLAW_PROFILE=STANDARD && make -j$(nproc) && ctest -R content_scanner -V
 ```
 
 Expected: all 9 tests PASS (3 original + 6 new).
@@ -605,8 +605,8 @@ Expected: all 9 tests PASS (3 original + 6 new).
 - [ ] **Step 5: Commit**
 
 ```bash
-git add defenseclaw-lite/src/decision/content_scanner.c \
-        defenseclaw-lite/tests/test_content_scanner.c
+git add edge-connector/src/decision/content_scanner.c \
+        edge-connector/tests/test_content_scanner.c
 git commit -m "feat(edge-connector): implement secret and credential pattern detection (Phase 1B Task 2)"
 ```
 
@@ -615,8 +615,8 @@ git commit -m "feat(edge-connector): implement secret and credential pattern det
 ### Task 3: PII, Injection, Exfil, and Command Detection
 
 **Files:**
-- Modify: `defenseclaw-lite/src/decision/content_scanner.c` (add 4 more pattern categories)
-- Modify: `defenseclaw-lite/tests/test_content_scanner.c` (add detection tests)
+- Modify: `edge-connector/src/decision/content_scanner.c` (add 4 more pattern categories)
+- Modify: `edge-connector/tests/test_content_scanner.c` (add detection tests)
 
 **Interfaces:**
 - Consumes: `add_finding()`, `is_boundary()`, `token_length()` helpers from Task 2
@@ -703,7 +703,7 @@ Update `main()` to call the new tests.
 - [ ] **Step 2: Run tests to verify they fail**
 
 ```bash
-cd defenseclaw-lite/build && make -j$(nproc) && ctest -R content_scanner -V
+cd edge-connector/build && make -j$(nproc) && ctest -R content_scanner -V
 ```
 
 Expected: new tests FAIL.
@@ -877,7 +877,7 @@ int dclaw_content_scan(const char *content, uint16_t content_len,
 - [ ] **Step 4: Run tests to verify all pass**
 
 ```bash
-cd defenseclaw-lite/build && make -j$(nproc) && ctest -R content_scanner -V
+cd edge-connector/build && make -j$(nproc) && ctest -R content_scanner -V
 ```
 
 Expected: all 15 tests PASS.
@@ -885,8 +885,8 @@ Expected: all 15 tests PASS.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add defenseclaw-lite/src/decision/content_scanner.c \
-        defenseclaw-lite/tests/test_content_scanner.c
+git add edge-connector/src/decision/content_scanner.c \
+        edge-connector/tests/test_content_scanner.c
 git commit -m "feat(edge-connector): add PII, injection, exfil, and command detection (Phase 1B Task 3)"
 ```
 
@@ -895,9 +895,9 @@ git commit -m "feat(edge-connector): add PII, injection, exfil, and command dete
 ### Task 4: SSRF/Network Validation
 
 **Files:**
-- Modify: `defenseclaw-lite/src/decision/content_scanner.c` (implement `dclaw_ssrf_check_destination()`)
-- Modify: `defenseclaw-lite/src/decision/policy_table.c` (integrate SSRF check into destination stage)
-- Modify: `defenseclaw-lite/tests/test_content_scanner.c` (add SSRF tests)
+- Modify: `edge-connector/src/decision/content_scanner.c` (implement `dclaw_ssrf_check_destination()`)
+- Modify: `edge-connector/src/decision/policy_table.c` (integrate SSRF check into destination stage)
+- Modify: `edge-connector/tests/test_content_scanner.c` (add SSRF tests)
 
 **Interfaces:**
 - Consumes: `dclaw_ssrf_check_destination()` stub from Task 1
@@ -945,8 +945,8 @@ Implement `dclaw_ssrf_check_destination()` in `content_scanner.c` — parse IP o
 - [ ] **Step 3: Commit**
 
 ```bash
-git add defenseclaw-lite/src/decision/content_scanner.c \
-        defenseclaw-lite/tests/test_content_scanner.c
+git add edge-connector/src/decision/content_scanner.c \
+        edge-connector/tests/test_content_scanner.c
 git commit -m "feat(edge-connector): add SSRF/network validation (Phase 1B Task 4)"
 ```
 
@@ -955,10 +955,10 @@ git commit -m "feat(edge-connector): add SSRF/network validation (Phase 1B Task 
 ### Task 5: Trust Boundary Inference and Pipeline Integration
 
 **Files:**
-- Modify: `defenseclaw-lite/src/decision/content_scanner.c` (implement `dclaw_infer_content_scope()`)
-- Modify: `defenseclaw-lite/src/dclaw_core.c` (insert content scan as pipeline stage 3, wire SSRF into stage 5)
-- Modify: `defenseclaw-lite/tests/test_content_scanner.c` (add trust inference tests)
-- Modify: `defenseclaw-lite/tests/test_evaluate_pipeline.c` (add content scan pipeline test)
+- Modify: `edge-connector/src/decision/content_scanner.c` (implement `dclaw_infer_content_scope()`)
+- Modify: `edge-connector/src/dclaw_core.c` (insert content scan as pipeline stage 3, wire SSRF into stage 5)
+- Modify: `edge-connector/tests/test_content_scanner.c` (add trust inference tests)
+- Modify: `edge-connector/tests/test_evaluate_pipeline.c` (add content scan pipeline test)
 
 **Interfaces:**
 - Consumes: `dclaw_content_scan()`, `dclaw_ssrf_check_destination()`, `dclaw_infer_content_scope()` from Tasks 1-4; `dclaw_evaluate()` pipeline from `dclaw_core.c`
@@ -1028,7 +1028,7 @@ In `test_evaluate_pipeline.c`, add a test that sends a request with content cont
 - [ ] **Step 4: Build, run all tests**
 
 ```bash
-cd defenseclaw-lite/build && cmake .. -DDCLAW_PROFILE=STANDARD && make -j$(nproc) && ctest --output-on-failure
+cd edge-connector/build && cmake .. -DDCLAW_PROFILE=STANDARD && make -j$(nproc) && ctest --output-on-failure
 ```
 
 Expected: ALL tests pass including existing pipeline tests.
@@ -1036,10 +1036,10 @@ Expected: ALL tests pass including existing pipeline tests.
 - [ ] **Step 5: Commit**
 
 ```bash
-git add defenseclaw-lite/src/dclaw_core.c \
-        defenseclaw-lite/src/decision/content_scanner.c \
-        defenseclaw-lite/tests/test_content_scanner.c \
-        defenseclaw-lite/tests/test_evaluate_pipeline.c
+git add edge-connector/src/dclaw_core.c \
+        edge-connector/src/decision/content_scanner.c \
+        edge-connector/tests/test_content_scanner.c \
+        edge-connector/tests/test_evaluate_pipeline.c
 git commit -m "feat(edge-connector): integrate content scan and SSRF into 8-stage pipeline (Phase 1B Task 5)"
 ```
 
@@ -1048,8 +1048,8 @@ git commit -m "feat(edge-connector): integrate content scan and SSRF into 8-stag
 ### Task 6: IPC Schema Extension (direction + content fields)
 
 **Files:**
-- Modify: `defenseclaw-lite/src/enforce/ipc_json.c` (parse `direction` and `content` fields)
-- Modify: `defenseclaw-lite/tests/test_input_validation.c` (add backward compat + new field tests)
+- Modify: `edge-connector/src/enforce/ipc_json.c` (parse `direction` and `content` fields)
+- Modify: `edge-connector/tests/test_input_validation.c` (add backward compat + new field tests)
 
 **Interfaces:**
 - Consumes: `dclaw_tool_request_t` with new fields from Task 1
@@ -1106,10 +1106,10 @@ git commit -m "feat(edge-connector): extend IPC schema with direction and conten
 ### Task 7: Enriched CBOR Escalation and Verdict Cache
 
 **Files:**
-- Modify: `defenseclaw-lite/src/comms/cbor_codec.c` (extend verdict request/response encoding)
-- Modify: `defenseclaw-lite/include/defenseclaw.h` (extend `dclaw_cache_entry_t` with category + evidence)
-- Modify: `defenseclaw-lite/src/decision/verdict_cache.c` (store/return category + evidence)
-- Modify: `defenseclaw-lite/tests/test_verdict_cache.c` (test enriched cache entries)
+- Modify: `edge-connector/src/comms/cbor_codec.c` (extend verdict request/response encoding)
+- Modify: `edge-connector/include/defenseclaw.h` (extend `dclaw_cache_entry_t` with category + evidence)
+- Modify: `edge-connector/src/decision/verdict_cache.c` (store/return category + evidence)
+- Modify: `edge-connector/tests/test_verdict_cache.c` (test enriched cache entries)
 
 **Interfaces:**
 - Consumes: `dclaw_content_category_t` enum from Task 1; CBOR codec functions from existing code
@@ -1157,9 +1157,9 @@ git commit -m "feat(edge-connector): enrich CBOR escalation and verdict cache wi
 ### Task 8: Binary Size Audit, Acceptance Tests, and Policy Compiler Update
 
 **Files:**
-- Modify: `defenseclaw-lite/tools/policy_compiler.py` (add `content_inspection` YAML section parsing)
-- Modify: `defenseclaw-lite/tests/test_acceptance.c` (add AC-13 through AC-17 tests)
-- Modify: `defenseclaw-lite/tests/bench_latency.c` (add content scan benchmark)
+- Modify: `edge-connector/tools/policy_compiler.py` (add `content_inspection` YAML section parsing)
+- Modify: `edge-connector/tests/test_acceptance.c` (add AC-13 through AC-17 tests)
+- Modify: `edge-connector/tests/bench_latency.c` (add content scan benchmark)
 
 **Interfaces:**
 - Consumes: all previous tasks
@@ -1184,10 +1184,10 @@ Add a benchmark that runs `dclaw_content_scan()` on a 512-byte sample and measur
 - [ ] **Step 4: Full build and size audit**
 
 ```bash
-cd defenseclaw-lite/build
+cd edge-connector/build
 cmake .. -DDCLAW_PROFILE=STANDARD
 make -j$(nproc)
-ls -la defenseclaw-lite  # Must be < 80KB
+ls -la edge-connector  # Must be < 80KB
 ctest --output-on-failure
 ./bench_latency
 ```

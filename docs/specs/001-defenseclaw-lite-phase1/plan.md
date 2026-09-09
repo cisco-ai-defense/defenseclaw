@@ -115,7 +115,7 @@ Phase 1B adds no new external dependencies. DFA tables are generated at compile 
 ### Week 1-2: Foundation
 
 ```
-1. Set up CMake + Kconfig build for defenseclaw-lite/
+1. Set up CMake + Kconfig build for edge-connector/
 2. Implement HAL for Linux (hal_linux.c)
 3. Implement core data structures (static allocation)
 4. Implement IPC hook with input validation

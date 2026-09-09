@@ -26,11 +26,11 @@ int main(void) {
     };
 
     if (dclaw_init(&info) != 0) {
-        fprintf(stderr, "defenseclaw-lite: init failed\n");
+        fprintf(stderr, "edge-connector: init failed\n");
         return 1;
     }
 
-    fprintf(stderr, "defenseclaw-lite: running (profile=STANDARD)\n");
+    fprintf(stderr, "edge-connector: running (profile=STANDARD)\n");
 
     while (g_running) {
         hal_watchdog_feed();
@@ -42,6 +42,6 @@ int main(void) {
     }
 
     dclaw_shutdown();
-    fprintf(stderr, "defenseclaw-lite: shutdown complete\n");
+    fprintf(stderr, "edge-connector: shutdown complete\n");
     return 0;
 }

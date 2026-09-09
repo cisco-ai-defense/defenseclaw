@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.22)
-project(defenseclaw-lite C)
+project(edge-connector C)
 
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -145,8 +145,8 @@ if(DCLAW_MQTT_ENABLED)
 endif()
 
 # Main executable
-add_executable(defenseclaw-lite src/main.c)
-target_link_libraries(defenseclaw-lite PRIVATE dclaw_core)
+add_executable(edge-connector src/main.c)
+target_link_libraries(edge-connector PRIVATE dclaw_core)
 
 # Tests
 option(DCLAW_BUILD_TESTS "Build unit tests" ON)

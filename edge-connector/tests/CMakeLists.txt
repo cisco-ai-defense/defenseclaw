@@ -1,4 +1,4 @@
-# Unit tests for defenseclaw-lite
+# Unit tests for edge-connector
 # Uses a simple test framework (no external deps)
 
 add_executable(test_input_validation test_input_validation.c)

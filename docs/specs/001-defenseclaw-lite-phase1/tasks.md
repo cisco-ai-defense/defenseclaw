@@ -7,7 +7,7 @@ Each task is independently mergeable where possible.
 
 ### Foundation (Week 1-2)
 
-1. [x] **Build system setup** — CMake + Kconfig for defenseclaw-lite/, cross-compile
+1. [x] **Build system setup** — CMake + Kconfig for edge-connector/, cross-compile
    for aarch64-linux-gnu, profile selection (STANDARD default), CI integration.
    Maps to: REQ-45, REQ-46.
 
@@ -141,7 +141,7 @@ Each task is independently mergeable where possible.
     (dclaw_ipc_parse_request). Run 1M+ iterations. Fix any crashes/hangs found.
     Verify no buffer overflows, no undefined behavior. Maps to: REQ-52.
 
-27. [x] **Static analysis** — Run cppcheck on entire defenseclaw-lite/ codebase.
+27. [x] **Static analysis** — Run cppcheck on entire edge-connector/ codebase.
     Zero findings policy. Fix all warnings. Add to CI as blocking check.
     Maps to: REQ-51.
 

@@ -14,10 +14,10 @@
 ssh nikghodki@nikraspberry.local
 
 # Terminal 2: log tail (keep visible on right side of screen)
-ssh nikghodki@nikraspberry.local "tail -f ~/defenseclaw-lite/dclaw_hook.log"
+ssh nikghodki@nikraspberry.local "tail -f ~/edge-connector/dclaw_hook.log"
 
 # Clear log
-> ~/defenseclaw-lite/dclaw_hook.log
+> ~/edge-connector/dclaw_hook.log
 ```
 
 ---
@@ -73,7 +73,7 @@ picoclaw agent -m "drive forward"
 ### Log shows
 ```
 EVAL tool=drive caps=0x20 → action=1 reason=CLOUD_TIMEOUT
-DENY: defenseclaw-lite: BLOCKED 'mcp_roboclaw_drive' — reason: CLOUD_TIMEOUT
+DENY: edge-connector: BLOCKED 'mcp_roboclaw_drive' — reason: CLOUD_TIMEOUT
 ```
 
 ---
