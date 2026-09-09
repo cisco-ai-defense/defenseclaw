@@ -1877,6 +1877,20 @@ export function createFetchInterceptor(
         reason: "interceptor-not-started",
       };
     }
+    // The probe posts to INTERCEPTION_SELF_TEST_URL (a real provider host) and
+    // only short-circuits inside our own wrapper. If globalThis.fetch is not
+    // ours -- never installed, or replaced by another module after start() --
+    // the probe would become genuine unguarded egress from the guardrail
+    // itself, repeated on every verify tick. describeLayers() already reports
+    // that condition with no network call, so answer from it instead.
+    if (!layers.fetch) {
+      return {
+        ok: false,
+        destination: "",
+        layers,
+        reason: "interception-self-test-fetch-missing",
+      };
+    }
 
     let destination = "";
     const probeInit = {

@@ -407,8 +407,16 @@ export default function (api: DefenseClawPluginHost) {
             `undici=${layers.undiciDispatcher}`,
         );
       }
-      await interceptor.runSelfTest();
+      // Start health monitoring first: runSelfTest() performs network I/O with
+      // no timeout of its own, so awaiting it here allowed a replaced
+      // globalThis.fetch to stall service startup indefinitely. The self-test
+      // still publishes its result, it just no longer gates the service.
       healthMonitor.start();
+      void interceptor.runSelfTest().catch((error) => {
+        console.warn(
+          `[defenseclaw] interception self-test failed to complete: ${String(error)}`,
+        );
+      });
       return {
         stop: () => {
           interceptor.stop();
