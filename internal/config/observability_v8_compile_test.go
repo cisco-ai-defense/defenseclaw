@@ -1051,7 +1051,7 @@ func TestCompileObservabilityV8Profiles(t *testing.T) {
 		},
 	})
 	profiles := plan.Snapshot().Profiles
-	if len(profiles) != 6 || profiles[4].Name != "legacy-v7" || profiles[5].Name != "soc" || profiles[5].FieldClasses[ObservabilityV8FieldEvidence] != ObservabilityV8ModeWhole {
+	if len(profiles) != 5 || profiles[4].Name != "soc" || profiles[4].FieldClasses[ObservabilityV8FieldEvidence] != ObservabilityV8ModeWhole {
 		t.Fatalf("compiled profiles = %+v", profiles)
 	}
 	for _, fieldClass := range []ObservabilityV8FieldClass{
@@ -1078,23 +1078,9 @@ func TestCompileObservabilityV8Profiles(t *testing.T) {
 			profiles[2].FieldClasses[ObservabilityV8FieldPath],
 			profiles[3].FieldClasses[ObservabilityV8FieldPath])
 	}
-	legacy := profiles[4]
-	if len(legacy.Detectors) != 0 || legacy.FieldClasses[ObservabilityV8FieldMetadata] != ObservabilityV8ModePreserve {
-		t.Fatalf("legacy-v7 metadata/detectors = %+v", legacy)
-	}
-	for _, fieldClass := range []ObservabilityV8FieldClass{
-		ObservabilityV8FieldIdentifier, ObservabilityV8FieldContent, ObservabilityV8FieldReason,
-		ObservabilityV8FieldEvidence, ObservabilityV8FieldError, ObservabilityV8FieldPath, ObservabilityV8FieldCredential,
-	} {
-		if legacy.FieldClasses[fieldClass] != ObservabilityV8ModeWhole {
-			t.Errorf("legacy-v7 %s mode = %q, want whole", fieldClass, legacy.FieldClasses[fieldClass])
-		}
-	}
-
 	invalid := []ObservabilityV8Source{
 		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"raw": {Extends: "none"}}},
-		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"legacy-v7": {Extends: "strict"}}},
-		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"compat": {Extends: "legacy-v7"}}},
+		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"compat": {Extends: "legacy-v7"}}}, // retired built-in is not a valid base
 		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"a": {Extends: "b"}, "b": {Extends: "a"}}},
 		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"bad": {Extends: "strict", Detectors: []ObservabilityV8DetectorGroup{"unknown"}}}},
 		{RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{"bad": {Extends: "sensitive", FieldClasses: map[ObservabilityV8FieldClass]ObservabilityV8FieldMode{ObservabilityV8FieldContent: ObservabilityV8ModePreserve}}}},

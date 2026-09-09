@@ -436,8 +436,8 @@ materializes the effective v7 choices that are needed to preserve:
 - endpoints, protocols, per-signal transport differences, TLS, headers, batching,
   resource attributes, sampling, and metric policy;
 - Splunk sourcetype overrides and OTLP log instrumentation scope;
-- effective v7 redaction through immutable `legacy-v7`, or `none` when the v7
-  global bypass was active;
+- effective v7 redaction through a generated `v7-compatible` custom profile, or
+  `none` when the v7 global bypass was active;
 - root-agent/subagent lifecycle, turns, executions, phases, operations, and the
   local Agent360/dashboard query contract.
 

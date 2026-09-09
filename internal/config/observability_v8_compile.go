@@ -1910,7 +1910,7 @@ func compileObservabilityV8Profiles(source map[string]ObservabilityV8RedactionPr
 		known[name] = struct{}{}
 	}
 	result := make([]ObservabilityV8EffectiveProfile, 0, len(builtIns)+len(source))
-	for _, name := range []string{"none", "sensitive", "content", "strict", "legacy-v7"} {
+	for _, name := range []string{"none", "sensitive", "content", "strict"} {
 		result = append(result, cloneObservabilityV8Profile(builtIns[name]))
 	}
 	names := make([]string, 0, len(source))
@@ -1921,7 +1921,7 @@ func compileObservabilityV8Profiles(source map[string]ObservabilityV8RedactionPr
 	for _, name := range names {
 		profileSource := source[name]
 		base, ok := builtIns[profileSource.Extends]
-		if !ok || profileSource.Extends == "none" || profileSource.Extends == "legacy-v7" {
+		if !ok || profileSource.Extends == "none" {
 			return nil, nil, fmt.Errorf("observability.redaction_profiles.%s.extends: expected sensitive, content, or strict", name)
 		}
 		if profileSource.Detectors != nil && len(profileSource.Detectors) == 0 {
@@ -1981,18 +1981,11 @@ func observabilityV8BuiltInProfiles() map[string]ObservabilityV8EffectiveProfile
 		ObservabilityV8FieldEvidence: ObservabilityV8ModeRemove, ObservabilityV8FieldError: ObservabilityV8ModeRemove,
 		ObservabilityV8FieldPath: ObservabilityV8ModeRemove, ObservabilityV8FieldCredential: ObservabilityV8ModeRemove,
 	}
-	legacyV7 := map[ObservabilityV8FieldClass]ObservabilityV8FieldMode{
-		ObservabilityV8FieldMetadata: ObservabilityV8ModePreserve, ObservabilityV8FieldIdentifier: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldContent: ObservabilityV8ModeWhole, ObservabilityV8FieldReason: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldEvidence: ObservabilityV8ModeWhole, ObservabilityV8FieldError: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldPath: ObservabilityV8ModeWhole, ObservabilityV8FieldCredential: ObservabilityV8ModeWhole,
-	}
 	return map[string]ObservabilityV8EffectiveProfile{
 		"none":      {Name: "none", BuiltIn: true, Detectors: []ObservabilityV8DetectorGroup{}, FieldClasses: preserveAll},
 		"sensitive": {Name: "sensitive", BuiltIn: true, Detectors: allDetectors, FieldClasses: sensitive},
 		"content":   {Name: "content", BuiltIn: true, Detectors: allDetectors, FieldClasses: content},
 		"strict":    {Name: "strict", BuiltIn: true, Detectors: allDetectors, FieldClasses: strict},
-		"legacy-v7": {Name: "legacy-v7", BuiltIn: true, Detectors: []ObservabilityV8DetectorGroup{}, FieldClasses: legacyV7},
 	}
 }
 

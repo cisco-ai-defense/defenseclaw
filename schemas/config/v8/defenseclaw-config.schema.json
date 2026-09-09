@@ -1366,8 +1366,7 @@
             "none",
             "sensitive",
             "content",
-            "strict",
-            "legacy-v7"
+            "strict"
           ]
         },
         {
@@ -1389,8 +1388,7 @@
                 "none",
                 "sensitive",
                 "content",
-                "strict",
-                "legacy-v7"
+                "strict"
               ]
             }
           }

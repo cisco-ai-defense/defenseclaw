@@ -109,7 +109,7 @@ FIELD_CLASSES = (
     "credential",
 )
 FIELD_MODES = ("preserve", "detect", "whole", "hash", "remove")
-BUILT_IN_PROFILES = ("none", "sensitive", "content", "strict", "legacy-v7")
+BUILT_IN_PROFILES = ("none", "sensitive", "content", "strict")
 ROUTE_ACTIONS = ("send", "drop")
 SELECTOR_FIELDS = ("buckets", "sources", "connectors", "actions", "event_names", "min_severity")
 DESTINATION_CAPABILITIES: dict[str, tuple[str, ...]] = {
@@ -1394,16 +1394,6 @@ def _built_in_field_modes() -> dict[str, dict[str, str]]:
             "error": "remove",
             "path": "remove",
             "credential": "remove",
-        },
-        "legacy-v7": {
-            "metadata": "preserve",
-            "identifier": "whole",
-            "content": "whole",
-            "reason": "whole",
-            "evidence": "whole",
-            "error": "whole",
-            "path": "whole",
-            "credential": "whole",
         },
     }
 

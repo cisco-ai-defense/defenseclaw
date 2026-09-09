@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
-	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 func TestEngineProjectsNestedValuesInCanonicalTraversalOrder(t *testing.T) {
@@ -537,121 +536,6 @@ func TestEngineMetricClassEnforcement(t *testing.T) {
 		projection.Metadata().State != ProjectionStateInspected ||
 		projection.Metadata().TransformedFields != 0 {
 		t.Fatalf("metric detector bypass contract = %#v / %#v", object, projection.Metadata())
-	}
-}
-
-func TestEngineLegacyV7ClassAdaptersArePureAndKeyless(t *testing.T) {
-	body := map[string]any{
-		"metadata":   "allow",
-		"identifier": "entity-value",
-		"content":    "message value",
-		"reason":     "RULE:dynamic value",
-		"evidence":   "evidence value",
-		"error":      "provider error",
-		"path":       "/private/model.json",
-		"credential": "credential value",
-		"number":     json.Number("12.5"),
-	}
-	classes := map[string]observability.FieldClass{
-		"/metadata": observability.FieldClassMetadata, "/identifier": observability.FieldClassIdentifier,
-		"/content": observability.FieldClassContent, "/reason": observability.FieldClassReason,
-		"/evidence": observability.FieldClassEvidence, "/error": observability.FieldClassError,
-		"/path": observability.FieldClassPath, "/credential": observability.FieldClassCredential,
-		"/number": observability.FieldClassContent,
-	}
-	record := newTestRecord(t, observability.SignalLogs, body, classes)
-	profile, ok := BuiltInProfile(ProfileLegacyV7)
-	if !ok {
-		t.Fatal("legacy-v7 profile is missing")
-	}
-	engine, err := NewEngine(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	projection, report, err := engine.Project(record, profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	object, _ := projection.Payload().Object()
-	want := map[string]any{
-		"metadata":   "allow",
-		"identifier": legacyredaction.LegacyV7Entity("entity-value"),
-		"content":    legacyredaction.LegacyV7MessageContent("message value"),
-		"reason":     legacyredaction.LegacyV7Reason("RULE:dynamic value"),
-		"evidence":   legacyredaction.LegacyV7Evidence("evidence value", -1, -1),
-		"error":      legacyredaction.LegacyV7String("provider error"),
-		"path":       legacyredaction.LegacyV7String("/private/model.json"),
-		"credential": legacyredaction.LegacyV7String("credential value"),
-		"number":     legacyredaction.LegacyV7MessageContent("12.5"),
-	}
-	if !reflect.DeepEqual(object, want) {
-		t.Fatalf("legacy-v7 projection = %#v, want %#v", object, want)
-	}
-	if projection.Metadata().State != ProjectionStateTransformed ||
-		projection.Metadata().TransformedFields != 8 || projection.Metadata().FailureCount != 0 ||
-		len(report.Entries()) != 0 {
-		t.Fatalf("legacy-v7 metadata = %#v / %#v", projection.Metadata(), report.Entries())
-	}
-	clone, _, err := engine.Reproject(projection, profile)
-	if err != nil {
-		t.Fatal(err)
-	}
-	left, _ := projection.Bytes()
-	right, _ := clone.Bytes()
-	if !bytes.Equal(left, right) {
-		t.Fatal("legacy-v7 trusted reprojection changed bytes")
-	}
-}
-
-func TestEngineLegacyV7DoesNotTrustCallerClassMapForTraceParentIdentity(t *testing.T) {
-	const parent = "0123456789abcdef"
-	body := map[string]any{
-		"parent_span_id": parent,
-		"business_id":    "business-identifier",
-	}
-	classes := map[string]observability.FieldClass{
-		"/parent_span_id": observability.FieldClassIdentifier,
-		"/business_id":    observability.FieldClassIdentifier,
-	}
-	profile, ok := BuiltInProfile(ProfileLegacyV7)
-	if !ok {
-		t.Fatal("legacy-v7 profile is missing")
-	}
-	engine, err := NewEngine(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	traceProjection, _, err := engine.Project(
-		newTestRecord(t, observability.SignalTraces, body, classes),
-		profile,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	traceBody, err := traceProjection.Payload().Object()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if traceBody["parent_span_id"] != legacyredaction.LegacyV7Entity(parent) ||
-		traceBody["business_id"] != legacyredaction.LegacyV7Entity("business-identifier") {
-		t.Fatalf("legacy-v7 untrusted trace identifiers=%#v", traceBody)
-	}
-
-	logProjection, _, err := engine.Project(
-		newTestRecord(t, observability.SignalLogs, body, classes),
-		profile,
-	)
-	if err != nil {
-		t.Fatal(err)
-	}
-	logBody, err := logProjection.Payload().Object()
-	if err != nil {
-		t.Fatal(err)
-	}
-	if logBody["parent_span_id"] != legacyredaction.LegacyV7Entity(parent) ||
-		logBody["business_id"] != legacyredaction.LegacyV7Entity("business-identifier") {
-		t.Fatalf("legacy-v7 non-trace identifier projection=%#v", logBody)
 	}
 }
 

@@ -252,7 +252,7 @@ def test_no_otel_upgrade_keeps_every_v7_local_log_bucket_collected() -> None:
 
     assert observability["defaults"] == {
         "collect": {"logs": False, "traces": False, "metrics": False},
-        "redaction_profile": "legacy-v7",
+        "redaction_profile": "v7-compatible",
     }
     assert set(observability["buckets"]) == set(BUCKETS)
     assert all(policy == {"collect": {"logs": True}} for policy in observability["buckets"].values())
@@ -378,7 +378,7 @@ notifications: {enabled: true}
     )
     assert observability["defaults"] == {
         "collect": {"logs": False, "traces": False, "metrics": False},
-        "redaction_profile": "legacy-v7",
+        "redaction_profile": "v7-compatible",
     }
     assert observability["buckets"]["compliance.activity"] == {
         "collect": {"logs": True, "traces": True, "metrics": True}
@@ -621,7 +621,7 @@ def test_redaction_environment_uses_exact_v7_truthy_vocabulary(value: str) -> No
     result = _convert("config_version: 7\n", {"DEFENSECLAW_DISABLE_REDACTION": value})
 
     observability = _document(result)["observability"]
-    assert observability["defaults"]["redaction_profile"] == "legacy-v7"
+    assert observability["defaults"]["redaction_profile"] == "v7-compatible"
     assert "environment_decision:DEFENSECLAW_DISABLE_REDACTION" not in result.warnings
 
 
@@ -1948,7 +1948,7 @@ otel:
             "name": "legacy-local-observability-traces-1",
             "signals": ["traces"],
             "selector": {"event_names": _ALL_SPAN_EVENT_NAMES},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         }
     ]
     assert log_metric_destination["protocol"] == "http/protobuf"
@@ -1965,7 +1965,7 @@ otel:
             "name": "legacy-local-observability-logs-1",
             "signals": ["logs"],
             "selector": {"buckets": _ALL_BUCKETS},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         },
         {
             "name": "legacy-local-observability-metrics-1",
@@ -2543,7 +2543,7 @@ otel:
             "name": "legacy-generic-otlp-logs-1",
             "signals": ["logs"],
             "selector": {"buckets": _ALL_BUCKETS},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         }
     ]
 
@@ -2698,7 +2698,7 @@ otel:
                 "name": "legacy-generic-otlp-traces-1",
                 "signals": ["traces"],
                 "selector": {"event_names": ["span.model.chat"]},
-                "redaction_profile": "legacy-v7",
+                "redaction_profile": "v7-compatible",
             }
         ]
         assert "span_filter_translated_from_generated_compatibility_selection" in result.warnings
@@ -2727,7 +2727,7 @@ __SPAN_FILTER__
                     "span.tool.execute",
                 ]
             },
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         }
     ]
 
@@ -2765,13 +2765,13 @@ otel:
             "name": "legacy-generic-otlp-logs-1",
             "signals": ["logs"],
             "selector": {"buckets": _ALL_BUCKETS},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         },
         {
             "name": "legacy-generic-otlp-traces-1",
             "signals": ["traces"],
             "selector": {"event_names": _ALL_SPAN_EVENT_NAMES},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         },
         {
             "name": "legacy-generic-otlp-metrics-1",
@@ -2783,7 +2783,7 @@ otel:
     redacted = _convert(template.replace("__DISABLED__", "false"))
     redacted_document = _document(redacted)
     assert _destination(redacted_document, "remote")["routes"] == expected_routes
-    assert redacted_document["observability"]["defaults"]["redaction_profile"] == "legacy-v7"
+    assert redacted_document["observability"]["defaults"]["redaction_profile"] == "v7-compatible"
     assert redacted_document["observability"]["buckets"]["ai.discovery"] == {"collect": {"logs": True}}
 
     unredacted = _convert(template.replace("__DISABLED__", "true"))
@@ -2793,7 +2793,7 @@ otel:
         "collect": {"logs": False, "traces": False, "metrics": False}
     }
     assert unredacted_routes == [
-        ({**route, "redaction_profile": "none"} if route.get("redaction_profile") == "legacy-v7" else route)
+        ({**route, "redaction_profile": "none"} if route.get("redaction_profile") == "v7-compatible" else route)
         for route in expected_routes
     ]
     for route in (*expected_routes, *unredacted_routes):
@@ -3010,7 +3010,7 @@ otel:
             "name": "legacy-generic-otlp-traces-1",
             "signals": ["traces"],
             "selector": {"event_names": ["span.retrieval.search"]},
-            "redaction_profile": "legacy-v7",
+            "redaction_profile": "v7-compatible",
         }
     ]
 
@@ -3250,7 +3250,7 @@ audit_sinks:
                 "tool_start",
             ]
         },
-        "redaction_profile": "legacy-v7",
+        "redaction_profile": "v7-compatible",
     }
     action_selector = routes[1]["selector"]["actions"]
     assert len(action_selector) == 190

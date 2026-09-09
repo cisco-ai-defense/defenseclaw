@@ -72,13 +72,23 @@ LEGACY_CONFIG_BOUNDARIES = (
 
 RULES = (
     Rule(
+        "v7-redaction-profile",
+        re.compile(r"\bProfileLegacyV7\b|\bLegacyV7(?:String|Entity|MessageContent|Reason|Evidence)\b|[\"']legacy-v7[\"']"),
+        "the legacy-v7 redaction profile is retired; upgrades emit a v7-compatible "
+        "custom profile instead",
+        # internal/audit names the retired profile in one constant so the reader
+        # can keep rejecting rows that were persisted while it existed.
+        allowed_prefixes=("internal/audit/event_history_lifecycle_v8.go",),
+        include_tests=False,
+    ),
+    Rule(
         "v7-ai-discovery-envelope",
         re.compile(
-            r"\bAIDiscovery(?:Payload|Component|Model|ModelProvenance|Runtime|Factor|Evidence)\b|"
-            r"\bEventAIDiscovery\b",
+            r"\bAIDiscovery(?:Payload|Component|Model|ModelProvenance|Runtime|Factor|Evidence)\b",
         ),
         "the v7 gateway-event AI discovery payload is retired; emit canonical v8 "
-        "ai.discovery records instead",
+        "ai.discovery records instead. EventAIDiscovery itself survives as the "
+        "classification key the v8 emitter uses, and is deliberately not matched.",
         include_tests=False,
     ),
     Rule(

@@ -25,7 +25,7 @@
 # default redaction profile is none. Explicit send/routes replace the generated
 # destination default. Collection is evaluated before routing and sampling.
 #
-# Built-in redaction: none, sensitive, content, strict, legacy-v7.
+# Built-in redaction: none, sensitive, content, strict.
 # Route selectors: different fields AND; values inside one field OR.
 # Route evaluation: first match wins independently per destination and signal.
 # Secrets are references (for example token_env or {env: NAME}), never literals.

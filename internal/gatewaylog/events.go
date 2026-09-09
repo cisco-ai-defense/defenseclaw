@@ -168,6 +168,12 @@ const (
 	// from an observe-mode would-block and then follow the next lifecycle,
 	// model, or tool event in the same agent execution.
 	EventHookDecision EventType = "hook_decision"
+
+	// EventAIDiscovery is the classification key the canonical v8 AI discovery
+	// records are emitted under; see internal/gateway/ai_discovery_observability_v8.go.
+	// Unlike the other EventType values it has no envelope payload: the v7
+	// ai_discovery envelope shape was retired, and nothing writes that row.
+	EventAIDiscovery EventType = "ai_discovery"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with

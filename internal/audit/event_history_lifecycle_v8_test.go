@@ -182,7 +182,22 @@ func TestLatestLifecycleProjectionRejectsTamperingAndTransformedIdentifiers(t *t
 				}
 			},
 		},
-		{name: "legacy-v7 identifiers", profile: observabilityredaction.ProfileLegacyV7},
+		{
+			// The legacy-v7 profile is retired, so the writer will no longer bind
+			// it. Rows written while it existed are still on disk, and their
+			// identifiers are v7 placeholders rather than canonical values, so the
+			// reader must keep rejecting them by stored name.
+			name: "retired legacy-v7 identifiers", profile: observabilityredaction.ProfileNone,
+			tamper: func(t *testing.T, store *Store) {
+				t.Helper()
+				if _, err := store.db.Exec(
+					`UPDATE audit_events SET redaction_profile=? WHERE id='candidate'`,
+					retiredLegacyV7ProfileName,
+				); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := newV8HistoryStore(t)

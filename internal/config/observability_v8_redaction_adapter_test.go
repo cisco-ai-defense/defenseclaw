@@ -22,7 +22,6 @@ func TestObservabilityV8RedactionProfileCatalogDefaultParity(t *testing.T) {
 
 	wantNames := []observabilityredaction.ProfileName{
 		observabilityredaction.ProfileContent,
-		observabilityredaction.ProfileLegacyV7,
 		observabilityredaction.ProfileNone,
 		observabilityredaction.ProfileSensitive,
 		observabilityredaction.ProfileStrict,
@@ -43,23 +42,6 @@ func TestObservabilityV8RedactionProfileCatalogDefaultParity(t *testing.T) {
 		assertEffectiveProfileParity(t, effective, profile)
 	}
 
-	legacy, ok := catalog.Resolve(observabilityredaction.ProfileLegacyV7)
-	if !ok {
-		t.Fatal("legacy-v7 is missing")
-	}
-	if got := legacy.DetectorGroups(); len(got) != 0 {
-		t.Fatalf("legacy-v7 detector groups = %v, want none", got)
-	}
-	for _, class := range observability.FieldClasses() {
-		mode, _ := legacy.Mode(class)
-		want := observabilityredaction.ModeWhole
-		if class == observability.FieldClassMetadata {
-			want = observabilityredaction.ModePreserve
-		}
-		if mode != want {
-			t.Fatalf("legacy-v7 %s mode = %q, want %q", class, mode, want)
-		}
-	}
 }
 
 func TestObservabilityV8PlanResolvesImmutableLocalProfiles(t *testing.T) {
@@ -110,7 +92,6 @@ func TestObservabilityV8RedactionProfileCatalogCustomParityAndCopySafety(t *test
 	wantNames := []observabilityredaction.ProfileName{
 		"alpha",
 		observabilityredaction.ProfileContent,
-		observabilityredaction.ProfileLegacyV7,
 		observabilityredaction.ProfileNone,
 		observabilityredaction.ProfileSensitive,
 		observabilityredaction.ProfileStrict,
@@ -179,7 +160,6 @@ func TestObservabilityV8RedactionAdapterMapsCompleteVocabulary(t *testing.T) {
 		"sensitive": observabilityredaction.ProfileSensitive,
 		"content":   observabilityredaction.ProfileContent,
 		"strict":    observabilityredaction.ProfileStrict,
-		"legacy-v7": observabilityredaction.ProfileLegacyV7,
 	}
 	if got := len(observabilityredaction.BuiltInProfiles()); len(profileNames) != got {
 		t.Fatalf("profile-name adapter covers %d built-ins, runtime exposes %d", len(profileNames), got)

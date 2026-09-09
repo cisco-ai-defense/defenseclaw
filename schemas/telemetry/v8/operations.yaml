@@ -2313,7 +2313,7 @@ attributes:
 - id: defenseclaw.admin.before_summary
   type: string
   brief: Sanitized bounded summary of pre-change state
-  examples: [profile=legacy-v7; destinations=1]
+  examples: [profile=v7-compatible; destinations=1]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -2341,7 +2341,7 @@ attributes:
 - id: defenseclaw.admin.before_state
   type: string
   brief: Canonical JSON source state observed before an administrative mutation
-  examples: ['{"observability":{"profile":"legacy-v7"}}']
+  examples: ['{"observability":{"profile":"v7-compatible"}}']
   stability: stable
   owner: defenseclaw
   field_class: content
@@ -2369,7 +2369,7 @@ attributes:
 - id: defenseclaw.admin.diff
   type: string
   brief: Canonical JSON mutation delta supplied by the administrative source
-  examples: ['[{"path":"observability.profile","op":"replace","before":"legacy-v7","after":"none"}]']
+  examples: ['[{"path":"observability.profile","op":"replace","before":"v7-compatible","after":"none"}]']
   stability: stable
   owner: defenseclaw
   field_class: content
