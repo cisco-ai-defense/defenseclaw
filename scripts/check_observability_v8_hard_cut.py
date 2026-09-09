@@ -72,6 +72,16 @@ LEGACY_CONFIG_BOUNDARIES = (
 
 RULES = (
     Rule(
+        "v7-ai-discovery-envelope",
+        re.compile(
+            r"\bAIDiscovery(?:Payload|Component|Model|ModelProvenance|Runtime|Factor|Evidence)\b|"
+            r"\bEventAIDiscovery\b",
+        ),
+        "the v7 gateway-event AI discovery payload is retired; emit canonical v8 "
+        "ai.discovery records instead",
+        include_tests=False,
+    ),
+    Rule(
         "gateway-writer",
         re.compile(
             r"\bgatewaylog\.(?:Writer|Config|New)\b|\b(?:SetEventWriter|EventWriter|withCapturedEvents)\b",

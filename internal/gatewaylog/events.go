@@ -168,11 +168,6 @@ const (
 	// from an observe-mode would-block and then follow the next lifecycle,
 	// model, or tool event in the same agent execution.
 	EventHookDecision EventType = "hook_decision"
-
-	// EventAIDiscovery records sanitized continuous AI usage discovery
-	// deltas. It is metadata-only: no raw paths, commands, prompt text,
-	// file contents, or secret values.
-	EventAIDiscovery EventType = "ai_discovery"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -449,7 +444,6 @@ type Event struct {
 	LLMResponse  *LLMResponsePayload  `json:"llm_response,omitempty"`
 	Tool         *ToolPayload         `json:"tool_invocation,omitempty"`
 	HookDecision *HookDecisionPayload `json:"hook_decision,omitempty"`
-	AIDiscovery  *AIDiscoveryPayload  `json:"ai_discovery,omitempty"`
 
 	ConnectorInventory *ConnectorInventoryPayload `json:"connector_inventory,omitempty"`
 	MCPInventory       *MCPInventoryPayload       `json:"mcp_inventory,omitempty"`
@@ -492,8 +486,6 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
 	case e.HookDecision != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.HookDecision)
-	case e.AIDiscovery != nil:
-		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	case e.ConnectorInventory != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.ConnectorInventory)
 	case e.MCPInventory != nil:
@@ -836,134 +828,6 @@ type ToolPayload struct {
 	ExitCode        *int   `json:"exit_code,omitempty"`
 	ReplyToPromptID string `json:"reply_to_prompt_id,omitempty"`
 	Source          string `json:"source,omitempty"`
-}
-
-// AIDiscoveryPayload preserves the historical gateway-event envelope schema.
-// Runtime v8 emits AI discovery through generated canonical records instead.
-//
-// Privacy contract:
-//   - The "minimal" set of fields (ScanID through LastSeen) is always
-//     populated -- they carry no raw paths or unhashed values, only
-//     sha256:* digests and category/vendor/product strings drawn from
-//     the operator-curated catalog.
-//   - The "extended" set remains decodable for pre-v8 stored envelopes. New
-//     producers do not construct this payload, and raw paths are never exposed
-//     through canonical API or destination projections.
-//   - Every extended field is `omitempty` so receivers cannot tell
-//     from the wire whether the operator opted out or never had a
-//     value for that signal.
-type AIDiscoveryPayload struct {
-	ScanID        string   `json:"scan_id"`
-	SignalID      string   `json:"signal_id"`
-	Category      string   `json:"category"`
-	Vendor        string   `json:"vendor,omitempty"`
-	Product       string   `json:"product,omitempty"`
-	Confidence    float64  `json:"confidence,omitempty"`
-	State         string   `json:"state"` // new | changed | gone
-	EvidenceTypes []string `json:"evidence_types,omitempty"`
-	PathHashes    []string `json:"path_hashes,omitempty"`
-	Basenames     []string `json:"basenames,omitempty"`
-	WorkspaceHash string   `json:"workspace_hash,omitempty"`
-	LastSeen      string   `json:"last_seen,omitempty"`
-
-	// Extended fields below are historical decode compatibility only.
-	Detector        string                `json:"detector,omitempty"`
-	Component       *AIDiscoveryComponent `json:"component,omitempty"`
-	Model           *AIDiscoveryModel     `json:"model,omitempty"`
-	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
-	LastActiveAt    string                `json:"last_active_at,omitempty"`
-	IdentityScore   float64               `json:"identity_score,omitempty"`
-	IdentityBand    string                `json:"identity_band,omitempty"`
-	PresenceScore   float64               `json:"presence_score,omitempty"`
-	PresenceBand    string                `json:"presence_band,omitempty"`
-	IdentityFactors []AIDiscoveryFactor   `json:"identity_factors,omitempty"`
-	PresenceFactors []AIDiscoveryFactor   `json:"presence_factors,omitempty"`
-	Detectors       []string              `json:"detectors,omitempty"`
-	Evidence        []AIDiscoveryEvidence `json:"evidence,omitempty"`
-	// RawPaths is retained only to decode historical envelopes.
-	RawPaths []string `json:"raw_paths,omitempty"`
-}
-
-// AIDiscoveryComponent mirrors inventory.AIComponent.
-type AIDiscoveryComponent struct {
-	Ecosystem string `json:"ecosystem,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Version   string `json:"version,omitempty"`
-	Framework string `json:"framework,omitempty"`
-}
-
-// AIDiscoveryModel mirrors inventory.LocalModelInfo. It is part of the
-// privacy-gated extended payload because model IDs can contain user-chosen or
-// private repository names. Local `/api/v1/ai-usage` responses still carry the
-// model block regardless of outbound sink redaction.
-type AIDiscoveryModel struct {
-	ID                  string                      `json:"id"`
-	Status              string                      `json:"status"`
-	Format              string                      `json:"format,omitempty"`
-	Provider            string                      `json:"provider,omitempty"`
-	Recipe              string                      `json:"recipe,omitempty"`
-	Modality            string                      `json:"modality,omitempty"`
-	Device              string                      `json:"device,omitempty"`
-	SizeBytes           int64                       `json:"size_bytes,omitempty"`
-	Pinned              bool                        `json:"pinned,omitempty"`
-	OwnerApplication    string                      `json:"owner_application,omitempty"`
-	Relevance           string                      `json:"relevance,omitempty"`
-	DiscoveryConfidence *float64                    `json:"discovery_confidence,omitempty"`
-	Provenance          *AIDiscoveryModelProvenance `json:"provenance,omitempty"`
-}
-
-// AIDiscoveryModelProvenance mirrors inventory.LocalModelProvenance for
-// historical extended envelopes. Runtime v8 emits a bounded provenance subset
-// through canonical ai_component logs instead of serializing this legacy model
-// block.
-type AIDiscoveryModelProvenance struct {
-	Publisher    string   `json:"publisher,omitempty"`
-	CountryCode  string   `json:"country_code,omitempty"`
-	RootModel    string   `json:"root_model,omitempty"`
-	BaseModels   []string `json:"base_models,omitempty"`
-	Quantized    *bool    `json:"quantized,omitempty"`
-	Quantization string   `json:"quantization,omitempty"`
-	Distilled    *bool    `json:"distilled,omitempty"`
-	Derivation   string   `json:"derivation,omitempty"`
-	Source       string   `json:"source,omitempty"`
-	Confidence   string   `json:"confidence,omitempty"`
-}
-
-// AIDiscoveryRuntime mirrors inventory.ProcessRuntime.
-type AIDiscoveryRuntime struct {
-	PID       int    `json:"pid,omitempty"`
-	PPID      int    `json:"ppid,omitempty"`
-	StartedAt string `json:"started_at,omitempty"`
-	UptimeSec int64  `json:"uptime_sec,omitempty"`
-	User      string `json:"user,omitempty"`
-	Comm      string `json:"comm,omitempty"`
-}
-
-// AIDiscoveryFactor mirrors inventory.ConfidenceFactor for the wire.
-// LogitDelta is the additive contribution this evidence made to the
-// per-axis log-odds; receivers can convert via P*(1-P) to get a
-// percentage-point shift.
-type AIDiscoveryFactor struct {
-	Detector    string  `json:"detector"`
-	EvidenceID  string  `json:"evidence_id,omitempty"`
-	MatchKind   string  `json:"match_kind,omitempty"`
-	Quality     float64 `json:"quality"`
-	Specificity float64 `json:"specificity"`
-	LR          float64 `json:"lr"`
-	LogitDelta  float64 `json:"logit_delta"`
-}
-
-// AIDiscoveryEvidence mirrors historical inventory evidence on the envelope.
-// Runtime v8 never populates RawPath on API or destination projections.
-type AIDiscoveryEvidence struct {
-	Type          string  `json:"type"`
-	Basename      string  `json:"basename,omitempty"`
-	PathHash      string  `json:"path_hash,omitempty"`
-	ValueHash     string  `json:"value_hash,omitempty"`
-	WorkspaceHash string  `json:"workspace_hash,omitempty"`
-	RawPath       string  `json:"raw_path,omitempty"`
-	Quality       float64 `json:"quality,omitempty"`
-	MatchKind     string  `json:"match_kind,omitempty"`
 }
 
 // ConnectorInventoryPayload is the endpoint's roster of configured
