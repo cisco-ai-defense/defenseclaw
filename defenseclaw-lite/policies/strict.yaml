@@ -60,3 +60,54 @@ iot_extensions:
     - "mqtts://edge-vip.site-alpha.local:8883"
     - "mqtts://edge-b.site-alpha.local:8883"
     - "mqtts://fleet.defenseclaw.cloud:8883"
+
+  content_inspection:
+    enabled: true
+    categories:
+      secret:
+        enabled: true
+        severity: high
+        action: block
+      pii:
+        enabled: true
+        severity: high
+        action: block
+      credential:
+        enabled: true
+        severity: high
+        action: block
+      exfil:
+        enabled: true
+        severity: high
+        action: block
+      injection:
+        enabled: true
+        severity: critical
+        action: block
+      command:
+        enabled: true
+        severity: critical
+        action: block
+
+  ssrf_protection:
+    enabled: true
+    block_private_ranges: true
+    block_loopback: true
+    block_link_local: true
+    block_cloud_metadata: true
+    reject_inline_credentials: true
+    allowed_schemes:
+      - http
+      - https
+    private_ip_allowlist: []
+
+  cloud_escalation:
+    max_payload_bytes: 1024
+    include_content: true
+    include_local_findings: true
+
+  trust_boundaries:
+    infer_from_context: true
+    strict_user_input: true
+    user_input_block_threshold: medium
+    system_block_threshold: high

@@ -1,7 +1,7 @@
-# DefenseClaw Lite: IoT Agent Architecture Proposal
+# DefenseClaw Edge Connector: IoT Agent Architecture Proposal
 
-**Document Version:** 1.2  
-**Date:** 2026-08-06  
+**Document Version:** 1.3  
+**Date:** 2026-09-09  
 **Status:** DRAFT — Full Architecture/Security/Operational Review Incorporated  
 **Authors:** Nikhil Ghodki  
 **Classification:** Cisco Confidential
@@ -16,6 +16,7 @@
 4. [System Architecture](#4-system-architecture)
 5. [Deployment Topologies](#5-deployment-topologies)
 6. [Component Specifications](#6-component-specifications)
+    - 6.3 [AI-Aware Content Inspection](#63-ai-aware-content-inspection)
 7. [Communication Protocol Design](#7-communication-protocol-design)
 8. [Security Model](#8-security-model)
 9. [Data Flow Analysis](#9-data-flow-analysis)
@@ -35,9 +36,9 @@
 
 ### Vision
 
-DefenseClaw Lite extends AI agent security governance to resource-constrained IoT and edge devices. As AI agents proliferate beyond cloud and desktop environments into industrial controllers, edge inference platforms, and embedded systems, the attack surface for agentic AI expands to devices that cannot run the full 50MB DefenseClaw gateway.
+DefenseClaw Edge Connector extends AI agent security governance to resource-constrained IoT and edge devices. As AI agents proliferate beyond cloud and desktop environments into industrial controllers, edge inference platforms, and embedded systems, the attack surface for agentic AI expands to devices that cannot run the full 50MB DefenseClaw gateway.
 
-DefenseClaw Lite is a purpose-built C-language enforcement agent (~80-150KB) that provides sub-microsecond local policy enforcement while delegating complex analysis (YARA scanning, LLM-based inspection, OPA evaluation) to a cloud or edge DefenseClaw instance. It is not a "smaller DefenseClaw" — it is a different architectural role: a fast enforcement point that executes pre-compiled decisions locally and escalates unknowns to the cloud brain.
+DefenseClaw Edge Connector is a purpose-built C-language enforcement agent (~80-150KB) that provides sub-microsecond local policy enforcement while delegating complex analysis (YARA scanning, LLM-based inspection, OPA evaluation) to a cloud or edge DefenseClaw instance. It is not a "smaller DefenseClaw" — it is a different architectural role: a fast enforcement point that executes pre-compiled decisions locally and escalates unknowns to the cloud brain.
 
 ### Key Metrics
 
@@ -120,7 +121,7 @@ The current DefenseClaw gateway requires:
 │  • Input PII redaction             • Taint tracking              │
 │  • Policy table enforcement        • OPA/Rego evaluation         │
 │                                                                   │
-│  ◄── IoT Lite handles locally ──► ◄── Cloud/Edge handles ──►    │
+│  ◄── Edge Connector handles locally ──► ◄── Cloud/Edge handles ──►    │
 │                                                                   │
 │  Latency: <5us                     Latency: 100-500ms            │
 │  Connectivity: not required         Connectivity: required        │
@@ -135,22 +136,23 @@ The system is designed around two invariants:
 
 ### Component Mapping from Full DefenseClaw
 
-| Full DefenseClaw Component | IoT Lite Equivalent | Location |
+| Full DefenseClaw Component | Edge Connector Equivalent | Location |
 |---|---|---|
 | Gateway proxy (115K LoC) | IPC/netfilter hook (inline) | Device |
 | OPA/Rego policy engine | Compiled decision tables (C) | Device |
 | Guardrail correlator | Session capability FSM (C) | Device |
 | Firewall compiler | iptables/nftables rule gen (C) | Device |
 | PII redaction | Outbound regex strip (C) | Device |
-| SSRF protection (netguard) | Destination allow-list (C) | Device |
+| SSRF protection (netguard) | Inline SSRF/netguard check (C) | Device |
+| Content inspection scanners | Streaming DFA pattern matcher (C) | Device |
 | Audit store (SQLite) | Ring buffer + HMAC chain (C) | Device |
 | OpenTelemetry (75K LoC) | 32-byte CBOR heartbeat | Device→Cloud |
 | YARA scanners | Hash-and-ask (verdict request) | Cloud |
 | LLM Judge | N/A on device | Cloud |
 | Cisco AI Defense | N/A on device | Cloud |
-| Inspection pipeline (4-stage) | Verdict cache hit or escalate | Cloud |
+| Inspection pipeline (8-stage) | Verdict cache hit or escalate | Cloud |
 | Bifrost routing | N/A (single endpoint) | N/A |
-| Connector matrix | "iot-lite" connector type | Cloud registry |
+| Connector matrix | "edge-connector" connector type | Cloud registry |
 
 ---
 
@@ -287,8 +289,8 @@ The system is designed around two invariants:
 ║  │  (Tier 1-3)   │           │  (Tier 1-3)   │           │  (Tier 1-3)   │      ║
 ║  │               │           │               │           │               │      ║
 ║  │ ┌───────────┐ │           │ ┌───────────┐ │           │ ┌───────────┐ │      ║
-║  │ │DefenseClaw│ │           │ │DefenseClaw│ │           │ │DefenseClaw│ │      ║
-║  │ │   Lite    │ │           │ │   Lite    │ │           │ │   Lite    │ │      ║
+║  │ │  Edge     │ │           │ │  Edge     │ │           │ │  Edge     │ │      ║
+║  │ │ Connector │ │           │ │ Connector │ │           │ │ Connector │ │      ║
 ║  │ │  (C agent)│ │           │ │  (C agent)│ │           │ │  (C agent)│ │      ║
 ║  │ └───────────┘ │           │ └───────────┘ │           │ └───────────┘ │      ║
 ║  │ ┌───────────┐ │           │ ┌───────────┐ │           │ ┌───────────┐ │      ║
@@ -388,7 +390,7 @@ The system is designed around two invariants:
 ║  │   │ 1 │ │ 2 │ │ 3 │       │ 4 │ │ 5 │ │ 6 │       │ 7 │ │ 8 │ │ 9 │    │ ║
 ║  │   └───┘ └───┘ └───┘       └───┘ └───┘ └───┘       └───┘ └───┘ └───┘    │ ║
 ║  │                                                                           │ ║
-║  │   D = IoT Device running DefenseClaw Lite (C agent)                      │ ║
+║  │   D = IoT Device running DefenseClaw Edge Connector (C agent)                      │ ║
 ║  └───────────────────────────────────────────────────────────────────────────┘ ║
 ║                                                                                   ║
 ╠═══════════════════════════════════════════════════════════════════════════════════╣
@@ -588,12 +590,12 @@ The edge gateway is a single point of failure per site. The following HA options
 
 ## 6. Component Specifications
 
-### 6.1 IoT Lite Agent (C)
+### 6.1 Edge Connector Agent (C)
 
 #### Module Decomposition
 
 ```
-defenseclaw-lite/
+edge-connector/
 ├── src/
 │   ├── main.c                    # Entry point, init, event loop
 │   ├── decision/
@@ -605,7 +607,11 @@ defenseclaw-lite/
 │   │   ├── ipc_hook.c            # Unix socket / JSON-RPC intercept
 │   │   ├── netfilter_hook.c      # iptables/nftables rule enforcement
 │   │   ├── rate_limiter.c        # Token bucket rate limiting
-│   │   └── redactor.c            # Outbound PII regex strip
+│   │   ├── redactor.c            # Outbound PII regex strip
+│   │   ├── content_scanner.c     # Streaming DFA pattern matcher (6 categories)
+│   │   ├── ssrf_guard.c          # SSRF/netguard network validation
+│   │   ├── trust_boundary.c      # Content scope inference + threshold lookup
+│   │   └── response_hook.c       # Bidirectional IPC response interception
 │   ├── persist/
 │   │   ├── audit_ring.c          # HMAC-chained ring buffer
 │   │   ├── flash_safe.c          # Wear-leveling safe writes
@@ -629,7 +635,8 @@ defenseclaw-lite/
 ├── generated/
 │   ├── policy_tables.h           # Auto-generated decision tables
 │   ├── deny_list.h               # Auto-generated hash deny list
-│   └── dest_allowlist.h          # Auto-generated destination list
+│   ├── dest_allowlist.h          # Auto-generated destination list
+│   └── content_dfa_tables.h      # Auto-generated DFA tables for content scanner
 ├── tools/
 │   ├── policy_compiler.py        # YAML → C header compiler
 │   ├── bloom_generator.py        # Generates bloom filter binary
@@ -641,7 +648,7 @@ defenseclaw-lite/
 #### Build Configuration (Kconfig)
 
 ```kconfig
-menu "DefenseClaw Lite Configuration"
+menu "DefenseClaw Edge Connector Configuration"
 
 choice DCLAW_PROFILE
     prompt "Agent Profile"
@@ -833,7 +840,29 @@ typedef enum {
     DCLAW_REASON_BLOOM_HIT      = 0x09,
     DCLAW_REASON_INVALID_INPUT  = 0x0A,
     DCLAW_REASON_RETROACTIVE    = 0x0B,
+    DCLAW_REASON_CONTENT_BLOCK  = 0x0C,  /* content scanner DFA match */
+    DCLAW_REASON_SSRF_BLOCK     = 0x0D,  /* SSRF/netguard destination block */
 } dclaw_reason_t;
+
+typedef enum {
+    DCLAW_CONTENT_SECRET     = 0x01,
+    DCLAW_CONTENT_PII        = 0x02,
+    DCLAW_CONTENT_CREDENTIAL = 0x04,
+    DCLAW_CONTENT_EXFIL      = 0x08,
+    DCLAW_CONTENT_INJECTION  = 0x10,
+    DCLAW_CONTENT_COMMAND    = 0x20,
+} dclaw_content_category_t;
+
+typedef enum {
+    DCLAW_SCOPE_SYSTEM      = 0x00,
+    DCLAW_SCOPE_USER_INPUT  = 0x01,
+    DCLAW_SCOPE_TOOL_OUTPUT = 0x02,
+} dclaw_content_scope_t;
+
+typedef enum {
+    DCLAW_DIR_FORWARD  = 0x00,  /* request: agent → tool */
+    DCLAW_DIR_BACKWARD = 0x01,  /* response: tool → agent */
+} dclaw_direction_t;
 
 /* --- Core structures --- */
 
@@ -871,6 +900,8 @@ typedef struct {
     uint8_t  cap_flags;        /* dclaw_capability_t bitmask */
     char     destination[128]; /* target URL/IP if network tool */
     uint16_t session_id;       /* correlator session tracking */
+    uint8_t  direction;        /* dclaw_direction_t: forward or backward */
+    uint8_t  content_scope;    /* dclaw_content_scope_t: trust boundary */
 } dclaw_tool_request_t;
 
 typedef enum {
@@ -1187,7 +1218,7 @@ void dclaw_shutdown(void);
 │  └────────────────────────────────────────────────────────────┘   │
 │                                                                    │
 │  Integration with existing DefenseClaw:                           │
-│  • Registers as connector type "iot-lite" in connector matrix     │
+│  • Registers as connector type "edge-connector" in connector matrix     │
 │  • Fleet metrics exposed via existing Prometheus endpoint         │
 │  • Audit events flow into existing SIEM pipeline                  │
 │  • Webhooks use existing WebhookDispatcher infrastructure         │
@@ -1225,7 +1256,7 @@ void dclaw_shutdown(void);
 │  │  Return      ┌──────────────────┐                           │   │
 │  │  cached      │ Inspection        │                          │   │
 │  │  verdict     │ Pipeline          │                          │   │
-│  │  (<1ms)      │ (full 4-stage)    │                          │   │
+│  │  (<1ms)      │ (full 8-stage)    │                          │   │
 │  │              │ ~50-200ms         │                          │   │
 │  │              └────────┬──────────┘                          │   │
 │  │                       │                                     │   │
@@ -1343,6 +1374,270 @@ void dclaw_shutdown(void);
 │                                                                    │
 └──────────────────────────────────────────────────────────────────┘
 ```
+
+---
+
+## 6.3 AI-Aware Content Inspection
+
+The Edge Connector performs lightweight content-aware analysis on device, complementing the deep cloud inspection pipeline. These stages run inline in the IPC hook path and add ~15KB to the binary and ~4KB to RAM, bringing the standard profile to ~68KB binary / ~14-19KB RAM (still within the 80KB / 25KB budget).
+
+### Content Scanner Module
+
+A streaming DFA-based pattern matcher inspects tool call payloads and responses inline. The scanner operates in constant memory (no backtracking, no heap allocation) and classifies matches into six categories:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              CONTENT SCANNER — DFA PATTERN CATEGORIES               │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Category     │ Code  │ Description                    │ Action   │
+│  ─────────────┼───────┼────────────────────────────────┼──────── │
+│  SECRET       │ 0x01  │ API keys, tokens, JWTs,        │ BLOCK   │
+│               │       │ cloud provider credentials     │         │
+│  PII          │ 0x02  │ SSN, email, phone, credit card │ REDACT  │
+│               │       │ (regex-class patterns)         │ or BLOCK│
+│  CREDENTIAL   │ 0x03  │ Passwords, connection strings, │ BLOCK   │
+│               │       │ private key material           │         │
+│  EXFIL        │ 0x04  │ Base64-encoded blobs > 4KB,    │ WARN /  │
+│               │       │ hex-encoded binary streams     │ ESCALATE│
+│  INJECTION    │ 0x05  │ Prompt injection markers,      │ BLOCK   │
+│               │       │ system prompt overrides,       │         │
+│               │       │ role-switching patterns        │         │
+│  COMMAND      │ 0x06  │ Shell metacharacters, path     │ BLOCK   │
+│               │       │ traversal sequences, SQL       │         │
+│               │       │ injection patterns             │         │
+│  ─────────────┴───────┴────────────────────────────────┴──────── │
+│                                                                    │
+│  Implementation:                                                  │
+│  • DFA tables are compiled from policy YAML by the policy         │
+│    compiler (new compilation stage in policy_compiler.py)         │
+│  • Tables are stored alongside policy_tables.h as                 │
+│    content_dfa_tables.h (const data, flash-resident)              │
+│  • Scanner processes input byte-by-byte in a single pass         │
+│  • Match callback fires immediately on pattern completion        │
+│  • Multiple categories can match in a single scan (bitmask)      │
+│  • Worst-case scan cost: O(n) where n = payload length           │
+│  • No heap allocation — DFA state is a single uint16_t           │
+│                                                                    │
+│  Size impact:                                                     │
+│  • DFA tables (flash): ~4 KB for default pattern set             │
+│  • Scanner code (.text): ~3 KB                                   │
+│  • RAM: 32 bytes (DFA state + match bitmask + scan position)     │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### SSRF / Network Validation
+
+Ported from the full gateway's `internal/netguard/` package, this module validates all outbound network destinations inline. It runs before the destination allowlist check and blocks requests that target dangerous network ranges regardless of policy.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              SSRF / NETWORK VALIDATION                              │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Blocked ranges (hardcoded, not policy-configurable):             │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Loopback:     127.0.0.0/8, ::1                              │ │
+│  │  Link-local:   169.254.0.0/16, fe80::/10                     │ │
+│  │  Metadata:     169.254.169.254 (AWS/GCP/Azure IMDS)          │ │
+│  │                fd00:ec2::254 (AWS IMDSv2 IPv6)                │ │
+│  │  RFC 1918:     10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16    │ │
+│  │                (unless explicitly allowlisted in policy)       │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  Inline credential rejection:                                     │
+│  • URLs containing userinfo (user:pass@host) are always blocked  │
+│  • Authorization headers in tool arguments are flagged CREDENTIAL │
+│                                                                    │
+│  Integration with destination allowlist:                          │
+│  1. SSRF check (this module) — hard block on dangerous ranges    │
+│  2. Destination allowlist check — policy-defined allow/deny       │
+│  3. Cloud escalation (if not in local list)                       │
+│                                                                    │
+│  Size impact:                                                     │
+│  • Code (.text): ~2 KB (IP parsing + range comparison)           │
+│  • RAM: 0 bytes (stateless, stack-only computation)              │
+│  • Flash (const): ~200 bytes (hardcoded range table)             │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Trust Boundary Inference
+
+Each IPC message is tagged with a `content_scope` field that identifies the trust boundary of the content. The AI agent runtime is expected to propagate this tag (the Edge Connector validates it against session state). Stricter scanning rules apply to less-trusted scopes.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              TRUST BOUNDARY — CONTENT SCOPE                         │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Scope           │ Code │ Origin                │ Scanner Posture │
+│  ────────────────┼──────┼───────────────────────┼──────────────── │
+│  system          │ 0x00 │ System prompt,        │ Baseline — all  │
+│                  │      │ hardcoded tool defs   │ 6 categories    │
+│  user_input      │ 0x01 │ User-provided text,   │ Strict — lower  │
+│                  │      │ sensor data, external │ thresholds for  │
+│                  │      │ API responses         │ INJECTION and   │
+│                  │      │                       │ COMMAND (2x     │
+│                  │      │                       │ sensitivity)    │
+│  tool_output     │ 0x02 │ Return values from    │ Standard — all  │
+│                  │      │ previously executed   │ 6 categories at │
+│                  │      │ tools                 │ normal threshold│
+│  ────────────────┴──────┴───────────────────────┴──────────────── │
+│                                                                    │
+│  Session tracking:                                                │
+│  • content_scope is set per-message by the agent runtime          │
+│  • The correlator validates scope transitions (e.g., a tool_output│
+│    scope is only valid if a tool was recently executed in the     │
+│    session — prevents an attacker from downgrading user_input     │
+│    to tool_output to bypass stricter rules)                       │
+│  • Unknown or missing scope defaults to user_input (strictest)   │
+│                                                                    │
+│  Size impact:                                                     │
+│  • Code (.text): ~1 KB (scope validation + threshold lookup)     │
+│  • RAM: 2 bytes per session (scope state in correlator struct)   │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Enriched Cloud Escalation
+
+When the Edge Connector escalates a tool call to the cloud/edge verdict service, the MQTT verdict request payload now includes content inspection findings. This enables the cloud pipeline to make better decisions without re-scanning content it cannot see (the device does not send full payloads to save bandwidth).
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              ENRICHED VERDICT REQUEST (MQTT payload)                 │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Standard fields (unchanged):                                     │
+│    request_id, sha256, tool_name, cap_flags,                      │
+│    session_risk, session_caps, destination                         │
+│                                                                    │
+│  New fields (appended to CBOR map):                               │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  content_snippet    │ text[0-128]  │ Truncated content near │ │
+│  │                     │              │ the scanner match point │ │
+│  │  direction          │ uint8        │ 0=request (to tool),    │ │
+│  │                     │              │ 1=response (from tool)  │ │
+│  │  content_scope      │ uint8        │ system/user_input/      │ │
+│  │                     │              │ tool_output (0/1/2)     │ │
+│  │  local_findings     │ uint8        │ Bitmask of matched      │ │
+│  │                     │              │ content categories      │ │
+│  │                     │              │ (SECRET|PII|CRED|...)   │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  Enriched verdict response (from cloud):                          │
+│  ┌─────────────────────────────────────────────────────────────┐ │
+│  │  Standard fields (unchanged):                                │ │
+│  │    request_id, action, severity, ttl_minutes,                │ │
+│  │    reason_code, flags, server_ts, hmac_tag                   │ │
+│  │                                                              │ │
+│  │  New fields (appended when content-inspection triggered):    │ │
+│  │    category        │ uint8   │ Primary finding category      │ │
+│  │    evidence_hash   │ bytes[4]│ Truncated hash of evidence    │ │
+│  │                    │         │ (for audit correlation)       │ │
+│  └─────────────────────────────────────────────────────────────┘ │
+│                                                                    │
+│  Backward compatibility:                                          │
+│  • New fields use CBOR map keys > 100 (ignored by old decoders) │
+│  • Old devices that don't send enrichment still get verdicts     │
+│  • Cloud detects enrichment presence via CBOR map key probe      │
+│                                                                    │
+│  Size impact on verdict request: +2 to +133 bytes (typical +20)  │
+│  Size impact on verdict response: +0 to +5 bytes                 │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Response Interception
+
+The content scanner operates bidirectionally: it inspects both tool call requests (from the AI agent to the tool) and tool call responses (from the tool back to the AI agent). This is implemented via a `direction` field in the IPC protocol.
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│              BIDIRECTIONAL IPC INTERCEPTION                          │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  ┌─────────────┐         ┌───────────────────┐      ┌──────────┐│
+│  │  AI Agent   │───req──►│  Edge Connector   │─────►│ MCP Tool ││
+│  │  Runtime    │         │  (IPC hook)       │      │          ││
+│  │             │◄──resp──│                   │◄─────│          ││
+│  └─────────────┘         └───────────────────┘      └──────────┘│
+│                                                                    │
+│  IPC message format (extended):                                   │
+│  ┌────────────────────────────────────────────────────────────┐  │
+│  │  Field         │ Type   │ Values                            │  │
+│  ├────────────────┼────────┼──────────────────────────────────┤  │
+│  │  direction     │ uint8  │ 0x00 = forward (request to tool) │  │
+│  │                │        │ 0x01 = backward (response to agent│  │
+│  │  content_scope │ uint8  │ 0x00=system, 0x01=user_input,    │  │
+│  │                │        │ 0x02=tool_output                  │  │
+│  │  payload_len   │ uint16 │ Length of content to scan         │  │
+│  │  payload       │ bytes  │ Content bytes (up to 512B)        │  │
+│  └────────────────┴────────┴──────────────────────────────────┘  │
+│                                                                    │
+│  Direction-specific behavior:                                     │
+│  • Forward (0x00): scan for INJECTION, COMMAND, EXFIL, SECRET    │
+│    — protects the tool from malicious agent input                 │
+│  • Backward (0x01): scan for SECRET, PII, CREDENTIAL, EXFIL     │
+│    — protects the agent (and downstream consumers) from          │
+│    tool responses that leak sensitive data                        │
+│                                                                    │
+│  Backward compatibility:                                          │
+│  • If direction field is absent, defaults to 0x00 (forward)      │
+│  • Old agent runtimes that do not send response interception     │
+│    messages continue to work — only forward scanning occurs      │
+│  • New agent runtimes opt in by sending backward messages        │
+│    after receiving tool responses                                │
+│                                                                    │
+│  Size impact:                                                     │
+│  • Code (.text): ~2 KB (direction dispatch + response hook)      │
+│  • RAM: 0 bytes (reuses existing scanner state per-call)         │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Content Inspection Pipeline Integration
+
+The content inspection stages integrate into the existing decision flow as stages 3-5 of the local 8-stage pipeline:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│           LOCAL 8-STAGE ENFORCEMENT PIPELINE                        │
+├──────────────────────────────────────────────────────────────────┤
+│                                                                    │
+│  Stage │ Name                   │ Action on match      │ Latency │
+│  ──────┼────────────────────────┼──────────────────────┼──────── │
+│  1     │ IPC validation         │ DROP invalid input   │ <1us    │
+│  2     │ Rate limiter           │ DROP excess           │ <1us    │
+│  3     │ Content scanner (DFA)  │ BLOCK/REDACT/WARN    │ 1-3us   │
+│  4     │ SSRF / netguard check  │ BLOCK dangerous dest │ <1us    │
+│  5     │ Trust boundary check   │ Adjust thresholds    │ <1us    │
+│  6     │ Policy table lookup    │ ALLOW/BLOCK/WARN     │ <1us    │
+│  7     │ Correlator (cap FSM)   │ BLOCK bad sequences  │ <1us    │
+│  8     │ Verdict cache / cloud  │ Cached or ESCALATE   │ <1us/net│
+│  ──────┴────────────────────────┴──────────────────────┴──────── │
+│                                                                    │
+│  Total local pipeline (no escalation): < 10 microseconds          │
+│                                                                    │
+│  Early exit: any stage returning BLOCK skips remaining stages.    │
+│  The audit entry records which stage triggered the verdict.       │
+│                                                                    │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### Updated Resource Impact (Standard Profile)
+
+With AI-Aware Content Inspection enabled, the standard profile resource usage is:
+
+| Resource | Without Content Inspection | With Content Inspection | Budget |
+|----------|---------------------------|------------------------|--------|
+| Binary (.text + .rodata) | ~53 KB | ~68 KB | 80 KB |
+| RAM (without bloom) | ~10-15 KB | ~14-19 KB | 25 KB |
+| RAM (with bloom) | ~28-33 KB | ~32-37 KB | 43 KB |
+
+The ~15 KB binary increase comes from: content scanner (~3 KB), DFA tables (~4 KB), SSRF/netguard (~2 KB), trust boundary (~1 KB), response interception (~2 KB), enriched escalation codec (~1 KB), and pattern definitions (~2 KB). The ~4 KB RAM increase comes from DFA state, scope tracking per session, and the content snippet buffer for escalation.
 
 ---
 
@@ -1905,17 +2200,17 @@ Forward secrecy limitation:
 │     │ Check: Version counter ≥ stored counter (anti-rollback)  │
 │     │ Key: OTA Signing CA public key                           │
 │     ▼                                                          │
-│  3. DefenseClaw Lite firmware                                  │
+│  3. DefenseClaw Edge Connector firmware                                  │
 │     │ Verify: Policy blob signature                            │
 │     │ Verify: Audit chain integrity (HMAC head matches flash)  │
 │     │ Init: Load policy tables, open IPC hook, start MQTT      │
 │     ▼                                                          │
 │  4. AI Agent Runtime (untrusted)                               │
-│     │ All tool calls routed through DefenseClaw Lite           │
+│     │ All tool calls routed through DefenseClaw Edge Connector           │
 │     │ DefenseClaw enforces regardless of agent state           │
 │                                                                 │
 │  Trust boundary: Between step 3 and step 4.                    │
-│  DefenseClaw Lite is the TCB (Trusted Computing Base).         │
+│  DefenseClaw Edge Connector is the TCB (Trusted Computing Base).         │
 │  The AI agent is untrusted — it is the thing being secured.    │
 │                                                                 │
 └───────────────────────────────────────────────────────────────┘
@@ -1925,7 +2220,7 @@ Forward secrecy limitation:
 
 **Invariant: All IPC input is untrusted and bounds-checked before processing.**
 
-The AI agent runtime is an untrusted entity. Any data it sends to DefenseClaw Lite
+The AI agent runtime is an untrusted entity. Any data it sends to DefenseClaw Edge Connector
 via the IPC hook must be treated as potentially malicious. The following validation
 rules apply to all incoming tool request payloads:
 
@@ -1989,29 +2284,28 @@ rules apply to all incoming tool request payloads:
 │                    DATA FLOW: TOOL CALL INTERCEPTION                           │
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                                │
-│  ┌───────────┐     ┌─────────────────────────────────────────────────┐       │
-│  │ AI Agent  │     │          DefenseClaw Lite (C)                    │       │
-│  │           │     │                                                 │       │
-│  │ Wants to  │     │  ┌─────┐   ┌────────┐   ┌───────┐   ┌──────┐ │       │
-│  │ call tool │────►│  │ IPC │──►│Classify │──►│Correlat│──►│Policy│ │       │
-│  │ "bash"    │     │  │Hook │   │        │   │       │   │Table │ │       │
-│  │           │     │  └─────┘   └────────┘   └───────┘   └──┬───┘ │       │
-│  │           │     │                                         │      │       │
-│  │           │     │                              ┌──────────┘      │       │
-│  │           │     │                              │                 │       │
-│  │           │     │                         ┌────▼────┐            │       │
-│  │           │     │                         │ Verdict │            │       │
-│  │           │◄────│─────────────────────────│ BLOCK   │            │       │
-│  │           │     │                         └────┬────┘            │       │
-│  │ Receives  │     │                              │                 │       │
-│  │ BLOCKED   │     │                         ┌────▼────┐            │       │
-│  │           │     │                         │ Audit   │            │       │
-│  └───────────┘     │                         │ Ring    │            │       │
-│                    │                         └─────────┘            │       │
-│                    └─────────────────────────────────────────────────┘       │
+│  ┌───────────┐     ┌───────────────────────────────────────────────────────┐ │
+│  │ AI Agent  │     │       DefenseClaw Edge Connector (C)                  │ │
+│  │           │     │       8-stage local enforcement pipeline              │ │
+│  │ Wants to  │     │                                                       │ │
+│  │ call tool │────►│  ┌─────┐  ┌───────┐  ┌───────┐  ┌──────────┐       │ │
+│  │ "bash"    │     │  │ IPC │─►│Content│─►│SSRF / │─►│ Trust    │       │ │
+│  │           │     │  │Valid │  │Scan   │  │Netgrd │  │ Boundary │       │ │
+│  │           │     │  └─────┘  └───────┘  └───────┘  └────┬─────┘       │ │
+│  │           │     │                                       │              │ │
+│  │           │     │       ┌──────────┐  ┌────────┐  ┌─────▼─────┐       │ │
+│  │           │     │       │ Verdict  │◄─│Correlat│◄─│  Policy   │       │ │
+│  │           │◄────│───────│ BLOCK    │  │        │  │  Table    │       │ │
+│  │           │     │       └────┬─────┘  └────────┘  └───────────┘       │ │
+│  │ Receives  │     │            │                                         │ │
+│  │ BLOCKED   │     │       ┌────▼────┐                                    │ │
+│  │           │     │       │ Audit   │                                    │ │
+│  └───────────┘     │       │ Ring    │                                    │ │
+│                    │       └─────────┘                                    │ │
+│                    └───────────────────────────────────────────────────────┘ │
 │                                                                                │
-│  Latency: <5 microseconds (all local, no allocation, no syscall)             │
-│  Data touched: 64 bytes tool_name, 8 bytes session state, 16 bytes rule      │
+│  Latency: <10 microseconds (all local, no allocation, no syscall)            │
+│  Data touched: 64B tool_name, 512B payload scan, 8B session, 16B rule        │
 │                                                                                │
 └──────────────────────────────────────────────────────────────────────────────┘
 ```
@@ -2024,7 +2318,7 @@ rules apply to all incoming tool request payloads:
 ├──────────────────────────────────────────────────────────────────────────────┤
 │                                                                                │
 │  ┌────────┐  ┌──────────────────────┐  ┌───────────┐  ┌──────────────────┐  │
-│  │  AI    │  │  DefenseClaw Lite    │  │   MQTT    │  │  Cloud/Edge      │  │
+│  │  AI    │  │  DefenseClaw Edge Connector    │  │   MQTT    │  │  Cloud/Edge      │  │
 │  │ Agent  │  │  (C agent)           │  │  Broker   │  │  Verdict Cache   │  │
 │  └───┬────┘  └───────────┬──────────┘  └─────┬─────┘  └────────┬─────────┘  │
 │      │                   │                    │                  │            │
@@ -2091,7 +2385,7 @@ rules apply to all incoming tool request payloads:
 │                                                                                │
 │  ┌─────────────┐  ┌──────────────┐  ┌───────────┐  ┌─────────────────────┐  │
 │  │   Admin     │  │  Policy      │  │  Cloud    │  │  Device             │  │
-│  │  (writes    │  │  Compiler    │  │  MQTT     │  │  (DefenseClaw Lite) │  │
+│  │  (writes    │  │  Compiler    │  │  MQTT     │  │  (DefenseClaw Edge Connector) │  │
 │  │   YAML)     │  │  (Python)    │  │  Broker   │  │                     │  │
 │  └──────┬──────┘  └──────┬───────┘  └─────┬─────┘  └──────────┬──────────┘  │
 │         │                │               │                    │              │
@@ -3234,7 +3528,7 @@ The IoT fleet services integrate with the existing DefenseClaw gateway as a new 
 │  │              Connector Matrix (existing)                   │    │
 │  │                                                          │    │
 │  │  ┌──────────┐ ┌──────────┐ ┌──────────┐ ┌───────────┐  │    │
-│  │  │ Claude   │ │ Codex    │ │ Cursor   │ │ iot-lite  │  │    │
+│  │  │ Claude   │ │ Codex    │ │ Cursor   │ │ edge-connector  │  │    │
 │  │  │ Code     │ │          │ │          │ │  (NEW)    │  │    │
 │  │  └──────────┘ └──────────┘ └──────────┘ └─────┬─────┘  │    │
 │  │                                                │         │    │
@@ -3329,6 +3623,19 @@ iot_extensions:
     write_fs: sync_block
     send_msg: speculative
 
+  # AI-Aware Content Inspection
+  content_inspection:
+    enabled: true
+    categories:
+      SECRET: block
+      PII: redact            # redact in forward direction, block in backward
+      CREDENTIAL: block
+      EXFIL: escalate        # send to cloud for deeper analysis
+      INJECTION: block
+      COMMAND: block
+    user_input_sensitivity: 2x   # 2× stricter thresholds for user_input scope
+    scan_responses: true          # enable bidirectional scanning
+
   # Bloom filter behavior when cloud is unreachable
   bloom_offline_action: warn  # "block" for high-security deployments
 
@@ -3368,10 +3675,13 @@ iot_extensions:
 **Objective:** Core C agent running on Linux SBC with MQTT cloud connectivity
 
 **Deliverables:**
-- DefenseClaw Lite C agent (STANDARD profile)
+- DefenseClaw Edge Connector C agent (STANDARD profile, ~68KB binary, ~14-19KB RAM)
   - Policy table enforcement
   - Capability correlator (session FSM)
   - IPC hook (Unix socket, JSON-RPC intercept) with SO_PEERCRED + start_time verification
+  - AI-Aware Content Inspection (streaming DFA scanner, SSRF/netguard, trust boundary inference)
+  - Bidirectional response interception with content_scope + direction fields
+  - Enriched cloud escalation (content snippet + local findings in verdict requests)
   - Audit ring buffer with HMAC chain + RAM write-coalescing (16-entry batch flush)
   - MQTT 5.0 client with mTLS + broker fallback list
   - Heartbeat reporting with clock synchronization (server_ts in verdict responses)
@@ -3502,6 +3812,10 @@ iot_extensions:
 | D16 | Ed25519-signed emergency broadcasts | Emergency kill-switch bypasses normal verdict flow — must be tamper-proof. Reuses existing OTA CA key (zero additional flash). Monotonic sequence prevents replay. | Unsigned (any broker access could kill fleet), HMAC-only (shared secret harder to rotate), full cert chain (too large for broadcast message) |
 | D17 | Verdict cache TTL asymmetry (ALLOW=24h, BLOCK=7d, WARN=4h) | Conservative: BLOCKs persist longer to prevent attackers from waiting out a cache expiry to retry. ALLOWs expire sooner so revocations take effect within 24h. WARNs expire fastest because they need frequent re-evaluation as context changes. Trade-off: a false BLOCK persists 7 days (availability impact) — mitigated by threat intel REVOKE_PRIOR which can instantly invalidate any cached verdict regardless of TTL. | Symmetric TTLs (simpler but weaker security), No caching (too many cloud round-trips), Infinite BLOCK TTL (no self-healing) |
 | D18 | IPC input validation as security boundary | The agent runtime is untrusted. All IPC payloads are bounds-checked, ASCII-validated, and rate-limited at 100 req/s before touching decision engine state. Prevents buffer overflow, format string, and CPU exhaustion attacks from a compromised agent. | Trust agent input (dangerous — agent is the thing being secured), Validate only at cloud (too late — local decisions use local data), Sandboxed VM for parsing (too heavy for MCU) |
+| D19 | Streaming DFA for on-device content scanning | O(n) single-pass scanning with constant memory (single uint16_t state). DFA tables compiled from policy YAML by policy compiler — no regex engine on device. Covers 6 categories (SECRET, PII, CREDENTIAL, EXFIL, INJECTION, COMMAND) at ~3KB code + ~4KB tables. | Full regex engine (too large, backtracking is unbounded), Cloud-only scanning (adds latency, doesn't work offline), Pattern list with strstr (O(n*m), too slow for inline) |
+| D20 | SSRF/netguard ported from gateway to device | Hardcoded dangerous ranges (loopback, link-local, metadata, RFC 1918) blocked regardless of policy. Prevents cloud metadata credential theft from compromised agents. ~2KB code, zero RAM (stateless). | Policy-only allowlist (misses metadata endpoints if admin forgets), Cloud-side SSRF check only (too late — request already sent), No SSRF protection (unacceptable for cloud-connected IoT) |
+| D21 | Trust boundary inference via content_scope | User input is inherently less trusted than system prompts or tool outputs. Stricter scanner thresholds for user_input scope catches injection attempts that would pass at normal sensitivity. Scope validated against session state to prevent downgrade attacks. | Uniform scanning thresholds (misses scope-dependent attacks), Agent-trusted scope tags without validation (trivially bypassable), No scope tracking (loses context about content origin) |
+| D22 | Bidirectional response interception | Tool responses can leak secrets, PII, or credentials. Scanning only forward (request) misses exfiltration via tool output. Backward scanning adds ~2KB code at zero RAM cost (reuses scanner state). Direction field is backward-compatible (defaults to forward if absent). | Forward-only scanning (misses response-side leaks), Full proxy mode (too complex for IPC hook), Cloud-only response scanning (requires full payload upload, bandwidth-prohibitive) |
 
 ---
 
@@ -3511,7 +3825,7 @@ iot_extensions:
 
 | Term | Definition |
 |------|-----------|
-| **DefenseClaw Lite** | The C-language IoT enforcement agent (this proposal) |
+| **DefenseClaw Edge Connector** | The C-language IoT enforcement agent (this proposal) |
 | **DefenseClaw Gateway** | The existing full Go-language security gateway |
 | **Edge Gateway** | A site-local server running full DefenseClaw + MQTT broker |
 | **Verdict** | The ALLOW/BLOCK/WARN decision for a tool call |
@@ -3529,6 +3843,11 @@ iot_extensions:
 | **Write Coalescing** | Buffering audit entries in RAM and batch-flushing to flash to reduce wear |
 | **Broker Fallback List** | Priority-ordered MQTT endpoints tried on disconnect (edge → secondary → cloud) |
 | **SE Degradation** | Controlled fallback to software keys with restricted operation when secure element fails |
+| **Content Scanner** | Streaming DFA-based pattern matcher that classifies payloads into 6 categories (SECRET, PII, CREDENTIAL, EXFIL, INJECTION, COMMAND) |
+| **Content Scope** | Trust boundary tag (system/user_input/tool_output) controlling scanner sensitivity thresholds |
+| **SSRF Guard** | Network validation module (ported from gateway's netguard) that blocks loopback, link-local, metadata, and RFC 1918 destinations |
+| **Response Interception** | Bidirectional IPC scanning of both tool requests (forward) and tool responses (backward) |
+| **DFA Tables** | Compiled deterministic finite automaton tables generated by the policy compiler for content pattern matching |
 
 ### B. Related Documents
 
@@ -3536,7 +3855,7 @@ iot_extensions:
 |----------|----------|-----------|
 | DefenseClaw Architecture | `docs/ARCHITECTURE.md` | Full system architecture (reference) |
 | Guardrail Design | `docs/GUARDRAIL.md` | Correlator logic (ported to C) |
-| Connector Matrix | `docs/CONNECTOR-MATRIX.md` | IoT-lite connector registration |
+| Connector Matrix | `docs/CONNECTOR-MATRIX.md` | Edge-connector registration |
 | Policy Format | `policies/*.yaml` | Shared policy format |
 | Observability Contract | `docs/OBSERVABILITY-CONTRACT.md` | Telemetry standards |
 
@@ -3569,7 +3888,7 @@ iot_extensions:
 
 ```
 ┌──────────────────────────────────────────────────────────────────┐
-│              RAM BUDGET — STANDARD PROFILE (80KB binary)           │
+│        RAM BUDGET — STANDARD PROFILE (~68KB binary, 80KB budget)  │
 ├──────────────────────────────────────────────────────────────────┤
 │                                                                    │
 │  Component                          │ RAM (bytes) │ Notes         │
@@ -3592,13 +3911,20 @@ iot_extensions:
 │  Broker fallback list               │    384      │ 3 × 128B URLs │
 │  Trace ID scratch                   │      8      │ per-request   │
 │  Heartbeat buffer                   │     32      │ outgoing pkt  │
+│  Content scanner DFA state          │     32      │ state+bitmask │
+│  Content scope (per session)        │     32      │ 2B × 16 sesns │
+│  Content snippet buffer (escalation)│    128      │ truncated buf │
+│  SSRF range table (stack-only)      │      0      │ stateless     │
 │  Stack                              │  4,096      │ main + ISR    │
 │  ───────────────────────────────────┼─────────────┼───────────── │
-│  TOTAL (without bloom)              │ ~25 KB      │              │
-│  TOTAL (with bloom)                 │ ~43 KB      │              │
+│  TOTAL (without bloom)              │ ~14-19 KB   │ (with content │
+│                                     │             │  inspection)  │
+│  TOTAL (with bloom)                 │ ~32-37 KB   │              │
 │                                                                    │
 │  * Const/flash data not counted in RAM budget                     │
 │                                                                    │
+│  Additional RAM from content inspect:│   ~192 B    │              │
+│  (DFA state + scope tracking + snippet buffer)                    │
 │  Additional RAM from all fixes:     │   ~450 B    │              │
 │  (dedup + canary + clock + peer + seq + broker list)              │
 │                                                                    │
@@ -3610,19 +3936,28 @@ iot_extensions:
 │                                                                    │
 │  Component                          │ Flash (KB)  │ Notes         │
 │  ───────────────────────────────────┼─────────────┼───────────── │
-│  Core enforcement (decision + IPC)  │    12       │ .text         │
-│  Correlator + policy table          │     8       │ .text + .rodata│
-│  MQTT + CBOR codec                  │    14       │ .text         │
-│  TLS library (mbedTLS minimal)      │    30       │ .text         │
-│  Audit + flash_safe                 │     4       │ .text         │
-│  OTA receiver + Ed25519 verify      │     6       │ .text         │
+│  Core enforcement (decision + IPC)  │    10       │ .text         │
+│  Correlator + policy table          │     6       │ .text + .rodata│
+│  MQTT + CBOR codec                  │    12       │ .text         │
+│  TLS library (mbedTLS minimal)      │    18       │ .text         │
+│  Audit + flash_safe                 │     3       │ .text         │
+│  OTA receiver + Ed25519 verify      │     5       │ .text         │
 │  Platform HAL                       │     2       │ .text         │
 │  Emergency broadcast handler        │     1       │ .text         │
 │  Speculative execution logic        │     1       │ .text         │
 │  Canary health-check                │     1       │ .text         │
 │  IPC peer verification              │     1       │ .text         │
+│  ─── subtotal (w/o content inspect) │   ~53 KB ── │ ────────────  │
+│  Content scanner (DFA engine)       │     3       │ .text         │
+│  Content DFA tables (patterns)      │     4       │ .rodata       │
+│  SSRF / netguard validation         │     2       │ .text         │
+│  Trust boundary inference           │     1       │ .text         │
+│  Response interception (bidir IPC)  │     2       │ .text         │
+│  Enriched escalation codec          │     1       │ .text         │
+│  Content pattern definitions        │     2       │ .rodata       │
 │  ───────────────────────────────────┼─────────────┼───────────── │
-│  TOTAL .text + .rodata (BINARY)    │   ~80 KB    │ ← "80KB target"│
+│  TOTAL .text + .rodata (BINARY)    │   ~68 KB    │ ← within 80KB │
+│                                     │             │   budget      │
 │                                                                    │
 │  The "80KB binary" target refers to .text + .rodata sections only. │
 │  Data partitions below are in SEPARATE flash regions:              │
@@ -3632,7 +3967,7 @@ iot_extensions:
 │  Device cert + CA keys              │     2 KB    │ Protected     │
 │  Config store (broker list, etc.)   │     1 KB    │ Protected     │
 │  ───────────────────────────────────┼─────────────┼───────────── │
-│  TOTAL flash (binary + data)       │   ~95 KB    │              │
+│  TOTAL flash (binary + data)       │   ~83 KB    │              │
 │  Minimum device flash required     │  128 KB     │ (with margin) │
 │                                                                    │
 └──────────────────────────────────────────────────────────────────┘

@@ -1,8 +1,8 @@
-# Requirements: DefenseClaw Lite — Phase 1 (STANDARD Profile)
+# Requirements: DefenseClaw Edge Connector — Phase 1 (STANDARD Profile)
 
 ## Context
 
-DefenseClaw Lite extends AI agent security governance to resource-constrained IoT
+DefenseClaw Edge Connector extends AI agent security governance to resource-constrained IoT
 and edge devices. Phase 1 delivers the core C-language enforcement agent (STANDARD
 profile, ~80KB binary) running on Linux SBC hardware (Raspberry Pi 4, NVIDIA Jetson
 Nano) with MQTT 5.0 cloud connectivity.
@@ -199,6 +199,89 @@ to the cloud.
   the target profile's partition size, emitting a size report and failing if
   the output exceeds the limit.
 
+### Functional — Content Scanner
+
+- REQ-53: The edge connector SHALL scan tool call arguments and content for
+  secrets (API keys, bearer tokens, AWS keys, passwords, token assignments)
+  using pre-compiled DFA pattern tables.
+
+- REQ-54: The edge connector SHALL scan content for PII data patterns (SSN
+  format XXX-XX-XXXX, credit card numbers Visa/MC/Amex/Discover) using
+  pre-compiled DFA tables.
+
+- REQ-55: The edge connector SHALL detect credential prefixes (sk-*, AKIA*,
+  ghp_*, xoxb-*, eyJ JWT) with minimum length floors to prevent false
+  positives.
+
+- REQ-56: The edge connector SHALL detect exfiltration intent by matching the
+  conjunction of: sensitive target path (/etc/passwd, .aws/credentials, SSH
+  keys) + read verb + egress verb within a 240-byte context window.
+
+- REQ-57: The edge connector SHALL detect dangerous command patterns (shell
+  metacharacters ;, &&, |, backticks, $() ) in tool arguments targeting
+  exec/shell capabilities.
+
+- REQ-58: The edge connector SHALL detect dangerous command sequences (rm -rf,
+  chmod 777, curl|sh, wget|bash) in tool arguments.
+
+### Functional — SSRF/Network Validation
+
+- REQ-59: The edge connector SHALL block destinations resolving to loopback,
+  link-local, cloud metadata (169.254.169.254, fd00:ec2::254), multicast,
+  and unspecified addresses.
+
+- REQ-60: The edge connector SHALL reject URLs containing inline credentials
+  (user:pass@ in userinfo).
+
+- REQ-61: The edge connector SHALL reject non-HTTP/HTTPS URL schemes (file://,
+  gopher://, ftp://).
+
+- REQ-62: The edge connector SHALL support an operator-configurable allowlist
+  of specific private IP addresses that bypass SSRF protection, with
+  loopback/link-local/metadata always denied.
+
+### Functional — Trust Boundary Inference
+
+- REQ-63: The edge connector SHALL infer content_scope from session context:
+  first call = system, tool_result direction = tool_output, all other =
+  user_input.
+
+- REQ-64: The edge connector SHALL apply stricter pattern matching rules (lower
+  severity threshold for blocking) on content classified as user_input.
+
+- REQ-65: The edge connector SHALL track content_scope per session and include
+  it in cloud escalation payloads.
+
+### Functional — Enriched Cloud Escalation
+
+- REQ-66: The edge connector SHALL include truncated content (tool arguments
+  and/or prompt text) in MQTT verdict request payloads, truncated to a
+  configurable max_escalation_payload_bytes (default 1024).
+
+- REQ-67: The edge connector SHALL tag each escalation with a direction enum:
+  prompt, completion, tool_call, tool_result.
+
+- REQ-68: The edge connector SHALL include local findings (category + severity)
+  in escalation payloads so the cloud can skip redundant local checks.
+
+- REQ-69: The cloud verdict response SHALL include a category enum (injection,
+  pii, secret, exfil, command, behavioral) and a 64-byte evidence snippet.
+
+- REQ-70: The edge connector SHALL cache enriched verdicts (action + category +
+  evidence) in the verdict cache.
+
+### Functional — Response Interception
+
+- REQ-71: The IPC JSON-RPC schema SHALL support a "direction" field with values
+  "request" and "response".
+
+- REQ-72: The IPC JSON-RPC schema SHALL support an optional "content" field
+  containing tool call arguments or prompt/response text.
+
+- REQ-73: When content is provided in the IPC request, the content scanner
+  SHALL run on it; when content is absent, behavior SHALL be identical to
+  Phase 1 (backward compatible).
+
 ### Non-Functional
 
 - REQ-45: The agent binary (.text + .rodata) shall not exceed 80 KB for the
@@ -267,6 +350,21 @@ to the cloud.
 - AC-12: Binary size measured at <80KB (.text+.rodata), RAM at <25KB (maps to
   REQ-45, REQ-46).
 
+- AC-13: Content scanner detects all 6 pattern categories with zero false
+  negatives on the test corpus (maps to REQ-53 through REQ-58).
+
+- AC-14: SSRF validation blocks all RFC1918, loopback, link-local, and metadata
+  addresses (maps to REQ-59 through REQ-62).
+
+- AC-15: Enriched cloud escalation includes content, direction, and local
+  findings in MQTT payload (maps to REQ-66 through REQ-70).
+
+- AC-16: Binary size remains <80KB and RAM <25KB after all additions (maps to
+  REQ-45, REQ-46).
+
+- AC-17: Backward compatibility — agents not sending content field get identical
+  behavior to Phase 1 (maps to REQ-73).
+
 ---
 
 ## Traceability
@@ -289,3 +387,8 @@ to the cloud.
 | REQ-37..40 | Proposal §6.2 (Fleet Manager) | AC-11 |
 | REQ-41..44 | Proposal §6.2 (Policy Compiler) | AC-10 |
 | REQ-45..52 | Proposal §1, Appendix E | AC-12, AC-08 |
+| REQ-53..58 | Content Scanner (AI-aware) | AC-13 |
+| REQ-59..62 | SSRF/Network Validation | AC-14 |
+| REQ-63..65 | Trust Boundary Inference | AC-13, AC-15 |
+| REQ-66..70 | Enriched Cloud Escalation | AC-15 |
+| REQ-71..73 | Response Interception (IPC) | AC-17 |

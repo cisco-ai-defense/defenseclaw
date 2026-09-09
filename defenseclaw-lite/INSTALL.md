@@ -1,6 +1,6 @@
-# DefenseClaw Lite — Installation Guide
+# DefenseClaw Edge Connector — Installation Guide
 
-Secure any AI agent on Linux with sub-microsecond policy enforcement. Three installation methods: pre-built binary (30 seconds), pip install (1 minute), or build from source (5 minutes).
+Secure any AI agent on Linux with sub-microsecond policy enforcement and AI-aware content inspection. Three installation methods: pre-built binary (30 seconds), pip install (1 minute), or build from source (5 minutes).
 
 ---
 
@@ -10,20 +10,20 @@ Download and run — no compiler needed.
 
 ```bash
 # Download latest release for your architecture
-curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/defenseclaw-lite-linux-arm64.tar.gz | tar xz
+curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/edge-connector-linux-arm64.tar.gz | tar xz
 
 # Or for x86_64:
-curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/defenseclaw-lite-linux-amd64.tar.gz | tar xz
+curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/edge-connector-linux-amd64.tar.gz | tar xz
 
 # Install
-sudo mv defenseclaw-lite/libdclaw_core.so /usr/local/lib/
-sudo mv defenseclaw-lite/defenseclaw-lite /usr/local/bin/
-sudo mv defenseclaw-lite/picoclaw_hook.py /usr/local/lib/defenseclaw/
-sudo mv defenseclaw-lite/policy_compiler.py /usr/local/lib/defenseclaw/
+sudo mv edge-connector/libdclaw_core.so /usr/local/lib/
+sudo mv edge-connector/edge-connector /usr/local/bin/
+sudo mv edge-connector/picoclaw_hook.py /usr/local/lib/defenseclaw/
+sudo mv edge-connector/policy_compiler.py /usr/local/lib/defenseclaw/
 sudo ldconfig
 
 # Verify
-defenseclaw-lite --version
+edge-connector --version
 python3 -c "import ctypes; ctypes.CDLL('libdclaw_core.so'); print('OK')"
 ```
 
@@ -32,9 +32,9 @@ python3 -c "import ctypes; ctypes.CDLL('libdclaw_core.so'); print('OK')"
 | File | Description |
 |------|-------------|
 | `libdclaw_core.so` | Shared library (77KB) — load from any language via FFI |
-| `defenseclaw-lite` | Standalone daemon binary (76KB) |
+| `edge-connector` | Standalone daemon binary (76KB) |
 | `picoclaw_hook.py` | PicoClaw integration hook (ready to use) |
-| `policy_compiler.py` | YAML→C policy compiler |
+| `policy_compiler.py` | YAML→C policy compiler (with DFA table generation) |
 | `policies/strict.yaml` | Default policy (edit to customize) |
 
 ### Supported Platforms
@@ -52,13 +52,13 @@ python3 -c "import ctypes; ctypes.CDLL('libdclaw_core.so'); print('OK')"
 For Python-based agents, install the wrapper package:
 
 ```bash
-pip install defenseclaw-lite
+pip install defenseclaw-edge-connector
 ```
 
 Usage:
 
 ```python
-from defenseclaw_lite import DclawEngine, CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH, CAP_SENSOR_READ
+from defenseclaw_edge_connector import DclawEngine, CAP_ACTUATE, CAP_EXEC_SHELL, CAP_NET_FETCH, CAP_SENSOR_READ
 
 engine = DclawEngine()  # auto-finds libdclaw_core.so
 
@@ -84,7 +84,7 @@ Required: `gcc`, `cmake` (3.22+), `make`.
 
 ```bash
 git clone https://github.com/cisco-ai-defense/defenseclaw.git
-cd defenseclaw/defenseclaw-lite
+cd defenseclaw/edge-connector
 mkdir build && cd build
 cmake .. -DDCLAW_PROFILE=STANDARD
 make -j$(nproc)
@@ -100,9 +100,9 @@ sudo make install
 
 | Profile | Binary Size | RAM | Use Case |
 |---------|-------------|-----|----------|
-| `MINIMAL` | ~30KB | ~12KB | MCUs, ultra-constrained devices |
-| `STANDARD` | ~76KB | ~25KB | Raspberry Pi, Jetson, SBCs |
-| `EDGE` | ~120KB | ~64KB | Edge gateways with bloom filter |
+| `MINIMAL` | ~22KB | ~8KB | MCUs, ultra-constrained devices |
+| `STANDARD` | ~68KB | ~14-19KB | Raspberry Pi, Jetson, SBCs |
+| `EDGE` | ~131KB | ~64KB | Edge gateways with bloom filter |
 
 ```bash
 cmake .. -DDCLAW_PROFILE=MINIMAL   # for tiny devices
@@ -175,7 +175,46 @@ iot_extensions:
     baseline_blocks_per_min: 5
 ```
 
-### Step 2: Compile the Policy (Optional — for custom policies)
+### Step 2: Configure Content Inspection
+
+The Edge Connector inspects tool call arguments and LLM responses for dangerous content patterns. Configure which pattern categories are active in your policy YAML:
+
+```yaml
+  # Content inspection settings
+  content_inspection:
+    enabled: true
+
+    # Enable or disable individual pattern categories
+    categories:
+      secrets: true        # API keys, tokens, private keys, passwords
+      pii: true            # SSN, credit cards, email addresses, phone numbers
+      credentials: true    # AWS keys, GCP service accounts, database URIs
+      exfiltration: true   # Base64-encoded blobs, hex dumps, data URI payloads
+      injection: true      # Prompt injection, jailbreak attempts, system prompt overrides
+      commands: true       # Shell commands, SQL statements, code execution patterns
+
+    # SSRF validation for network destinations
+    ssrf_validation:
+      enabled: true
+      block_private_ranges: true    # 10.x, 172.16-31.x, 192.168.x, 127.x
+      block_metadata_endpoints: true # 169.254.169.254, metadata.google.internal
+      block_link_local: true         # fe80::/10, 169.254.x.x
+
+    # Custom patterns (appended to built-in patterns)
+    custom_patterns:
+      - name: "internal_project_code"
+        category: secrets
+        regex: "PROJ-[A-Z]{3}-[0-9]{6}"
+        severity: high
+      - name: "internal_hostname"
+        category: exfiltration
+        regex: "[a-z]+-prod-[0-9]+\\.internal\\.corp"
+        severity: medium
+```
+
+To disable content inspection entirely (not recommended), set `content_inspection.enabled: false`. Individual categories can be toggled independently. Custom patterns follow the same format as built-in patterns and are compiled into the DFA tables by the policy compiler.
+
+### Step 3: Compile the Policy (Optional — for custom policies)
 
 ```bash
 python3 /usr/local/lib/defenseclaw/policy_compiler.py \
@@ -194,7 +233,7 @@ python3 /usr/local/lib/defenseclaw/policy_compiler.py \
 
 ### PicoClaw (Supported)
 
-PicoClaw is the primary supported agent framework. DefenseClaw Lite integrates via PicoClaw's process hook system, intercepting all tool calls, LLM inputs, and LLM outputs.
+PicoClaw is the primary supported agent framework. DefenseClaw Edge Connector integrates via PicoClaw's process hook system, intercepting all tool calls, LLM inputs, and LLM outputs.
 
 ```bash
 # 1. Copy the hook
@@ -215,7 +254,7 @@ Add to `hooks.processes`:
     "command": ["python3", "~/.picoclaw/hooks/defenseclaw_gate.py"],
     "env": {
       "DCLAW_LIB_PATH": "/usr/local/lib/libdclaw_core.so",
-      "DCLAW_LOG_PATH": "~/defenseclaw-lite.log"
+      "DCLAW_LOG_PATH": "~/edge-connector.log"
     },
     "intercept": ["before_tool", "before_llm", "after_llm"]
   }
@@ -226,9 +265,9 @@ Add to `hooks.processes`:
 
 | Hook | What DefenseClaw Does | Supported Actions |
 |------|----------------------|-------------------|
-| `before_tool` | 7-stage policy evaluation (rate limit, deny-list, dest filter, sequence detect, cache) | `deny_tool` with canned message, `continue` |
+| `before_tool` | 8-stage policy evaluation (rate limit, deny-list, dest filter, content scan, SSRF check, sequence detect, cache, escalation) | `deny_tool` with canned message, `continue` |
 | `before_llm` | Pattern-based prompt injection detection (20+ patterns) | `abort_turn` (blocks LLM call entirely), `continue` |
-| `after_llm` | PII/credential leakage scanning (SSN, credit cards, API keys, private keys) | Detection + logging (redaction not supported in PicoClaw v0.3.x) |
+| `after_llm` | PII/credential leakage scanning (SSN, credit cards, API keys, private keys) via content scanner | Detection + logging (redaction not supported in PicoClaw v0.3.x) |
 
 #### Verify the integration
 
@@ -237,7 +276,7 @@ Add to `hooks.processes`:
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
   DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
   python3 ~/.picoclaw/hooks/defenseclaw_gate.py
-# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"defenseclaw-lite-gate"}}
+# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
 # Test through PicoClaw (should ALLOW — sensor read)
 picoclaw agent -m "check battery status"
@@ -246,14 +285,14 @@ picoclaw agent -m "check battery status"
 picoclaw agent -m "run whoami in the shell"
 
 # Watch decisions in real-time
-tail -f ~/defenseclaw-lite.log
+tail -f ~/edge-connector.log
 ```
 
 ---
 
 ### Upcoming Integrations (Roadmap)
 
-The following frameworks are planned for future releases. DefenseClaw Lite's shared library (`libdclaw_core.so`) and Unix socket interface make integration straightforward — each framework needs only a thin adapter at its tool-dispatch layer.
+The following frameworks are planned for future releases. DefenseClaw Edge Connector's shared library (`libdclaw_core.so`) and Unix socket interface make integration straightforward — each framework needs only a thin adapter at its tool-dispatch layer.
 
 | Framework | Type | Integration Point | Status |
 |-----------|------|-------------------|--------|
@@ -267,7 +306,7 @@ The following frameworks are planned for future releases. DefenseClaw Lite's sha
 
 #### Generic Integration (Any Framework)
 
-For frameworks not listed above, DefenseClaw Lite exposes two generic interfaces:
+For frameworks not listed above, DefenseClaw Edge Connector exposes two generic interfaces:
 
 **Shared Library (FFI)** — load `libdclaw_core.so` from any language:
 ```python
@@ -280,22 +319,53 @@ lib = ctypes.CDLL("/usr/local/lib/libdclaw_core.so")
 ```bash
 echo '{"jsonrpc":"2.0","id":1,"method":"evaluate","params":{
   "tool_name":"exec_shell","cap_flags":4,"destination":"","session_id":1
-}}' | socat - UNIX-CONNECT:/var/run/defenseclaw-lite.sock
+}}' | socat - UNIX-CONNECT:/var/run/edge-connector.sock
 ```
 
 If you'd like to contribute an integration adapter for your framework, see [CONTRIBUTING.md](../docs/CONTRIBUTING.md).
 
 ---
 
+## IPC Schema
+
+The evaluation request sent over the Unix socket or through the hook uses the following JSON-RPC schema:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "evaluate",
+  "params": {
+    "tool_name": "call_api",
+    "cap_flags": 8,
+    "destination": "api.example.com",
+    "session_id": 1,
+    "direction": "request",
+    "content": "Authorization: Bearer sk-proj-abc123..."
+  }
+}
+```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `tool_name` | string | yes | Name of the tool being called |
+| `cap_flags` | int | yes | Capability bitmask (see table below) |
+| `destination` | string | yes | Target URL/host (empty string if none) |
+| `session_id` | int | yes | Session identifier for sequence correlation |
+| `direction` | string | no | `"request"` (tool call args) or `"response"` (LLM/tool output). Defaults to `"request"`. Controls which content patterns are evaluated — request-direction checks for injection and commands, response-direction checks for secrets and PII leakage. |
+| `content` | string | no | The actual text payload to inspect (tool arguments, LLM response body, etc.). When provided, the content scanner runs all enabled pattern categories against this field and includes matched findings in the verdict and cloud escalation payload. When omitted, only rule-based policy checks (deny-list, dest filter, rate limit, sequence) are performed. |
+
+---
+
 ## Tool-to-Capability Mapping
 
-Each tool your agent calls must be mapped to a capability. This determines how DefenseClaw Lite handles it:
+Each tool your agent calls must be mapped to a capability. This determines how DefenseClaw Edge Connector handles it. When `content` is provided in the evaluation request, the content scanner additionally inspects the payload for secrets, PII, credentials, exfiltration patterns, injection attempts, and dangerous commands. Content findings can elevate a verdict from ALLOW to WARN or BLOCK depending on severity and policy configuration.
 
 | Capability | Flag | Escalation Mode | Behavior |
 |---|---|---|---|
 | `SENSOR_READ` | 0x40 | speculative | ALLOW immediately (read-only, safe) |
 | `READ_FS` | 0x01 | speculative | ALLOW immediately |
-| `NET_FETCH` | 0x08 | speculative | ALLOW if destination in allowlist |
+| `NET_FETCH` | 0x08 | speculative | ALLOW if destination in allowlist; SSRF validation applied |
 | `SEND_MSG` | 0x10 | speculative | ALLOW if destination in allowlist |
 | `ACTUATE` | 0x20 | sync_block | BLOCK without cloud (physical world) |
 | `EXEC_SHELL` | 0x04 | sync_block | BLOCK without cloud (code execution) |
@@ -323,9 +393,10 @@ TOOL_CAP_MAP = {
 | Variable | Default | Description |
 |---|---|---|
 | `DCLAW_LIB_PATH` | `/usr/local/lib/libdclaw_core.so` | Path to shared library |
-| `DCLAW_LOG_PATH` | `~/defenseclaw-lite.log` | Audit log file |
+| `DCLAW_LOG_PATH` | `~/edge-connector.log` | Audit log file |
 | `DCLAW_POLICY_PATH` | (compiled in) | Path to custom policy binary |
 | `DCLAW_FLASH_DIR` | `/tmp/dclaw-flash/` | Directory for flash emulation |
+| `DEFENSECLAW_MAX_ESCALATION_PAYLOAD_BYTES` | `1024` | Maximum size in bytes of the content snippet included in cloud escalation requests. Content exceeding this limit is truncated. Set to `0` to omit content from escalation payloads entirely. |
 
 ---
 
@@ -340,16 +411,16 @@ print('Library loaded OK')
 "
 
 # 2. Run built-in tests (if built from source)
-cd defenseclaw-lite/build && ctest --output-on-failure
+cd edge-connector/build && ctest --output-on-failure
 
 # 3. Test the hook standalone
 echo '{"jsonrpc":"2.0","id":1,"method":"hook.hello","params":{}}' | \
   DCLAW_LIB_PATH=/usr/local/lib/libdclaw_core.so \
   python3 /usr/local/lib/defenseclaw/picoclaw_hook.py
-# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"defenseclaw-lite-gate"}}
+# Expected: {"jsonrpc":"2.0","id":1,"result":{"ok":true,"name":"edge-connector-gate"}}
 
 # 4. Benchmark performance
-defenseclaw-lite --benchmark
+edge-connector --benchmark
 # Expected: <5μs decisions, >100K/sec throughput
 ```
 
@@ -359,13 +430,13 @@ defenseclaw-lite --benchmark
 
 ```bash
 # Pre-built binary
-curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/defenseclaw-lite-linux-$(uname -m).tar.gz | tar xz
-sudo mv defenseclaw-lite/libdclaw_core.so /usr/local/lib/
+curl -fsSL https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/edge-connector-linux-$(uname -m).tar.gz | tar xz
+sudo mv edge-connector/libdclaw_core.so /usr/local/lib/
 sudo ldconfig
 
 # From source
 cd defenseclaw && git pull
-cd defenseclaw-lite/build && cmake .. && make -j$(nproc)
+cd edge-connector/build && cmake .. && make -j$(nproc)
 sudo make install
 ```
 
@@ -379,6 +450,8 @@ sudo make install
 | All tools getting blocked | Check TOOL_CAP_MAP — unknown tools default to EXEC_SHELL |
 | `CLOUD_TIMEOUT` on tools you want allowed | Change escalation_mode from `sync_block` to `speculative` in policy |
 | `DEST_DENY` on valid URLs | Add domain to `destination_allowlist` in policy YAML |
+| `CONTENT_BLOCK` false positives | Disable the offending category in `content_inspection.categories` or add an exception pattern |
+| `SSRF_BLOCK` on internal services you trust | Add trusted internal hosts to `ssrf_validation.allowlist` in policy YAML |
 | Hook not starting | Check `DCLAW_LIB_PATH` points to correct `.so` file |
 | Build fails on GCC 14+ | Use latest source — pragma guards for unused warnings included |
 
@@ -390,24 +463,27 @@ sudo make install
 ┌─────────────────────────────────────────────────────────┐
 │  Your AI Agent (PicoClaw, Claude Code, LangChain, etc.) │
 └────────────────────────┬────────────────────────────────┘
-                         │ tool call
+                         │ tool call + content
                          ▼
 ┌─────────────────────────────────────────────────────────┐
 │  Integration Layer (hook / middleware / FFI call)        │
 │  • Maps tool_name → capability flag                     │
 │  • Extracts destination from arguments                  │
+│  • Extracts content for inspection                      │
+│  • Sets direction (request / response)                  │
 │  • Calls dclaw_evaluate()                               │
 └────────────────────────┬────────────────────────────────┘
                          │
                          ▼
 ┌─────────────────────────────────────────────────────────┐
-│  DefenseClaw Lite Engine (libdclaw_core.so, 77KB)       │
+│  DefenseClaw Edge Connector Engine (libdclaw_core.so)   │
 │                                                         │
-│  7-Stage Pipeline (~2-3μs on ARM):                      │
-│  1. Input validation    5. Sequence correlation         │
-│  2. Rate limiting       6. Verdict cache                │
-│  3. Hash deny-list      7. Cloud escalation             │
-│  4. Dest filtering                                      │
+│  8-Stage Pipeline (~2-3μs on ARM):                      │
+│  1. Input validation    5. Content scanning             │
+│  2. Rate limiting       6. Sequence correlation         │
+│  3. Hash deny-list      7. Verdict cache                │
+│  4. Dest filtering      8. Cloud escalation (enriched)  │
+│      + SSRF validation                                  │
 │                                                         │
 │  → ALLOW / BLOCK / WARN / PENDING                       │
 └─────────────────────────────────────────────────────────┘
@@ -415,15 +491,20 @@ sudo make install
 
 ---
 
-## What's Included vs. What You Provide
+## What's Included vs. What You Configure
 
-| DefenseClaw Lite Provides | You Configure |
-|---------------------------|---------------|
-| 7-stage evaluation engine | Tool → capability mapping |
+| DefenseClaw Edge Connector Provides | You Configure |
+|-------------------------------------|---------------|
+| 8-stage evaluation engine | Tool → capability mapping |
+| Content scanning (secrets, PII, credentials, exfil, injection, commands) | Pattern categories to enable/disable |
+| SSRF validation | Trusted internal hosts (if any) |
 | Sequence correlation (FSM) | Destination allowlist |
 | Rate limiting (3 buckets) | Rate limit values |
 | HMAC-chained audit trail | Log file path |
 | Verdict caching (LRU) | — |
 | Destination filtering | Allowed domains |
 | Hash deny-list | Threat intel hashes (optional) |
+| Trust boundary inference | — |
+| Enriched cloud escalation with content | Max escalation payload size |
+| Response interception | — |
 | Pre-built hooks for PicoClaw, Claude Code | Custom hooks for other frameworks |
