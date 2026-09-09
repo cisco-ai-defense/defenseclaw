@@ -1080,7 +1080,7 @@
         {"location": "cli/defenseclaw/rotate_token_guardian.py", "description": "Managed rotate-token coordinator discovers the trusted enabled-target roster"},
         {"location": "cli/defenseclaw/commands/cmd_setup.py", "description": "Passes the bound manifest path into guardian rotate children"}
       ],
-      "since": "0.8.0",
+      "since": "0.8.10",
       "security_note": "Administrator-owned roster — the path must be an absolute regular file. A substituted or world-writable manifest would let an untrusted writer change which user homes receive generation B."
     },
     {
