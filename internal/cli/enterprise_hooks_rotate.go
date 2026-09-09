@@ -229,6 +229,16 @@ func executeEnterpriseHookRotationPrepare(req enterpriseHookRotationRequest) (en
 				return journal, nil
 			case enterpriseHookRotationPhaseRolledBack:
 				return journal, fmt.Errorf("enterprise hooks rotate prepare: operation already rolled back")
+			case enterpriseHookRotationPhasePreparing:
+				// Resuming would re-enter the snapshot loop below, and
+				// snapshotEnterpriseHookRotationTarget overwrites the sidecar
+				// unconditionally -- so any target already published as B would
+				// have its generation-A snapshot replaced with B, and a later
+				// rollback would restore B while reporting success. Refuse and
+				// require an explicit rollback first, as the Windows adapter does.
+				return journal, fmt.Errorf("enterprise hooks rotate prepare: operation is already preparing; rollback first")
+			default:
+				return journal, fmt.Errorf("enterprise hooks rotate prepare: unrecognized journal phase %q", journal.Phase)
 			}
 		}
 		if err := writeEnterpriseHookRotationJournal(cfg.DataDir, plan.Journal); err != nil {
@@ -295,6 +305,11 @@ func executeEnterpriseHookRotationCommit(req enterpriseHookRotationRequest) (ent
 			return journal, err
 		}
 		if journal.Phase == enterpriseHookRotationPhaseCommitted {
+			// An earlier attempt persisted committed but may have failed before
+			// retiring the rollback directory; finish that cleanup here.
+			if err := removeEnterpriseHookRotationRollbackDir(cfg.DataDir); err != nil {
+				return journal, fmt.Errorf("enterprise hooks rotate commit: retire rollback material: %w", err)
+			}
 			return journal, nil
 		}
 		if journal.Phase != enterpriseHookRotationPhasePrepared {
@@ -303,13 +318,16 @@ func executeEnterpriseHookRotationCommit(req enterpriseHookRotationRequest) (ent
 		if err := verifyEnterpriseHookRotationCurrentB(plan); err != nil {
 			return journal, err
 		}
-		if err := removeEnterpriseHookRotationRollbackDir(cfg.DataDir); err != nil {
-			return journal, fmt.Errorf("enterprise hooks rotate commit: retire rollback material: %w", err)
-		}
+		// Persist committed BEFORE retiring generation-A material. Reversed, a
+		// failed journal write leaves the on-disk phase at prepared with no
+		// snapshots remaining, so a later rollback cannot prove exact A.
 		journal.Phase = enterpriseHookRotationPhaseCommitted
 		journal.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := writeEnterpriseHookRotationJournal(cfg.DataDir, journal); err != nil {
 			return journal, err
+		}
+		if err := removeEnterpriseHookRotationRollbackDir(cfg.DataDir); err != nil {
+			return journal, fmt.Errorf("enterprise hooks rotate commit: retire rollback material: %w", err)
 		}
 		return journal, nil
 	})

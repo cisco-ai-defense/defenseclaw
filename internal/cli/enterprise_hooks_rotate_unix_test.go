@@ -362,3 +362,80 @@ func TestEnterpriseHookRotationBoundMkdirCreatesRealDirs(t *testing.T) {
 		t.Fatalf("bound mkdir second call: %v", err)
 	}
 }
+
+// A prepare that was interrupted leaves the journal at `preparing`. Resuming it
+// re-entered the snapshot loop, and snapshotEnterpriseHookRotationTarget
+// overwrites the sidecar unconditionally -- so a target already published as
+// generation B had its generation-A snapshot replaced with B, and a later
+// rollback restored B while reporting success. Prepare must refuse instead.
+func TestEnterpriseHookRotationPreparingJournalRefusesResume(t *testing.T) {
+	env := newEnterpriseHookRotationTestEnv(t, "alice")
+	req := env.request()
+	prepared, err := executeEnterpriseHookRotationPrepare(req)
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if prepared.Phase != enterpriseHookRotationPhasePrepared {
+		t.Fatalf("prepare phase = %q", prepared.Phase)
+	}
+	// Simulate an interruption: rewind the persisted phase to preparing.
+	journal, exists, err := loadEnterpriseHookRotationJournal(env.serviceDir)
+	if err != nil || !exists {
+		t.Fatalf("load journal: %v exists=%v", err, exists)
+	}
+	journal.Phase = enterpriseHookRotationPhasePreparing
+	if err := writeEnterpriseHookRotationJournal(env.serviceDir, journal); err != nil {
+		t.Fatalf("seed preparing journal: %v", err)
+	}
+	snapshotBefore := mustReadRotationSnapshot(t, env, "alice")
+	if _, err := executeEnterpriseHookRotationPrepare(req); err == nil ||
+		!strings.Contains(err.Error(), "already preparing") {
+		t.Fatalf("resume error = %v, want refusal", err)
+	}
+	if after := mustReadRotationSnapshot(t, env, "alice"); after != snapshotBefore {
+		t.Fatal("refused prepare still overwrote the generation-A snapshot")
+	}
+}
+
+// An interrupted commit can persist `committed` and still fail before retiring
+// the rollback directory. Re-running commit must finish that cleanup.
+func TestEnterpriseHookRotationCommitRetiresRollbackMaterialIdempotently(t *testing.T) {
+	env := newEnterpriseHookRotationTestEnv(t, "alice")
+	req := env.request()
+	if _, err := executeEnterpriseHookRotationPrepare(req); err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	journal, exists, err := loadEnterpriseHookRotationJournal(env.serviceDir)
+	if err != nil || !exists {
+		t.Fatalf("load journal: %v exists=%v", err, exists)
+	}
+	journal.Phase = enterpriseHookRotationPhaseCommitted
+	if err := writeEnterpriseHookRotationJournal(env.serviceDir, journal); err != nil {
+		t.Fatalf("write committed journal: %v", err)
+	}
+	if _, err := os.Lstat(enterpriseHookRotationRollbackPath(env.serviceDir)); err != nil {
+		t.Fatalf("expected leftover rollback material: %v", err)
+	}
+	committed, err := executeEnterpriseHookRotationCommit(req)
+	if err != nil {
+		t.Fatalf("idempotent commit: %v", err)
+	}
+	if committed.Phase != enterpriseHookRotationPhaseCommitted {
+		t.Fatalf("phase = %q", committed.Phase)
+	}
+	if _, err := os.Lstat(enterpriseHookRotationRollbackPath(env.serviceDir)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback material was not retired: %v", err)
+	}
+}
+
+func mustReadRotationSnapshot(t *testing.T, env *enterpriseHookRotationTestEnv, user string) string {
+	t.Helper()
+	target := enterpriseHookRotationTarget{
+		User: user, UserHome: env.homes[user], Connector: "codex",
+	}
+	data, err := os.ReadFile(enterpriseHookRotationTargetSnapshotPath(env.serviceDir, target))
+	if err != nil {
+		t.Fatalf("read snapshot for %s: %v", user, err)
+	}
+	return string(data)
+}
