@@ -587,7 +587,7 @@ defenseclaw agent discovery runtime findings
 | --- | --- | --- |
 | **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
 | **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
-| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security, `cn_proc` + `fanotify`, ETW + Security log |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`), `cn_proc` + `fanotify`, the Windows Security event log |
 
 Plane A only raises a heartbeat inside a scriptable runtime or a known model
 server. A compiled application burning CPU is a compiled application burning
@@ -607,15 +607,70 @@ inventory scanner's names-only rule. DNS capture and the host plane each need
 their own explicit opt-in.
 </Callout>
 
+### What each platform actually delivers
+
+Plane C's coverage differs by platform and by privilege, and the sensor reports
+which parts it has rather than implying it has all of them.
+
+| Platform | Source | Needs | Delivers | Does not |
+| --- | --- | --- | --- | --- |
+| macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | exec with argv, exit, file read/write on watched paths | account creation and privilege events, which are recognised from argv instead |
+| Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
+| Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
+| Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
+
+The Linux halves start independently. An unprivileged host gets `cn_proc` with
+the file half honestly reported absent, which beats losing the plane to one
+missing capability — and the snapshot reports it as *partially covered* rather
+than complete.
+
+Windows has two prerequisites that fail differently and are therefore reported
+differently: Advanced Audit Policy for the events at all, and the separate
+command-line policy for argv. Without the second, lineage still works and
+argument-vector tactics do not.
+
+```bash
+# Windows: what Plane C needs
+auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Sensitive Privilege Use" /success:enable /failure:enable
+reg add "HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit" ^
+  /v ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f
+```
+
+### Naming a peer: DNS capture
+
+With `dns_capture` enabled, an egress peer is named from the answer this host
+actually resolved rather than inferred from its address. That is a direct
+observation, which is why it carries full confidence where a PTR record — owned
+by whoever controls the address, and frequently naming infrastructure rather
+than the service — does not.
+
+| Platform | Mechanism |
+| --- | --- |
+| Linux | `AF_PACKET` with a kernel BPF filter for UDP/53 |
+| macOS | `/dev/bpf` with the same filter, in immediate mode |
+| Windows | `Microsoft-Windows-DNS-Client/Operational` event 3008 |
+
+No `tcpdump` subprocess on any platform, and no third-party capture driver on
+Windows. A capture that cannot start is degraded coverage rather than fatal:
+the reverse resolver still names peers, less confidently, and the snapshot says
+so.
+
 ### Every host-plane signal is gated on agent lineage
 
 Not one Plane C signal fires for a process without an AI agent above it in the
 process tree. A developer running `sudo` produces nothing; the same `sudo` as a
 descendant of `claude` produces a signal.
 
-That gate is the primary false-positive control. These tactics are far too
-ordinary on a developer machine to be worth reporting without an actor
-attached:
+That gate is the primary false-positive control, and it is measurable: every
+snapshot reports how many observations it classified and how many it discarded
+for having no agent above them. A control nobody can measure is a control
+nobody can trust — and a gated count rising while the classified count stays at
+zero is a different problem from a quiet host.
+
+These tactics are far too ordinary on a developer machine to be worth reporting
+without an actor attached:
 
 ```
 claude ──▶ sh ──▶ cat ~/.aws/credentials          credential_access
@@ -625,7 +680,10 @@ claude ──▶ sh ──▶ cat ~/.aws/credentials          credential_access
 ```
 
 Not one of those steps is worth paging on alone, and four separate per-process
-findings would be four alerts nobody joins up. **The sequence is the finding.**
+findings would be four alerts nobody joins up. **The sequence is the finding**,
+so a host-plane finding is one per agent *session*, not one per process — an
+agent that is a shell script forks children that inherit its identity, and each
+one rooting itself would reproduce exactly the fragmentation this avoids.
 No single host-plane tactic reaches `high` on its own; the chain bonus is
 awarded only when the session moved through three or more stages *in order*.
 An agent that reads a credential and later uploads something has progressed;
@@ -662,13 +720,15 @@ defenseclaw agent discovery runtime selftest
 ```
 
 ```
-  ✓ inference heartbeat: up via /proc
-  ⚠ shadow egress: available but not running -- connection table unreadable
-  ⚠ agent actions: unavailable -- eslogger not found; needs macOS 13+ and Full
-    Disk Access granted to the process that launches the gateway
-  processes: 412 read, 9 not fully readable | connections: 60 seen, 55 with no owner
-  ⚠ 92% of connections could not be attributed to a process. Run the gateway
-    with elevated privilege for machine-wide egress attribution.
+  ✓ inference heartbeat: running via /proc
+  ✓ shadow egress: running via /proc/net and /proc/<pid>/fd
+  ✓ agent actions: running via netlink process connector (cn_proc) only
+  processes: 180 read, 0 not fully readable | connections: 14 seen, 9 with no owner
+  ⚠ coverage is partial:
+    - agent actions partially covered: file events need fanotify, which needs
+      CAP_SYS_ADMIN: fanotify_init: operation not permitted
+    - 64% of connections could not be attributed to a process. Run the gateway
+      with elevated privilege for machine-wide egress attribution.
 ```
 
 The privilege asymmetry behind that last line is real. On macOS and Linux the
@@ -676,6 +736,12 @@ whole process table is readable unprivileged, but the socket-to-pid mapping is
 readable only for the caller's own processes — so an unprivileged run watches
 the whole machine *compute* and only its own share of it *talk*. Windows is the
 exception: its connection table carries the owning pid in every row.
+
+Note that Plane C is *running* here and still incomplete. Partial coverage is
+reported as partial rather than as either healthy or down, because a plane
+delivering process events but not file events is missing a whole tactic class,
+and calling that complete would let an operator read reduced coverage as a
+clean host.
 
 Plane health is emitted on **every** cycle, including when a plane is down. If
 health were reported only while a plane worked, a subscription that died would
@@ -707,12 +773,16 @@ dashboards:
 | `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
 
 A degraded cycle is reported with outcome `partial` rather than `completed`.
-The local observability stack ships `defenseclaw-ai-runtime.json`, cross-linked
-with the AI Discovery dashboard; its first row is coverage, before any finding.
 
-### TUI
+The local observability stack ships `defenseclaw-ai-runtime.json`, provisioned
+by `defenseclaw setup local-observability up` like every other dashboard and
+cross-linked with AI Discovery. Splunk local mode gets a matching **AI Discovery
+Runtime Planes** view. Both put coverage in the first row, before any finding.
 
-The `Runtime` panel (`N`) renders the same snapshot. The plane strip is always
+### TUI and macOS app
+
+The TUI `Runtime` panel (`N`) and the macOS app's **Runtime** panel render the
+same snapshot. The plane strip is always
 visible — press `p` to expand each plane's reason — and coverage sits in the
 header beside the finding count, because a reader who sees only the count
 cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
