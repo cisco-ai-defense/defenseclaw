@@ -7,6 +7,9 @@
 extern bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out);
 extern void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
                               dclaw_severity_t severity);
+extern void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
+                                       dclaw_severity_t severity, uint8_t category,
+                                       const char *evidence);
 extern void dclaw_cache_invalidate(const uint8_t *tool_hash);
 extern void dclaw_cache_flush_all(void);
 extern dclaw_state_t *dclaw_get_state(void);
@@ -104,6 +107,65 @@ static void test_lru_eviction(void) {
     printf("  PASS: LRU eviction works (new entry stored when full)\n");
 }
 
+static void test_cache_stores_and_retrieves_category(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    s->clock.time_trusted = true;
+
+    uint8_t hash[32];
+    memset(hash, 0xEE, 32);
+    dclaw_cache_store_enriched(hash, DCLAW_ACTION_BLOCK, DCLAW_SEV_HIGH,
+                                DCLAW_CONTENT_CATEGORY_SECRET, "api_key=sk-proj-...");
+
+    /* Verify cache entry was stored with enriched fields */
+    bool found = false;
+    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
+        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, hash, 32) == 0) {
+            assert(s->cache[i].action == DCLAW_ACTION_BLOCK);
+            assert(s->cache[i].severity == DCLAW_SEV_HIGH);
+            assert(s->cache[i].category == DCLAW_CONTENT_CATEGORY_SECRET);
+            assert(strcmp(s->cache[i].evidence, "api_key=sk-proj-...") == 0);
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+
+    /* Basic lookup still works */
+    dclaw_verdict_t v;
+    bool hit = dclaw_cache_lookup(hash, &v);
+    assert(hit);
+    assert(v.action == DCLAW_ACTION_BLOCK);
+    printf("  PASS: cache stores and retrieves enriched verdict\n");
+}
+
+static void test_cache_truncates_long_evidence(void) {
+    dclaw_state_t *s = dclaw_get_state();
+    s->clock.time_trusted = true;
+
+    uint8_t hash[32];
+    memset(hash, 0xAB, 32);
+
+    /* Create evidence string longer than 64 bytes */
+    char long_evidence[128];
+    memset(long_evidence, 'X', 127);
+    long_evidence[127] = '\0';
+
+    dclaw_cache_store_enriched(hash, DCLAW_ACTION_WARN, DCLAW_SEV_MEDIUM,
+                                DCLAW_CONTENT_CATEGORY_PII, long_evidence);
+
+    /* Verify evidence was truncated to 63 chars + null terminator */
+    bool found = false;
+    for (size_t i = 0; i < DCLAW_VERDICT_CACHE_SIZE; i++) {
+        if (s->cache[i].occupied && memcmp(s->cache[i].tool_hash, hash, 32) == 0) {
+            assert(strlen(s->cache[i].evidence) == 63);
+            found = true;
+            break;
+        }
+    }
+    assert(found);
+    printf("  PASS: cache truncates long evidence to 63 bytes\n");
+}
+
 int main(void) {
     hal_init();
     dclaw_device_info_t info = {.device_id = 1};
@@ -117,7 +179,9 @@ int main(void) {
     test_untrusted_clock_always_misses();
     test_flush_all_clears_cache();
     test_lru_eviction();
-    printf("  ALL PASSED (7 tests)\n");
+    test_cache_stores_and_retrieves_category();
+    test_cache_truncates_long_evidence();
+    printf("  ALL PASSED (9 tests)\n");
 
     dclaw_shutdown();
     return 0;

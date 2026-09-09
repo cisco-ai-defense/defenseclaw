@@ -165,7 +165,7 @@ int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req,
                                       uint8_t session_risk,
                                       uint8_t *buf, size_t *out_len,
                                       size_t buf_size) {
-    if (buf_size < 128) return -1;
+    if (buf_size < 256) return -1; /* Increased from 128 to accommodate content */
     size_t pos = 0;
 
     /* request_id: uint16 */
@@ -192,20 +192,45 @@ int dclaw_cbor_encode_verdict_request(const dclaw_tool_request_t *req,
     /* destination: optional text (only if non-empty) */
     if (req->destination[0] != '\0') {
         pos += cbor_encode_text(buf + pos, req->destination);
+    } else {
+        /* Empty string if no destination */
+        pos += cbor_encode_text(buf + pos, "");
     }
+
+    /* direction: uint8 */
+    pos += cbor_encode_uint(buf + pos, 0, req->direction);
+
+    /* content_scope: uint8 */
+    pos += cbor_encode_uint(buf + pos, 0, req->content_scope);
+
+    /* content: text string (truncated to DCLAW_ESCALATION_PAYLOAD_MAX if needed) */
+    if (req->content != NULL && req->content_len > 0) {
+        /* Truncate content to fit in escalation payload max (typically 256 bytes) */
+        size_t max_content = DCLAW_ESCALATION_PAYLOAD_MAX;
+        size_t content_to_send = req->content_len < max_content ? req->content_len : max_content;
+        size_t hdr = cbor_encode_uint(buf + pos, 3, content_to_send);
+        memcpy(buf + pos + hdr, req->content, content_to_send);
+        pos += hdr + content_to_send;
+    } else {
+        /* Empty string if no content */
+        pos += cbor_encode_text(buf + pos, "");
+    }
+
+    /* findings: uint8 (bitmask of categories found locally - placeholder for now) */
+    pos += cbor_encode_uint(buf + pos, 0, 0);
 
     *out_len = pos;
     return 0;
 }
 
-/* === Verdict Response Decoder (16 bytes fixed) === */
+/* === Verdict Response Decoder (16 bytes fixed, or extended with category/evidence) === */
 
 int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
                                        uint16_t *request_id, uint8_t *action,
                                        uint8_t *severity, uint16_t *ttl,
                                        uint8_t *reason, uint8_t *flags,
                                        uint32_t *server_ts, uint8_t *hmac_tag) {
-    if (len != 16) return -1;
+    if (len < 16) return -1;
 
     /* Fixed binary format, not CBOR — matching proposal §7.2 wire format:
      * [request_id:2][action:1][severity:1][ttl:2][reason:1][flags:1][server_ts:4][hmac:4] */
@@ -218,6 +243,59 @@ int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
     *server_ts = ((uint32_t)buf[8] << 24) | ((uint32_t)buf[9] << 16) |
                  ((uint32_t)buf[10] << 8) | buf[11];
     memcpy(hmac_tag, buf + 12, 4);
+
+    return 0;
+}
+
+/* === Enriched Verdict Response Decoder (with category and evidence) === */
+
+int dclaw_cbor_decode_verdict_response_enriched(const uint8_t *buf, size_t len,
+                                                uint16_t *request_id, uint8_t *action,
+                                                uint8_t *severity, uint16_t *ttl,
+                                                uint8_t *reason, uint8_t *flags,
+                                                uint32_t *server_ts, uint8_t *hmac_tag,
+                                                uint8_t *category, char *evidence,
+                                                size_t evidence_size) {
+    /* First decode the standard 16-byte response */
+    if (dclaw_cbor_decode_verdict_response(buf, len, request_id, action, severity,
+                                           ttl, reason, flags, server_ts, hmac_tag) != 0) {
+        return -1;
+    }
+
+    /* If there's additional data, try to extract category and evidence */
+    *category = 0;
+    if (evidence != NULL && evidence_size > 0) {
+        evidence[0] = '\0';
+    }
+
+    if (len > 16) {
+        size_t pos = 16;
+
+        /* category: uint8 */
+        if (pos < len) {
+            uint64_t cat_val;
+            size_t consumed = cbor_decode_uint(buf + pos, len - pos, &cat_val);
+            if (consumed > 0) {
+                *category = (uint8_t)cat_val;
+                pos += consumed;
+            }
+        }
+
+        /* evidence: byte string (max 64 bytes) */
+        if (pos < len && evidence != NULL && evidence_size > 0) {
+            /* Check if this is a byte string (major type 2) or text string (major type 3) */
+            uint8_t major = (buf[pos] >> 5) & 0x07;
+            if (major == 2 || major == 3) {
+                uint64_t str_len;
+                size_t hdr = cbor_decode_uint(buf + pos, len - pos, &str_len);
+                if (hdr > 0 && pos + hdr + str_len <= len) {
+                    size_t copy_len = str_len < (evidence_size - 1) ? str_len : (evidence_size - 1);
+                    memcpy(evidence, buf + pos + hdr, copy_len);
+                    evidence[copy_len] = '\0';
+                }
+            }
+        }
+    }
 
     return 0;
 }

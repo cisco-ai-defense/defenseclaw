@@ -173,6 +173,8 @@ typedef struct {
     uint8_t  tool_hash[32];
     uint8_t  action;
     uint8_t  severity;
+    uint8_t  category;          /* dclaw_content_category_t */
+    char     evidence[64];      /* truncated evidence snippet */
     uint16_t ttl_minutes;
     uint32_t cached_at_tick;
     bool     occupied;

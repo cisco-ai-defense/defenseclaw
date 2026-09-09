@@ -55,22 +55,40 @@ bool dclaw_cache_lookup(const uint8_t *tool_hash, dclaw_verdict_t *out) {
         out->reason = DCLAW_REASON_CLOUD_BLOCK; /* cached cloud decision */
         out->mode = DCLAW_VERDICT_SYNC;
         out->from_cache = true;
+        /* category and evidence available in cache entry but not exposed via verdict yet */
         return true;
     }
     return false;
 }
 
-void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
-                       dclaw_severity_t severity) {
+void dclaw_cache_store_enriched(const uint8_t *tool_hash, dclaw_action_t action,
+                                dclaw_severity_t severity, uint8_t category,
+                                const char *evidence) {
     dclaw_state_t *s = dclaw_get_state();
     size_t idx = find_lru_slot();
 
     memcpy(s->cache[idx].tool_hash, tool_hash, 32);
     s->cache[idx].action = (uint8_t)action;
     s->cache[idx].severity = (uint8_t)severity;
+    s->cache[idx].category = category;
+
+    /* Truncate evidence to fit 64-byte buffer */
+    if (evidence != NULL && evidence[0] != '\0') {
+        strncpy(s->cache[idx].evidence, evidence, 63);
+        s->cache[idx].evidence[63] = '\0';
+    } else {
+        s->cache[idx].evidence[0] = '\0';
+    }
+
     s->cache[idx].ttl_minutes = (uint16_t)ttl_for_action(action);
     s->cache[idx].cached_at_tick = hal_tick_ms();
     s->cache[idx].occupied = true;
+}
+
+void dclaw_cache_store(const uint8_t *tool_hash, dclaw_action_t action,
+                       dclaw_severity_t severity) {
+    /* Backward compatibility: call enriched store with empty category and evidence */
+    dclaw_cache_store_enriched(tool_hash, action, severity, 0, "");
 }
 
 void dclaw_cache_invalidate(const uint8_t *tool_hash) {
