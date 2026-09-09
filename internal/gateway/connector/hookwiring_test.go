@@ -2512,6 +2512,16 @@ func TestWindowsNativeConfigMatrix(t *testing.T) {
 					if !strings.Contains(adapterText, marker) {
 						t.Errorf("Copilot adapter missing byte-stream marker %q:\n%s", marker, adapterText)
 					}
+
+					// Marker presence alone accepted a broken adapter: setting the console
+					// input encoding after ReadToEnd() cannot affect bytes already decoded,
+					// so Copilot UTF-8 JSON would be mangled while every marker above
+					// still matched. Assert the documented order.
+					encodingAt := strings.Index(adapterText, "[Console]::InputEncoding = $utf8NoBom")
+					readAt := strings.Index(adapterText, "[Console]::In.ReadToEnd()")
+					if encodingAt < 0 || readAt < 0 || encodingAt > readAt {
+						t.Fatalf("Copilot adapter must set the console input encoding before reading stdin (encoding=%d read=%d)", encodingAt, readAt)
+					}
 				}
 			} else {
 				if !strings.Contains(text, windowsHookBinaryName) {
