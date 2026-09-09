@@ -220,6 +220,12 @@ func executeWindowsManagedRotationCommit(req enterpriseHookRotationRequest) (ent
 			return journal.public(), err
 		}
 		if journal.Phase == enterpriseHookRotationPhaseCommitted {
+			// An earlier attempt persisted committed but may have failed before
+			// retiring the rollback directory. Finish that cleanup here so the
+			// deferred delete is not lost.
+			if err := removeWindowsManagedRotationRollbackDir(cfg.DataDir); err != nil {
+				return journal.public(), fmt.Errorf("windows managed rotation commit: retire rollback material: %w", err)
+			}
 			return journal.public(), nil
 		}
 		if journal.Phase != enterpriseHookRotationPhasePrepared {
@@ -228,13 +234,18 @@ func executeWindowsManagedRotationCommit(req enterpriseHookRotationRequest) (ent
 		if err := verifyWindowsManagedRotationCurrentB(plan); err != nil {
 			return journal.public(), err
 		}
-		if err := removeWindowsManagedRotationRollbackDir(cfg.DataDir); err != nil {
-			return journal.public(), fmt.Errorf("windows managed rotation commit: retire rollback material: %w", err)
-		}
+		// Persist committed BEFORE retiring generation-A rollback material. In the
+		// reverse order a failed journal write leaves the on-disk phase at
+		// prepared with no snapshots remaining, and a later rollback finds
+		// nothing to restore yet still reports success -- stranding the host on
+		// generation B while the operator is told it reverted to A.
 		journal.Phase = enterpriseHookRotationPhaseCommitted
 		journal.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 		if err := writeWindowsManagedRotationJournal(cfg.DataDir, journal); err != nil {
 			return journal.public(), err
+		}
+		if err := removeWindowsManagedRotationRollbackDir(cfg.DataDir); err != nil {
+			return journal.public(), fmt.Errorf("windows managed rotation commit: retire rollback material: %w", err)
 		}
 		return journal.public(), nil
 	})
@@ -276,6 +287,23 @@ func executeWindowsManagedRotationRollback(req enterpriseHookRotationRequest) (e
 		snapshotted, err := windowsManagedRotationSnapshottedTargets(cfg.DataDir, targets)
 		if err != nil {
 			return journal.public(), err
+		}
+		// windowsManagedRotationSnapshottedTargets skips absent snapshots, and
+		// restoreWindowsManagedRotationMutated over an empty set joins zero
+		// errors into nil, so a journal that lost its snapshot material would
+		// otherwise restore nothing and still report success.
+		//
+		// This only holds for a *prepared* journal. prepare writes `prepared`
+		// solely after every target has been snapshotted, published, verified
+		// and current-published, so at that phase a missing snapshot means the
+		// rollback material was destroyed. A `preparing` journal was interrupted
+		// part-way, where an absent snapshot legitimately means that target was
+		// never mutated and there is nothing to restore for it.
+		if exists && journal.Phase == enterpriseHookRotationPhasePrepared &&
+			len(targets) > 0 && len(snapshotted) < len(targets) {
+			return journal.public(), fmt.Errorf(
+				"windows managed rotation rollback: %d of %d target snapshots are missing from a prepared rotation; exact A restoration cannot be proved",
+				len(targets)-len(snapshotted), len(targets))
 		}
 		if err := restoreWindowsManagedRotationMutated(cfg.DataDir, snapshotted); err != nil {
 			if exists {

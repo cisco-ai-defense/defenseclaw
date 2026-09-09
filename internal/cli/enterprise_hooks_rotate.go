@@ -553,10 +553,46 @@ func compareEnterpriseHookRotationRosters(enabled, expected []enterpriseHookRota
 
 func publishEnterpriseHookRotationTargetB(target enterpriseHookRotationTarget, token string) error {
 	dataDir := enterpriseHookRotationUserDataDir(target)
-	if err := os.MkdirAll(filepath.Join(dataDir, "hooks"), 0o700); err != nil {
+	// refuseEnterpriseHookRotationSymlink ran during preflight, before the
+	// rotation lock was held, so its result is stale by the time we get here.
+	// Re-check now and create every directory through a bound root handle:
+	// os.Root refuses symlinked and escaping components for the whole
+	// traversal, which removes the MkdirAll-through-a-swapped-symlink vector
+	// that a path-only check leaves open to the target user.
+	//
+	// The final write still goes through connector.PublishHookAPIToken, which
+	// takes a path, so a narrow window remains at that last step. Closing it
+	// needs a descriptor-bound publish API in the connector package.
+	if err := refuseEnterpriseHookRotationSymlink(dataDir, "target data dir"); err != nil {
+		return err
+	}
+	if err := mkdirEnterpriseHookRotationBound(dataDir, "hooks"); err != nil {
 		return err
 	}
 	return enterpriseHookRotationPublishB(dataDir, target.Connector, token)
+}
+
+// mkdirEnterpriseHookRotationBound creates dataDir and its named subdirectory
+// without following a symlink at any component. The parent directory is opened
+// as a bound root, so a target user who swaps a component after validation
+// cannot redirect the privileged mkdir outside their own home.
+func mkdirEnterpriseHookRotationBound(dataDir, sub string) error {
+	parent := filepath.Dir(dataDir)
+	if err := refuseEnterpriseHookRotationSymlink(parent, "target data dir parent"); err != nil {
+		return err
+	}
+	root, err := os.OpenRoot(parent)
+	if err != nil {
+		return fmt.Errorf("enterprise hooks rotate: bind target data dir parent: %w", err)
+	}
+	defer func() { _ = root.Close() }()
+	leaf := filepath.Base(dataDir)
+	for _, rel := range []string{leaf, filepath.Join(leaf, sub)} {
+		if err := root.Mkdir(rel, 0o700); err != nil && !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("enterprise hooks rotate: create %s: %w", rel, err)
+		}
+	}
+	return nil
 }
 
 func verifyEnterpriseHookRotationCurrentB(plan enterpriseHookRotationPlan) error {
