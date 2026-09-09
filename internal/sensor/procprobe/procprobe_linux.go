@@ -1,0 +1,157 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// Copyright (c) 2026 Mike Storm. All rights reserved.
+//
+// Derived from ShadowClaw -- Universal Shadow AI Detector, by Mike Storm,
+// Distinguished Engineer, CCIE Security 13847. Reimplemented in Go and
+// absorbed into the DefenseClaw gateway; see NOTICE for the modifications.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build linux
+
+package procprobe
+
+import (
+	"bytes"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// maxCmdlineBytes bounds a single /proc/<pid>/cmdline read. A process can set
+// an arbitrarily long argv, and the runtime plane only needs enough of it to
+// recognise a framework or an exfiltration command.
+const maxCmdlineBytes = 16 << 10
+
+// snapshot reads /proc directly.
+//
+// Deliberately not shelling out to ps: /proc is the only dependency, so this
+// works unchanged on a minimal container or cloud image that ships no
+// procps-ng, and it avoids spawning a subprocess on every poll of a sensor
+// running as root.
+func snapshot() ([]Process, int, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, 0, err
+	}
+	clockTicks := clockTicksPerSecond()
+	pageSize := int64(os.Getpagesize())
+
+	rows := make([]Process, 0, len(entries))
+	skipped := 0
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, convErr := strconv.Atoi(entry.Name())
+		if convErr != nil || pid <= 0 {
+			continue
+		}
+		row, ok := readProcess(pid, clockTicks, pageSize)
+		if !ok {
+			// Either the process exited between ReadDir and here -- the normal
+			// case, and not interesting -- or this run is not allowed to read
+			// it. Both are counted so an unprivileged run can report coverage.
+			skipped++
+			continue
+		}
+		rows = append(rows, row)
+	}
+	return rows, skipped, nil
+}
+
+func readProcess(pid int, clockTicks, pageSize int64) (Process, bool) {
+	base := filepath.Join("/proc", strconv.Itoa(pid))
+	statBytes, err := os.ReadFile(filepath.Join(base, "stat"))
+	if err != nil {
+		return Process{}, false
+	}
+	row, ok := parseStat(statBytes, clockTicks, pageSize)
+	if !ok {
+		return Process{}, false
+	}
+	row.PID = pid
+	row.Cmdline = readCmdline(filepath.Join(base, "cmdline"))
+	row.User = ownerOf(base)
+	return row, true
+}
+
+// parseStat decodes /proc/<pid>/stat.
+//
+// The comm field is parenthesised and may itself contain spaces and
+// parentheses, so the split is anchored on the LAST ')' rather than on
+// whitespace. A process named "a) 1 2 3 (b" is a real and trivially
+// constructed way to desynchronise a naive field split, and every field after
+// it -- including ppid and the CPU counters -- would then be read from the
+// wrong offset.
+func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
+	open := bytes.IndexByte(raw, '(')
+	closeIdx := bytes.LastIndexByte(raw, ')')
+	if open < 0 || closeIdx < open {
+		return Process{}, false
+	}
+	comm := string(raw[open+1 : closeIdx])
+	rest := strings.Fields(string(raw[closeIdx+1:]))
+	// rest[0] is state; fields are 1-indexed from state == field 3 in proc(5).
+	// ppid is field 4, utime 14, stime 15, rss 24.
+	const (
+		offsetPPID  = 1
+		offsetUTime = 11
+		offsetSTime = 12
+		offsetRSS   = 21
+	)
+	if len(rest) <= offsetRSS {
+		return Process{}, false
+	}
+	ppid, err := strconv.Atoi(rest[offsetPPID])
+	if err != nil {
+		return Process{}, false
+	}
+	utime, _ := strconv.ParseInt(rest[offsetUTime], 10, 64)
+	stime, _ := strconv.ParseInt(rest[offsetSTime], 10, 64)
+	rssPages, _ := strconv.ParseInt(rest[offsetRSS], 10, 64)
+
+	cpu := time.Duration(0)
+	if clockTicks > 0 {
+		cpu = time.Duration((utime+stime)*int64(time.Second)) / time.Duration(clockTicks)
+	}
+	return Process{
+		PPID: ppid, Name: comm, CPUTime: cpu, RSSBytes: rssPages * pageSize,
+	}, true
+}
+
+func readCmdline(path string) string {
+	handle, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer handle.Close()
+	buffer := make([]byte, maxCmdlineBytes)
+	read, err := handle.Read(buffer)
+	if err != nil || read <= 0 {
+		return ""
+	}
+	// /proc/<pid>/cmdline is NUL-separated with a trailing NUL.
+	fields := bytes.Split(bytes.TrimRight(buffer[:read], "\x00"), []byte{0})
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		if len(field) > 0 {
+			parts = append(parts, string(field))
+		}
+	}
+	return strings.Join(parts, " ")
+}
