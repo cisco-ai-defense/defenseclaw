@@ -1788,6 +1788,466 @@ def discovery_scan(
     )
 
 
+# ---------------------------------------------------------------------------
+# ``agent discovery runtime`` -- the runtime planes.
+#
+# Nested under ``discovery`` rather than hung off ``agent`` directly because
+# presence and behaviour are two halves of one question. An operator who has
+# just run ``agent discovery status`` should find "and what actually ran" one
+# level down, not in a sibling namespace.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+_RUNTIME_GATEWAY_OPTIONS = (
+    click.option("--gateway-host", default=None, help="Sidecar API host override."),
+    click.option("--gateway-port", type=int, default=None, help="Sidecar API port override."),
+    click.option(
+        "--gateway-token-env",
+        default=None,
+        help="Environment variable containing the sidecar API token override.",
+    ),
+)
+
+
+def _runtime_gateway_options(command):
+    for option in reversed(_RUNTIME_GATEWAY_OPTIONS):
+        command = option(command)
+    return command
+
+
+def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a table, falling back to a pipe-delimited form without Rich.
+
+    Mirrors _render_signatures_table: the fallback exists because the CLI runs
+    in packaging and CI contexts where Rich is not importable, and a traceback
+    there would be a worse outcome than an unaligned table.
+    """
+    try:
+        from io import StringIO
+
+        from rich.console import Console
+        from rich.table import Table
+    except Exception:
+        lines = [" | ".join(headers)]
+        lines.extend(" | ".join(row) for row in rows)
+        return "\n".join(lines) + "\n"
+
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    table = Table()
+    for header in headers:
+        table.add_column(header)
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+    return stream.getvalue()
+
+
+@discovery.group("runtime")
+def discovery_runtime() -> None:
+    """Inspect the AI discovery runtime planes.
+
+    Where the surrounding ``discovery`` commands inventory what is present,
+    these report what actually ran: sustained inference compute, per-process
+    egress to a provider, and -- when the host plane is enabled -- the sequence
+    of actions an agent took.
+    """
+
+
+def _runtime_snapshot(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+    refresh: bool = False,
+) -> dict:
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        return client.scan_ai_runtime() if refresh else client.ai_runtime()
+    except requests.ConnectionError as exc:
+        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 503:
+            raise click.ClickException(
+                "the runtime planes are disabled in config. Run "
+                "'defenseclaw agent discovery runtime enable' first."
+            ) from exc
+        raise click.ClickException(f"sidecar rejected the request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+
+def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
+    """Render the plane strip.
+
+    Always printed, healthy or not. A detector reporting clean because it was
+    never able to look is indistinguishable, on a dashboard, from a host that
+    is genuinely clean -- so the coverage line is not optional output.
+    """
+    from defenseclaw import ux
+
+    for plane in payload.get("planes") or []:
+        name = str(plane.get("name") or plane.get("plane") or "plane")
+        if plane.get("running"):
+            ux.ok(f"{name}: running via {plane.get('mechanism') or 'unknown mechanism'}", indent=indent)
+        elif plane.get("available"):
+            ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
+        else:
+            ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
+
+
+def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
+    from defenseclaw import ux
+
+    observed = int(payload.get("processes_observed") or 0)
+    skipped = int(payload.get("processes_skipped") or 0)
+    connections = int(payload.get("connections_observed") or 0)
+    unattributed = int(payload.get("connections_unattributed") or 0)
+    ux.subhead(
+        f"processes: {observed} read, {skipped} not fully readable | "
+        f"connections: {connections} seen, {unattributed} with no owner",
+        indent=indent,
+    )
+    if unattributed and connections:
+        share = round(100 * unattributed / connections)
+        if share >= 50:
+            ux.warn(
+                f"{share}% of connections could not be attributed to a process. "
+                "Run the gateway with elevated privilege for machine-wide egress attribution.",
+                indent=indent,
+            )
+
+
+@discovery_runtime.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output status as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_status(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Show what the runtime planes can and cannot see right now."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime planes")
+    if not payload.get("enabled"):
+        ux.warn("disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    scanned = payload.get("scanned_at") or "never"
+    ux.ok(f"last poll: {scanned}", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    findings = payload.get("findings") or []
+    ux.subhead(f"{len(findings)} finding(s) at or above the reporting floor", indent="  ")
+
+
+@discovery_runtime.command("findings")
+@click.option("--json", "as_json", is_flag=True, help="Output findings as JSON.")
+@click.option("--refresh", is_flag=True, help="Poll immediately instead of reading the last snapshot.")
+@click.option(
+    "--severity",
+    type=click.Choice(_RUNTIME_SEVERITY_ORDER),
+    default=None,
+    help="Only show findings at or above this severity.",
+)
+@click.option("--limit", type=int, default=50, help="Maximum rows to render.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_findings(
+    app: AppContext,
+    as_json: bool,
+    refresh: bool,
+    severity: str | None,
+    limit: int,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List scored runtime findings."""
+    from defenseclaw import ux
+
+    if limit < 0:
+        raise click.BadParameter("--limit must not be negative")
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=refresh,
+    )
+    if as_json:
+        # The JSON is the complete snapshot on purpose. Filtering is a
+        # rendering concern; a caller piping to jq wants the raw view, and
+        # silently dropping rows from a machine-readable export is how
+        # coverage gaps get hidden.
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime findings")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        return
+
+    findings = list(payload.get("findings") or [])
+    if severity:
+        cutoff = _RUNTIME_SEVERITY_ORDER.index(severity)
+        findings = [
+            finding for finding in findings
+            if _RUNTIME_SEVERITY_ORDER.index(str(finding.get("severity") or "info")) <= cutoff
+        ]
+    if not findings:
+        ux.ok("no findings at or above the reporting floor", indent="  ")
+        # Coverage is printed even with nothing to show, because "nothing
+        # found" and "nothing could be looked at" are different results.
+        _render_plane_health(payload)
+        _render_coverage(payload)
+        return
+
+    rows = []
+    for finding in findings[:limit]:
+        providers = ", ".join(
+            str(provider.get("hostname") or "") for provider in (finding.get("providers") or [])
+        )
+        rows.append([
+            str(finding.get("severity") or ""),
+            str(finding.get("score") or 0),
+            str(finding.get("process") or ""),
+            str(finding.get("pid") or ""),
+            str(finding.get("agent_name") or "-"),
+            providers or "-",
+            str((finding.get("correlation") or {}).get("verdict") or ""),
+        ])
+    click.echo(_render_runtime_table(
+        ["Severity", "Score", "Process", "PID", "Agent", "Providers", "Inventory"], rows,
+    ), nl=False)
+    if len(findings) > limit:
+        ux.subhead(f"{len(findings) - limit} more not shown; raise --limit", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("selftest")
+@click.option("--json", "as_json", is_flag=True, help="Output the capability report as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_selftest(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Report what this host's planes can and cannot see, and why.
+
+    Exists because an unprivileged or blinded plane reporting clean is
+    indistinguishable, on a dashboard, from a host that is genuinely clean.
+    This states the difference out loud before anyone relies on the result.
+    """
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(
+            {
+                "enabled": bool(payload.get("enabled")),
+                "planes": payload.get("planes") or [],
+                "degraded": bool(payload.get("degraded")),
+                "degraded_reasons": payload.get("degraded_reasons") or [],
+                "processes_observed": payload.get("processes_observed") or 0,
+                "processes_skipped": payload.get("processes_skipped") or 0,
+                "connections_observed": payload.get("connections_observed") or 0,
+                "connections_unattributed": payload.get("connections_unattributed") or 0,
+            },
+            indent=2,
+            sort_keys=True,
+        ))
+        return
+
+    ux.section("AI discovery runtime self-test")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    reasons = payload.get("degraded_reasons") or []
+    if reasons:
+        ux.warn("coverage is partial:", indent="  ")
+        for reason in reasons:
+            ux.subhead(f"- {reason}", indent="    ")
+    else:
+        ux.ok("every selected plane is running", indent="  ")
+
+
+@discovery_runtime.command("scan")
+@click.option("--json", "as_json", is_flag=True, help="Output the poll result as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_scan(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Poll the runtime planes immediately."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=True,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    ux.section("AI discovery runtime scan")
+    ux.ok(f"poll complete: {len(payload.get('findings') or [])} finding(s)", indent="  ")
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("enable")
+@click.option("--enable-host-plane/--no-enable-host-plane", default=None,
+              help="Kernel process, file, and identity events. Needs elevated privilege.")
+@click.option("--dns-capture/--no-dns-capture", default=None,
+              help="Passive DNS observation so peers are named rather than inferred.")
+@click.option("--poll-interval-s", type=int, default=None, help="Seconds between polls (5-3600).")
+@click.option("--min-risk-to-report", type=int, default=None, help="Reporting floor (1-100).")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_enable(
+    app: AppContext,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Turn on the runtime planes."""
+    _apply_runtime_settings(
+        app,
+        enabled=True,
+        enable_host_plane=enable_host_plane,
+        dns_capture=dns_capture,
+        poll_interval_s=poll_interval_s,
+        min_risk_to_report=min_risk_to_report,
+        restart=restart,
+        yes=yes,
+        action="enable",
+    )
+
+
+@discovery_runtime.command("disable")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_disable(app: AppContext, restart: bool, yes: bool) -> None:
+    """Turn off the runtime planes. Recorded findings are preserved."""
+    _apply_runtime_settings(
+        app, enabled=False, enable_host_plane=None, dns_capture=None,
+        poll_interval_s=None, min_risk_to_report=None,
+        restart=restart, yes=yes, action="disable",
+    )
+
+
+def _apply_runtime_settings(
+    app: AppContext,
+    *,
+    enabled: bool,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+    action: str,
+) -> None:
+    """Preview, confirm, persist, restart -- the same shape as ``discovery enable``."""
+    from defenseclaw import ux
+
+    cfg = _require_loaded_config(app)
+    runtime = cfg.ai_discovery.runtime
+
+    if poll_interval_s is not None and not 5 <= poll_interval_s <= 3600:
+        raise click.BadParameter("--poll-interval-s must be between 5 and 3600")
+    if min_risk_to_report is not None and not 1 <= min_risk_to_report <= 100:
+        raise click.BadParameter("--min-risk-to-report must be between 1 and 100")
+
+    changes: list[tuple[str, object, object]] = []
+
+    def stage(field: str, value: object) -> None:
+        if value is None:
+            return
+        current = getattr(runtime, field)
+        if current != value:
+            changes.append((field, current, value))
+            setattr(runtime, field, value)
+
+    stage("enabled", enabled)
+    stage("enable_host_plane", enable_host_plane)
+    stage("dns_capture", dns_capture)
+    stage("poll_interval_s", poll_interval_s)
+    stage("min_risk_to_report", min_risk_to_report)
+
+    ux.section(f"AI discovery runtime {action}")
+    if not changes:
+        ux.ok("no configuration changes needed", indent="  ")
+    else:
+        for field, before, after in changes:
+            ux.subhead(f"{field}: {before!r} -> {after!r}", indent="  ")
+        if runtime.enable_host_plane:
+            ux.warn(
+                "the host plane reads kernel process, file, and identity events. Every "
+                "signal it raises is gated on an AI agent in the process lineage.",
+                indent="  ",
+            )
+        if not yes and not click.confirm("Apply these changes?", default=True):
+            raise SystemExit(1)
+        try:
+            cfg.save()
+        except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
+            raise SystemExit(f"failed to save config: {exc}") from exc
+        ux.ok("configuration saved", indent="  ")
+
+    if restart and changes:
+        ux.subhead(
+            "Restart the gateway to apply: 'defenseclaw setup restart' or "
+            "restart the DefenseClaw service.",
+            indent="  ",
+        )
+
+
 def _normalize_scan_roots(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 

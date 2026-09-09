@@ -3082,6 +3082,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # kept verbatim.
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
+    _prune_ai_runtime(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3524,10 +3525,47 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
         d.pop("observability", None)
 
 
+def _prune_ai_runtime(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on the runtime block.
+
+    The Go struct omits an unset interval, floor, or window so the effective
+    default applies; the Python dataclass represents "unset" as 0, which the
+    v8 schema rejects because 0 is outside every one of those ranges. Dropping
+    the zeros keeps the two sides byte-identical and keeps a config that never
+    touched the runtime planes from failing validation on save.
+
+    ``correlate`` is dropped only when None. An explicit false must survive:
+    it is the difference between "do not consult the inventory" and "the
+    inventory disagreed".
+    """
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    for field_name in ("poll_interval_s", "min_risk_to_report", "chain_window_min"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("planes", "sanctioned_endpoints"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    if runtime.get("correlate") is None:
+        runtime.pop("correlate", None)
+    # A runtime block that says nothing beyond "off" is the default state and
+    # does not belong on disk at all.
+    if runtime == {"enabled": False, "enable_host_plane": False, "dns_capture": False}:
+        ai_discovery.pop("runtime", None)
+
+
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
     from dataclasses import asdict
 
-    return asdict(AIDiscoveryConfig(enabled=False))
+    disabled = asdict(AIDiscoveryConfig(enabled=False))
+    # Prune the reference the same way the serialized block is pruned, so the
+    # "is this just the default?" comparison stays an equality check on one
+    # shape rather than drifting every time a nested block gains a field.
+    _prune_ai_runtime(disabled)
+    return disabled
 
 
 def _default_application_protection_dict() -> dict[str, Any]:
