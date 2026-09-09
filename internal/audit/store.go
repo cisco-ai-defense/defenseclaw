@@ -3492,38 +3492,20 @@ func alertEffectiveSeveritySQL() string {
 	END`
 }
 
-// alertEnforcedOutcomeSQL identifies an actual block/deny independently of
-// severity. Severity describes impact; it must never hide an enforcement fact
-// from the Active Alerts counter.
-func alertEnforcedOutcomeSQL() string {
+// activeAIDHookBlockSQL identifies the durable enforcement companion emitted
+// after a managed-enterprise connector hook actually applies an AI Defense
+// block. Managed enterprise makes AI Defense the sole hook-lane decision maker,
+// so the connector-sourced block companion is the authoritative AVC counter
+// fact. Severity, findings, advisory outcomes, health events, and legacy hook
+// summaries are deliberately irrelevant.
+func activeAIDHookBlockSQL() string {
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	return `(
-		(
-			event.bucket IN ('enforcement.action','network.egress')
-			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
-		)
-		OR (
-			event.bucket IS NULL
-			AND (
-				LOWER(COALESCE(event.action,'')) IN (` + alertNonAllowOutcomeSQL + `)
-				OR (
-					LOWER(COALESCE(event.action,'')) = 'connector-hook'
-					AND (
-						COALESCE(event.enforced, 0) = 1
-						OR (
-							INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
-								' mode=observe ') = 0
-							AND (
-								INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
-									' action=block ') > 0
-								OR INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
-									' action=deny ') > 0
-							)
-						)
-					)
-				)
-			)
-		)
+		event.bucket = 'enforcement.action'
+		AND event.event_name = 'enforcement.block.applied'
+		AND event.source = 'connector'
+		AND COALESCE(event.enforced, 0) = 1
+		AND ` + canonicalOutcome + ` IN ('block','blocked')
 	)`
 }
 
@@ -3804,25 +3786,12 @@ type Counts struct {
 
 func (s *Store) GetCounts() (Counts, error) {
 	var c Counts
-	legacyActions := legacyAlertEligibleActions()
-	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE (event.bucket IS NULL OR event.bucket IN (
-			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
-		))
-		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
-		  AND (
-			` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
-			OR ` + alertEnforcedOutcomeSQL() + `
-		  )
+		WHERE ` + activeAIDHookBlockSQL() + `
 		  AND NOT EXISTS (
 			  SELECT 1 FROM alert_acknowledgement_projection AS projection
 			  WHERE projection.alert_id = event.id
 		  )`
-	alertCountArgs := make([]any, 0, len(legacyActions))
-	for _, action := range legacyActions {
-		alertCountArgs = append(alertCountArgs, action)
-	}
 	queries := []struct {
 		sql  string
 		args []any
@@ -3832,12 +3801,9 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
-		// ActiveAlerts is the unacknowledged actionable queue. Important
-		// findings and health failures retain their severity threshold, while
-		// every real enforced/non-allow outcome counts even when its severity
-		// is LOW or MEDIUM. Detection-only, clean lifecycle, and reviewed rows
-		// stay out.
-		{alertCountSQL, alertCountArgs, &c.Alerts},
+		// AVC ActiveAlerts is exactly the number of unacknowledged AI Defense
+		// blocks that managed-enterprise connector hooks actually enforced.
+		{alertCountSQL, nil, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},
 	}

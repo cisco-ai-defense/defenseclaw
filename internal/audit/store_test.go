@@ -633,8 +633,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != len(alerts) {
-		t.Fatalf("active alert count=%d, REST alerts=%d", counts.Alerts, len(alerts))
+	// The REST alert queue remains broad, while AVC ActiveAlerts is deliberately
+	// restricted to durable managed-enterprise AI Defense hook blocks.
+	if counts.Alerts != 0 {
+		t.Fatalf("active AI Defense block count=%d, want 0", counts.Alerts)
 	}
 }
 
@@ -827,8 +829,8 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != len(want) {
-		t.Fatalf("actionable alert count=%d, want %d visible canonical or legacy alerts", counts.Alerts, len(want))
+	if counts.Alerts != 0 {
+		t.Fatalf("active AI Defense block count=%d, want 0", counts.Alerts)
 	}
 
 }
