@@ -43,8 +43,11 @@ func (p curlSequentialPrefixProof) ok() bool {
 	return p.nonce != nil && p.maxGroup >= 0
 }
 
-func (p curlSequentialPrefixProof) covers(group int) bool {
-	return p.ok() && group >= 0 && group <= p.maxGroup
+// covers reports whether the proof authorises group for command. The proof is
+// bound to the command it was minted from: a proof derived from a different
+// command never satisfies coverage, even when the group number matches.
+func (p curlSequentialPrefixProof) covers(command CommandFact, group int) bool {
+	return p.ok() && p.commandID == command.ID && group >= 0 && group <= p.maxGroup
 }
 
 // proveCurlSequentialTransferPrefix reports the last --next group that will
@@ -89,6 +92,9 @@ func curlSequentialPrefixEnvelopeValid(command CommandFact) bool {
 	return (command.Dialect == DialectPOSIX || command.Dialect == DialectArgv) &&
 		command.Effect == EffectExecute &&
 		command.ParentCommandID == 0 &&
+		// A pipeline member is not an unconditionally executing envelope:
+		// `printf safe | curl ...` must not mint prefix authority.
+		command.PipelineID == 0 &&
 		len(command.Wrappers) == 0 &&
 		len(command.Redirects) == 0 &&
 		command.ArgvComplete &&

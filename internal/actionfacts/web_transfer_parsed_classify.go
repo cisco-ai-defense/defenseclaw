@@ -5863,7 +5863,7 @@ func staticCurlFTPControlRequestComponents(
 		if _, present := groups[group]; !present {
 			continue
 		}
-		if !prefix.covers(group) {
+		if !prefix.covers(command, group) {
 			break
 		}
 		if !curlRequestModeValidForGroup(parsed, group) ||
