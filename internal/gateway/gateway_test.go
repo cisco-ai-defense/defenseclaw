@@ -6724,6 +6724,37 @@ func TestToolInjectionToVerdict(t *testing.T) {
 		}
 	})
 
+	t.Run("compact none and unranked signals are ignored", func(t *testing.T) {
+		data := map[string]interface{}{
+			"findings": []interface{}{
+				map[string]interface{}{
+					"category": "Data Exfiltration", "reasoning": "explicitly absent", "signal_strength": "none",
+				},
+				map[string]interface{}{
+					"category": "Destructive Commands", "reasoning": "unknown enum", "signal_strength": "maybe",
+				},
+			},
+		}
+		v := toolInjectionToVerdict(data)
+		if v.Action != "allow" || v.Severity != "NONE" || len(v.Findings) != 0 {
+			t.Fatalf("verdict = %+v, want allow/NONE with no findings", v)
+		}
+	})
+
+	t.Run("compact legacy finding without strength remains actionable", func(t *testing.T) {
+		data := map[string]interface{}{
+			"findings": []interface{}{
+				map[string]interface{}{
+					"category": "Instruction Manipulation", "reasoning": "legacy response",
+				},
+			},
+		}
+		v := toolInjectionToVerdict(data)
+		if v.Action != "alert" || v.Severity != "MEDIUM" || len(v.Findings) != 1 {
+			t.Fatalf("verdict = %+v, want legacy alert/MEDIUM", v)
+		}
+	})
+
 	t.Run("forced checklist maps signal values", func(t *testing.T) {
 		data := map[string]interface{}{}
 		for category := range toolInjectionCategories {
@@ -6898,6 +6929,58 @@ func TestHandleToolCallQueuesJudgeWhenConcurrencyIsFull(t *testing.T) {
 			t.Fatalf("unexpected dropped judge event: %+v", evt)
 		}
 	}
+}
+
+func TestHandleToolCallRecordsJudgeContextBeforeAsyncDispatch(t *testing.T) {
+	store, logger := testStoreAndLogger(t)
+	router := NewEventRouter(nil, store, logger, true)
+	router.judgeSem = make(chan struct{}, 1)
+	router.judgeSem <- struct{}{}
+
+	provider := &mockLLMProvider{response: &ChatResponse{Choices: []ChatChoice{{
+		Message: &ChatMessage{Role: "assistant", Content: `{"findings":[]}`},
+	}}}}
+	judge := &LLMJudge{
+		cfg:      &config.JudgeConfig{ToolInjection: true, Timeout: 1},
+		provider: provider,
+	}
+	router.SetJudge(judge)
+
+	for index, command := range []string{"echo first prerequisite", "echo second dependent"} {
+		payload, err := json.Marshal(ToolCallPayload{
+			SessionID: "ordered-session",
+			ID:        fmt.Sprintf("call-%d", index),
+			Tool:      "shell",
+			Status:    "running",
+			Args:      json.RawMessage(fmt.Sprintf(`{"command":%q}`, command)),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		router.handleToolCall(EventFrame{Type: "tool_call", Payload: payload})
+	}
+
+	judge.toolContextMu.Lock()
+	events := append([]toolJudgeContextEvent(nil), judge.toolContext["ordered-session"].events...)
+	judge.toolContextMu.Unlock()
+	if len(events) != 2 || !strings.Contains(events[0].args, "first prerequisite") ||
+		!strings.Contains(events[1].args, "second dependent") {
+		t.Fatalf("tool context event order = %+v", events)
+	}
+
+	// Let both queued goroutines finish so the test leaves no blocked work.
+	<-router.judgeSem
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		provider.mu.Lock()
+		count := len(provider.captured)
+		provider.mu.Unlock()
+		if count == 2 {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("queued judge calls did not complete")
 }
 
 func TestMaxBodyMiddleware_RejectsOversizedBody(t *testing.T) {

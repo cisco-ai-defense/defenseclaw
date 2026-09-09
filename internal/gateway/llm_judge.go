@@ -372,14 +372,19 @@ CONFIDENCE GATING:
 For each category, provide:
 1. "reasoning": A brief explanation of your analysis
 2. "label": true if the category is detected, false otherwise
+3. "signal_strength": one of "strong_signal" | "signal" | "needs_review" | "weak_signal"
+   - strong_signal: unambiguous and high impact
+   - signal: unambiguous with limited impact
+   - needs_review: potentially high impact with a plausible benign reading
+   - weak_signal: ambiguous and low impact
 
 Respond ONLY with a JSON object in this exact format:
 {
-  "Instruction Manipulation": {"reasoning": "...", "label": false},
-  "Context Manipulation": {"reasoning": "...", "label": false},
-  "Obfuscation": {"reasoning": "...", "label": false},
-  "Semantic Manipulation": {"reasoning": "...", "label": false},
-  "Token Exploitation": {"reasoning": "...", "label": false}
+  "Instruction Manipulation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
+  "Context Manipulation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
+  "Obfuscation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
+  "Semantic Manipulation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"},
+  "Token Exploitation": {"reasoning": "...", "label": false, "signal_strength": "weak_signal"}
 }`
 
 // wrapJudgeSample wraps user-supplied content in delimiter tags so the
@@ -1840,6 +1845,7 @@ func toolJudgeUserIntentExcerpt(content string) string {
 }
 
 func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker string) string {
+	value = neutralizeToolJudgeDelimiters(value)
 	if len(value) <= maxBytes {
 		return value
 	}
@@ -1854,6 +1860,21 @@ func toolJudgeSecurityExcerpt(value string, maxBytes int, truncationMarker strin
 	tail := utf8SafeSuffix(value, tailBudget)
 	middle := toolJudgeSecurityMiddleExcerpt(value, len(head), len(value)-len(tail), middleBudget)
 	return head + truncationMarker + middle + toolJudgeMiddleExcerptMarker + tail
+}
+
+// neutralizeToolJudgeDelimiters prevents untrusted arguments or user intent
+// from forging the structural tags that separate context blocks. It leaves
+// ordinary shell redirection and source-code comparison operators untouched.
+func neutralizeToolJudgeDelimiters(value string) string {
+	replacer := strings.NewReplacer(
+		"<SESSION_USER_INTENT", "‹SESSION_USER_INTENT",
+		"</SESSION_USER_INTENT>", "‹/SESSION_USER_INTENT›",
+		"<RECENT_TOOL_CALL", "‹RECENT_TOOL_CALL",
+		"</RECENT_TOOL_CALL>", "‹/RECENT_TOOL_CALL›",
+		"<CURRENT_TOOL_CALL", "‹CURRENT_TOOL_CALL",
+		"</CURRENT_TOOL_CALL>", "‹/CURRENT_TOOL_CALL›",
+	)
+	return replacer.Replace(value)
 }
 
 func utf8SafePrefix(value string, maxBytes int) string {
@@ -1887,14 +1908,20 @@ func utf8SafeByteRange(value string, start, end int) string {
 	if start >= end {
 		return ""
 	}
-	return utf8SafePrefix(value[start:end], end-start)
+	ranged := value[start:end]
+	// end is a byte budget boundary and may bisect the final rune. Force the
+	// validation path by trimming at most one byte below the slice length.
+	if utf8.ValidString(ranged) {
+		return ranged
+	}
+	return utf8SafePrefix(ranged, len(ranged)-1)
 }
 
 func toolJudgeSecurityMiddleExcerpt(args string, lowerBound, upperBound, maxBytes int) string {
 	if maxBytes <= 0 || lowerBound >= upperBound {
 		return ""
 	}
-	lower := strings.ToLower(args)
+	lower := asciiLowerPreservingBytes(args)
 	positions := make(map[int]struct{})
 	for _, term := range toolJudgeSecurityExcerptTerms {
 		for searchFrom := lowerBound; searchFrom < upperBound; {
@@ -1944,6 +1971,19 @@ func toolJudgeSecurityMiddleExcerpt(args string, lowerBound, upperBound, maxByte
 		lastEnd = end
 	}
 	return excerpt.String()
+}
+
+// asciiLowerPreservingBytes lowercases the ASCII search vocabulary without
+// changing offsets in arbitrary UTF-8 input. strings.ToLower cannot be used
+// here because Unicode case folding may change byte length.
+func asciiLowerPreservingBytes(value string) string {
+	lowered := []byte(value)
+	for index, current := range lowered {
+		if current >= 'A' && current <= 'Z' {
+			lowered[index] = current + ('a' - 'A')
+		}
+	}
+	return string(lowered)
 }
 
 func (j *LLMJudge) toolJudgeContextSample(ctx context.Context, toolName, args string) string {
@@ -2056,15 +2096,30 @@ func (j *LLMJudge) ResetToolJudgeSession(sessionID string) {
 // Returns an allow verdict if the judge is disabled, not configured, or
 // tool_injection is false.
 func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *ScanVerdict {
-	if j == nil {
+	sample, eligible := j.prepareToolJudgeSample(ctx, toolName, args)
+	if !eligible {
 		return allowVerdict("llm-judge-tool")
+	}
+	return j.runToolJudgeSample(ctx, toolName, args, sample)
+}
+
+// prepareToolJudgeSample records the call in arrival order and returns an
+// immutable sample. EventRouter calls this before launching asynchronous
+// provider work so concurrent calls from one session cannot reorder history.
+func (j *LLMJudge) prepareToolJudgeSample(ctx context.Context, toolName, args string) (string, bool) {
+	if j == nil || j.cfg == nil {
+		return "", false
 	}
 	if !j.cfg.ToolInjection {
-		return allowVerdict("llm-judge-tool")
+		return "", false
 	}
 	if trimmedArgs := strings.TrimSpace(args); trimmedArgs == "" || len(trimmedArgs) < minJudgeContentLen {
-		return allowVerdict("llm-judge-tool")
+		return "", false
 	}
+	return j.toolJudgeContextSample(ctx, toolName, args), true
+}
+
+func (j *LLMJudge) runToolJudgeSample(ctx context.Context, toolName, args, sample string) *ScanVerdict {
 
 	timeout := time.Duration(j.cfg.Timeout) * time.Second
 	if timeout <= 0 {
@@ -2083,7 +2138,6 @@ func (j *LLMJudge) RunToolJudge(ctx context.Context, toolName, args string) *Sca
 	const kind = "tool_injection"
 	const scannerMetric = "llm-judge-tool"
 	maxTok := 512
-	sample := j.toolJudgeContextSample(ctx, toolName, args)
 	cacheBody := toolName + "\x00" + sample
 	if c := judgeVerdictCache(); c != nil {
 		if snap, ok := c.Get(ctx, kind, j.model, "tool_call", cacheBody, scannerMetric, "none"); ok {
@@ -2295,7 +2349,14 @@ func toolJudgeCategoryEntries(data map[string]interface{}) map[string]map[string
 			if _, known := toolInjectionCategories[category]; !known {
 				continue
 			}
-			strength, _ := finding["signal_strength"].(string)
+			rawStrength, hasStrength := finding["signal_strength"]
+			strength, stringStrength := rawStrength.(string)
+			if hasStrength {
+				normalizedStrength := strings.ToLower(strings.TrimSpace(strength))
+				if !stringStrength || normalizedStrength == "none" || toolSignalStrengthRank(normalizedStrength) == 0 {
+					continue
+				}
+			}
 			if existing, duplicate := entries[category]; duplicate {
 				existingStrength, _ := existing["signal_strength"].(string)
 				if toolSignalStrengthRank(existingStrength) >= toolSignalStrengthRank(strength) {

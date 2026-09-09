@@ -11,9 +11,9 @@ keywords:
 
 DefenseClaw's contextual judge is designed to add coverage when one tool call
 is ambiguous in isolation. On the frozen public validation set, the
-deterministic-first cascade with Bedrock Gemma 4 detected **95 of 100**
-family-excluded attack trajectories, with **98.96% precision**, **95% recall**,
-and **0.969 F1**. It alerted on one of 20 benign coding trajectories and
+deterministic-first cascade with Bedrock Gemma 4 detected **94 of 100**
+family-excluded attack trajectories, with **98.95% precision**, **94% recall**,
+and **0.964 F1**. It alerted on one of 20 benign coding trajectories and
 recommended blocking none of them.
 
 <Callout type="info" title="Benchmark-bounded coverage">
@@ -76,25 +76,25 @@ executed.
 | System | TP / FN | FP / TN | Precision | Recall | F1 | FPR | Attack block recall | Benign block rate |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
 | Deterministic only | 1 / 99 | 0 / 20 | 100% | 1% | 0.020 | 0% | 0% | 0% |
-| Gemma 4 judge first | 95 / 5 | 1 / 19 | 98.96% | 95% | **0.969** | 5% | 37% | **0%** |
-| Deterministic → Gemma 4 | 95 / 5 | 1 / 19 | 98.96% | 95% | **0.969** | 5% | 37% | **0%** |
-| Gemma 3 judge first | 98 / 2 | 16 / 4 | 85.96% | 98% | 0.916 | 80% | 89% | 80% |
+| Gemma 4 judge first | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Deterministic → Gemma 4 | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Gemma 3 judge first | 99 / 1 | 18 / 2 | 84.62% | 99% | 0.912 | 90% | 95% | 90% |
 
-Gemma 4 added 94 detections beyond the deterministic result. Gemma 3's higher
-attack recall came with an 80% benign trajectory alert and block rate, so it is
+Gemma 4 added 93 detections beyond the deterministic result. Gemma 3's higher
+attack recall came with a 90% benign trajectory alert and block rate, so it is
 not recommended for coding-session enforcement. Granite was removed after
 lower-recall pilots; Qwen 3.5 and Muse were not included in the frozen matrix.
 
 Stateful labels apply to whole trajectories, not individual tool calls. On the
-benign lane, 6 of 511 hook decisions alerted (1.17%) and none blocked. That is
+benign lane, 1 of 511 hook decisions alerted (0.20%) and none blocked. That is
 an operational interruption measure, not per-hook classification accuracy.
 
 ## Time, tokens, and cost
 
 | Model | Provider calls | Input / output tokens | Total tokens | Cost | Mean provider time | Trajectory p50 / p95 / max |
 | --- | ---: | ---: | ---: | ---: | ---: | ---: |
-| Bedrock Gemma 4 26B A4B | 1,146 | 3,043,661 / 57,830 | 3,101,491 | **$0.4188** | **0.874s/call** | 6.88s / 14.57s / 47.26s |
-| Bedrock Gemma 3 12B IT | 1,146 | 2,698,961 / 102,744 | 2,801,705 | $0.2727 | 1.773s/call | 13.52s / 33.13s / 95.98s |
+| Bedrock Gemma 4 26B A4B | 1,146 | 3,020,728 / 57,692 | 3,078,420 | **$0.4158** | **0.614s/call** | 5.05s / 11.89s / 29.07s |
+| Bedrock Gemma 3 12B IT | 1,146 | 2,676,031 / 103,076 | 2,779,107 | $0.2707 | 1.341s/call | 10.96s / 23.17s / 83.93s |
 
 Costs use the explicit evaluation-time rates supplied to the scorecard:
 $0.13/M Gemma 4 input tokens and $0.40/M output tokens; $0.09/M Gemma 3 input
@@ -118,7 +118,7 @@ the retained user task.
 | GitHub Copilot | `userPromptSubmitted` |
 | OpenHands | `user_prompt_submit` |
 | Gemini CLI | `BeforeAgent` |
-| Antigravity | `PreInvocation`, when prompt content is present |
+| Antigravity | No prompt in the documented `PreInvocation` schema; same-session tool-call context only |
 | Hermes | `pre_llm_call`, when prompt content is present |
 | Amp | `agent.start` |
 | OmniGent | `UserPromptSubmit` only when the deployment supplies a stable session ID |
@@ -133,7 +133,14 @@ tool calls with 1,024 bytes of arguments each, and 3,072 bytes for the current
 arguments. Oversized intent and arguments retain a UTF-8-safe beginning and
 end plus mechanically selected security-relevant middle excerpts. Explicit
 truncation markers tell the model that omitted material exists. Session start
-or end removes the context.
+or end removes the context, except Claude Code's `SessionStart` with
+`source=compact`, which continues the current turn. The gateway's existing
+request-body limit rejects a hook payload that is too large to parse safely.
+
+Untrusted bodies cannot create fake context blocks: DefenseClaw neutralizes
+the structural delimiter tokens before assembly. Stream tool calls are added
+to history synchronously in arrival order before the model request runs in the
+bounded asynchronous worker pool.
 
 The retained prompt is tagged as untrusted data inside the judge request. It
 can explain authorized work, but it cannot excuse clear credential

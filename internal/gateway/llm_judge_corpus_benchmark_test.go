@@ -604,7 +604,7 @@ func validateCorpusJudgeResumeContract(
 	// exact request and its invocation count.
 	sort.Strings(expected)
 	sort.Strings(actual)
-	if len(actual) == 0 {
+	if len(expected) > 0 && len(actual) == 0 {
 		return errors.New("missing request_sha256 values; restart without DEFENSECLAW_JUDGE_BENCHMARK_RESUME")
 	}
 	if !equalCorpusJudgeStrings(actual, expected) {
@@ -703,6 +703,13 @@ func TestValidateCorpusJudgeResumeContract(t *testing.T) {
 	if err := validateCorpusJudgeResumeContract(t.Context(), judge, judge.model, benchmarkCase, prior); err == nil ||
 		!strings.Contains(err.Error(), "request contract changed") {
 		t.Fatalf("stale request contract error = %v", err)
+	}
+
+	emptyCase := corpusJudgeCase{SchemaVersion: "1", ID: "empty-case", Surface: "action"}
+	emptyCase.Payload.ToolName = "shell"
+	emptyPrior := corpusJudgePrediction{SchemaVersion: "1", CaseID: "empty-case", Model: judge.model}
+	if err := validateCorpusJudgeResumeContract(t.Context(), judge, judge.model, emptyCase, emptyPrior); err != nil {
+		t.Fatalf("legitimate zero-invocation resume rejected: %v", err)
 	}
 }
 

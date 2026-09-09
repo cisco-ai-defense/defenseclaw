@@ -55,6 +55,28 @@ class ContextualJudgePrepareTests(unittest.TestCase):
             },
         )
 
+    def test_zero_quota_selects_nothing(self) -> None:
+        selected, available = prepare.select_rows(
+            [row("a", "action", "attack")],
+            {("fixture", "attack", "action", "any"): 0},
+            7,
+        )
+        self.assertEqual(selected, [])
+        self.assertEqual(available["fixture:attack:action:any"], 1)
+
+    def test_extended_lock_provenance_is_validated_explicitly(self) -> None:
+        selected = [row("a", "action", "attack")]
+        with self.assertRaisesRegex(ValueError, "missing provenance fields"):
+            prepare.selected_source_provenance(selected)
+
+        selected[0]["source"].update(
+            {"revision": "pinned", "license": "approved", "redistribution": "private"}
+        )
+        self.assertEqual(
+            prepare.selected_source_provenance(selected)["fixture"]["revision"],
+            "pinned",
+        )
+
     def test_surface_filter_prevents_stateful_call_expansion(self) -> None:
         rows = [row("a", "action", "attack"), row("b", "stateful", "attack")]
         selected, available = prepare.select_rows(

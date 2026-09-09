@@ -178,6 +178,8 @@ def select_rows(
         available[":".join(key)] = len(candidates)
         deduplicated: list[dict[str, Any]] = []
         for row in candidates:
+            if len(deduplicated) == quota:
+                break
             family = family_id(row)
             case_id = str(row.get("id", ""))
             if case_id in selected_case_ids or family in selected_families:
@@ -185,8 +187,6 @@ def select_rows(
             selected_case_ids.add(case_id)
             selected_families.add(family)
             deduplicated.append(row)
-            if len(deduplicated) == quota:
-                break
         if len(deduplicated) != quota:
             raise ValueError(
                 f"quota {':'.join(key)} requested {quota}, "
@@ -204,10 +204,8 @@ def write_extended_lock(
 ) -> None:
     lock = json.loads(canonical_path.read_text(encoding="utf-8"))
     known = {dataset["id"] for dataset in lock["datasets"]}
-    first_by_dataset: dict[str, dict[str, Any]] = {}
-    for row in selected:
-        source = row["source"]
-        first_by_dataset.setdefault(source["dataset"], source)
+    first_by_dataset = selected_source_provenance(selected)
+
     for dataset, source in sorted(first_by_dataset.items()):
         if dataset in known:
             continue
@@ -230,6 +228,21 @@ def write_extended_lock(
         )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.write_text(json.dumps(lock, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def selected_source_provenance(selected: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    first_by_dataset: dict[str, dict[str, Any]] = {}
+    for row in selected:
+        source = row["source"]
+        first_by_dataset.setdefault(source["dataset"], source)
+    for dataset, source in sorted(first_by_dataset.items()):
+        required = ("revision", "license", "redistribution")
+        missing = [field for field in required if field not in source or source[field] in (None, "")]
+        if missing:
+            raise ValueError(
+                f"dataset {dataset!r} is missing provenance fields: {', '.join(missing)}"
+            )
+    return first_by_dataset
 
 
 def main() -> int:
@@ -267,6 +280,10 @@ def main() -> int:
         excluded_case_ids,
         excluded_families,
     )
+    if args.extended_lock_output:
+        # Validate before writing the selected corpus or its manifest so a
+        # malformed provenance row cannot leave a partial benchmark artifact.
+        selected_source_provenance(selected)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for row in selected:

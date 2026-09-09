@@ -170,7 +170,7 @@ func TestScanInboundPromptBalancedHighDoesNotEnforce(t *testing.T) {
 func TestScanInboundPromptSeedsBoundedJudgeSessionIntent(t *testing.T) {
 	store, logger := testStoreAndLogger(t)
 	r := NewEventRouter(nil, store, logger, false)
-	judge := &LLMJudge{}
+	judge := &LLMJudge{cfg: &config.JudgeConfig{Enabled: true, Timeout: 1}}
 	r.SetJudge(judge)
 
 	const sessionID = "agent:main:judge-context"

@@ -40,6 +40,7 @@ def task_contexts(source_root: Path, task_root: Path | None = None) -> dict[str,
         raise RuntimeError("pyarrow is required to read TerminalBench") from exc
 
     names: dict[str, str] = {}
+    instructions: dict[str, str] = {}
     for path in sorted((source_root / "data").glob("*.parquet")):
         for row in parquet.read_table(path, columns=["task_name"]).to_pylist():
             name = row.get("task_name")
@@ -50,9 +51,11 @@ def task_contexts(source_root: Path, task_root: Path | None = None) -> dict[str,
             context = name
             if task_root is not None:
                 instruction = task_root / name / "instruction.md"
-                if not instruction.is_file():
-                    raise ValueError(f"missing TerminalBench instruction: {instruction}")
-                context = instruction.read_text(encoding="utf-8").strip()
+                if name not in instructions:
+                    if not instruction.is_file():
+                        raise ValueError(f"missing TerminalBench instruction: {instruction}")
+                    instructions[name] = instruction.read_text(encoding="utf-8").strip()
+                context = instructions[name]
             prior = names.setdefault(group, context)
             if prior != context:
                 raise ValueError(f"TerminalBench task hash collision: {group}")

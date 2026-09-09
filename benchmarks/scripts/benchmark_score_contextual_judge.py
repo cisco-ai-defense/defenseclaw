@@ -329,6 +329,7 @@ def model_cost(
     total = sum(int(row.get("total_tokens", 0)) for row in selected)
     usd: float | None = None
     rates = token_rates(args, model)
+    has_model_rates = model in parse_model_pricing(getattr(args, "model_pricing", []))
     if rates is not None:
         input_rate, output_rate = rates
         usd = round(
@@ -377,7 +378,13 @@ def model_cost(
         "estimated_provider_cost_usd": usd,
         "input_usd_per_million_tokens": rates[0] if rates is not None else None,
         "output_usd_per_million_tokens": rates[1] if rates is not None else None,
-        "cost_basis": "explicit per-model token rates" if usd is not None else "monetary cost not estimated",
+        "cost_basis": (
+            "explicit per-model token rates"
+            if usd is not None and has_model_rates
+            else "explicit global token rates"
+            if usd is not None
+            else "monetary cost not estimated"
+        ),
     }
 
 

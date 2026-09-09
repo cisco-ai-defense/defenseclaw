@@ -153,6 +153,16 @@ class ContextualJudgeScorerTests(unittest.TestCase):
         )
         self.assertEqual(scorer.token_rates(args, "bedrock/google.gemma-3-12b-it"), (0.09, 0.29))
         self.assertEqual(scorer.token_rates(args, "unlisted"), (9.0, 9.0))
+
+        priced_rows = [llm("priced")]
+        self.assertEqual(
+            scorer.model_cost(priced_rows, {"priced"}, args, "bedrock/google.gemma-3-12b-it")["cost_basis"],
+            "explicit per-model token rates",
+        )
+        self.assertEqual(
+            scorer.model_cost(priced_rows, {"priced"}, args, "unlisted")["cost_basis"],
+            "explicit global token rates",
+        )
         with self.assertRaisesRegex(ValueError, "duplicate model pricing"):
             scorer.parse_model_pricing(["model:1:2", "model:3:4"])
 

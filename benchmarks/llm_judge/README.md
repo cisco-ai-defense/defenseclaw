@@ -80,7 +80,7 @@ running the judge. The harness replays that content through
   --source-root "$TERMINAL_BENCH_TRAJECTORIES" \
   --input outputs/contextual-judge/terminalbench.jsonl \
   --task-root "$TERMINAL_BENCH_TASKS" \
-  --tasks-revision "$TERMINAL_BENCH_TASKS_REVISION" \
+  --task-revision "$TERMINAL_BENCH_TASKS_REVISION" \
   --output outputs/contextual-judge/terminalbench-with-context.jsonl
 ```
 

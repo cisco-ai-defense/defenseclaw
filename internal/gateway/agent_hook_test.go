@@ -1070,10 +1070,9 @@ func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
 	intentEvents := []string{
 		// Codex, Claude Code, Devin, and OmniGent.
 		"UserPromptSubmit",
-		// Cursor, Windsurf, Copilot, OpenHands, Gemini CLI,
-		// Antigravity, Hermes, and Amp.
+		// Cursor, Windsurf, Copilot, OpenHands, Gemini CLI, Hermes, and Amp.
 		"beforeSubmitPrompt", "pre_user_prompt", "userPromptSubmitted",
-		"user_prompt_submit", "BeforeAgent", "PreInvocation", "pre_llm_call", "agent.start",
+		"user_prompt_submit", "BeforeAgent", "pre_llm_call", "agent.start",
 	}
 	for _, event := range intentEvents {
 		if !isToolJudgeIntentEvent(event) {
@@ -1085,7 +1084,7 @@ func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
 	// not overwrite the authenticated user task retained for tool judging.
 	for _, event := range []string{
 		"UserPromptTransformed", "UserPromptExpansion", "BeforeModel",
-		"SubagentStart", "PostToolUse", "tool.execute.before",
+		"SubagentStart", "PostToolUse", "tool.execute.before", "PreInvocation",
 	} {
 		if isToolJudgeIntentEvent(event) {
 			t.Errorf("isToolJudgeIntentEvent(%q) = true, want false", event)
@@ -1106,6 +1105,55 @@ func TestToolJudgeSessionBoundariesCoverConnectorSpellings(t *testing.T) {
 	for _, event := range []string{"agent.start", "agent.end", "Stop", "PreToolUse"} {
 		if isToolJudgeSessionBoundaryEvent(event) {
 			t.Errorf("isToolJudgeSessionBoundaryEvent(%q) = true, want false", event)
+		}
+	}
+}
+
+func TestShouldResetToolJudgeSessionPreservesClaudeCompaction(t *testing.T) {
+	tests := []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{
+			name: "claude compaction continues session",
+			req: agentHookRequest{
+				HookEventName: "SessionStart",
+				Payload:       map[string]interface{}{"source": "compact"},
+			},
+			want: false,
+		},
+		{
+			name: "claude clear starts session",
+			req: agentHookRequest{
+				HookEventName: "SessionStart",
+				Payload:       map[string]interface{}{"source": "clear"},
+			},
+			want: true,
+		},
+		{
+			name: "session end resets",
+			req:  agentHookRequest{HookEventName: "SessionEnd"},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldResetToolJudgeSession(tt.req); got != tt.want {
+				t.Fatalf("shouldResetToolJudgeSession(%+v) = %v, want %v", tt.req, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestToolJudgeIntentEventsAreRoutedAsPromptLike(t *testing.T) {
+	for _, event := range []string{
+		"UserPromptSubmit", "beforeSubmitPrompt", "pre_user_prompt",
+		"userPromptSubmitted", "user_prompt_submit", "BeforeAgent",
+		"pre_llm_call", "agent.start",
+	} {
+		if !isToolJudgeIntentEvent(event) || !isPromptLikeEvent(event) {
+			t.Errorf("intent event %q is not reachable through the prompt route", event)
 		}
 	}
 }
