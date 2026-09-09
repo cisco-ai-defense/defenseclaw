@@ -167,6 +167,7 @@ struct MainWindow: View {
         case .tools: ToolsView()
         case .inventory: InventoryView()
         case .aiDiscovery: AIDiscoveryView()
+        case .aiRuntime: AIRuntimeView()
         case .registries: RegistriesView()
         case .setup: SetupView()
         }

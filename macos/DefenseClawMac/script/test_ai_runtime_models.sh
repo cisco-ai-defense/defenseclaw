@@ -18,7 +18,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
-BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-installation-context-tests.XXXXXX")"
+BUILD_DIR="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-ai-runtime-tests.XXXXXX")"
 trap 'rm -rf "$BUILD_DIR"' EXIT
 MODULE_CACHE="$BUILD_DIR/ModuleCache"
 mkdir -p "$MODULE_CACHE"
@@ -26,12 +26,8 @@ mkdir -p "$MODULE_CACHE"
 CLANG_MODULE_CACHE_PATH="$MODULE_CACHE" xcrun swiftc \
   -module-cache-path "$MODULE_CACHE" \
   "$ROOT/DefenseClawMac/DataLayer/Models.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/InstallationContext.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/ConfigStore.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/CLIRunner.swift" \
   "$ROOT/DefenseClawMac/DataLayer/AIRuntimeModels.swift" \
-  "$ROOT/DefenseClawMac/DataLayer/GatewayClient.swift" \
-  "$ROOT/Tests/InstallationContextTests.swift" \
-  -o "$BUILD_DIR/InstallationContextTests"
+  "$ROOT/Tests/AIRuntimeModelTests.swift" \
+  -o "$BUILD_DIR/AIRuntimeModelTests"
 
-"$BUILD_DIR/InstallationContextTests"
+"$BUILD_DIR/AIRuntimeModelTests"

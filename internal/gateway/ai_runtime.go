@@ -79,6 +79,12 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	service, err := sensor.New(sensor.Options{
 		Config:    runtimeConfig,
 		Inventory: discoveryCorrelationSource{sidecar: s},
+		// The same home list the inventory scanner walks. Under launchd or a
+		// Windows service the daemon's own $HOME is not a real user's, so the
+		// host plane would watch the wrong paths without this; in
+		// managed_enterprise the hook-enumerator already populates it from the
+		// eligible-users enumeration that renders targets.yaml.
+		HomeDirs: s.currentConfig().AIDiscovery.HomeDirs,
 	})
 	if err != nil {
 		// A platform with no backend is a hard stop rather than a degraded

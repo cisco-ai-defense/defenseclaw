@@ -551,6 +551,24 @@ actor GatewayClient {
         return snap
     }
 
+    /// Fetch the runtime-plane snapshot.
+    ///
+    /// Throws on a malformed payload so the caller keeps the last good
+    /// snapshot: replacing a stale-but-true coverage report with an empty one
+    /// would read as a clean host rather than as a lost connection.
+    func aiRuntime() async throws -> AIRuntimeSnapshot {
+        let json = try await getJSON("/api/v1/ai-usage/runtime")
+        guard json is [String: Any] else {
+            throw GatewayError.badResponse("/api/v1/ai-usage/runtime not an object")
+        }
+        return AIRuntimeDecoding.snapshot(from: json)
+    }
+
+    /// Trigger one immediate runtime-plane poll.
+    func scanAIRuntime() async throws {
+        try await post("/api/v1/ai-usage/runtime/scan", timeout: Self.scanTimeout)
+    }
+
     func aiComponents() async throws -> [AIComponent] {
         let json = try await getJSON("/api/v1/ai-usage/components")
         let rows = (json as? [[String: Any]]) ?? ((json as? [String: Any])?["components"] as? [[String: Any]]) ?? []
