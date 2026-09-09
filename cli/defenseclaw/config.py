@@ -5158,6 +5158,13 @@ def default_config() -> Config:
         ai_discovery=AIDiscoveryConfig(
             enabled=True,
             confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
+            # A fresh install gets the two runtime planes that need no
+            # privilege beyond what the gateway already has, and reports
+            # honestly where they cannot see. Plane C stays off: it reads
+            # kernel process, file, and identity events, and that decision
+            # belongs to the operator rather than to a default. DNS capture is
+            # off for the same reason.
+            runtime=AIRuntimeConfig(enabled=True, planes=["a", "b"]),
         ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),
