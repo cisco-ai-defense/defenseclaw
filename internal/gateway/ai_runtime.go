@@ -118,7 +118,14 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			}
 			return nil
 		case <-ticker.C:
-			s.publishAIRuntimeHealth(service.Snapshot())
+			snapshot := service.Snapshot()
+			s.publishAIRuntimeHealth(snapshot)
+			// Emission is best-effort and never blocks the planes. A
+			// destination being unreachable must not stop the sensor from
+			// observing; the snapshot the API serves is unaffected either way.
+			if adapter := newAIRuntimeV8Adapter(s.observabilityV8Emitter()); adapter != nil {
+				_ = adapter.EmitSnapshot(ctx, snapshot)
+			}
 		case <-ctx.Done():
 			err := <-errCh
 			if err != nil && !isContextTermination(err) {
