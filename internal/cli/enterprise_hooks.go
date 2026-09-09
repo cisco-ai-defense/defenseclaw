@@ -60,21 +60,24 @@ var enterpriseHookTargetsWaitTimeout = 24 * time.Hour
 var enterpriseHookTargetsWaitPoll = 30 * time.Second
 
 var (
-	enterpriseHookConnector     string
-	enterpriseHookUser          string
-	enterpriseHookUserHome      string
-	enterpriseHookUID           int
-	enterpriseHookGID           int
-	enterpriseHookSID           string
-	enterpriseHookDataDir       string
-	enterpriseHookAPIAddr       string
-	enterpriseHookProxyAddr     string
-	enterpriseHookAgentVersion  string
-	enterpriseHookManifest      string
-	enterpriseHookJSON          bool
-	enterpriseHookWatchInterval time.Duration
-	enterpriseHookWatchDebounce time.Duration
-	enterpriseHookWatchSettle   time.Duration
+	enterpriseHookConnector          string
+	enterpriseHookUser               string
+	enterpriseHookUserHome           string
+	enterpriseHookUID                int
+	enterpriseHookGID                int
+	enterpriseHookSID                string
+	enterpriseHookDataDir            string
+	enterpriseHookAPIAddr            string
+	enterpriseHookProxyAddr          string
+	enterpriseHookAgentVersion       string
+	enterpriseHookManifest           string
+	enterpriseHookJSON               bool
+	enterpriseHookWatchInterval      time.Duration
+	enterpriseHookWatchDebounce      time.Duration
+	enterpriseHookWatchSettle        time.Duration
+	enterpriseHookRotateOperationID  string
+	enterpriseHookRotateGeneration   string
+	enterpriseHookRotateFingerprints string
 
 	enterpriseHooksRuntimeGOOS               = func() string { return runtime.GOOS }
 	enterpriseHooksPlatformPreflight         = enterpriseHooksNativePlatformPreflight
@@ -100,6 +103,9 @@ var (
 	enterpriseHooksWatchRunE                   = runEnterpriseHooksWatch
 	enterpriseHooksStatusRunE                  = runEnterpriseHooksStatus
 	enterpriseHooksVerifyRunE                  = runEnterpriseHooksVerify
+	enterpriseHooksRotatePrepareRunE           = runEnterpriseHooksRotatePrepare
+	enterpriseHooksRotateCommitRunE            = runEnterpriseHooksRotateCommit
+	enterpriseHooksRotateRollbackRunE          = runEnterpriseHooksRotateRollback
 	enterpriseHookAuthorizationOwnershipSetter = setEnterpriseHookAuthorizationOwnership
 	enterpriseHookAuthorizationDirTrustCheck   = func(path string) error {
 		return managed.ValidateTrustedRuntimeDir(path, "hook guardian authorization directory")
@@ -129,11 +135,13 @@ const hookGuardianActivationFile = "activation.json"
 const hookGuardianAuthorizationDirEnv = managed.HookGuardianAuthorizationDirEnv
 
 const (
-	enterpriseHookGuardianStateMaxBytes         int64 = 1 << 20
-	enterpriseHookGuardianAuthorizationMaxBytes int64 = 4 << 20
-	enterpriseHookGuardianActivationVersion           = 1
-	enterpriseHookWatchRepairRetryMin                 = time.Second
-	enterpriseHookWatchRepairRetryMax                 = 15 * time.Second
+	enterpriseHookGuardianStateMaxBytes          int64 = 1 << 20
+	enterpriseHookGuardianAuthorizationMaxBytes  int64 = 4 << 20
+	enterpriseHookGuardianActivationVersion            = 1
+	enterpriseHookGuardianAuthorizationVersionV1       = 1
+	enterpriseHookGuardianAuthorizationVersionV2       = 2
+	enterpriseHookWatchRepairRetryMin                  = time.Second
+	enterpriseHookWatchRepairRetryMax                  = 15 * time.Second
 )
 
 var enterpriseCmd = &cobra.Command{
@@ -338,12 +346,32 @@ func init() {
 	enterpriseHooksVerifyCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
 		"Emit machine-readable JSON")
 
+	for _, rotateCmd := range []*cobra.Command{
+		enterpriseHooksRotatePrepareCmd,
+		enterpriseHooksRotateCommitCmd,
+		enterpriseHooksRotateRollbackCmd,
+	} {
+		rotateCmd.Flags().StringVar(&enterpriseHookManifest, "manifest", defaultEnterpriseHookManifest,
+			"YAML manifest of the exact enabled target roster")
+		rotateCmd.Flags().StringVar(&enterpriseHookRotateOperationID, "operation-id", "",
+			"Opaque 32-hex-character rotation operation ID")
+		rotateCmd.Flags().StringVar(&enterpriseHookRotateGeneration, "generation", "",
+			"Opaque 32-hex-character rotation generation")
+		rotateCmd.Flags().BoolVar(&enterpriseHookJSON, "json", false,
+			"Emit machine-readable JSON")
+	}
+	enterpriseHooksRotatePrepareCmd.Flags().StringVar(&enterpriseHookRotateFingerprints, "expected-fingerprints", "",
+		"Trusted JSON file of per-target canonical non-secret B fingerprints")
+
 	enterpriseHooksCmd.AddCommand(enterpriseHooksInstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksUninstallCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksReconcileCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksWatchCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksStatusCmd)
 	enterpriseHooksCmd.AddCommand(enterpriseHooksVerifyCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotatePrepareCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotateCommitCmd)
+	enterpriseHooksCmd.AddCommand(enterpriseHooksRotateRollbackCmd)
 	enterpriseCmd.AddCommand(enterpriseHooksCmd)
 	rootCmd.AddCommand(enterpriseCmd)
 }
@@ -482,6 +510,37 @@ type enterpriseHookReconcileRow struct {
 	Pending bool                           `json:"pending,omitempty"`
 	Error   string                         `json:"error,omitempty"`
 	Result  *enterprisehooks.InstallResult `json:"result,omitempty"`
+	// TokenFingerprint is the canonical non-secret SHA-256 of the scoped
+	// token observed during this reconcile. It is never derived from a
+	// historical protected row.
+	TokenFingerprint string `json:"token_fingerprint,omitempty"`
+}
+
+// enterpriseHookCurrentAttestation is one per-target v2 readiness fact for the
+// current reconcile/rotation generation. Historical success must not appear here.
+type enterpriseHookCurrentAttestation struct {
+	User             string `json:"user,omitempty"`
+	UserHome         string `json:"user_home,omitempty"`
+	SID              string `json:"sid,omitempty"`
+	Connector        string `json:"connector"`
+	OK               bool   `json:"ok"`
+	Generation       string `json:"generation"`
+	TokenFingerprint string `json:"token_fingerprint"`
+	ManifestSHA256   string `json:"manifest_sha256"`
+}
+
+// enterpriseHookCurrentReadiness is published atomically with authorization.
+// Service-writable status must never be treated as this record.
+type enterpriseHookCurrentReadiness struct {
+	Version        int                                `json:"version"`
+	ReconcileID    string                             `json:"reconcile_id"`
+	ManifestSHA256 string                             `json:"manifest_sha256"`
+	Generation     string                             `json:"generation"`
+	OK             bool                               `json:"ok"`
+	TargetCount    int                                `json:"target_count"`
+	SuccessCount   int                                `json:"success_count"`
+	FailureCount   int                                `json:"failure_count"`
+	Attestations   []enterpriseHookCurrentAttestation `json:"attestations"`
 }
 
 type enterpriseHookReconcileRun struct {
@@ -658,6 +717,19 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			enterpriseHookManifest,
 			manifestSHA256,
 		)...)
+		// A deferred reconcile is a supported state. buildEnterpriseHookCurrentReadiness
+		// clears Current.OK whenever any target is pending, so requiring OK here
+		// rejected every such deployment even though state, authorization and
+		// activation were all healthy. Both current records must still exist --
+		// only the OK flag is relaxed, and only while targets are pending, so
+		// incomplete non-pending coverage still fails closed. state.PendingCount
+		// is already on the persisted record, so no wire-format change is needed.
+		if authorization.Version != enterpriseHookGuardianAuthorizationVersionV2 ||
+			authorization.Current == nil || activation.Current == nil ||
+			(state.PendingCount == 0 &&
+				(!authorization.Current.OK || !activation.Current.OK)) {
+			report.Errors = append(report.Errors, "current per-target attestations are not ready")
+		}
 		// The Guardian is the trusted live verifier on native Windows: it runs
 		// as LocalSystem, reconciles every enabled target, and publishes this
 		// bounded result together with an independently protected authorization
@@ -839,6 +911,11 @@ func compareEnterpriseHookGuardianRecords(
 	}
 	if expected := strings.TrimSpace(expectedManifestSHA256); expected != "" && activation.ManifestSHA256 != expected {
 		issues = append(issues, fmt.Sprintf("guardian activation records manifest SHA-256 %s, expected %s", activation.ManifestSHA256, expected))
+	}
+	if authorization.Version != enterpriseHookGuardianAuthorizationVersionV2 {
+		issues = append(issues, "legacy v1 authorization cannot satisfy current readiness")
+	} else {
+		issues = append(issues, compareEnterpriseHookCurrentReadinessPair(authorization.Current, activation.Current)...)
 	}
 	if state.OK && authorization.OK {
 		protectedRows := enterpriseHookProtectedReconcileRows(state.Results)
@@ -1213,6 +1290,9 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		run.AuthorizationErr = authorizationErr
 	} else if !exists {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is missing")
+	} else if authorization.Version != enterpriseHookGuardianAuthorizationVersionV2 ||
+		authorization.Current == nil {
+		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization lacks current per-target attestations")
 	} else if !authorization.OK || authorization.FailureCount != 0 ||
 		authorization.SuccessCount+authorization.PendingCount != authorization.TargetCount {
 		run.AuthorizationErr = fmt.Errorf("protected hook guardian authorization is incomplete (%d succeeded, %d pending, %d total)", authorization.SuccessCount, authorization.PendingCount, authorization.TargetCount)
@@ -1315,6 +1395,9 @@ func runEnterpriseHookVerifyAttempt(ctx context.Context) (enterpriseHookVerifyRu
 		otlpToken := ""
 		if targetErr == nil {
 			token, targetErr = loadEnterpriseHookScopedToken(cfg.DataDir, target.Connector)
+			if targetErr == nil {
+				row.TokenFingerprint = managed.ScopedTokenFingerprint(token)
+			}
 		}
 		if targetErr == nil {
 			otlpToken, targetErr = loadEnterpriseHookScopedOTLPToken(cfg.DataDir, target.Connector)
@@ -1522,6 +1605,12 @@ func enterpriseHookVerifyDispositionIssues(
 			"activation",
 		)...,
 	)
+	issues = append(issues, compareEnterpriseHookCurrentAttestationsAgainstRun(run, authorization.Current)...)
+	if activation.Current != nil {
+		issues = append(issues, compareEnterpriseHookCurrentReadinessPair(authorization.Current, activation.Current)...)
+	} else if authorization.Version == enterpriseHookGuardianAuthorizationVersionV2 {
+		issues = append(issues, "activation current attestations are missing")
+	}
 	sort.Strings(issues)
 	return issues
 }
@@ -1532,6 +1621,9 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 		return run, fmt.Errorf("enterprise hooks reconcile: config is not loaded")
 	}
 	if err := enterpriseHooksManagedMutationPreflight(); err != nil {
+		return run, err
+	}
+	if err := enterpriseHookRotationBusy(cfg.DataDir); err != nil {
 		return run, err
 	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
@@ -1619,6 +1711,8 @@ func runEnterpriseHookReconcileOnce(ctx context.Context) (enterpriseHookReconcil
 			token, tokenErr = enterpriseHookScopedTokenMinter(cfg.DataDir, target.Connector)
 			if tokenErr != nil {
 				err = tokenErr
+			} else {
+				row.TokenFingerprint = managed.ScopedTokenFingerprint(token)
 			}
 		}
 		if err == nil {
@@ -1892,6 +1986,10 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 		}
 		settleUntil = time.Now().Add(settle)
 		droppedInSettle = 0
+		// A rotation-busy startup leaves ready unpublished. The next
+		// successful reconcile must publish it so sidecar health does
+		// not stay waiting_for_targets / unknown after rotation ends.
+		publishGuardianReadyAfterWatchReconcile(cmd.ErrOrStderr(), nil, run.Failures, run.StateErr)
 		return changed, nil
 	}
 
@@ -1900,27 +1998,32 @@ func runEnterpriseHooksWatch(cmd *cobra.Command, _ []string) error {
 	// Non-managed-enterprise deployments retain the existing hard-exit
 	// behaviour (an operator explicitly asked for a manifest that
 	// isn't there; loudly refusing is the right thing).
+	var startupErr error
 	if _, err := reconcile("startup"); err != nil {
-		if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		if errors.Is(err, errEnterpriseHookRotationBusy) {
+			startupErr = err
+		} else if !isMissingManifestErr(err) || cfg == nil || !managed.IsManagedEnterprise(cfg.DeploymentMode) {
 			return err
-		}
-		if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
-			return waitErr
-		}
-		// Manifest is present now — re-run the startup reconcile so
-		// the watch loop enters its main select with a valid row set,
-		// hashes, and watched dirs. Any other error from THIS retry
-		// (parse failure, missing file races back to gone, etc.) is
-		// fatal — we've done our one bounded wait; further retries
-		// belong to the SCM restart cycle.
-		if _, err := reconcile("startup_after_wait"); err != nil {
-			return err
+		} else {
+			if waitErr := waitForEnterpriseHookManifestManaged(cmd.Context(), cmd.ErrOrStderr(), fsw); waitErr != nil {
+				return waitErr
+			}
+			// Manifest is present now — re-run the startup reconcile so
+			// the watch loop enters its main select with a valid row set,
+			// hashes, and watched dirs. Any other error from THIS retry
+			// (parse failure, missing file races back to gone, etc.) is
+			// fatal — we've done our one bounded wait; further retries
+			// belong to the SCM restart cycle.
+			if _, err := reconcile("startup_after_wait"); err != nil {
+				return err
+			}
 		}
 	}
-	// Successful startup reconcile ⇒ manifest is loaded ⇒ publish
-	// the guardian-side "ready" state so the sidecar's health surface
-	// (spec 003 REQ-19) can collapse to overall `ready`.
-	writeGuardianStateOrLog(cmd.ErrOrStderr(), guardianstate.StateReady)
+	// Ready is published only inside reconcile() via
+	// publishGuardianReadyAfterWatchReconcile. A leftover write here
+	// would mark the sidecar ready after a nil-error incomplete
+	// startup (Failures>0 or StateErr!=nil).
+	applyEnterpriseHookWatchStartupReadyTail(cmd.ErrOrStderr(), startupErr)
 
 	ticker := time.NewTicker(enterpriseHookWatchInterval)
 	defer ticker.Stop()
@@ -2114,6 +2217,24 @@ func isMissingManifestErr(err error) bool {
 // returns an error: a state-file write failure is a health-surface
 // degradation (the sidecar will fall through to its safe default), not
 // a reason to fail the guardian's core reconcile path.
+func publishGuardianReadyAfterWatchReconcile(w io.Writer, reconcileErr error, failures int, stateErr error) {
+	if reconcileErr != nil || failures > 0 || stateErr != nil {
+		return
+	}
+	writeGuardianStateOrLog(w, guardianstate.StateReady)
+}
+
+// applyEnterpriseHookWatchStartupReadyTail finishes the watch-loop
+// startup after reconcile() has already run. Ready is published only
+// inside reconcile() via publishGuardianReadyAfterWatchReconcile.
+// runEnterpriseHookReconcileOnce can return err==nil with Failures>0
+// or StateErr!=nil, so this leftover must not write StateReady.
+func applyEnterpriseHookWatchStartupReadyTail(w io.Writer, startupErr error) {
+	if errors.Is(startupErr, errEnterpriseHookRotationBusy) {
+		fmt.Fprintf(w, "[hook-guardian] rotation in progress; deferring startup reconcile\n")
+	}
+}
+
 func writeGuardianStateOrLog(w io.Writer, state string) {
 	if enterpriseHookManifest == "" {
 		return
@@ -2516,14 +2637,15 @@ type enterpriseHookGuardianState struct {
 }
 
 type enterpriseHookGuardianAuthorization struct {
-	Version          int                          `json:"version"`
-	UpdatedAt        string                       `json:"updated_at"`
-	OK               bool                         `json:"ok"`
-	TargetCount      int                          `json:"target_count"`
-	SuccessCount     int                          `json:"success_count"`
-	FailureCount     int                          `json:"failure_count"`
-	PendingCount     int                          `json:"pending_count,omitempty"`
-	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
+	Version          int                             `json:"version"`
+	UpdatedAt        string                          `json:"updated_at"`
+	OK               bool                            `json:"ok"`
+	TargetCount      int                             `json:"target_count"`
+	SuccessCount     int                             `json:"success_count"`
+	FailureCount     int                             `json:"failure_count"`
+	PendingCount     int                             `json:"pending_count,omitempty"`
+	ProtectedTargets []enterpriseHookReconcileRow    `json:"protected_targets"`
+	Current          *enterpriseHookCurrentReadiness `json:"current,omitempty"`
 }
 
 // enterpriseHookGuardianActivation is a new, separately protected commit
@@ -2531,23 +2653,44 @@ type enterpriseHookGuardianAuthorization struct {
 // pair lets a failed servicing transaction restart the prior strict v1 binary;
 // normal activation still requires this exact-manifest receipt.
 type enterpriseHookGuardianActivation struct {
-	Version          int                          `json:"version"`
-	UpdatedAt        string                       `json:"updated_at"`
-	ReconcileID      string                       `json:"reconcile_id"`
-	Manifest         string                       `json:"manifest"`
-	ManifestSHA256   string                       `json:"manifest_sha256"`
-	OK               bool                         `json:"ok"`
-	TargetCount      int                          `json:"target_count"`
-	SuccessCount     int                          `json:"success_count"`
-	FailureCount     int                          `json:"failure_count"`
-	PendingCount     int                          `json:"pending_count,omitempty"`
-	ProtectedTargets []enterpriseHookReconcileRow `json:"protected_targets"`
+	Version          int                             `json:"version"`
+	UpdatedAt        string                          `json:"updated_at"`
+	ReconcileID      string                          `json:"reconcile_id"`
+	Manifest         string                          `json:"manifest"`
+	ManifestSHA256   string                          `json:"manifest_sha256"`
+	OK               bool                            `json:"ok"`
+	TargetCount      int                             `json:"target_count"`
+	SuccessCount     int                             `json:"success_count"`
+	FailureCount     int                             `json:"failure_count"`
+	PendingCount     int                             `json:"pending_count,omitempty"`
+	ProtectedTargets []enterpriseHookReconcileRow    `json:"protected_targets"`
+	Current          *enterpriseHookCurrentReadiness `json:"current,omitempty"`
 }
 
 func writeEnterpriseHookGuardianState(
 	dataDir,
 	manifest,
 	manifestSHA256 string,
+	rows []enterpriseHookReconcileRow,
+	failures int,
+	complete bool,
+) error {
+	return writeEnterpriseHookGuardianStateIdentified(
+		dataDir,
+		manifest,
+		manifestSHA256,
+		"",
+		rows,
+		failures,
+		complete,
+	)
+}
+
+func writeEnterpriseHookGuardianStateIdentified(
+	dataDir,
+	manifest,
+	manifestSHA256,
+	reconcileID string,
 	rows []enterpriseHookReconcileRow,
 	failures int,
 	complete bool,
@@ -2560,11 +2703,16 @@ func writeEnterpriseHookGuardianState(
 	if !validEnterpriseHookHex(manifestSHA256, sha256.Size) {
 		return fmt.Errorf("invalid hook guardian manifest SHA-256")
 	}
-	reconcileIDBytes := make([]byte, 16)
-	if _, err := io.ReadFull(rand.Reader, reconcileIDBytes); err != nil {
-		return fmt.Errorf("generate hook guardian reconcile ID: %w", err)
+	reconcileID = strings.TrimSpace(reconcileID)
+	if reconcileID == "" {
+		reconcileIDBytes := make([]byte, 16)
+		if _, err := io.ReadFull(rand.Reader, reconcileIDBytes); err != nil {
+			return fmt.Errorf("generate hook guardian reconcile ID: %w", err)
+		}
+		reconcileID = hex.EncodeToString(reconcileIDBytes)
+	} else if !validEnterpriseHookHex(reconcileID, 16) {
+		return fmt.Errorf("invalid hook guardian reconcile identity")
 	}
-	reconcileID := hex.EncodeToString(reconcileIDBytes)
 	successes := 0
 	pending := 0
 	for _, row := range rows {
@@ -2590,8 +2738,9 @@ func writeEnterpriseHookGuardianState(
 		return err
 	}
 	protected := mergeProtectedEnterpriseHookTargets(previous.ProtectedTargets, rows)
+	current := buildEnterpriseHookCurrentReadiness(rows, reconcileID, manifestSHA256, complete, failures)
 	authorization := enterpriseHookGuardianAuthorization{
-		Version:          1,
+		Version:          enterpriseHookGuardianAuthorizationVersionV2,
 		UpdatedAt:        now,
 		OK:               complete && failures == 0 && successes+pending == len(rows),
 		TargetCount:      len(rows),
@@ -2599,6 +2748,7 @@ func writeEnterpriseHookGuardianState(
 		FailureCount:     failures,
 		PendingCount:     pending,
 		ProtectedTargets: protected,
+		Current:          &current,
 	}
 	authorizationData, err := json.MarshalIndent(authorization, "", "  ")
 	if err != nil {
@@ -2669,11 +2819,7 @@ func writeEnterpriseHookGuardianState(
 		return fmt.Errorf("set hook guardian state ownership: %w", err)
 	}
 	if cfg != nil && managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		if err := managed.ValidateTrustedServiceRuntimeFilePath(
-			path,
-			"hook guardian state",
-			os.Getenv(managed.WindowsServiceAccountEnv),
-		); err != nil {
+		if err := enterpriseHookGuardianStateFileTrustCheck(path); err != nil {
 			return err
 		}
 	}
@@ -2694,6 +2840,7 @@ func writeEnterpriseHookGuardianState(
 		FailureCount:     failures,
 		PendingCount:     pending,
 		ProtectedTargets: protected,
+		Current:          &current,
 	}
 	activationData, err := json.MarshalIndent(activation, "", "  ")
 	if err != nil {
@@ -2808,8 +2955,12 @@ func loadEnterpriseHookGuardianAuthorization(dataDir string) (enterpriseHookGuar
 	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
 		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("parse hook guardian authorization %s: trailing content", path)
 	}
-	if state.Version != 1 {
+	if state.Version != enterpriseHookGuardianAuthorizationVersionV1 &&
+		state.Version != enterpriseHookGuardianAuthorizationVersionV2 {
 		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s has unsupported version %d", path, state.Version)
+	}
+	if err := validateEnterpriseHookCurrentReadiness(state.Current, state.Version); err != nil {
+		return enterpriseHookGuardianAuthorization{}, true, fmt.Errorf("hook guardian authorization %s: %w", path, err)
 	}
 	if state.TargetCount < 0 || state.SuccessCount < 0 || state.FailureCount < 0 || state.PendingCount < 0 ||
 		state.SuccessCount+state.FailureCount+state.PendingCount != state.TargetCount {
@@ -2877,6 +3028,15 @@ func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardia
 		activation.SuccessCount+activation.FailureCount+activation.PendingCount != activation.TargetCount {
 		return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation %s has an invalid schema", path)
 	}
+	if activation.Current != nil {
+		if err := validateEnterpriseHookCurrentReadiness(activation.Current, enterpriseHookGuardianAuthorizationVersionV2); err != nil {
+			return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation %s: %w", path, err)
+		}
+		if activation.Current.ReconcileID != activation.ReconcileID ||
+			activation.Current.ManifestSHA256 != activation.ManifestSHA256 {
+			return enterpriseHookGuardianActivation{}, true, fmt.Errorf("hook guardian activation %s current attestations do not bind the activation identity", path)
+		}
+	}
 	rows := make([]enterpriseHookReconcileRow, 0, len(activation.ProtectedTargets))
 	seen := map[string]struct{}{}
 	for _, row := range activation.ProtectedTargets {
@@ -2895,6 +3055,292 @@ func loadEnterpriseHookGuardianActivation(dataDir string) (enterpriseHookGuardia
 	}
 	activation.ProtectedTargets = rows
 	return activation, true, nil
+}
+
+func buildEnterpriseHookCurrentReadiness(
+	rows []enterpriseHookReconcileRow,
+	reconcileID,
+	manifestSHA256 string,
+	complete bool,
+	failures int,
+) enterpriseHookCurrentReadiness {
+	attestations := make([]enterpriseHookCurrentAttestation, 0, len(rows))
+	seen := map[string]struct{}{}
+	missing := 0
+	duplicates := false
+	for _, row := range rows {
+		if !row.OK || row.Pending {
+			continue
+		}
+		key := enterpriseHookProtectedTargetKey(row)
+		fingerprint := strings.TrimSpace(row.TokenFingerprint)
+		if key == "" || !managed.ValidScopedTokenFingerprint(fingerprint) {
+			missing++
+			continue
+		}
+		if _, exists := seen[key]; exists {
+			duplicates = true
+			continue
+		}
+		seen[key] = struct{}{}
+		attestations = append(attestations, enterpriseHookCurrentAttestation{
+			User:             strings.TrimSpace(row.User),
+			UserHome:         strings.TrimSpace(row.UserHome),
+			SID:              strings.TrimSpace(row.SID),
+			Connector:        strings.ToLower(strings.TrimSpace(row.Connector)),
+			OK:               true,
+			Generation:       reconcileID,
+			TokenFingerprint: fingerprint,
+			ManifestSHA256:   manifestSHA256,
+		})
+	}
+	sort.Slice(attestations, func(i, j int) bool {
+		return enterpriseHookCurrentAttestationKey(attestations[i]) < enterpriseHookCurrentAttestationKey(attestations[j])
+	})
+	pending := 0
+	for _, row := range rows {
+		if row.Pending {
+			pending++
+		}
+	}
+	ready := complete &&
+		failures == 0 &&
+		pending == 0 &&
+		missing == 0 &&
+		!duplicates &&
+		len(attestations) == len(rows) &&
+		len(rows) > 0
+	return enterpriseHookCurrentReadiness{
+		Version:        enterpriseHookGuardianAuthorizationVersionV2,
+		ReconcileID:    reconcileID,
+		ManifestSHA256: manifestSHA256,
+		Generation:     reconcileID,
+		OK:             ready,
+		TargetCount:    len(rows),
+		SuccessCount:   len(attestations),
+		FailureCount:   failures + missing,
+		Attestations:   attestations,
+	}
+}
+
+func enterpriseHookCurrentAttestationKey(row enterpriseHookCurrentAttestation) string {
+	return enterpriseHookProtectedTargetKey(enterpriseHookReconcileRow{
+		User:      row.User,
+		UserHome:  row.UserHome,
+		SID:       row.SID,
+		Connector: row.Connector,
+	})
+}
+
+func validateEnterpriseHookCurrentReadiness(current *enterpriseHookCurrentReadiness, authVersion int) error {
+	if authVersion == enterpriseHookGuardianAuthorizationVersionV1 {
+		if current != nil {
+			return errors.New("legacy v1 authorization includes current attestations")
+		}
+		return nil
+	}
+	if current == nil {
+		return errors.New("v2 authorization is missing current attestations")
+	}
+	if current.Version != enterpriseHookGuardianAuthorizationVersionV2 ||
+		!validEnterpriseHookHex(current.ReconcileID, 16) ||
+		!validEnterpriseHookHex(current.Generation, 16) ||
+		!validEnterpriseHookHex(current.ManifestSHA256, sha256.Size) ||
+		current.Generation != current.ReconcileID ||
+		current.TargetCount < 0 || current.SuccessCount < 0 || current.FailureCount < 0 ||
+		current.SuccessCount != len(current.Attestations) {
+		return errors.New("current attestations have an invalid schema")
+	}
+	seen := map[string]struct{}{}
+	generation := strings.TrimSpace(current.Generation)
+	manifest := strings.TrimSpace(current.ManifestSHA256)
+	for _, row := range current.Attestations {
+		if !row.OK {
+			return errors.New("current attestations contain an unsuccessful entry")
+		}
+		key := enterpriseHookCurrentAttestationKey(row)
+		if key == "" || !managed.ValidScopedTokenFingerprint(row.TokenFingerprint) {
+			return errors.New("current attestations contain an incomplete entry")
+		}
+		if row.Generation != generation || row.ManifestSHA256 != manifest {
+			return errors.New("current attestations mix generations or manifests")
+		}
+		if _, duplicate := seen[key]; duplicate {
+			return errors.New("current attestations contain a duplicate target")
+		}
+		seen[key] = struct{}{}
+	}
+	if current.OK && (len(current.Attestations) == 0 ||
+		current.FailureCount != 0 ||
+		current.SuccessCount != current.TargetCount) {
+		return errors.New("current readiness is true without a complete attestation set")
+	}
+	return nil
+}
+
+func compareEnterpriseHookCurrentReadinessPair(
+	authorization,
+	activation *enterpriseHookCurrentReadiness,
+) []string {
+	var issues []string
+	if err := validateEnterpriseHookCurrentReadiness(authorization, enterpriseHookGuardianAuthorizationVersionV2); err != nil {
+		issues = append(issues, fmt.Sprintf("authorization current attestations: %v", err))
+	}
+	if activation == nil {
+		issues = append(issues, "activation current attestations are missing")
+		return issues
+	}
+	if err := validateEnterpriseHookCurrentReadiness(activation, enterpriseHookGuardianAuthorizationVersionV2); err != nil {
+		issues = append(issues, fmt.Sprintf("activation current attestations: %v", err))
+	}
+	if authorization == nil || activation == nil {
+		return issues
+	}
+	if authorization.ReconcileID != activation.ReconcileID ||
+		authorization.Generation != activation.Generation ||
+		authorization.ManifestSHA256 != activation.ManifestSHA256 ||
+		authorization.OK != activation.OK ||
+		authorization.TargetCount != activation.TargetCount ||
+		authorization.SuccessCount != activation.SuccessCount ||
+		authorization.FailureCount != activation.FailureCount {
+		issues = append(issues, "authorization and activation current attestations do not match")
+		return issues
+	}
+	issues = append(issues, compareEnterpriseHookCurrentAttestationSets(
+		authorization.Attestations,
+		activation.Attestations,
+	)...)
+	return issues
+}
+
+func compareEnterpriseHookCurrentAttestationSets(
+	expected,
+	actual []enterpriseHookCurrentAttestation,
+) []string {
+	expectedByKey := make(map[string]enterpriseHookCurrentAttestation, len(expected))
+	actualByKey := make(map[string]enterpriseHookCurrentAttestation, len(actual))
+	var issues []string
+	for _, row := range expected {
+		key := enterpriseHookCurrentAttestationKey(row)
+		if key == "" {
+			issues = append(issues, fmt.Sprintf("current attestation is incomplete: %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+			continue
+		}
+		if _, duplicate := expectedByKey[key]; duplicate {
+			issues = append(issues, fmt.Sprintf("current attestation is duplicated: %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+			continue
+		}
+		expectedByKey[key] = row
+	}
+	for _, row := range actual {
+		key := enterpriseHookCurrentAttestationKey(row)
+		if key == "" {
+			issues = append(issues, "activation current attestations contain an incomplete target")
+			continue
+		}
+		if _, duplicate := actualByKey[key]; duplicate {
+			issues = append(issues, "activation current attestations contain a duplicate target")
+			continue
+		}
+		actualByKey[key] = row
+	}
+	for key, row := range expectedByKey {
+		got, covered := actualByKey[key]
+		if !covered {
+			issues = append(issues, fmt.Sprintf("activation current attestations do not cover %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+			continue
+		}
+		if got.TokenFingerprint != row.TokenFingerprint {
+			issues = append(issues, fmt.Sprintf("current attestations have a mismatched fingerprint for %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+		}
+	}
+	for key, row := range actualByKey {
+		if _, enabled := expectedByKey[key]; !enabled {
+			issues = append(issues, fmt.Sprintf("activation current attestations contain extra or stale target %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+		}
+	}
+	sort.Strings(issues)
+	return issues
+}
+
+func compareEnterpriseHookCurrentAttestationsAgainstRun(
+	run enterpriseHookVerifyRun,
+	current *enterpriseHookCurrentReadiness,
+) []string {
+	if current == nil {
+		return []string{"current attestations are missing"}
+	}
+	wantReady := run.Failures == 0 && run.Pending == 0 && len(run.Rows) > 0
+	if current.OK != wantReady {
+		return []string{"current readiness does not match this verification"}
+	}
+	expected := make([]enterpriseHookCurrentAttestation, 0, len(run.Rows))
+	for _, row := range run.Rows {
+		if !row.OK || row.Pending {
+			continue
+		}
+		expected = append(expected, enterpriseHookCurrentAttestation{
+			User:             row.User,
+			UserHome:         row.UserHome,
+			SID:              row.SID,
+			Connector:        row.Connector,
+			OK:               true,
+			TokenFingerprint: row.TokenFingerprint,
+		})
+	}
+	var issues []string
+	expectedByKey := make(map[string]enterpriseHookCurrentAttestation, len(expected))
+	actualByKey := make(map[string]enterpriseHookCurrentAttestation, len(current.Attestations))
+	for _, row := range expected {
+		key := enterpriseHookCurrentAttestationKey(row)
+		if key == "" || !managed.ValidScopedTokenFingerprint(row.TokenFingerprint) {
+			issues = append(issues, fmt.Sprintf("verified target is missing a current fingerprint: %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+			continue
+		}
+		expectedByKey[key] = row
+	}
+	for _, row := range current.Attestations {
+		key := enterpriseHookCurrentAttestationKey(row)
+		if key == "" {
+			issues = append(issues, "current attestations contain an incomplete target")
+			continue
+		}
+		actualByKey[key] = row
+	}
+	for key, row := range expectedByKey {
+		got, covered := actualByKey[key]
+		label := enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+			User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+		})
+		if !covered {
+			issues = append(issues, fmt.Sprintf("current attestations do not cover %s", label))
+			continue
+		}
+		if got.TokenFingerprint != row.TokenFingerprint {
+			issues = append(issues, fmt.Sprintf("current attestations have the wrong fingerprint for %s", label))
+		}
+	}
+	for key, row := range actualByKey {
+		if _, enabled := expectedByKey[key]; !enabled {
+			issues = append(issues, fmt.Sprintf("current attestations contain extra or stale target %s", enterpriseHookTargetLabel(enterpriseHookReconcileRow{
+				User: row.User, UserHome: row.UserHome, SID: row.SID, Connector: row.Connector,
+			})))
+		}
+	}
+	sort.Strings(issues)
+	return issues
 }
 
 func validEnterpriseHookHex(value string, byteLength int) bool {
