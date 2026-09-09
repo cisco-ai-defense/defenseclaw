@@ -581,12 +581,34 @@ def _read_regular_file(path: str, info: os.stat_result, max_bytes: int, label: s
     except UnsafePathError as exc:
         raise click.ClickException(f"{label} is not a trusted regular file.") from exc
     try:
-        raw = os.read(fd, max_bytes + 1)
+        # A single os.read() may return short, and POSIX permits that even for
+        # a regular file. Accepting the first chunk let YAML parse incomplete
+        # content and let guardian_manifest_digest hash incomplete bytes, so
+        # read to EOF and then prove the descriptor did not change underneath.
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            chunk = os.read(fd, 1 << 16)
+            if not chunk:
+                break
+            total += len(chunk)
+            if total > max_bytes:
+                raise click.ClickException(
+                    f"{label} exceeded the trusted size bound."
+                )
+            chunks.append(chunk)
+        after = os.fstat(fd)
+        if (
+            after.st_ino != info.st_ino
+            or after.st_dev != info.st_dev
+            or after.st_size != total
+        ):
+            raise click.ClickException(
+                f"{label} changed while it was being read."
+            )
     finally:
         os.close(fd)
-    if len(raw) > max_bytes:
-        raise click.ClickException(f"{label} exceeded the trusted size bound.")
-    return raw
+    return b"".join(chunks)
 
 
 def _sha256_regular_file(path: str, info: os.stat_result, max_bytes: int, label: str) -> str:

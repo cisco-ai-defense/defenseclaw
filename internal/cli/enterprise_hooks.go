@@ -717,9 +717,17 @@ func runEnterpriseHooksStatus(cmd *cobra.Command, _ []string) error {
 			enterpriseHookManifest,
 			manifestSHA256,
 		)...)
+		// A deferred reconcile is a supported state. buildEnterpriseHookCurrentReadiness
+		// clears Current.OK whenever any target is pending, so requiring OK here
+		// rejected every such deployment even though state, authorization and
+		// activation were all healthy. Both current records must still exist --
+		// only the OK flag is relaxed, and only while targets are pending, so
+		// incomplete non-pending coverage still fails closed. state.PendingCount
+		// is already on the persisted record, so no wire-format change is needed.
 		if authorization.Version != enterpriseHookGuardianAuthorizationVersionV2 ||
-			authorization.Current == nil || !authorization.Current.OK ||
-			activation.Current == nil || !activation.Current.OK {
+			authorization.Current == nil || activation.Current == nil ||
+			(state.PendingCount == 0 &&
+				(!authorization.Current.OK || !activation.Current.OK)) {
 			report.Errors = append(report.Errors, "current per-target attestations are not ready")
 		}
 		// The Guardian is the trusted live verifier on native Windows: it runs
