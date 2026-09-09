@@ -43,3 +43,9 @@ add_test(NAME acceptance COMMAND test_acceptance)
 
 add_executable(bench_latency bench_latency.c)
 target_link_libraries(bench_latency PRIVATE dclaw_core)
+
+if(DCLAW_CONTENT_SCAN)
+    add_executable(test_content_scanner test_content_scanner.c)
+    target_link_libraries(test_content_scanner PRIVATE dclaw_core)
+    add_test(NAME content_scanner COMMAND test_content_scanner)
+endif()

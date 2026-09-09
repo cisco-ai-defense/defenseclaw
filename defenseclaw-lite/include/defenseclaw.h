@@ -46,6 +46,8 @@ typedef enum {
     DCLAW_REASON_BLOOM_HIT      = 0x09,
     DCLAW_REASON_INVALID_INPUT  = 0x0A,
     DCLAW_REASON_RETROACTIVE    = 0x0B,
+    DCLAW_REASON_CONTENT_BLOCK  = 0x0C,
+    DCLAW_REASON_SSRF_BLOCK     = 0x0D,
 } dclaw_reason_t;
 
 typedef enum {
@@ -66,6 +68,28 @@ typedef enum {
     DCLAW_SE_MODE_DEGRADED,
     DCLAW_SE_MODE_DISABLED,
 } dclaw_se_failure_mode_t;
+
+typedef enum {
+    DCLAW_CONTENT_CATEGORY_NONE       = 0,
+    DCLAW_CONTENT_CATEGORY_SECRET     = 1,
+    DCLAW_CONTENT_CATEGORY_PII        = 2,
+    DCLAW_CONTENT_CATEGORY_CREDENTIAL = 3,
+    DCLAW_CONTENT_CATEGORY_EXFIL      = 4,
+    DCLAW_CONTENT_CATEGORY_INJECTION  = 5,
+    DCLAW_CONTENT_CATEGORY_COMMAND    = 6,
+} dclaw_content_category_t;
+
+typedef enum {
+    DCLAW_CONTENT_SCOPE_UNKNOWN     = 0,
+    DCLAW_CONTENT_SCOPE_SYSTEM      = 1,
+    DCLAW_CONTENT_SCOPE_USER_INPUT  = 2,
+    DCLAW_CONTENT_SCOPE_TOOL_OUTPUT = 3,
+} dclaw_content_scope_t;
+
+typedef enum {
+    DCLAW_DIRECTION_REQUEST  = 0,
+    DCLAW_DIRECTION_RESPONSE = 1,
+} dclaw_direction_t;
 
 /* === Core Structures === */
 
@@ -95,6 +119,10 @@ typedef struct {
     uint8_t  cap_flags;
     char     destination[DCLAW_DESTINATION_MAX];
     uint16_t session_id;
+    uint8_t  direction;
+    uint8_t  content_scope;
+    const char *content;
+    uint16_t content_len;
 } dclaw_tool_request_t;
 
 typedef struct {
