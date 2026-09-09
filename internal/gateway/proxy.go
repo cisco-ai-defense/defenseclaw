@@ -968,7 +968,10 @@ func (p *GuardrailProxy) handlePassthrough(w http.ResponseWriter, r *http.Reques
 	// input. Do not let top-level `system` replace it (#718). Anthropic
 	// and other system-only native shapes still fall through here when
 	// prompt is empty.
-	if userText == "" && partial.System != "" && strings.TrimSpace(partial.Prompt) == "" {
+	// System must be non-blank, not merely non-empty: a whitespace-only value
+	// would otherwise become the inspected text and produce an empty-content
+	// inspection instead of falling through to the other native shapes.
+	if userText == "" && strings.TrimSpace(partial.System) != "" && strings.TrimSpace(partial.Prompt) == "" {
 		userText = partial.System
 	}
 	// Responses API: input can be a string or array of message/item objects.

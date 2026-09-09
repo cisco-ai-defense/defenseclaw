@@ -57,8 +57,20 @@ func (s *Store) CollectSQLiteHealth(ctx context.Context) (SQLiteHealthSnapshot, 
 	}
 	startedAt := time.Now()
 	if err := retryBusyObserved(ctx, "sqlite_health_wal_checkpoint", s.sqliteBusyObservabilityV8(), func() error {
-		_, execErr := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)")
-		return execErr
+		// wal_checkpoint returns (busy, log, checkpointed). ExecContext discarded
+		// that row, so a checkpoint blocked by a reader looked successful and the
+		// recorded CheckpointMs described work that never happened. Scan the row
+		// and report a blocked checkpoint as busy so retryBusyObserved retries it
+		// -- the phrasing is what isSQLiteBusy matches.
+		var busy, walFrames, checkpointed int
+		if scanErr := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").
+			Scan(&busy, &walFrames, &checkpointed); scanErr != nil {
+			return scanErr
+		}
+		if busy != 0 {
+			return fmt.Errorf("sqlite_busy: wal_checkpoint(PASSIVE) was blocked")
+		}
+		return nil
 	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: checkpoint SQLite health: %w", err)
 	}
