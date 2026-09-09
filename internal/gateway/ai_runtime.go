@@ -1,0 +1,183 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// Copyright (c) 2026 Mike Storm. All rights reserved.
+//
+// Derived from ShadowClaw -- Universal Shadow AI Detector, by Mike Storm,
+// Distinguished Engineer, CCIE Security 13847. Reimplemented in Go and
+// absorbed into the DefenseClaw gateway; see NOTICE for the modifications.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+//
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"fmt"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+)
+
+// aiDiscoveryPartialResult is the summary value the inventory scanner writes
+// when a scan could not complete.
+const aiDiscoveryPartialResult = "partial"
+
+// aiRuntimeHealthInterval is how often the health record is refreshed while
+// the planes run. It is independent of the poll interval so a long poll
+// interval does not make the subsystem look stalled.
+const aiRuntimeHealthInterval = 10 * time.Second
+
+// discoveryCorrelationSource adapts the continuous discovery service to the
+// join's snapshot interface.
+//
+// It reports staleness and completeness rather than only the signals, because
+// "the scanner has not produced a snapshot yet" and "the scanner ran and found
+// nothing" are the two readings the join must never confuse.
+type discoveryCorrelationSource struct{ sidecar *Sidecar }
+
+// CorrelationSnapshot implements sensor.InventoryProvider.
+func (d discoveryCorrelationSource) CorrelationSnapshot() correlate.Snapshot {
+	service := d.sidecar.aiDiscoverySnapshot()
+	if service == nil {
+		// Discovery is disabled or has not started. An empty snapshot with no
+		// scan time is exactly the unobserved case, which changes no score in
+		// either direction.
+		return correlate.Snapshot{}
+	}
+	report := service.Snapshot()
+	// A partial scan hit a traversal budget or a permission error, so it cannot
+	// conclude that anything is absent. The join treats that as unobserved
+	// rather than as disagreement.
+	return correlate.Snapshot{
+		Signals:  report.Signals,
+		ScanTime: report.Summary.ScannedAt,
+		Complete: report.Summary.Result != aiDiscoveryPartialResult,
+	}
+}
+
+// runAIRuntime starts the AI Discovery runtime planes when enabled.
+func (s *Sidecar) runAIRuntime(ctx context.Context) error {
+	runtimeConfig := s.currentConfig().AIDiscovery.Runtime
+	if !runtimeConfig.Enabled {
+		s.health.SetAIRuntime(StateDisabled, "", nil)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+
+	service, err := sensor.New(sensor.Options{
+		Config:    runtimeConfig,
+		Inventory: discoveryCorrelationSource{sidecar: s},
+	})
+	if err != nil {
+		// A platform with no backend is a hard stop rather than a degraded
+		// start: a detector that reports nothing on an unknown platform is
+		// indistinguishable from one watching a quiet host.
+		s.health.SetAIRuntime(StateError, err.Error(), nil)
+		return fmt.Errorf("ai runtime: %w", err)
+	}
+	s.aiRuntimeMu.Lock()
+	s.aiRuntime = service
+	s.aiRuntimeMu.Unlock()
+
+	s.health.SetAIRuntime(StateStarting, "", map[string]interface{}{
+		"planes":             runtimeConfig.EffectivePlanes(),
+		"poll_interval_s":    int(runtimeConfig.EffectivePollInterval().Seconds()),
+		"min_risk_to_report": runtimeConfig.EffectiveMinRisk(),
+		"host_plane":         runtimeConfig.EnableHostPlane,
+		"dns_capture":        runtimeConfig.DNSCapture,
+		"correlate":          runtimeConfig.CorrelationEnabled(),
+	})
+
+	errCh := make(chan error, 1)
+	go func() { errCh <- service.Run(ctx) }()
+
+	ticker := time.NewTicker(aiRuntimeHealthInterval)
+	defer ticker.Stop()
+	for {
+		select {
+		case err := <-errCh:
+			if err != nil && ctx.Err() == nil && !isContextTermination(err) {
+				s.health.SetAIRuntime(StateError, err.Error(), nil)
+				return err
+			}
+			s.health.SetAIRuntime(StateStopped, "", nil)
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			return nil
+		case <-ticker.C:
+			s.publishAIRuntimeHealth(service.Snapshot())
+		case <-ctx.Done():
+			err := <-errCh
+			if err != nil && !isContextTermination(err) {
+				s.health.SetAIRuntime(StateError, err.Error(), nil)
+				return err
+			}
+			s.health.SetAIRuntime(StateStopped, "", nil)
+			return ctx.Err()
+		}
+	}
+}
+
+// publishAIRuntimeHealth records the current coverage.
+//
+// Every plane appears, running or not, and a degraded run says why. Reporting
+// only the healthy planes would make a dead subscription look identical to a
+// clean host.
+func (s *Sidecar) publishAIRuntimeHealth(snapshot sensor.Snapshot) {
+	planes := make(map[string]interface{}, len(snapshot.Planes))
+	for _, health := range snapshot.Planes {
+		entry := map[string]interface{}{
+			"available": health.Available,
+			"running":   health.Running,
+		}
+		if health.Mechanism != "" {
+			entry["mechanism"] = health.Mechanism
+		}
+		if health.Reason != "" {
+			entry["reason"] = health.Reason
+		}
+		planes[string(health.Plane)] = entry
+	}
+	details := map[string]interface{}{
+		"last_poll":                snapshot.ScannedAt.Format(time.RFC3339),
+		"findings":                 len(snapshot.Findings),
+		"processes_observed":       snapshot.ProcessesObserved,
+		"processes_skipped":        snapshot.ProcessesSkipped,
+		"connections_observed":     snapshot.ConnectionsObserved,
+		"connections_unattributed": snapshot.ConnectionsUnattributed,
+		"planes":                   planes,
+		"degraded":                 snapshot.Degraded,
+	}
+	if snapshot.Degraded {
+		details["degraded_reasons"] = sensor.SortedDegradedReasons(snapshot)
+	}
+	state := StateRunning
+	if snapshot.ScannedAt.IsZero() {
+		state = StateStarting
+	}
+	s.health.SetAIRuntime(state, "", details)
+}
+
+// aiRuntimeSnapshot returns the running service, or nil when the planes are
+// disabled or have not started.
+func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
+	if s == nil {
+		return nil
+	}
+	s.aiRuntimeMu.RLock()
+	defer s.aiRuntimeMu.RUnlock()
+	return s.aiRuntime
+}

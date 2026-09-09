@@ -58,6 +58,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/routing"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
+	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 	"github.com/defenseclaw/defenseclaw/internal/watcher"
 	"github.com/google/uuid"
@@ -93,6 +94,7 @@ type Sidecar struct {
 	hilt          *HILTApprovalManager
 	webhooks      *WebhookDispatcher
 	aiDiscovery   *inventory.ContinuousDiscoveryService
+	aiRuntime     *sensor.Service
 	appProtection *applicationProtectionController
 	osNotifier    *notifier.Dispatcher
 	configMgr     *ConfigManager
@@ -104,6 +106,7 @@ type Sidecar struct {
 
 	webhooksMu        sync.RWMutex
 	aiDiscoveryMu     sync.RWMutex
+	aiRuntimeMu       sync.RWMutex
 	apiMu             sync.RWMutex
 	apiServer         *APIServer
 	hookGuardsMu      sync.RWMutex
@@ -120,6 +123,7 @@ type Sidecar struct {
 	watcherRestartCh         chan struct{}
 	guardrailRestartCh       chan struct{}
 	aiRestartCh              chan struct{}
+	aiRuntimeRestartCh       chan struct{}
 	runCancelMu              sync.Mutex
 	runCancel                context.CancelFunc
 	observabilityV8Mu        sync.Mutex
@@ -470,6 +474,7 @@ func NewSidecar(cfg *config.Config, store *audit.Store, logger *audit.Logger, sh
 		watcherRestartCh:        make(chan struct{}, 1),
 		guardrailRestartCh:      make(chan struct{}, 1),
 		aiRestartCh:             make(chan struct{}, 1),
+		aiRuntimeRestartCh:      make(chan struct{}, 1),
 		alertCtx:                alertCtx,
 		alertCancel:             alertCancel,
 		judge:                   hookJudge,
@@ -1090,6 +1095,19 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 		defer wg.Done()
 		if err := s.runRestartable(runCtx, "ai discovery", s.aiRestartCh, s.runAIDiscovery); err != nil && runCtx.Err() == nil {
 			fmt.Fprintf(os.Stderr, "[sidecar] ai discovery exited with error: %v\n", err)
+			errCh <- err
+		}
+	}()
+
+	// Goroutine 5b: AI discovery runtime planes (opt-in via config). Separate
+	// from the inventory scanner above because the two fail independently: a
+	// blind runtime plane must not stop the inventory, and a failing inventory
+	// scan must not stop the planes.
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		if err := s.runRestartable(runCtx, "ai runtime", s.aiRuntimeRestartCh, s.runAIRuntime); err != nil && runCtx.Err() == nil {
+			fmt.Fprintf(os.Stderr, "[sidecar] ai runtime exited with error: %v\n", err)
 			errCh <- err
 		}
 	}()
@@ -1874,6 +1892,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 		}
 		if api := s.apiSnapshot(); api != nil {
 			api.SetAIDiscoveryService(nextAIDiscovery)
+			api.SetAIRuntimeService(s.aiRuntimeSnapshot())
 		}
 		// The API setter waits for leases using the old service before it
 		// publishes the replacement. A coalesced intermediate that the restart
@@ -1952,6 +1971,7 @@ func (s *Sidecar) applyConfigReloadSnapshot(
 	}
 	if aiRestart {
 		signalRestart(s.aiRestartCh)
+		signalRestart(s.aiRuntimeRestartCh)
 	}
 	preparedCommitted = true
 	return nil
@@ -6167,6 +6187,7 @@ func (s *Sidecar) runAPI(ctx context.Context) error {
 		api.SetHookJudge(judge)
 	}
 	api.SetAIDiscoveryService(s.aiDiscoverySnapshot())
+	api.SetAIRuntimeService(s.aiRuntimeSnapshot())
 	api.SetNotifier(s.osNotifier)
 	if s.opa != nil {
 		api.SetPolicyReloader(s.opa.Reload)

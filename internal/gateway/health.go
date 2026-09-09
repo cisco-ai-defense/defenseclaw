@@ -146,6 +146,7 @@ type HealthSnapshot struct {
 	Routing               SubsystemHealth  `json:"routing"`
 	Telemetry             SubsystemHealth  `json:"telemetry"`
 	AIDiscovery           SubsystemHealth  `json:"ai_discovery"`
+	AIRuntime             SubsystemHealth  `json:"ai_runtime"`
 	ApplicationProtection SubsystemHealth  `json:"application_protection"`
 	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
 	// Configuration is the overall daemon+guardian readiness state,
@@ -186,6 +187,7 @@ type SidecarHealth struct {
 	routing                               SubsystemHealth
 	telemetry                             SubsystemHealth
 	aiDiscovery                           SubsystemHealth
+	aiRuntime                             SubsystemHealth
 	applicationProtection                 SubsystemHealth
 	sandbox                               *SubsystemHealth
 	startedAt                             time.Time
@@ -954,6 +956,24 @@ func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, det
 	h.notifySubscribers()
 }
 
+// SetAIRuntime records the runtime planes' state.
+//
+// Reported separately from AIDiscovery because the two answer different
+// questions and fail independently: the inventory scanner can be healthy while
+// every runtime plane is blind, and an operator reading one as the other would
+// draw exactly the wrong conclusion about coverage.
+func (h *SidecarHealth) SetAIRuntime(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.aiRuntime = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
 func (h *SidecarHealth) SetApplicationProtection(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.applicationProtection = SubsystemHealth{
@@ -1359,6 +1379,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Routing:               h.routing,
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
+		AIRuntime:             h.aiRuntime,
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
