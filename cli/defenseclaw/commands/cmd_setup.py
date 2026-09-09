@@ -3658,16 +3658,27 @@ def _run_guardian_rotate(
     child_env.pop(_GATEWAY_TOKEN_ENV, None)
     child_env[GUARDIAN_AUTH_DIR_ENV] = guardian_authorization_dir(data_dir)
     child_env[GUARDIAN_MANIFEST_ENV] = plan.manifest
+    # Passing the custody-checked pathname to subprocess left a check-to-exec
+    # race: a writer replacing that path between the check and process creation
+    # would have this privileged phase execute the replacement. Bind the
+    # executable object once and spawn each phase from the held descriptor, the
+    # same way the gateway lifecycle phases already do.
     try:
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            text=True,
-            shell=False,
-            stdin=subprocess.DEVNULL,
-            env=child_env,
-            timeout=_TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS,
-        )
+        with bind_trusted_executable(executable) as bound:
+            result = run_bound_executable(
+                bound,
+                command[1:],
+                runner=subprocess.run,
+                capture_output=True,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                env=child_env,
+                timeout=_TOKEN_ROTATION_LIFECYCLE_TIMEOUT_SECONDS,
+            )
+    except ExecBindError as exc:
+        raise _RotateTokenGuardianError(
+            f"Guardian rotation {action} executable could not be bound during the token-rotation transaction."
+        ) from exc
     except subprocess.TimeoutExpired as exc:
         raise _RotateTokenGuardianError(
             f"Guardian rotation {action} timed out during the token-rotation transaction."

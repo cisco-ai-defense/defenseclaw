@@ -2448,11 +2448,29 @@ class RotateTokenGuardianCoordinatorTests(unittest.TestCase):
                     ),
                 )
 
+            # _run_guardian_rotate now spawns each phase from a bound executable
+            # descriptor rather than a pathname, so stub the binding. This test
+            # asserts env/argv propagation, not the exec-binding mechanism --
+            # that is covered by cli/tests/test_doctor_exec.py.
+            class _StubBound:
+                path = "/bin/defenseclaw"
+                fd = -1
+
+                def __enter__(self):
+                    return self
+
+                def __exit__(self, *_exc):
+                    return False
+
+            def fake_bound_run(bound, args, **kwargs):
+                return fake_run([bound.path, *list(args)], **kwargs)
+
             os.environ[GUARDIAN_AUTH_DIR_ENV] = auth_dir
             try:
                 with (
                     mock.patch.object(cmd_setup, "_gateway_lifecycle_executable", return_value="/bin/defenseclaw"),
-                    mock.patch("defenseclaw.commands.cmd_setup.subprocess.run", side_effect=fake_run),
+                    mock.patch.object(cmd_setup, "bind_trusted_executable", return_value=_StubBound()),
+                    mock.patch.object(cmd_setup, "run_bound_executable", side_effect=fake_bound_run),
                 ):
                     cmd_setup._run_guardian_rotate(
                         td,
