@@ -2030,9 +2030,18 @@ func TestHandlePassthrough_OllamaSystemAndPromptInspectsPrompt(t *testing.T) {
 			"model":  "llama3.2",
 			"prompt": "ollama native prompt",
 		})
+		// observe mode sets no blocking verdict, so handlePassthrough reaches
+		// doProviderRequest; without a local upstream this posted a real generate
+		// request to whatever listens on 127.0.0.1:11434.
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"model":"llama3.2","response":"","done":true}`))
+		}))
+		defer upstream.Close()
+
 		req := httptest.NewRequest(http.MethodPost, "/api/generate", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DC-Target-URL", "http://127.0.0.1:11434")
+		req.Header.Set("X-DC-Target-URL", upstream.URL)
 		req.Header.Set("X-AI-Auth", "Bearer inert-ollama")
 		req.RemoteAddr = "127.0.0.1:12345"
 		rec := httptest.NewRecorder()
@@ -2055,9 +2064,17 @@ func TestHandlePassthrough_OllamaSystemAndPromptInspectsPrompt(t *testing.T) {
 			"model":  "claude-sonnet-4",
 			"system": "system-only native prompt",
 		})
+		// Same shape: observe mode reaches doProviderRequest, so this sent a real
+		// outbound request to api.anthropic.com from a unit test.
+		upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"id":"msg_test","type":"message","role":"assistant"}`))
+		}))
+		defer upstream.Close()
+
 		req := httptest.NewRequest(http.MethodPost, "/v1/messages", bytes.NewReader(body))
 		req.Header.Set("Content-Type", "application/json")
-		req.Header.Set("X-DC-Target-URL", "https://api.anthropic.com")
+		req.Header.Set("X-DC-Target-URL", upstream.URL)
 		req.Header.Set("X-AI-Auth", "Bearer sk-ant-key")
 		req.RemoteAddr = "127.0.0.1:12345"
 		rec := httptest.NewRecorder()
