@@ -697,7 +697,8 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
                 [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
-                [string]$Action
+                [string]$Action,
+                [switch]$PurgeContractLocks
             )
             if ($Action -ne 'rollback') {
                 throw "unexpected direct recovery action: $Action"
@@ -1468,7 +1469,8 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)]
                 [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
-                [string]$Action
+                [string]$Action,
+                [switch]$PurgeContractLocks
             )
             $script:HarnessState.events.Add("teardown:$Action")
             $currentMetadata = Get-DefenseClawDeploymentMetadata `
@@ -1576,6 +1578,13 @@ targets:
                     return [pscustomobject]@{ ok = $true }
                 }
                 'finalize' {
+                    if ($PurgeContractLocks) {
+                        if (-not $script:HarnessState.ContainsKey(
+                                'purge_contract_lock_finalizations')) {
+                            $script:HarnessState.purge_contract_lock_finalizations = 0
+                        }
+                        $script:HarnessState.purge_contract_lock_finalizations++
+                    }
                     if ([bool]$script:HarnessState.active_references) {
                         throw 'finalize observed a surviving machine reference'
                     }
@@ -1599,12 +1608,14 @@ targets:
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
                 [Parameter(Mandatory)][string]$GatewayServiceName,
-                [Parameter(Mandatory)][string]$GuardianServiceName
+                [Parameter(Mandatory)][string]$GuardianServiceName,
+                [switch]$Purge
             )
             return Invoke-DefenseClawManagedHooksTeardownCommand `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -Action finalize
+                -Action finalize `
+                -PurgeContractLocks:$Purge
         }
         function script:Invoke-DefenseClawManagedHooksLifecycleSnapshotCommand {
             param(
@@ -2951,6 +2962,7 @@ targets:
                 service_contract_checks = 0
                 owned_checks = 0
                 removed_services = 0
+                purge_contract_lock_finalizations = 0
                 purged_state = $false
                 self_purge = [bool]$Purge
                 install_saw_retired_journal = $false
@@ -3097,6 +3109,12 @@ targets:
                     -Condition (-not (Microsoft.PowerShell.Management\Test-Path `
                         -LiteralPath $layout.ManagedHooksTeardownJournalPath)) `
                     -Message "$Name left a prepared journal after committed uninstall"
+                Assert-Harness `
+                    -Condition (
+                        $script:HarnessState.purge_contract_lock_finalizations -eq
+                            $(if ($Purge) { 1 } else { 0 })
+                    ) `
+                    -Message "$Name did not preserve purge-only contract-lock cleanup"
             }
             else {
                 Assert-Harness `
@@ -5429,7 +5447,8 @@ targets:
             [void](Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
                 -GatewayServiceName 'DefenseClawGateway' `
-                -GuardianServiceName 'DefenseClawHookGuardian')
+                -GuardianServiceName 'DefenseClawHookGuardian' `
+                -Purge)
             Remove-DefenseClawCommittedEmptyInstallRoot -Layout $Layout
             [void](Remove-DefenseClawCommittedManagedHooksTeardownJournal `
                 -Layout $Layout `

@@ -35,6 +35,13 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		if child.Flags().Lookup("json") == nil {
 			t.Fatalf("%s action is missing --json", child.Name())
 		}
+		purgeFlag := child.Flags().Lookup("purge-contract-locks")
+		if child.Name() == "finalize" && purgeFlag == nil {
+			t.Fatal("finalize action is missing --purge-contract-locks")
+		}
+		if child.Name() != "finalize" && purgeFlag != nil {
+			t.Fatalf("%s action unexpectedly accepts --purge-contract-locks", child.Name())
+		}
 		actions = append(actions, child.Name())
 	}
 	if !slices.Equal(actions, []string{"finalize", "prepare", "rollback", "verify"}) {

@@ -111,6 +111,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 	for _, action := range []string{"prepare", "verify", "rollback", "finalize"} {
 		action := action
 		var jsonOutput bool
+		var purgeContractLocks bool
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " managed hook machine-wiring teardown",
@@ -118,7 +119,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				report, err := runWindowsManagedHooksTeardown(action)
+				report, err := runWindowsManagedHooksTeardown(action, purgeContractLocks)
 				if jsonOutput {
 					if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil {
 						if err == nil {
@@ -153,6 +154,14 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "finalize" {
+			child.Flags().BoolVar(
+				&purgeContractLocks,
+				"purge-contract-locks",
+				false,
+				"clear manifest-owned per-user hook contract locks",
+			)
+		}
 		command.AddCommand(child)
 	}
 	return command
@@ -160,6 +169,7 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 
 func runWindowsManagedHooksTeardown(
 	action string,
+	purgeContractLocks bool,
 ) (windowsManagedHooksTeardownReport, error) {
 	report := windowsManagedHooksTeardownReport{
 		SchemaVersion: windowsManagedHooksTeardownSchema,
@@ -410,6 +420,7 @@ func runWindowsManagedHooksTeardown(
 			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
+				purgeContractLocks,
 			)
 		}
 		if err == nil {
@@ -1052,6 +1063,7 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
+	purgeContractLocks bool,
 ) (int, error) {
 	collected := 0
 	for _, target := range journal.Targets {
@@ -1072,6 +1084,25 @@ func finalizeWindowsManagedHooksTeardown(
 			)
 		}
 		collected += removed
+		if purgeContractLocks {
+			err := enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege(
+				func() error {
+					return connector.ClearManagedHookContractLockEntryForOwner(
+						target.DataDir,
+						target.Connector,
+						target.SID,
+					)
+				},
+			)
+			if err != nil {
+				return collected, fmt.Errorf(
+					"purge %s managed hook contract lock for %s: %w",
+					target.Connector,
+					target.SID,
+					err,
+				)
+			}
+		}
 	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {

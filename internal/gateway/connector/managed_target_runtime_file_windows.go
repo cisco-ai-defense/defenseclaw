@@ -26,6 +26,19 @@ const managedTargetRuntimeStageAttempts = 128
 var managedTargetRuntimeBeforePublish func(string) error
 
 func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace bool) error {
+	target, err := windowsManagedTargetRuntimeSID()
+	if err != nil {
+		return err
+	}
+	return writeManagedTargetRuntimeFileForTarget(path, data, replace, target)
+}
+
+func writeManagedTargetRuntimeFileForTarget(
+	path string,
+	data []byte,
+	replace bool,
+	target *windows.SID,
+) error {
 	if len(data) > atomicTransformMaxConfigBytes {
 		return fmt.Errorf(
 			"managed target runtime file exceeds %d-byte limit",
@@ -39,9 +52,11 @@ func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace boo
 	if err := validateAtomicTransformBoundLeaf(name); err != nil {
 		return fmt.Errorf("validate managed target runtime file name: %w", err)
 	}
-	target, err := windowsManagedTargetRuntimeSID()
-	if err != nil {
-		return err
+	if target == nil || target.IsWellKnown(windows.WinLocalSystemSid) ||
+		target.IsWellKnown(windows.WinLocalServiceSid) ||
+		target.IsWellKnown(windows.WinNetworkServiceSid) ||
+		target.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		return fmt.Errorf("managed target runtime owner is not an interactive user")
 	}
 	descriptor, err := windowsManagedTargetRuntimeSecurityDescriptor(target)
 	if err != nil {

@@ -13465,19 +13465,27 @@ function Invoke-DefenseClawManagedHooksTeardownCommand {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)]
         [ValidateSet('prepare', 'verify', 'rollback', 'finalize')]
-        [string]$Action
+        [string]$Action,
+        [switch]$PurgeContractLocks
     )
     Assert-DefenseClawAdministrator
+    $arguments = @(
+        'enterprise',
+        'windows',
+        'teardown-managed-hooks',
+        $Action,
+        '--json'
+    )
+    if ($PurgeContractLocks) {
+        if ($Action -cne 'finalize') {
+            throw '-PurgeContractLocks is valid only for managed-hook finalization'
+        }
+        $arguments += '--purge-contract-locks'
+    }
     $probe = Invoke-DefenseClawGatewayCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Arguments @(
-            'enterprise',
-            'windows',
-            'teardown-managed-hooks',
-            $Action,
-            '--json'
-        ) `
+        -Arguments $arguments `
         -Capture `
         -AllowFailure
     $reports = [Collections.Generic.List[object]]::new()
@@ -16730,7 +16738,8 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName,
-        [Parameter(Mandatory)][string]$GuardianServiceName
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [switch]$Purge
     )
     if (Microsoft.PowerShell.Management\Test-Path `
         -LiteralPath $Layout.PendingPath) {
@@ -16761,7 +16770,8 @@ function Complete-DefenseClawCommittedManagedHooksFinalization {
     return Invoke-DefenseClawManagedHooksTeardownCommand `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName `
-        -Action finalize
+        -Action finalize `
+        -PurgeContractLocks:$Purge
 }
 
 function Write-DefenseClawProtectedTextAtomic {
@@ -17993,7 +18003,8 @@ function Invoke-DefenseClawSelfUninstallRecovery {
             [void](Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
+                -GuardianServiceName $GuardianServiceName `
+                -Purge:([bool]$receipt.purge_requested))
             $retiredRoot = [string]$receipt.retired_install_root
             [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
             if ((Microsoft.PowerShell.Management\Test-Path `
@@ -18707,7 +18718,8 @@ function Invoke-DefenseClawCommittedUninstallCleanup {
             [void](Complete-DefenseClawCommittedManagedHooksFinalization `
                 -Layout $Layout `
                 -GatewayServiceName $GatewayServiceName `
-                -GuardianServiceName $GuardianServiceName)
+                -GuardianServiceName $GuardianServiceName `
+                -Purge:$Purge)
         }
         elseif ($teardownPhase -ceq 'finalized') {
             # Finalization no longer needs the executable tree. Validate the
@@ -20639,7 +20651,8 @@ function Invoke-DefenseClawUninstallLifecycle {
         [void](Complete-DefenseClawCommittedManagedHooksFinalization `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
-            -GuardianServiceName $GuardianServiceName)
+            -GuardianServiceName $GuardianServiceName `
+            -Purge:$Purge)
         if ($null -ne $selfUninstallReceipt) {
             $retiredRoot = [string]$selfUninstallReceipt.retired_install_root
             [IO.Directory]::Move($Layout.InstallRoot, $retiredRoot)
