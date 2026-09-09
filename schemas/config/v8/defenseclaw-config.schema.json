@@ -1082,6 +1082,73 @@
           "items": {
             "$ref": "#/$defs/pathString"
           }
+        },
+        "runtime": {
+          "$ref": "#/$defs/aiDiscoveryRuntime"
+        }
+      }
+    },
+    "aiDiscoveryRuntime": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "AI Discovery runtime planes: what actually ran, alongside the surrounding block's inventory of what is present. Disabled by default. Reads process argv, which the inventory detector deliberately does not collect; argv is classified as content and governed by each destination's redaction profile. Environment variable values are never read.",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": false
+        },
+        "poll_interval_s": {
+          "type": "integer",
+          "minimum": 5,
+          "maximum": 3600,
+          "description": "Sampling interval, and the window that distinguishes sustained inference from a momentary CPU spike."
+        },
+        "min_risk_to_report": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "planes": {
+          "type": "array",
+          "maxItems": 3,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "enum": ["a", "b", "c"]
+          },
+          "description": "Empty means a and b. Plane c additionally requires enable_host_plane; selecting it without that opt-in is ignored."
+        },
+        "enable_host_plane": {
+          "type": "boolean",
+          "default": false,
+          "description": "Explicit opt-in for kernel process, file, and identity events. Every host-plane signal is gated on an AI agent appearing in the process lineage."
+        },
+        "dns_capture": {
+          "type": "boolean",
+          "default": false,
+          "description": "Passive DNS observation, so an egress peer is named from the answer the process received rather than inferred from an address. Requires elevated privilege."
+        },
+        "chain_window_min": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1440,
+          "description": "How long a kill chain may take. A chain is a chain within a window, not over the lifetime of a long-running agent."
+        },
+        "sanctioned_endpoints": {
+          "type": "array",
+          "maxItems": 64,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 253
+          },
+          "description": "Gateway hostnames through which AI use is approved. Reaching one is inventory rather than alarm; going around one that exists is scored as a bypass."
+        },
+        "correlate": {
+          "type": "boolean",
+          "default": true,
+          "description": "Join runtime observations against the inventory snapshot. Disabling removes the read; it does not make findings score as though the inventory disagreed."
         }
       }
     },

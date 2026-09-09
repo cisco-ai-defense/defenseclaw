@@ -2152,6 +2152,32 @@ class PrivacyConfig:
 
 
 @dataclass
+class AIRuntimeConfig:
+    """AI Discovery runtime planes -- what actually ran.
+
+    Mirrors internal/config.AIRuntimeConfig. Disabled by default. The planes
+    read process argv, which the inventory scanner deliberately does not
+    collect; argv is classified as content on the wire and governed by each
+    destination's redaction profile. Environment variable values are never
+    read on any of these paths.
+    """
+
+    enabled: bool = False
+    poll_interval_s: int = 0
+    min_risk_to_report: int = 0
+    planes: list[str] = field(default_factory=list)
+    enable_host_plane: bool = False
+    dns_capture: bool = False
+    chain_window_min: int = 0
+    sanctioned_endpoints: list[str] = field(default_factory=list)
+    # None means "not stated", which resolves to enabled. Distinguishing that
+    # from an explicit false matters: disabling correlation removes the
+    # inventory read, it does not make findings score as though the inventory
+    # disagreed.
+    correlate: bool | None = None
+
+
+@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2172,6 +2198,7 @@ class AIDiscoveryConfig:
     confidence_policy_path: str = ""
     require_trusted_binary_paths: bool = False
     trusted_binary_prefixes: list[str] = field(default_factory=list)
+    runtime: AIRuntimeConfig = field(default_factory=lambda: AIRuntimeConfig())
 
 
 @dataclass
@@ -4894,6 +4921,24 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
         require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
+        runtime=_merge_ai_runtime(raw.get("runtime")),
+    )
+
+
+def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
+    if not isinstance(raw, dict):
+        return AIRuntimeConfig()
+    correlate = raw.get("correlate")
+    return AIRuntimeConfig(
+        enabled=bool(raw.get("enabled", False)),
+        poll_interval_s=int(raw.get("poll_interval_s", 0) or 0),
+        min_risk_to_report=int(raw.get("min_risk_to_report", 0) or 0),
+        planes=[str(v) for v in (raw.get("planes", []) or [])],
+        enable_host_plane=bool(raw.get("enable_host_plane", False)),
+        dns_capture=bool(raw.get("dns_capture", False)),
+        chain_window_min=int(raw.get("chain_window_min", 0) or 0),
+        sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
+        correlate=None if correlate is None else _coerce_bool(correlate),
     )
 
 
