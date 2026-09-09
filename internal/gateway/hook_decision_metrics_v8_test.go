@@ -197,7 +197,7 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 }
 
 func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
-	for _, connector := range []string{"codex", "claudecode"} {
+	for _, connector := range []string{"codex", "claudecode", "cursor"} {
 		for _, mode := range []struct {
 			name        string
 			capture     *hookDecisionRecordCapture

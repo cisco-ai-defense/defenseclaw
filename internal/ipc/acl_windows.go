@@ -66,10 +66,11 @@ const (
 //
 // `class` picks a per-object-type mask for Authenticated Users:
 //
-//   - aclObjectDirectory  ⇒ traverse + list ONLY. Authenticated
-//     Users MUST NOT gain FILE_ADD_FILE on the directory or a
-//     malicious local user could pre-create a file at the socket
-//     path while the daemon is stopped.
+//   - aclObjectDirectory  ⇒ traverse + list + metadata/security read.
+//     The metadata rights let AVC validate the recreated IPC endpoint
+//     after a gateway restart. Authenticated Users MUST NOT gain
+//     FILE_ADD_FILE on the directory or a malicious local user could
+//     pre-create a file at the socket path while the daemon is stopped.
 //   - aclObjectSocketFile ⇒ read + write. Enough for UDS connect()
 //   - gRPC handshake; still refuses WRITE_DAC so the auth-user
 //     population cannot rewrite the socket's ACL.
@@ -88,6 +89,13 @@ func applyBaselineIPCACL(path string, class aclObjectClass) error {
 	if err != nil {
 		return err
 	}
+	return applyBaselineIPCACLEntries(path, entries)
+}
+
+// applyBaselineIPCACLEntries is the common restart-time application boundary.
+// Keeping the OS write separate from service-SID lookup lets the Windows test
+// exercise repeated ACL reconciliation with a deterministic service SID.
+func applyBaselineIPCACLEntries(path string, entries []windows.EXPLICIT_ACCESS) error {
 	acl, err := windows.ACLFromEntries(entries, nil)
 	if err != nil {
 		return fmt.Errorf("ipc: build baseline ACL: %w", err)
@@ -154,8 +162,10 @@ func baselineIPCACEsForGatewaySID(
 	// both object classes. Authenticated Users: per-class mask.
 	//
 	// Directory mask: FILE_TRAVERSE (execute the dir) + FILE_LIST_DIRECTORY
-	// (list child names). Enough for a UDS client to path-resolve
-	// `<parent>\<socket>` and open() it. FILE_ADD_FILE is REFUSED —
+	// (list child names) + FILE_READ_EA, FILE_READ_ATTRIBUTES, and READ_CONTROL.
+	// Windows AF_UNIX path resolution needs the extended-attribute read, while
+	// the metadata rights let AVC inspect and validate a newly recreated
+	// endpoint after a gateway restart. FILE_ADD_FILE is REFUSED —
 	// a malicious auth-user must NOT be able to pre-create a decoy
 	// file at the socket path while the daemon is stopped. Windows'
 	// specific rights for a directory object; NOT the generic bits
@@ -165,13 +175,15 @@ func baselineIPCACEsForGatewaySID(
 	// Socket-file mask: GENERIC_READ | GENERIC_WRITE. Enough for the
 	// UDS `connect()` + gRPC handshake byte streams. WRITE_DAC is
 	// refused (not present in GENERIC_WRITE for FILE objects).
-	const directoryTraverseList windows.ACCESS_MASK = windows.FILE_TRAVERSE | windows.FILE_LIST_DIRECTORY
+	const directoryTraverseListInspect windows.ACCESS_MASK = windows.FILE_TRAVERSE |
+		windows.FILE_LIST_DIRECTORY | windows.FILE_READ_EA |
+		windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL
 	const socketReadWrite windows.ACCESS_MASK = windows.GENERIC_READ | windows.GENERIC_WRITE
 
 	var authUsersMask windows.ACCESS_MASK
 	switch class {
 	case aclObjectDirectory:
-		authUsersMask = directoryTraverseList
+		authUsersMask = directoryTraverseListInspect
 	case aclObjectSocketFile:
 		authUsersMask = socketReadWrite
 	default:

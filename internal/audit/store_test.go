@@ -827,8 +827,8 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != 5 {
-		t.Fatalf("actionable alert count=%d, want 5 canonical or legacy enforcement facts", counts.Alerts)
+	if counts.Alerts != len(want) {
+		t.Fatalf("actionable alert count=%d, want %d visible canonical or legacy alerts", counts.Alerts, len(want))
 	}
 
 }

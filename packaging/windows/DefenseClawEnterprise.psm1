@@ -2871,17 +2871,16 @@ function New-DefenseClawCanonicalPathAcl {
         'ManagedIPCDirectory' {
             # Match the gateway's bind-time IPC baseline: only the exact
             # service SID may create/remove the socket, while authenticated
-            # clients receive path traversal and child-name lookup only.
+            # clients receive path traversal, child-name lookup, and the
+            # metadata/security read rights AVC uses to validate a recreated
+            # endpoint after a gateway restart.
             $entries.Add([pscustomobject]@{
                 sid = $GatewayServiceSID
                 rights = [Security.AccessControl.FileSystemRights]::FullControl
             })
             $entries.Add([pscustomobject]@{
                 sid = $script:AuthenticatedUsersSID
-                rights = (
-                    [Security.AccessControl.FileSystemRights]::ListDirectory -bor
-                    [Security.AccessControl.FileSystemRights]::Traverse
-                )
+                rights = [Security.AccessControl.FileSystemRights]::ReadAndExecute
             })
         }
     }
@@ -14870,10 +14869,8 @@ function New-DefenseClawRequiredRights {
         }
         'ManagedIPCDirectory' {
             $required[$GatewayServiceSID] = [Security.AccessControl.FileSystemRights]::FullControl
-            $required[$script:AuthenticatedUsersSID] = (
-                [Security.AccessControl.FileSystemRights]::ListDirectory -bor
-                [Security.AccessControl.FileSystemRights]::Traverse
-            )
+            $required[$script:AuthenticatedUsersSID] =
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute
         }
     }
     return $required

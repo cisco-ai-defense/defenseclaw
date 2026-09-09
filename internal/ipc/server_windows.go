@@ -87,10 +87,11 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 	if err := winpath.RejectReparseChain(dir); err != nil {
 		return nil, fmt.Errorf("ipc: reject reparse chain %s: %w", dir, err)
 	}
-	// Directory gets the traverse+list-only Authenticated Users ACE.
-	// FILE_ADD_FILE is deliberately refused so an auth-user cannot
-	// pre-create a decoy at the socket path while the daemon is
-	// stopped (CR spec-004:PRRT_kwDORuAK-s6ankzk).
+	// Directory gets the read-only traversal/inspection Authenticated Users
+	// ACE. AVC needs to inspect the recreated endpoint after restart;
+	// FILE_ADD_FILE remains deliberately refused so an auth-user cannot
+	// pre-create a decoy at the socket path while the daemon is stopped
+	// (CR spec-004:PRRT_kwDORuAK-s6ankzk).
 	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
 		return nil, err
 	}

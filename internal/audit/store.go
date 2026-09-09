@@ -3492,6 +3492,41 @@ func alertEffectiveSeveritySQL() string {
 	END`
 }
 
+// alertEnforcedOutcomeSQL identifies an actual block/deny independently of
+// severity. Severity describes impact; it must never hide an enforcement fact
+// from the Active Alerts counter.
+func alertEnforcedOutcomeSQL() string {
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	return `(
+		(
+			event.bucket IN ('enforcement.action','network.egress')
+			AND ` + canonicalOutcome + ` IN (` + alertNonAllowOutcomeSQL + `)
+		)
+		OR (
+			event.bucket IS NULL
+			AND (
+				LOWER(COALESCE(event.action,'')) IN (` + alertNonAllowOutcomeSQL + `)
+				OR (
+					LOWER(COALESCE(event.action,'')) = 'connector-hook'
+					AND (
+						COALESCE(event.enforced, 0) = 1
+						OR (
+							INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+								' mode=observe ') = 0
+							AND (
+								INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+									' action=block ') > 0
+								OR INSTR(' ' || LOWER(COALESCE(event.details,'')) || ' ',
+									' action=deny ') > 0
+							)
+						)
+					)
+				)
+			)
+		)
+	)`
+}
+
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
 // the projection versions that must be included in the caller's preview
 // digest. Every caller-controlled value is bound as a SQL parameter.
@@ -3776,7 +3811,10 @@ func (s *Store) GetCounts() (Counts, error) {
 			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
 		))
 		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
-		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
+		  AND (
+			` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
+			OR ` + alertEnforcedOutcomeSQL() + `
+		  )
 		  AND NOT EXISTS (
 			  SELECT 1 FROM alert_acknowledgement_projection AS projection
 			  WHERE projection.alert_id = event.id
@@ -3794,11 +3832,11 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
-		// ActiveAlerts is the unacknowledged actionable queue, not a count
-		// of every non-INFO audit row. Keep this IPC surface aligned with
-		// the v8 disposition selector: real findings, explicit non-allow
-		// outcomes, and important health failures only. Detection-only,
-		// clean lifecycle, LOW/MEDIUM/WARNING, and reviewed rows stay out.
+		// ActiveAlerts is the unacknowledged actionable queue. Important
+		// findings and health failures retain their severity threshold, while
+		// every real enforced/non-allow outcome counts even when its severity
+		// is LOW or MEDIUM. Detection-only, clean lifecycle, and reviewed rows
+		// stay out.
 		{alertCountSQL, alertCountArgs, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},

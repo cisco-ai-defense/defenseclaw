@@ -531,6 +531,23 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("LogEvent hook CRITICAL: %v", err)
 	}
+	// Severity describes impact, not whether enforcement happened. A real
+	// block must enter Active Alerts at every severity.
+	if err := store.LogEvent(Event{
+		ID:       "hook-low",
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Details:  "connector=cursor action=block mode=action severity=LOW",
+		Enforced: true,
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "LOW",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook LOW: %v", err)
+	}
 	if err := store.LogEvent(Event{
 		ID: "legacy-finding", Action: "scan-finding", Target: "skill:test", Severity: "HIGH",
 	}); err != nil {
@@ -567,14 +584,17 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 		payload_json
 	) VALUES
 		('canonical-deny', ?, 'enforcement', 'gateway', '', 'INFO',
-		 'enforcement.action', 'action.applied',
-		 '{"defenseclaw.enforcement.effective_action":"deny"}'),
+			'enforcement.action', 'action.applied',
+			'{"defenseclaw.enforcement.effective_action":"deny"}'),
+		('canonical-medium-block', ?, 'enforcement', 'gateway', '', 'MEDIUM',
+			'enforcement.action', 'enforcement.block.applied',
+			'{"defenseclaw.enforcement.effective_action":"block"}'),
 		('health-error', ?, 'sink-failure', 'gateway', '', 'ERROR',
 		 'platform.health', 'destination.export_failed', '{}'),
 		('detection-only', ?, 'scan-finding', 'scanner', '', 'HIGH',
 		 'security.finding', 'finding.observed',
 		 '{"defenseclaw.finding.tags":["secret","detection-only"]}')`,
-		stamp, stamp, stamp); err != nil {
+		stamp, stamp, stamp, stamp); err != nil {
 		t.Fatalf("insert canonical alert fixtures: %v", err)
 	}
 
@@ -582,13 +602,66 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Two legacy enforced hooks, one legacy finding, one canonical deny, and one
-	// important health failure. Clean/unrelated/detection-only/reviewed rows
-	// are excluded. Guardrail evaluations are not counted because their
-	// enforcement.action companion is the canonical actionable fact.
-	if counts.Alerts != 5 {
-		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
+	// Three legacy enforced hooks (including LOW), one legacy finding, two
+	// canonical non-allow outcomes (including MEDIUM), and one important
+	// health failure. Clean/unrelated/detection-only/reviewed rows are excluded.
+	// Guardrail evaluations are not counted because their enforcement.action
+	// companion is the canonical actionable fact.
+	if counts.Alerts != 7 {
+		t.Errorf("Alerts = %d, want 7 active actionable alerts", counts.Alerts)
 	}
+}
+
+func TestStore_GetCounts_ActiveAlertsCountsLowSeverityBlockUntilAcknowledged(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertAlerts := func(want int) {
+		t.Helper()
+		counts, countErr := store.GetCounts()
+		if countErr != nil {
+			t.Fatal(countErr)
+		}
+		if counts.Alerts != want {
+			t.Fatalf("ActiveAlerts = %d, want %d", counts.Alerts, want)
+		}
+	}
+	assertAlerts(0)
+
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json
+	) VALUES
+		('low-finding', ?, 'scan-finding', 'scanner', '', 'LOW',
+		 'security.finding', 'finding.observed', '{}'),
+		('low-block', ?, 'block', 'gateway', '', 'LOW',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}'),
+		('medium-allow', ?, 'allow', 'gateway', '', 'MEDIUM',
+		 'enforcement.action', 'enforcement.allow.applied',
+		 '{"defenseclaw.enforcement.effective_action":"allow"}')`,
+		stamp, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	// The LOW finding remains below the alert threshold, but the LOW block is
+	// actionable because enforcement happened.
+	assertAlerts(1)
+
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES ('low-block', 'acknowledged', 'test', ?, 1, 'modern',
+		'ack-low-block', ?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	assertAlerts(0)
 }
 
 // --- Logger ---
