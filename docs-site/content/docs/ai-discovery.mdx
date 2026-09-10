@@ -658,6 +658,14 @@ can only explain a gateway that is already up. Add `--os linux|darwin|windows`
 to plan for a platform you are not standing on, or `--json` to feed a
 deployment tool.
 
+It also checks. Each line reads `[granted]`, `[MISSING]`, or `[unknown]` for
+the host you are on, so the output is a list of gaps rather than a list of
+requirements. `[unknown]` means this process cannot verify that grant from
+where it is running — reported as such rather than as missing, because
+sending an operator to change something already correct is its own kind of
+wrong answer. Asking about another OS never probes: it would be a confident
+wrong answer about a machine you are not on.
+
 **Unmanaged install — the operator grants these directly**
 
 | | macOS | Linux | Windows |

@@ -2125,6 +2125,118 @@ def runtime_selftest(
         ux.ok("every selected plane is running", indent="  ")
 
 
+def _probe_root() -> bool | None:
+    """Whether this process is running with full privilege."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:  # noqa: BLE001 - an unanswerable probe reports unknown
+            return None
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return None
+
+
+def _probe_full_disk_access() -> bool | None:
+    """Whether this process holds macOS Full Disk Access.
+
+    TCC.db is readable only with the grant, which makes opening it the
+    cheapest honest probe available. It answers for *this* process, which is
+    the right question: the grant attaches to the responsible process, so
+    asking about anything else would report someone else's permission.
+    """
+    if sys.platform != "darwin":
+        return None
+    candidate = Path.home() / "Library/Application Support/com.apple.TCC/TCC.db"
+    try:
+        with candidate.open("rb") as handle:
+            handle.read(1)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        # Missing or unreadable for some other reason: unknown, not denied.
+        return None
+
+
+def _probe_linux_capability(name: str) -> bool | None:
+    """Whether this process holds a capability, read from /proc/self/status."""
+    if not sys.platform.startswith("linux"):
+        return None
+    if _probe_root():
+        return True
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if not line.startswith("CapEff:"):
+            continue
+        try:
+            effective = int(line.split()[1], 16)
+        except (IndexError, ValueError):
+            return None
+        bit = _LINUX_CAPABILITY_BITS.get(name)
+        if bit is None:
+            return None
+        return bool(effective & (1 << bit))
+    return None
+
+
+# Capability bit numbers from linux/capability.h. Only the ones the planes
+# ask for, because an incomplete map is better than a stale copy of a header.
+_LINUX_CAPABILITY_BITS = {
+    "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_RAW": 13,
+    "CAP_SYS_ADMIN": 21,
+}
+
+
+def _probe_windows_audit(subcategory: str) -> bool | None:
+    """Whether an audit subcategory is enabled, via auditpol."""
+    if sys.platform != "win32":
+        return None
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    try:
+        completed = subprocess.run(
+            ["auditpol", "/get", f"/subcategory:{subcategory}"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in completed.stdout.splitlines():
+        if subcategory.lower() in line.lower():
+            return "success" in line.lower()
+    return None
+
+
+def _probe_windows_cmdline_audit() -> bool | None:
+    """Whether process-creation events carry command lines."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # noqa: PLC0415 - Windows only
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ProcessCreationIncludeCmdLine_Enabled")
+            return bool(value)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
 # _RUNTIME_GRANTS is what each plane needs, per OS, stated as something an
 # operator can actually do.
 #
@@ -2149,6 +2261,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "shadow egress (B)",
             "needs": "root, for machine-wide attribution",
+            "probe": "root",
             "why": (
                 "unprivileged lsof returns only this user's sockets, so other users' "
                 "egress is invisible rather than merely unattributed"
@@ -2158,6 +2271,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "shadow egress (B), DNS naming",
             "needs": "root, for /dev/bpf",
+            "probe": "root",
             "why": (
                 "naming a peer from the answer this host resolved is a direct "
                 "observation; without it peers are named by reverse DNS, less "
@@ -2168,6 +2282,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "agent actions (C)",
             "needs": "root AND Full Disk Access",
+            "probe": "darwin_fda",
             "why": (
                 "Endpoint Security refuses a client without the TCC grant, and "
                 "refuses it for the *responsible* process -- the terminal or "
@@ -2190,6 +2305,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "shadow egress (B)",
             "needs": "root or CAP_DAC_READ_SEARCH, for machine-wide attribution",
+            "probe": "cap_dac",
             "why": (
                 "/proc/net/tcp lists every connection to anyone, but the "
                 "/proc/<pid>/fd links that attribute a socket to a process are "
@@ -2200,6 +2316,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "shadow egress (B), DNS naming",
             "needs": "CAP_NET_RAW",
+            "probe": "cap_net_raw",
             "why": "AF_PACKET capture needs it; without it peers fall back to reverse DNS",
             "how": "setcap cap_net_raw+ep on the gateway, or run it as root",
         },
@@ -2215,6 +2332,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "agent actions (C), file events",
             "needs": "CAP_SYS_ADMIN",
+            "probe": "cap_sys_admin",
             "why": (
                 "fanotify needs it. Without it credential reads are inferred from "
                 "argv instead of observed, which sees the command but not the read"
@@ -2232,12 +2350,14 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "shadow egress (B)",
             "needs": "elevated token",
+            "probe": "root",
             "why": "GetExtendedTcpTable returns owning pids machine-wide only when elevated",
             "how": "run the gateway elevated",
         },
         {
             "plane": "agent actions (C), process and identity events",
             "needs": "elevated token AND Advanced Audit Policy",
+            "probe": "win_audit_proc",
             "why": "the Security channel carries nothing until the subcategories are on",
             "how": (
                 'auditpol /set /subcategory:"Process Creation" /success:enable '
@@ -2248,6 +2368,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "agent actions (C), command lines",
             "needs": "the separate command-line audit policy",
+            "probe": "win_cmdline",
             "why": (
                 "without it lineage still works and every argument-vector tactic "
                 "goes undetected, which is most of them"
@@ -2269,6 +2390,35 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         },
     ],
 }
+
+
+def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
+    """Resolve a grant's current state, or None when it cannot be known.
+
+    Unknown is a real answer and is reported as such. Telling an operator a
+    grant is missing when it is merely unverifiable sends them to change
+    something that was already correct, which is worse than saying so.
+    """
+    if not probe or not for_this_host:
+        return None
+    if probe == "root":
+        return _probe_root()
+    if probe == "darwin_fda":
+        granted = _probe_full_disk_access()
+        if granted is None:
+            return None
+        return bool(granted and _probe_root())
+    if probe == "cap_dac":
+        return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_raw":
+        return _probe_linux_capability("CAP_NET_RAW")
+    if probe == "cap_sys_admin":
+        return _probe_linux_capability("CAP_SYS_ADMIN")
+    if probe == "win_audit_proc":
+        return _probe_windows_audit("Process Creation")
+    if probe == "win_cmdline":
+        return _probe_windows_cmdline_audit()
+    return None
 
 
 @discovery_runtime.command("permissions")
@@ -2295,8 +2445,22 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
     if grants is None:
         raise SystemExit(f"no permission guidance for {resolved}")
 
+    for_this_host = target_os is None
+    evaluated = []
+    for grant in grants:
+        if grant["needs"] == "nothing":
+            # Nothing to grant is not an unknown. Rendering it as one would
+            # bury the entries that do need action among ones that never will.
+            state: bool | None = True
+        else:
+            state = _evaluate_grant(grant.get("probe"), for_this_host)  # type: ignore[arg-type]
+        evaluated.append({**grant, "granted": state})
+
     if as_json:
-        click.echo(json.dumps({"os": resolved, "grants": grants}, indent=2, sort_keys=True))
+        click.echo(json.dumps(
+            {"os": resolved, "checked_this_host": for_this_host, "grants": evaluated},
+            indent=2, sort_keys=True,
+        ))
         return
 
     ux.section(f"AI discovery runtime permissions ({resolved})")
@@ -2305,12 +2469,32 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
         "Granting them is how the coverage gets complete, not how it starts.",
         indent="  ",
     )
-    for grant in grants:
-        ux.subhead(f"{grant['plane']}", indent="  ")
+    missing = 0
+    for grant in evaluated:
+        state = grant["granted"]
+        if state is True:
+            mark = "[granted]"
+        elif state is False:
+            mark = "[MISSING]"
+            missing += 1
+        else:
+            mark = "[unknown]"
+        ux.subhead(f"{mark} {grant['plane']}", indent="  ")
         ux.subhead(f"needs: {grant['needs']}", indent="    ")
         ux.subhead(f"why:   {grant['why']}", indent="    ")
-        if grant["how"]:
+        if grant["how"] and state is not True:
             ux.subhead(f"grant: {grant['how']}", indent="    ")
+    if for_this_host:
+        if missing:
+            ux.warn(f"{missing} grant(s) missing on this host", indent="  ")
+        else:
+            ux.ok("nothing this check can see is missing", indent="  ")
+        ux.subhead(
+            "An [unknown] is not a failure: it is a grant this process cannot "
+            "verify from where it is running, and reporting it as missing "
+            "would send you to change something already correct.",
+            indent="  ",
+        )
     ux.subhead(
         "In a managed enterprise install the gateway is deliberately "
         "de-privileged and a separate sensor helper holds these instead; see "

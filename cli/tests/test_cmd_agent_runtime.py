@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from typing import Any
 
 import pytest
@@ -353,3 +354,50 @@ def test_runtime_permissions_names_the_windows_command_line_policy():
     assert result.exit_code == 0
     assert "ProcessCreationIncludeCmdLine_Enabled" in result.output
     assert "auditpol" in result.output
+
+
+def test_runtime_permissions_reports_state_not_just_requirements():
+    """A list of requirements is not actionable; a list of gaps is.
+
+    The unprivileged test process cannot hold root, so the grants that
+    depend on it must read as missing rather than as unknown -- an
+    [unknown] an operator cannot act on is the same as no answer.
+    """
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    result = CliRunner().invoke(runtime_permissions, ["--json"])
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["checked_this_host"] is True
+
+    by_state: dict[object, int] = {}
+    for entry in payload["grants"]:
+        by_state[entry["granted"]] = by_state.get(entry["granted"], 0) + 1
+        # An entry needing nothing is settled, never unknown.
+        if entry["needs"] == "nothing":
+            assert entry["granted"] is True, entry
+    # Something must have been decided either way; an all-unknown report is
+    # indistinguishable from not having checked.
+    assert by_state.get(True, 0) + by_state.get(False, 0) > 0, payload
+
+
+def test_runtime_permissions_does_not_probe_another_host_os():
+    """Asking about a platform you are not on must not report its state.
+
+    Probing this host and labelling the result as another OS's would be a
+    confident wrong answer, which is worse than declining to answer.
+    """
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    other = "windows" if sys.platform != "win32" else "linux"
+    result = CliRunner().invoke(runtime_permissions, ["--os", other, "--json"])
+    assert result.exit_code == 0
+    payload = json.loads(result.output)
+    assert payload["checked_this_host"] is False
+    for entry in payload["grants"]:
+        if entry["needs"] != "nothing":
+            assert entry["granted"] is None, entry
