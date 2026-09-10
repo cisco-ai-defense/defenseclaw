@@ -41,6 +41,7 @@ def test_runtime_is_nested_under_discovery_not_under_agent() -> None:
         "disable",
         "enable",
         "findings",
+        "permissions",
         "scan",
         "selftest",
         "status",
@@ -288,3 +289,67 @@ def test_severity_filter_narrows_the_table_and_tolerates_unknown_bands(
     assert unfiltered.exit_code == 0, unfiltered.output
     for process in ("critproc", "lowproc", "weirdproc"):
         assert process in unfiltered.output
+
+
+def test_runtime_permissions_covers_every_os_and_plane():
+    """The install-time answer has to exist for every platform we ship.
+
+    'runtime selftest' can only explain a gateway that is already running.
+    An operator deciding what to grant before installing needs an answer
+    that does not depend on anything being up, and a plane missing from
+    that answer is a plane whose blindness nobody was warned about.
+    """
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    for target in ("darwin", "linux", "windows"):
+        result = CliRunner().invoke(runtime_permissions, ["--os", target, "--json"])
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["os"] == target
+        planes = " ".join(entry["plane"] for entry in payload["grants"])
+        # All three planes must be represented, whatever the OS calls them.
+        assert "(A)" in planes, target
+        assert "(B)" in planes, target
+        assert "(C)" in planes, target
+        for entry in payload["grants"]:
+            # A grant with no stated reason is one an operator cannot weigh.
+            assert entry["needs"], entry
+            assert entry["why"], entry
+            # "how" may be absent only when nothing needs granting.
+            if entry["needs"] != "nothing":
+                assert entry["how"], entry
+
+
+def test_runtime_permissions_names_the_macos_tcc_grant():
+    """Full Disk Access is the grant people get wrong, twice over.
+
+    It is required on top of root, and it applies to the responsible
+    process rather than the gateway binary. Both were observed live: as
+    root without it, Endpoint Security refused the client outright.
+    """
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    result = CliRunner().invoke(runtime_permissions, ["--os", "darwin"])
+    assert result.exit_code == 0
+    assert "Full Disk Access" in result.output
+    assert "responsible" in result.output
+
+
+def test_runtime_permissions_names_the_windows_command_line_policy():
+    """Argv on Windows is a second, separate policy from the audit itself.
+
+    With only the audit subcategories enabled, lineage works and every
+    argument-vector tactic silently does not.
+    """
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    result = CliRunner().invoke(runtime_permissions, ["--os", "windows"])
+    assert result.exit_code == 0
+    assert "ProcessCreationIncludeCmdLine_Enabled" in result.output
+    assert "auditpol" in result.output

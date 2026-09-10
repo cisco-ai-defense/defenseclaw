@@ -614,7 +614,7 @@ which parts it has rather than implying it has all of them.
 
 | Platform | Source | Needs | Delivers | Does not |
 | --- | --- | --- | --- | --- |
-| macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | exec with argv, exit, file read/write on watched paths | account creation and privilege events, which are recognised from argv instead |
+| macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | all six kinds: exec with argv, exit, file read/write on watched paths, and account/privilege events recognised from the exec argument vector | — |
 | Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
 | Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
 | Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
@@ -640,6 +640,130 @@ $audit = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
 New-Item -Path $audit -Force | Out-Null
 Set-ItemProperty -Path $audit -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
 ```
+
+### What to grant, per OS
+
+Every plane runs without any of this and reports what it cannot see. Granting
+these is how coverage becomes complete, not how it starts — nothing here is a
+prerequisite for installing or running.
+
+Ask the host itself rather than reading a table:
+
+```bash
+defenseclaw agent discovery runtime permissions
+```
+
+It answers before anything is running, which is the point: `runtime selftest`
+can only explain a gateway that is already up. Add `--os linux|darwin|windows`
+to plan for a platform you are not standing on, or `--json` to feed a
+deployment tool.
+
+**Unmanaged install — the operator grants these directly**
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
+| **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
+| **B** DNS naming | root, for `/dev/bpf` | `CAP_NET_RAW` | elevated token |
+| **C** process + identity events | root **and** Full Disk Access | nothing | elevated **and** Advanced Audit Policy |
+| **C** file events | included above | `CAP_SYS_ADMIN` (fanotify) | a SACL per audited object |
+| **C** command lines | included above | included above | the separate command-line audit policy |
+
+Three of these are worth calling out because they are the ones that get
+missed:
+
+<Callout type="warn">
+**macOS Full Disk Access applies to the responsible process** — the terminal
+or daemon that launched the gateway, not the gateway binary. Without it,
+Endpoint Security refuses the client outright even when running as root, and
+Plane C reports itself stopped with Apple's own message.
+
+**Windows argv is a second policy.** The audit subcategories turn the events
+on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors
+inside them. With only the first, lineage works and nearly every tactic
+silently does not.
+
+**Linux Plane C has two independent halves.** `cn_proc` needs nothing, so
+process events work unprivileged; `fanotify` needs `CAP_SYS_ADMIN`. The plane
+starts on whichever half it can and reports the other absent, rather than
+failing whole.
+</Callout>
+
+**Managed enterprise install — the installer arranges these**
+
+The gateway is deliberately de-privileged here, so with one exception these
+grants do not go to it:
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | virtual service account |
+| Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
+| Who holds the privilege | the gateway | the helper (root) | the helper |
+| Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
+
+macOS is the exception: its managed gateway already runs as root for an
+unrelated reason, so there is nothing to broker and the only outstanding grant
+is the TCC profile. Linux and Windows de-privilege the gateway, so the helper
+holds the capabilities instead and the operator grants nothing at the gateway
+at all.
+
+### Where the privilege lives
+
+Plane C needs to read the kernel. The gateway is the component least entitled
+to: it is network-facing, so a managed deployment de-privileges it on purpose.
+On Linux it runs as an unprivileged account inside a systemd sandbox; on
+Windows it runs as a dedicated virtual service account. Only the managed macOS
+daemon runs as root, and for an unrelated reason — the cloud auth provider has
+to re-perm its per-machine credential store.
+
+Measured under the shipped Linux unit, a gateway reading directly sees
+**one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
+hides every other process before privilege is even considered,
+`RestrictAddressFamilies` blocks `AF_NETLINK` and `AF_PACKET`, and the empty
+`CapabilityBoundingSet` blocks `fanotify`.
+
+So acquisition is brokered instead. `defenseclaw-sensor-helper` holds the
+privilege, does nothing else, and answers a fixed set of questions:
+
+<Callout type="info">
+The helper takes **no instruction about what to read**. There is no path,
+filter, pid, glob, or command anywhere in a request — a test asserts the
+request type's field count so one cannot be added unnoticed. What it watches
+comes from its own root-owned configuration. A compromised gateway can
+therefore obtain the process table it would have had anyway, and cannot turn a
+root process into a general-purpose file reader.
+</Callout>
+
+| Setting | Value |
+| --- | --- |
+| `ai_discovery.runtime.acquisition` | `auto` (default), `direct`, or `helper` |
+| Transport | `AF_UNIX` socket, mode `0660`, owned by the gateway's group |
+| Peer check (Linux, macOS) | kernel-supplied uid via `SO_PEERCRED` / `LOCAL_PEERCRED`, which the peer cannot forge |
+| Peer check (Windows) | the socket DACL, refused in-kernel at open |
+| Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
+
+`auto` brokers only where the gateway was de-privileged *and* a helper is
+therefore installed. It reads directly on a managed macOS host, because that
+gateway is already root and a broker would add a failure mode for nothing, and
+on an unmanaged workstation, where there is no helper to ask and the honest
+answer is to read what it can and report the shortfall.
+
+With the helper running, that same sandboxed Linux gateway reports
+`degraded: false` and detects a full credential-access → identity-creation →
+exfiltration chain, including file reads observed through `fanotify` — a
+syscall it cannot itself make.
+
+```bash
+systemctl enable --now defenseclaw-sensor-helper
+```
+
+<Callout type="warn">
+The helper needs `CAP_CHOWN` alongside the capabilities acquisition uses. It
+hands the socket to the gateway's group, and without it the socket stays
+root-owned, the gateway cannot open it, and the helper would otherwise come up
+reporting success while brokering nothing. The listener verifies the ownership
+took and refuses to start rather than allow that.
+</Callout>
 
 ### Naming a peer: DNS capture
 

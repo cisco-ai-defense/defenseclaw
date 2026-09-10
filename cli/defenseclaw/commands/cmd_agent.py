@@ -22,6 +22,7 @@ import dataclasses
 import hashlib
 import ipaddress
 import json
+import sys
 import os
 import time
 from collections.abc import Mapping
@@ -2122,6 +2123,200 @@ def runtime_selftest(
             ux.subhead(f"- {reason}", indent="    ")
     else:
         ux.ok("every selected plane is running", indent="  ")
+
+
+# _RUNTIME_GRANTS is what each plane needs, per OS, stated as something an
+# operator can actually do.
+#
+# It is static on purpose. The point of this command is to be answerable
+# *before* anything is running -- at install time, or on a host where the
+# planes came up blind and the operator needs to know what to change. A
+# reason derived from a live snapshot cannot answer "what should I grant
+# before I start", which is the question people actually ask.
+#
+# `check` is a callable returning None when this process cannot tell. It is
+# deliberately allowed to be uncertain: claiming a grant is missing when it
+# is merely unverifiable would send an operator to change something that was
+# already correct.
+_RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
+    "darwin": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads the process table through ps(1), which any user may do",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root, for machine-wide attribution",
+            "why": (
+                "unprivileged lsof returns only this user's sockets, so other users' "
+                "egress is invisible rather than merely unattributed"
+            ),
+            "how": "run the gateway as root (the packaged LaunchDaemon already does)",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "root, for /dev/bpf",
+            "why": (
+                "naming a peer from the answer this host resolved is a direct "
+                "observation; without it peers are named by reverse DNS, less "
+                "confidently"
+            ),
+            "how": "run the gateway as root, or set dns_capture: false to stop asking",
+        },
+        {
+            "plane": "agent actions (C)",
+            "needs": "root AND Full Disk Access",
+            "why": (
+                "Endpoint Security refuses a client without the TCC grant, and "
+                "refuses it for the *responsible* process -- the terminal or "
+                "daemon that launched the gateway, not the gateway binary"
+            ),
+            "how": (
+                "System Settings > Privacy & Security > Full Disk Access, add the "
+                "process that launches the gateway. Managed installs ship this as "
+                "an MDM PPPC profile"
+            ),
+        },
+    ],
+    "linux": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads /proc, which is world-readable for process stat",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root or CAP_DAC_READ_SEARCH, for machine-wide attribution",
+            "why": (
+                "/proc/net/tcp lists every connection to anyone, but the "
+                "/proc/<pid>/fd links that attribute a socket to a process are "
+                "readable only by the owner or root"
+            ),
+            "how": "run the gateway as root, or grant CAP_DAC_READ_SEARCH",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "CAP_NET_RAW",
+            "why": "AF_PACKET capture needs it; without it peers fall back to reverse DNS",
+            "how": "setcap cap_net_raw+ep on the gateway, or run it as root",
+        },
+        {
+            "plane": "agent actions (C), process events",
+            "needs": "nothing",
+            "why": (
+                "the cn_proc netlink connector is readable unprivileged on most "
+                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+            ),
+            "how": None,
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "CAP_SYS_ADMIN",
+            "why": (
+                "fanotify needs it. Without it credential reads are inferred from "
+                "argv instead of observed, which sees the command but not the read"
+            ),
+            "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+    ],
+    "windows": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing for this user's processes; elevation for all",
+            "why": "OpenProcess on another user's process needs an elevated token",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "elevated token",
+            "why": "GetExtendedTcpTable returns owning pids machine-wide only when elevated",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "agent actions (C), process and identity events",
+            "needs": "elevated token AND Advanced Audit Policy",
+            "why": "the Security channel carries nothing until the subcategories are on",
+            "how": (
+                'auditpol /set /subcategory:"Process Creation" /success:enable '
+                "/failure:enable   (also User Account Management, Sensitive "
+                "Privilege Use)"
+            ),
+        },
+        {
+            "plane": "agent actions (C), command lines",
+            "needs": "the separate command-line audit policy",
+            "why": (
+                "without it lineage still works and every argument-vector tactic "
+                "goes undetected, which is most of them"
+            ),
+            "how": (
+                "reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+                "\\Policies\\System\\Audit /v "
+                "ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f"
+            ),
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "a SACL on each audited object",
+            "why": (
+                "event 4663 is only emitted for objects with an audit ACE, so "
+                "credential reads and persistence writes are not observable without one"
+            ),
+            "how": "set an audit ACE on the credential paths you care about",
+        },
+    ],
+}
+
+
+@discovery_runtime.command("permissions")
+@click.option("--json", "as_json", is_flag=True, help="Output the grants as JSON.")
+@click.option("--os", "target_os",
+              type=click.Choice(["darwin", "linux", "windows"]),
+              default=None, help="Report for another OS instead of this one.")
+@pass_ctx
+def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -> None:
+    """What each runtime plane needs, and how to grant it.
+
+    Answerable before anything is running, which is the point: an operator
+    installing DefenseClaw needs to know what to grant up front, and
+    'runtime selftest' can only explain a gateway that is already up.
+    """
+    from defenseclaw import ux
+
+    resolved = target_os or sys.platform
+    if resolved.startswith("linux"):
+        resolved = "linux"
+    elif resolved == "win32":
+        resolved = "windows"
+    grants = _RUNTIME_GRANTS.get(resolved)
+    if grants is None:
+        raise SystemExit(f"no permission guidance for {resolved}")
+
+    if as_json:
+        click.echo(json.dumps({"os": resolved, "grants": grants}, indent=2, sort_keys=True))
+        return
+
+    ux.section(f"AI discovery runtime permissions ({resolved})")
+    ux.subhead(
+        "Every plane runs without these and reports what it cannot see. "
+        "Granting them is how the coverage gets complete, not how it starts.",
+        indent="  ",
+    )
+    for grant in grants:
+        ux.subhead(f"{grant['plane']}", indent="  ")
+        ux.subhead(f"needs: {grant['needs']}", indent="    ")
+        ux.subhead(f"why:   {grant['why']}", indent="    ")
+        if grant["how"]:
+            ux.subhead(f"grant: {grant['how']}", indent="    ")
+    ux.subhead(
+        "In a managed enterprise install the gateway is deliberately "
+        "de-privileged and a separate sensor helper holds these instead; see "
+        "the AI Discovery docs.",
+        indent="  ",
+    )
 
 
 @discovery_runtime.command("scan")
