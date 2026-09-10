@@ -499,3 +499,45 @@ def test_grant_confirmed_runs_exactly_the_planned_commands(monkeypatch):
 
     cmd_agent._apply_grants("linux", revert=False, assume_yes=False)
     assert ran == cmd_agent._linux_grant_commands("/usr/bin/true", False)
+
+
+def test_runtime_acquisition_survives_the_merge():
+    """A setting the Python layer does not know is a setting it erases.
+
+    _merge_ai_runtime rebuilds the runtime block from a whitelist, so any
+    key missing from it is dropped on the next save. An operator who pinned
+    acquisition to "direct" while diagnosing would have found it silently
+    gone after any CLI config write, with the gateway quietly back on auto.
+    """
+    from defenseclaw.config import _merge_ai_runtime
+
+    merged = _merge_ai_runtime({
+        "enabled": True,
+        "acquisition": "direct",
+        "helper_socket": "/run/defenseclaw/sensor-helper.sock",
+    })
+    assert merged.acquisition == "direct"
+    assert merged.helper_socket == "/run/defenseclaw/sensor-helper.sock"
+
+    # Absent stays empty rather than becoming a value the compiler must read.
+    assert _merge_ai_runtime({"enabled": True}).acquisition == ""
+    assert _merge_ai_runtime({"enabled": True}).helper_socket == ""
+
+
+def test_runtime_acquisition_is_pruned_when_unset():
+    """Unset must stay absent on the wire, mirroring Go's omitempty.
+
+    Writing an empty string would be a value the schema has to accept and
+    the compiler has to interpret, where absence already means auto.
+    """
+    from defenseclaw.config import _prune_ai_runtime_fields
+
+    block = {"runtime": {"enabled": True, "acquisition": "", "helper_socket": ""}}
+    _prune_ai_runtime_fields(block)
+    assert "acquisition" not in block["runtime"]
+    assert "helper_socket" not in block["runtime"]
+
+    # A real value survives pruning.
+    kept = {"runtime": {"enabled": True, "acquisition": "helper"}}
+    _prune_ai_runtime_fields(kept)
+    assert kept["runtime"]["acquisition"] == "helper"

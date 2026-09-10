@@ -2169,6 +2169,10 @@ class AIRuntimeConfig:
     enable_host_plane: bool = False
     dns_capture: bool = False
     chain_window_min: int = 0
+    # Where the privileged reads come from: "" (auto), "direct", or
+    # "helper". Mirrors Go's AIRuntimeConfig.Acquisition.
+    acquisition: str = ""
+    helper_socket: str = ""
     sanctioned_endpoints: list[str] = field(default_factory=list)
     # None means "not stated", which resolves to enabled. Distinguishing that
     # from an explicit false matters: disabling correlation removes the
@@ -3536,6 +3540,9 @@ def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
         if not runtime.get(field_name):
             runtime.pop(field_name, None)
     for field_name in ("planes", "sanctioned_endpoints"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("acquisition", "helper_socket"):
         if not runtime.get(field_name):
             runtime.pop(field_name, None)
     if runtime.get("correlate") is None:
@@ -5004,6 +5011,13 @@ def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
         chain_window_min=int(raw.get("chain_window_min", 0) or 0),
         sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
         correlate=None if correlate is None else _coerce_bool(correlate),
+        # Reconstructed explicitly, like every other field: this merge
+        # rebuilds the block from a whitelist, so a key absent here is a key
+        # silently erased on the next save. An operator who pinned
+        # acquisition to "direct" while diagnosing would have found it gone
+        # after the next CLI write, with the gateway quietly back on auto.
+        acquisition=str(raw.get("acquisition", "") or ""),
+        helper_socket=str(raw.get("helper_socket", "") or ""),
     )
 
 
