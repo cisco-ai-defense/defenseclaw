@@ -914,6 +914,8 @@ _AI_DISCOVERY_MODES: tuple[str, ...] = ("passive", "enhanced")
 _SCAN_INTERVAL_MIN_RANGE = (1, 24 * 60)        # 1 minute … 24 hours
 _PROCESS_INTERVAL_S_RANGE = (5, 60 * 60)        # 5 seconds … 1 hour
 _MAX_FILES_PER_SCAN_RANGE = (10, 100_000)
+_RUNTIME_POLL_INTERVAL_S_RANGE = (5, 60 * 60)   # 5 seconds … 1 hour
+_RUNTIME_MIN_RISK_RANGE = (1, 100)              # the score band findings are cut at
 # 4 KiB up to 16 MiB — anything beyond that almost certainly means
 # the operator has a runaway log file in scan_roots and would
 # benefit from rejecting the value.
@@ -2156,8 +2158,10 @@ def runtime_scan(
               help="Kernel process, file, and identity events. Needs elevated privilege.")
 @click.option("--dns-capture/--no-dns-capture", default=None,
               help="Passive DNS observation so peers are named rather than inferred.")
-@click.option("--poll-interval-s", type=int, default=None, help="Seconds between polls (5-3600).")
-@click.option("--min-risk-to-report", type=int, default=None, help="Reporting floor (1-100).")
+@click.option("--poll-interval-s", type=click.IntRange(*_RUNTIME_POLL_INTERVAL_S_RANGE),
+              default=None, help="Seconds between polls.")
+@click.option("--min-risk-to-report", type=click.IntRange(*_RUNTIME_MIN_RISK_RANGE),
+              default=None, help="Reporting floor: the score a finding must reach to be reported.")
 @click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
 @click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
@@ -2214,11 +2218,6 @@ def _apply_runtime_settings(
 
     cfg = _require_loaded_config(app)
     runtime = cfg.ai_discovery.runtime
-
-    if poll_interval_s is not None and not 5 <= poll_interval_s <= 3600:
-        raise click.BadParameter("--poll-interval-s must be between 5 and 3600")
-    if min_risk_to_report is not None and not 1 <= min_risk_to_report <= 100:
-        raise click.BadParameter("--min-risk-to-report must be between 1 and 100")
 
     changes: list[tuple[str, object, object]] = []
 

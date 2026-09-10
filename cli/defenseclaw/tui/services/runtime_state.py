@@ -125,11 +125,9 @@ class RuntimeRow:
         finding: reading a credential is a lead, and reading a credential then
         minting an identity then uploading is an incident.
         """
-        for signal_id, _title, _weight in self.signals:
+        for signal_id, detail, _weight in self.signals:
             if signal_id == "agent_kill_chain":
-                for candidate_id, detail, _ in self.signals:
-                    if candidate_id == "agent_kill_chain":
-                        return detail
+                return detail
         return ""
 
     def matches(self, needle: str) -> bool:
