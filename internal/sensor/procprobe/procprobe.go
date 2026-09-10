@@ -83,6 +83,17 @@ type Process struct {
 	// RSSBytes is resident set size. Plane A reads it as "large enough to hold
 	// model weights", which is a weak signal on its own and weighted as such.
 	RSSBytes int64
+	// StartedAt is when the kernel created the process, zero when this
+	// platform could not supply it.
+	//
+	// It exists to disambiguate a recycled pid. A pid is only unique while
+	// the process lives, and the correlator joins runtime observations
+	// against a discovery snapshot up to fifteen minutes old -- long enough
+	// on a busy host for the number to have been handed to something else.
+	// Matching on the number alone would then account for one process using
+	// evidence about another, which is the one substitution this subsystem
+	// must never make.
+	StartedAt time.Time
 }
 
 // Snapshot reads the current process table.

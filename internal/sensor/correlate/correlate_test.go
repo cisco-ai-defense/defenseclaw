@@ -83,7 +83,7 @@ func TestUnobservedIsNeverEvidenceOrExoneration(t *testing.T) {
 			if got.Reason == "" {
 				t.Fatal("unobserved verdict carried no reason; the blindness must be recorded")
 			}
-			if !contains(got.Reason, test.wantIn) {
+			if !strings.Contains(got.Reason, test.wantIn) {
 				t.Fatalf("reason = %q, want it to mention %q", got.Reason, test.wantIn)
 			}
 			if got.Tag() != "correlation:unobserved" {
@@ -207,11 +207,6 @@ func TestNoSignalsInMatchableCategoriesIsUnobservedNotAbsence(t *testing.T) {
 	}
 }
 
-func contains(haystack, needle string) bool {
-	return len(needle) == 0 || len(haystack) >= len(needle) &&
-		(haystack == needle || strings.Contains(haystack, needle))
-}
-
 // TestFutureDatedSnapshotIsUnobservedNotFresh closes a staleness check that
 // only looked one way.
 //
@@ -243,6 +238,137 @@ func TestFutureDatedSnapshotIsUnobservedNotFresh(t *testing.T) {
 			correlator.now = func() time.Time { return now }
 			if got := correlator.LocalModel(observation).Verdict; got != test.want {
 				t.Fatalf("verdict = %v, want %v", got, test.want)
+			}
+		})
+	}
+}
+
+// connectorSignal is a discovery signal carrying live process identity, which
+// is what a pid join is made against.
+func connectorSignal(pid int, comm string, startedAt *time.Time) inventory.AISignal {
+	return inventory.AISignal{
+		SignalID: "sig-connector", Category: inventory.SignalActiveProcess,
+		State:   inventory.AIStateSeen,
+		Product: "Claude Code",
+		Runtime: &inventory.ProcessRuntime{PID: pid, Comm: comm, StartedAt: startedAt},
+	}
+}
+
+// TestRecycledPIDIsNotAccountedFor is the boundary the pid join exists to
+// respect.
+//
+// A pid names a process only while it lives, and this join reads a snapshot
+// up to MaxSnapshotAge old. Matching on the number alone would spend evidence
+// about a process that has since exited to account for an unrelated one --
+// and because accounting attenuates the score, that failure hides real
+// findings rather than inventing false ones.
+func TestRecycledPIDIsNotAccountedFor(t *testing.T) {
+	t.Parallel()
+	snapshotStart := time.Now().Add(-30 * time.Minute)
+
+	for _, test := range []struct {
+		name        string
+		observation Observation
+		signal      inventory.AISignal
+		want        Verdict
+	}{
+		{
+			name: "same pid, same start instant",
+			observation: Observation{
+				PID: 4242, ExeName: "claude", StartedAt: snapshotStart,
+			},
+			signal: connectorSignal(4242, "claude", &snapshotStart),
+			want:   VerdictAccounted,
+		},
+		{
+			name: "same pid, start instants a few seconds apart",
+			observation: Observation{
+				// Two samples of one kernel value taken different ways: they
+				// agree to within the tolerance, not exactly.
+				PID: 4242, ExeName: "claude", StartedAt: snapshotStart.Add(2 * time.Second),
+			},
+			signal: connectorSignal(4242, "claude", &snapshotStart),
+			want:   VerdictAccounted,
+		},
+		{
+			name: "same pid, recycled hours later",
+			observation: Observation{
+				PID: 4242, ExeName: "claude", StartedAt: snapshotStart.Add(2 * time.Hour),
+			},
+			signal: connectorSignal(4242, "claude", &snapshotStart),
+			want:   VerdictUnaccounted,
+		},
+		{
+			name: "same pid, no start times, executables disagree",
+			observation: Observation{
+				PID: 4242, ExeName: "some-other-binary",
+			},
+			signal: connectorSignal(4242, "claude", nil),
+			want:   VerdictUnaccounted,
+		},
+		{
+			name: "same pid, no start times, executables agree",
+			observation: Observation{
+				PID: 4242, ExeName: "claude",
+			},
+			signal: connectorSignal(4242, "claude", nil),
+			want:   VerdictAccounted,
+		},
+		{
+			// Neither side can corroborate. Unobserved is never spent as
+			// evidence, and it is never spent as exoneration either: the
+			// number is all there is, so the number stands.
+			name:        "same pid, nothing to corroborate with",
+			observation: Observation{PID: 4242},
+			signal:      connectorSignal(4242, "", nil),
+			want:        VerdictAccounted,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			got := New(freshSnapshot(test.signal)).Connector(test.observation)
+			if got.Verdict != test.want {
+				t.Fatalf("verdict = %s, want %s (%s)", got.Verdict, test.want, got.Reason)
+			}
+		})
+	}
+}
+
+// TestProviderDomainMatchesTheDetectedDomain closes the join that could not
+// fire.
+//
+// A provider_domain signal is built from a shell-history hit, whose evidence
+// basename is the history file. Until the matched domain was folded into
+// Basenames, nothing on the signal named the provider, so a Plane B peer
+// observation of exactly the host that produced the signal came back
+// unaccounted.
+func TestProviderDomainMatchesTheDetectedDomain(t *testing.T) {
+	t.Parallel()
+	signal := inventory.AISignal{
+		SignalID: "sig-domain", Category: inventory.SignalProviderDomain,
+		State:     inventory.AIStateSeen,
+		Name:      "Claude Code",
+		Product:   "Claude Code",
+		Basenames: []string{".zsh_history", "anthropic.com"},
+	}
+	for _, test := range []struct {
+		domain string
+		want   Verdict
+	}{
+		{domain: "anthropic.com", want: VerdictAccounted},
+		{domain: "api.anthropic.com", want: VerdictAccounted},
+		{domain: "api.anthropic.com.", want: VerdictAccounted},
+		{domain: "API.Anthropic.COM", want: VerdictAccounted},
+		// A suffix that is not a label boundary is a different domain.
+		{domain: "notanthropic.com", want: VerdictUnaccounted},
+		{domain: "api.openai.com", want: VerdictUnaccounted},
+	} {
+		t.Run(test.domain, func(t *testing.T) {
+			t.Parallel()
+			got := New(freshSnapshot(signal)).ProviderDomain(Observation{ProviderDomain: test.domain})
+			if got.Verdict != test.want {
+				t.Fatalf("verdict for %s = %s, want %s (%s)",
+					test.domain, got.Verdict, test.want, got.Reason)
 			}
 		})
 	}

@@ -51,6 +51,7 @@ func snapshot() ([]Process, int, error) {
 	}
 	clockTicks := clockTicksPerSecond()
 	pageSize := int64(os.Getpagesize())
+	bootTime := bootInstant()
 
 	rows := make([]Process, 0, len(entries))
 	skipped := 0
@@ -62,7 +63,7 @@ func snapshot() ([]Process, int, error) {
 		if convErr != nil || pid <= 0 {
 			continue
 		}
-		row, ok := readProcess(pid, clockTicks, pageSize)
+		row, ok := readProcess(pid, clockTicks, pageSize, bootTime)
 		if !ok {
 			// Either the process exited between ReadDir and here -- the normal
 			// case, and not interesting -- or this run is not allowed to read
@@ -75,13 +76,13 @@ func snapshot() ([]Process, int, error) {
 	return rows, skipped, nil
 }
 
-func readProcess(pid int, clockTicks, pageSize int64) (Process, bool) {
+func readProcess(pid int, clockTicks, pageSize int64, bootTime time.Time) (Process, bool) {
 	base := filepath.Join("/proc", strconv.Itoa(pid))
 	statBytes, err := os.ReadFile(filepath.Join(base, "stat"))
 	if err != nil {
 		return Process{}, false
 	}
-	row, ok := parseStat(statBytes, clockTicks, pageSize)
+	row, ok := parseStat(statBytes, clockTicks, pageSize, bootTime)
 	if !ok {
 		return Process{}, false
 	}
@@ -131,7 +132,7 @@ const commTruncationLimit = 15
 // constructed way to desynchronise a naive field split, and every field after
 // it -- including ppid and the CPU counters -- would then be read from the
 // wrong offset.
-func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
+func parseStat(raw []byte, clockTicks, pageSize int64, bootTime time.Time) (Process, bool) {
 	open := bytes.IndexByte(raw, '(')
 	closeIdx := bytes.LastIndexByte(raw, ')')
 	if open < 0 || closeIdx < open {
@@ -141,11 +142,13 @@ func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
 	rest := strings.Fields(string(raw[closeIdx+1:]))
 	// rest[0] is state; fields are 1-indexed from state == field 3 in proc(5).
 	// ppid is field 4, utime 14, stime 15, rss 24.
+	// starttime is field 22, so offset 19 from state.
 	const (
-		offsetPPID  = 1
-		offsetUTime = 11
-		offsetSTime = 12
-		offsetRSS   = 21
+		offsetPPID      = 1
+		offsetUTime     = 11
+		offsetSTime     = 12
+		offsetStartTime = 19
+		offsetRSS       = 21
 	)
 	if len(rest) <= offsetRSS {
 		return Process{}, false
@@ -157,6 +160,7 @@ func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
 	utime, _ := strconv.ParseInt(rest[offsetUTime], 10, 64)
 	stime, _ := strconv.ParseInt(rest[offsetSTime], 10, 64)
 	rssPages, _ := strconv.ParseInt(rest[offsetRSS], 10, 64)
+	startTicks, _ := strconv.ParseInt(rest[offsetStartTime], 10, 64)
 
 	cpu := time.Duration(0)
 	if clockTicks > 0 {
@@ -170,8 +174,19 @@ func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
 		cpu = time.Duration(ticks/clockTicks)*time.Second +
 			time.Duration((ticks%clockTicks)*int64(time.Second)/clockTicks)
 	}
+	// starttime is measured in clock ticks since boot, so it needs the boot
+	// instant to become an absolute time. Left zero when either is unknown
+	// rather than guessed: a wrong start time is worse than none, because
+	// the correlator would use it to reject a legitimate match.
+	var started time.Time
+	if clockTicks > 0 && startTicks > 0 && !bootTime.IsZero() {
+		started = bootTime.Add(
+			time.Duration(startTicks/clockTicks)*time.Second +
+				time.Duration((startTicks%clockTicks)*int64(time.Second)/clockTicks))
+	}
 	return Process{
 		PPID: ppid, Name: comm, CPUTime: cpu, RSSBytes: rssPages * pageSize,
+		StartedAt: started,
 	}, true
 }
 
@@ -202,4 +217,29 @@ func readCmdline(path string) string {
 		}
 	}
 	return strings.Join(parts, " ")
+}
+
+// bootInstant reads btime from /proc/stat: the wall-clock second the kernel
+// booted. /proc/<pid>/stat reports a process start as ticks since that
+// instant, so without it the number cannot be turned into a time.
+//
+// Returns the zero time on any failure. The caller leaves StartedAt unset in
+// that case rather than substituting a plausible value.
+func bootInstant() time.Time {
+	raw, err := os.ReadFile("/proc/stat")
+	if err != nil {
+		return time.Time{}
+	}
+	for _, line := range strings.Split(string(raw), "\n") {
+		value, ok := strings.CutPrefix(line, "btime ")
+		if !ok {
+			continue
+		}
+		seconds, err := strconv.ParseInt(strings.TrimSpace(value), 10, 64)
+		if err != nil || seconds <= 0 {
+			return time.Time{}
+		}
+		return time.Unix(seconds, 0)
+	}
+	return time.Time{}
 }

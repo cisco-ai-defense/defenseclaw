@@ -5,6 +5,7 @@ package audit
 
 import (
 	"crypto/sha256"
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -182,26 +183,6 @@ func TestLatestLifecycleProjectionRejectsTamperingAndTransformedIdentifiers(t *t
 				}
 			},
 		},
-		{
-			// The legacy-v7 profile is retired, so the writer will no longer bind
-			// it. Rows written while it existed are still on disk, and their
-			// identifiers are v7 placeholders rather than canonical values, so the
-			// reader must keep rejecting them by stored name.
-			name: "retired legacy-v7 identifiers", profile: observabilityredaction.ProfileNone,
-			tamper: func(t *testing.T, store *Store) {
-				t.Helper()
-				if _, err := store.db.Exec(
-					`UPDATE audit_events SET redaction_profile=? WHERE id='candidate'`,
-					// The literal, deliberately, not the constant the guard
-					// uses. Writing the constant means the test agrees with
-					// whatever it says, so a wrong value would pass here
-					// while pre-v8 rows quietly stopped being rejected.
-					"legacy-v7",
-				); err != nil {
-					t.Fatal(err)
-				}
-			},
-		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			store := newV8HistoryStore(t)
@@ -270,5 +251,117 @@ func TestLatestLifecycleProjectionRejectsAmbiguousInconsistentAndOutOfRangeRows(
 				t.Fatal("invalid lifecycle projection was accepted")
 			}
 		})
+	}
+}
+
+// TestDecodeLifecycleProjectionRejectsRetiredLegacyV7Rows pins the guard that
+// keeps pre-v8 rows out of a v8 projection.
+//
+// It runs against decodeLifecycleProjection directly, which is where the
+// guard lives, because there is no other honest way to build the row. The
+// writer refuses to bind the retired profile at all -- correctly, and
+// asserted below -- so a legacy-v7 row can only exist as an artifact left on
+// disk by a version that is gone.
+//
+// The earlier version of this test patched the redaction_profile column of a
+// stored row and nothing else. That left the projected envelope still naming
+// the old profile, and the envelope/column comparison rejected the row before
+// the name guard was ever consulted: the case passed with the guard deleted,
+// which is the one thing it existed to catch. Here the row is made
+// internally consistent first, and asserted to decode, so the retired name is
+// the only difference between the accepted case and the rejected one.
+func TestDecodeLifecycleProjectionRejectsRetiredLegacyV7Rows(t *testing.T) {
+	// The literal, deliberately, not the constant the guard uses. Writing the
+	// constant would make the test agree with whatever the guard says, so a
+	// wrong value would pass here while pre-v8 rows quietly stopped being
+	// rejected.
+	const retiredProfile = "legacy-v7"
+
+	store := newV8HistoryStore(t)
+	writer := newLifecycleHistoryWriter(t, store, observabilityredaction.ProfileNone)
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	appendLifecycleHistoryRecord(t, writer, newLifecycleHistoryRecord(
+		t, "candidate", "turn_start", "active", "planning",
+		"agent-root", "agent-root", 1, 7, base,
+	), observabilityredaction.ProfileNone)
+
+	query := LifecycleProjectionQuery{
+		Connector: "codex", SessionID: "session-child", AgentID: "agent-child",
+	}
+	var row storedLifecycleProjection
+	if err := store.db.QueryRow(`
+		SELECT id, COALESCE(CAST(timestamp AS TEXT),''), COALESCE(retention_timestamp_unix_nano,0),
+		       COALESCE(bucket,''), COALESCE(event_name,''), COALESCE(source,''), COALESCE(signal,''),
+		       COALESCE(bucket_catalog_version,0), COALESCE(record_schema_version,0),
+		       COALESCE(redaction_profile,''), COALESCE(connector,''),
+		       COALESCE(session_id,''), COALESCE(agent_id,''),
+		       COALESCE(projected_record_json,'')
+		FROM audit_events WHERE id='candidate'`,
+	).Scan(
+		&row.recordID, &row.timestamp, &row.timestampUnixNano, &row.bucket, &row.eventName,
+		&row.source, &row.signal, &row.bucketCatalogVersion, &row.recordSchemaVersion,
+		&row.redactionProfile, &row.connector, &row.sessionID, &row.agentID, &row.projected,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	// The row as written must decode. Without this the rejection below could
+	// be caused by anything at all in the fixture.
+	if _, valid := decodeLifecycleProjection(row, query); !valid {
+		t.Fatal("the row as written did not decode; the fixture proves nothing")
+	}
+
+	// Rewrite the profile in both places a stored row records it, so the row
+	// stays internally consistent and the retired name is the only defect.
+	var envelope map[string]any
+	if err := json.Unmarshal([]byte(row.projected), &envelope); err != nil {
+		t.Fatal(err)
+	}
+	projection, ok := envelope["projection"].(map[string]any)
+	if !ok {
+		t.Fatalf("projected envelope has no projection block: %s", row.projected)
+	}
+	if projection["redaction_profile"] != string(observabilityredaction.ProfileNone) {
+		t.Fatalf("projected envelope names profile %v, want %s",
+			projection["redaction_profile"], observabilityredaction.ProfileNone)
+	}
+	projection["redaction_profile"] = retiredProfile
+	rewritten, err := json.Marshal(envelope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	row.projected = string(rewritten)
+	row.redactionProfile = retiredProfile
+
+	if _, valid := decodeLifecycleProjection(row, query); valid {
+		t.Fatal("a row stored under the retired legacy-v7 profile was accepted")
+	}
+}
+
+// TestEventHistoryWriterRefusesToBindTheRetiredProfile is the other half of
+// the guard: nothing new may be written under the retired name, so the only
+// legacy-v7 rows that can exist are the ones already on disk.
+func TestEventHistoryWriterRefusesToBindTheRetiredProfile(t *testing.T) {
+	store := newV8HistoryStore(t)
+	signer := &testProjectionSigner{
+		key: []byte("0123456789abcdef0123456789abcdef"), keyID: "lifecycle-test-key",
+	}
+	writer, err := NewEventHistoryWriter(
+		store, signer, nil,
+		testLocalProfileResolver{profile: observabilityredaction.ProfileName("legacy-v7")},
+	)
+	if err != nil {
+		// Refusing at construction is also a refusal.
+		return
+	}
+	base := time.Date(2026, 7, 10, 12, 0, 0, 0, time.UTC)
+	record := newLifecycleHistoryRecord(
+		t, "candidate", "turn_start", "active", "planning",
+		"agent-root", "agent-root", 1, 7, base,
+	)
+	if err := writer.Append(record, projectV8HistoryRecord(
+		t, record, observabilityredaction.ProfileName("legacy-v7"),
+	)); err == nil {
+		t.Fatal("the writer bound the retired legacy-v7 profile")
 	}
 }

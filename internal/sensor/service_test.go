@@ -30,7 +30,6 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
-	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
@@ -250,8 +249,6 @@ func TestRunPollsImmediatelyThenStops(t *testing.T) {
 		t.Fatal("Run() did not return after cancellation")
 	}
 }
-
-var _ = catalog.CategoryFrontier
 
 // countingResolver records how many lookups a poll performed and how long the
 // caller was willing to wait, so the naming budget can be observed rather than

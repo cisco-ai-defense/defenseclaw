@@ -84,8 +84,14 @@ func snapshot() ([]Process, int, error) {
 	return rows, partial, nil
 }
 
-// enrich fills CPU, RSS, user, and argv. It reports false when the process
-// handle could not be opened at all, which is the case worth counting.
+// enrich fills CPU, RSS, user, start time, and argv.
+//
+// It reports false for a row that was only partially enriched, which is
+// either of two cases: the handle could not be opened at all, so nothing was
+// filled, or it opened only at the limited access level, so everything but
+// argv was. Both are counted as coverage loss because both leave the caller
+// with less than it asked for, and argv is the field this package exists to
+// collect.
 func enrich(row *Process) bool {
 	const access = windows.PROCESS_QUERY_LIMITED_INFORMATION | windows.PROCESS_VM_READ
 	process, err := windows.OpenProcess(access, false, uint32(row.PID))
@@ -122,6 +128,11 @@ func readTimes(process windows.Handle, row *Process) {
 	ticks := int64(kernel.HighDateTime)<<32 | int64(kernel.LowDateTime)
 	ticks += int64(user.HighDateTime)<<32 | int64(user.LowDateTime)
 	row.CPUTime = time.Duration(ticks) * 100 * time.Nanosecond
+	// The creation time comes back from the same call, so the start instant
+	// that disambiguates a recycled pid costs nothing extra here.
+	if creation.Nanoseconds() > 0 {
+		row.StartedAt = time.Unix(0, creation.Nanoseconds())
+	}
 }
 
 // processMemoryCounters mirrors PROCESS_MEMORY_COUNTERS. golang.org/x/sys does

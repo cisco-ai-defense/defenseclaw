@@ -118,6 +118,10 @@ type Observation struct {
 	ProviderDomain string
 	// AgentName is the lineage-attributed agent, for host-plane observations.
 	AgentName string
+	// StartedAt is when the observed process was created, zero when the
+	// platform could not supply it. It disambiguates a recycled pid: see
+	// samePIDIdentity.
+	StartedAt time.Time
 }
 
 // Result carries the verdict plus the evidence behind it.
@@ -331,7 +335,7 @@ func (c *Correlator) matchesMCP(observation Observation, signal inventory.AISign
 }
 
 func (c *Correlator) matchesConnector(observation Observation, signal inventory.AISignal) bool {
-	if observation.PID > 0 && signal.Runtime != nil && signal.Runtime.PID == observation.PID {
+	if samePIDIdentity(observation, signal) {
 		return true
 	}
 	for _, candidate := range []string{observation.AgentName, observation.ExeName} {
@@ -347,6 +351,52 @@ func (c *Correlator) matchesConnector(observation Observation, signal inventory.
 	}
 	return false
 }
+
+// samePIDIdentity reports whether the observation and the signal describe the
+// same live process, not merely the same number.
+//
+// A pid identifies a process only while it lives. This join runs against a
+// discovery snapshot up to MaxSnapshotAge old, which on a host with ordinary
+// churn is long enough for the kernel to have handed the number to something
+// unrelated. Accepting the number alone would let evidence about a dead
+// process account for a live one -- and because accounting attenuates the
+// score, the failure direction is toward under-reporting a real finding.
+//
+// So the number must agree, and then whatever identity both sides carry must
+// agree too: the start instant when both have one, the executable name
+// otherwise. When neither side offers corroboration the pid still matches, on
+// the same principle the rest of this package follows -- unobserved is never
+// spent as evidence, and it is never spent as exoneration either.
+func samePIDIdentity(observation Observation, signal inventory.AISignal) bool {
+	if observation.PID <= 0 || signal.Runtime == nil || signal.Runtime.PID != observation.PID {
+		return false
+	}
+	if !observation.StartedAt.IsZero() && signal.Runtime.StartedAt != nil &&
+		!signal.Runtime.StartedAt.IsZero() {
+		// Both sides sampled the same kernel value through different paths
+		// and at different times, so they agree to within a tolerance rather
+		// than exactly.
+		delta := observation.StartedAt.Sub(*signal.Runtime.StartedAt)
+		if delta < 0 {
+			delta = -delta
+		}
+		return delta <= maxStartTimeSkew
+	}
+	if observation.ExeName != "" && signal.Runtime.Comm != "" {
+		return equalFold(observation.ExeName, signal.Runtime.Comm)
+	}
+	return true
+}
+
+// maxStartTimeSkew is how far two samples of one process's start instant may
+// differ and still be the same process.
+//
+// Sized for the coarsest source in play: a Darwin start recovered by
+// subtracting whole-second elapsed time from the moment ps ran, which can sit
+// a second or two off a start read directly from the kernel. Well under the
+// window in which a pid could plausibly be recycled and reused by an AI
+// runtime, which is what this needs to separate.
+const maxStartTimeSkew = 10 * time.Second
 
 func (c *Correlator) matchesDomain(observation Observation, signal inventory.AISignal) bool {
 	if observation.ProviderDomain == "" {

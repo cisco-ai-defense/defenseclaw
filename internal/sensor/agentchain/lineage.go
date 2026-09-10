@@ -69,6 +69,12 @@ type Tracker struct {
 	records map[int]*processRecord
 	ttl     time.Duration
 	now     func() time.Time
+	// exited counts records whose process has gone. It is the only thing
+	// eviction can reclaim, so keeping the count lets a full table of live
+	// processes skip the scan entirely instead of walking every record to
+	// discover there is nothing to drop -- which, under sustained process
+	// churn, is a full-table scan for every new pid, on the poll path.
+	exited int
 }
 
 // NewTracker returns an empty tracker using the real clock.
@@ -130,6 +136,9 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 	// exec'd into something else. Either way the identity recorded before
 	// belongs to a process that is gone.
 	recycled := !existing.exitedAt.IsZero() || existing.name != name
+	if !existing.exitedAt.IsZero() {
+		t.exited--
+	}
 
 	existing.ppid = ppid
 	existing.responsiblePID = responsiblePID
@@ -157,6 +166,12 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 }
 
 func (t *Tracker) evictOldestExitedLocked() {
+	if t.exited == 0 {
+		// Nothing to reclaim. Without this the table walks all
+		// maxTrackedProcesses records on every new pid once it is full and
+		// every process in it is alive.
+		return
+	}
 	var oldestPID int
 	var oldest time.Time
 	for pid, record := range t.records {
@@ -169,6 +184,7 @@ func (t *Tracker) evictOldestExitedLocked() {
 	}
 	if oldestPID != 0 {
 		delete(t.records, oldestPID)
+		t.exited--
 	}
 }
 
@@ -178,6 +194,9 @@ func (t *Tracker) ObserveExit(pid int) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if record, ok := t.records[pid]; ok {
+		if record.exitedAt.IsZero() {
+			t.exited++
+		}
 		record.exitedAt = t.now()
 	}
 }
@@ -191,6 +210,7 @@ func (t *Tracker) Reap() int {
 	for pid, record := range t.records {
 		if !record.exitedAt.IsZero() && record.exitedAt.Before(cutoff) {
 			delete(t.records, pid)
+			t.exited--
 			removed++
 		}
 	}

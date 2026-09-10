@@ -687,7 +687,9 @@ func correlateFinding(
 	result planeBResult,
 	tracker *agentchain.Tracker,
 ) correlate.Result {
-	observation := correlate.Observation{PID: process.PID, ExeName: process.Name}
+	observation := correlate.Observation{
+		PID: process.PID, ExeName: process.Name, StartedAt: process.StartedAt,
+	}
 	if attribution, ok := tracker.Attribute(process.PID); ok {
 		observation.AgentName = attribution.AgentName
 	}

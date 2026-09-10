@@ -44,8 +44,13 @@ const snapshotTimeout = 10 * time.Second
 // an unprivileged caller, and is the same source the upstream detector used.
 //
 // The format is deliberately ordered with args last: it is the only field that
-// can contain spaces, so the five fixed fields split on whitespace and the
+// can contain spaces, so the six fixed fields split on whitespace and the
 // remainder is argv verbatim.
+//
+// etime is elapsed wall time, which is how a start instant is recovered here:
+// macOS ps renders an absolute start (lstart) as five space-separated tokens,
+// which would break the fixed-field split, while etime is one token in the
+// same [[DD-]HH:]MM:SS form the CPU field already uses.
 //
 // comm is deliberately not requested. The kernel-backed short process name is
 // truncated to 16 bytes on Darwin, so "/usr/libexec/logd" arrives as
@@ -56,7 +61,8 @@ func snapshot() ([]Process, int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), snapshotTimeout)
 	defer cancel()
 
-	cmd := processutil.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,ppid=,rss=,time=,user=,args=")
+	cmd := processutil.CommandContext(ctx, "/bin/ps", "-Ao", "pid=,ppid=,rss=,time=,etime=,user=,args=")
+	readAt := time.Now()
 	output, err := cmd.Output()
 	if err != nil {
 		return nil, 0, err
@@ -67,7 +73,7 @@ func snapshot() ([]Process, int, error) {
 	scanner := bufio.NewScanner(strings.NewReader(string(output)))
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
-		row, ok := parsePSLine(scanner.Text())
+		row, ok := parsePSLine(scanner.Text(), readAt)
 		if !ok {
 			skipped++
 			continue
@@ -80,12 +86,15 @@ func snapshot() ([]Process, int, error) {
 	return rows, skipped, nil
 }
 
-// parsePSLine decodes one row of the ps format above: five whitespace-
+// parsePSLine decodes one row of the ps format above: six whitespace-
 // delimited fixed fields, then argv verbatim.
-func parsePSLine(line string) (Process, bool) {
+//
+// readAt is when ps was run, which is what elapsed time is subtracted from to
+// recover the start instant.
+func parsePSLine(line string, readAt time.Time) (Process, bool) {
 	rest := strings.TrimLeft(line, " \t")
-	values := make([]string, 0, 5)
-	for len(values) < 5 {
+	values := make([]string, 0, 6)
+	for len(values) < 6 {
 		index := strings.IndexAny(rest, " \t")
 		if index < 0 {
 			return Process{}, false
@@ -109,6 +118,14 @@ func parsePSLine(line string) (Process, bool) {
 	if !ok {
 		return Process{}, false
 	}
+	// An unparseable elapsed time leaves the start unset rather than
+	// rejecting the row: the process is real and everything else about it
+	// was read. A wrong start time would be worse than none, because the
+	// correlator spends it rejecting matches.
+	var started time.Time
+	if elapsed, ok := parsePSTime(values[4]); ok {
+		started = readAt.Add(-elapsed)
+	}
 	cmdline := strings.TrimSpace(rest)
 	if cmdline == "" {
 		return Process{}, false
@@ -124,7 +141,8 @@ func parsePSLine(line string) (Process, bool) {
 	}
 	return Process{
 		PID: pid, PPID: ppid, Name: baseName(name), Cmdline: cmdline,
-		User: values[4], CPUTime: cpu, RSSBytes: rssKB * 1024,
+		User: values[5], CPUTime: cpu, RSSBytes: rssKB * 1024,
+		StartedAt: started,
 	}, true
 }
 
