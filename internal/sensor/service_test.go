@@ -34,6 +34,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 )
 
@@ -460,4 +461,38 @@ func TestRepeatedUnnamedEgressEscalates(t *testing.T) {
 	if quiet.unnamedPeerPolls != 0 {
 		t.Fatal("a poll with no unnamed peers advanced the repeat count")
 	}
+}
+
+// TestFindingIDsDistinguishEpisodesOnAReusedPid pins both identifiers against
+// pid reuse.
+//
+// The telemetry schema documents finding_id as stable for the life of a
+// process episode, which invites consumers to upsert by it. pid, name and
+// user repeat as soon as the kernel recycles a pid for the same program under
+// the same account, so without the episode start two unrelated episodes share
+// an id and the later finding silently overwrites the earlier one.
+func TestFindingIDsDistinguishEpisodesOnAReusedPid(t *testing.T) {
+	first := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	second := first.Add(time.Hour)
+	process := procprobe.Process{PID: 4242, Name: "python3", User: "dev"}
+
+	t.Run("process findings", func(t *testing.T) {
+		if findingID(process, first) == findingID(process, second) {
+			t.Fatal("two episodes on a reused pid share one finding id")
+		}
+		if findingID(process, first) != findingID(process, first) {
+			t.Fatal("the id is not stable within one episode")
+		}
+	})
+
+	t.Run("host-plane findings", func(t *testing.T) {
+		early := hostFinding{RootPID: 4242, AgentName: "claude", FirstSeen: first}
+		late := hostFinding{RootPID: 4242, AgentName: "claude", FirstSeen: second}
+		if hostFindingID(early) == hostFindingID(late) {
+			t.Fatal("two agent sessions on a reused root pid share one finding id")
+		}
+		if hostFindingID(early) != hostFindingID(early) {
+			t.Fatal("the id is not stable within one session")
+		}
+	})
 }

@@ -44,6 +44,12 @@ type IndicatorSet struct {
 	// that rewrites these is arranging to influence every future session on
 	// the machine, which no launch item and no login item would show.
 	AgentConfigPaths []string
+	// CaseInsensitivePaths is true where the platform's filesystem does not
+	// distinguish case, so an indicator written as C:\Users must still match
+	// an event reporting c:\users. Set only for Windows: on Linux two paths
+	// differing in case are two different files, and folding them would let
+	// an indicator match something it does not name.
+	CaseInsensitivePaths bool
 }
 
 // portableCredentialPaths are the secrets at rest that exist on every
@@ -137,6 +143,11 @@ var windowsIndicators = IndicatorSet{
 		`\Microsoft\Windows\PowerShell\`,
 	},
 	AgentConfigPaths: portableAgentConfigPaths,
+	// NTFS is case-insensitive by default, and these indicators are written
+	// in the conventional casing. An agent reading c:\users\dev\.aws\credentials
+	// is reading the same file as C:\Users\dev\.aws\credentials, and only
+	// one of the two spellings would otherwise be recognised.
+	CaseInsensitivePaths: true,
 }
 
 // Indicators returns the set for the host this process runs on.

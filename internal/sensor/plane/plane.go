@@ -38,6 +38,7 @@ package plane
 
 import (
 	"context"
+	"sync/atomic"
 	"time"
 )
 
@@ -137,8 +138,13 @@ const eventBuffer = 4096
 
 // Buffer is a bounded, oldest-dropping event queue shared by the backends.
 type Buffer struct {
-	events  chan Event
-	dropped int64
+	events chan Event
+	// dropped is atomic because the Linux source runs two readers over one
+	// buffer -- cn_proc and fanotify -- and both call Push. A plain counter
+	// races, and lost increments understate the drop count, which is the
+	// number reported as reduced coverage. Undercounting the drops is the
+	// silent degradation this package exists to make impossible.
+	dropped atomic.Int64
 }
 
 // NewBuffer returns an empty buffer.
@@ -153,13 +159,13 @@ func (b *Buffer) Push(event Event) {
 	}
 	select {
 	case <-b.events:
-		b.dropped++
+		b.dropped.Add(1)
 	default:
 	}
 	select {
 	case b.events <- event:
 	default:
-		b.dropped++
+		b.dropped.Add(1)
 	}
 }
 
@@ -167,7 +173,7 @@ func (b *Buffer) Push(event Event) {
 func (b *Buffer) Events() <-chan Event { return b.events }
 
 // Dropped is how many events were discarded under back-pressure.
-func (b *Buffer) Dropped() int64 { return b.dropped }
+func (b *Buffer) Dropped() int64 { return b.dropped.Load() }
 
 // Close closes the delivery channel.
 func (b *Buffer) Close() { close(b.events) }

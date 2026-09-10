@@ -340,6 +340,37 @@ func matrixFor(goos string) []matrixCase {
 				fires(Persistence, "agent_persistence"),
 			},
 			matrixCase{
+				// PowerShell's cmdlet takes no /add. Requiring one meant the
+				// documented modern spelling was never recognised.
+				"grants group membership with the PowerShell cmdlet",
+				Observation{Kind: KindExec,
+					Cmdline: `Add-LocalGroupMember -Group Administrators -Member svc`},
+				fires(IdentityCreation, "agent_identity_creation"),
+			},
+			matrixCase{
+				"creates a local account with the PowerShell cmdlet",
+				Observation{Kind: KindExec, Cmdline: `New-LocalUser -Name svc -NoPassword`},
+				fires(IdentityCreation, "agent_identity_creation"),
+			},
+			matrixCase{
+				// NTFS does not distinguish case, so the lowercase spelling
+				// names the same file the indicator does.
+				"reads AWS credentials at a lowercase path",
+				Observation{Kind: KindFileRead, Path: `c:\users\dev\.aws\credentials`},
+				fires(CredentialAccess, "agent_credential_access"),
+			},
+			matrixCase{
+				"writes a Run key in lowercase",
+				Observation{Kind: KindFileWrite,
+					Path: `hklm\software\microsoft\windows\currentversion\run`},
+				fires(Persistence, "agent_persistence"),
+			},
+			matrixCase{
+				"drops a scheduled task at an uppercase path",
+				Observation{Kind: KindFileWrite, Path: `C:\WINDOWS\SYSTEM32\TASKS\Updater`},
+				fires(Persistence, "agent_persistence"),
+			},
+			matrixCase{
 				"creates a local account with net user",
 				Observation{Kind: KindExec, Cmdline: `net user svc P@ss /add`},
 				fires(IdentityCreation, "agent_identity_creation"),

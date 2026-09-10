@@ -404,7 +404,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 			agentName = attribution.AgentName
 		}
 		findings = append(findings, Finding{
-			FindingID:   findingID(process),
+			FindingID:   findingID(process, state.firstSeen),
 			PID:         process.PID,
 			Process:     process.Name,
 			Cmdline:     process.Cmdline,
@@ -655,7 +655,8 @@ func (s *Service) hostPlaneFindings(
 // hostFindingID is stable for an agent session so repeated emissions update
 // rather than accumulate.
 func hostFindingID(session hostFinding) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("host|%d|%s", session.RootPID, session.AgentName)))
+	digest := sha256.Sum256([]byte(fmt.Sprintf("host|%d|%s|%d",
+		session.RootPID, session.AgentName, session.FirstSeen.UnixNano())))
 	return "chain-" + hex.EncodeToString(digest[:8])
 }
 
@@ -747,11 +748,22 @@ func peersOf(ctx context.Context, connections []netprobe.Connection, resolver Re
 }
 
 // findingID is stable for a process episode so repeated emissions update
-// rather than accumulate. The start-independent inputs are deliberate: a pid
-// alone would collide after reuse, and including the score would make every
-// re-scoring a new finding.
-func findingID(process procprobe.Process) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s", process.PID, process.Name, process.User)))
+// rather than accumulate.
+//
+// The episode start is part of the digest, and has to be: pid, name and user
+// alone all repeat after the kernel recycles a pid for the same program under
+// the same account, which on a busy host is ordinary rather than exotic. Two
+// distinct episodes then share an id, and a consumer that upserts by
+// finding_id -- which the telemetry schema says it may, because the id is
+// documented as stable for the life of an episode -- overwrites the earlier
+// finding with the later one instead of recording both.
+//
+// The score is deliberately not an input: including it would make every
+// re-scoring of the same episode a new finding, which is the opposite
+// failure.
+func findingID(process procprobe.Process, episodeStart time.Time) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d|%s|%s|%d",
+		process.PID, process.Name, process.User, episodeStart.UnixNano())))
 	return "run-" + hex.EncodeToString(digest[:8])
 }
 

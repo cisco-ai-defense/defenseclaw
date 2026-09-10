@@ -68,7 +68,11 @@ var identityCommands = []struct {
 	{regexp.MustCompile(`(?i)\bNew-LocalUser\b`), "Windows local account created via PowerShell"},
 	{regexp.MustCompile(`(?i)\bdscl\s+\.\s+-create\s+/Users/`), "macOS local account created"},
 	{regexp.MustCompile(`(?i)\busermod\s+.*-a?G\s`), "group membership granted"},
-	{regexp.MustCompile(`(?i)\b(net\s+localgroup|Add-LocalGroupMember)\b.*\/add`), "Windows group membership granted"},
+	{regexp.MustCompile(`(?i)\bnet\s+localgroup\b.*\/add`), "Windows group membership granted"},
+	// PowerShell's cmdlet takes no /add; requiring one meant the documented
+	// modern spelling of this command was never recognised.
+	{regexp.MustCompile(`(?i)\bAdd-LocalGroupMember\b`), "Windows group membership granted"},
+	{regexp.MustCompile(`(?i)\bNew-LocalUser\b`), "Windows local account created"},
 	{regexp.MustCompile(`(?i)\bgroupadd\b`), "local group creation"},
 }
 
@@ -175,13 +179,13 @@ func classifyFileRead(observation Observation, indicators IndicatorSet) (Match, 
 	if path == "" {
 		return Match{}, false
 	}
-	if match, ok := containsAny(path, indicators.HighConfidenceCredentials); ok {
+	if match, ok := containsAnyFold(path, indicators.HighConfidenceCredentials, indicators.CaseInsensitivePaths); ok {
 		return Match{
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent read a secret at rest", Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAny(path, indicators.CredentialPaths); ok {
+	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
 		// A path that merely looks credential-adjacent is graded down rather
 		// than discarded: it can corroborate a chain, and on its own it should
 		// not raise a finding.
@@ -198,14 +202,14 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 	if path == "" {
 		return Match{}, false
 	}
-	if match, ok := containsAny(path, indicators.PersistencePaths); ok {
+	if match, ok := containsAnyFold(path, indicators.PersistencePaths, indicators.CaseInsensitivePaths); ok {
 		return Match{
 			Tactic: Persistence, SignalID: "agent_persistence",
 			Title:  "agent installed a launch item, unit, or rc-file hook",
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAny(path, indicators.AgentConfigPaths); ok {
+	if match, ok := containsAnyFold(path, indicators.AgentConfigPaths, indicators.CaseInsensitivePaths); ok {
 		// The category with no equivalent in a traditional endpoint product.
 		// An agent that appends to its own CLAUDE.md or registers an MCP
 		// server is arranging to influence every future session on the
@@ -218,7 +222,7 @@ func classifyFileWrite(observation Observation, indicators IndicatorSet) (Match,
 			Detail: match, Confidence: 1.0,
 		}, true
 	}
-	if match, ok := containsAny(path, indicators.CredentialPaths); ok {
+	if match, ok := containsAnyFold(path, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
 		return Match{
 			Tactic: CredentialAccess, SignalID: "agent_credential_access",
 			Title: "agent wrote to a credential store", Detail: match, Confidence: 1.0,
@@ -272,13 +276,13 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 	// configured. Graded slightly down against a kernel file event: argv says
 	// what a process was asked to do, a file event says what it did.
 	if credentialReader.MatchString(cmdline) {
-		if match, ok := containsAny(cmdline, indicators.HighConfidenceCredentials); ok {
+		if match, ok := containsAnyFold(cmdline, indicators.HighConfidenceCredentials, indicators.CaseInsensitivePaths); ok {
 			return Match{
 				Tactic: CredentialAccess, SignalID: "agent_credential_access",
 				Title: "agent read a secret at rest", Detail: match, Confidence: 0.9,
 			}, true
 		}
-		if match, ok := containsAny(cmdline, indicators.CredentialPaths); ok {
+		if match, ok := containsAnyFold(cmdline, indicators.CredentialPaths, indicators.CaseInsensitivePaths); ok {
 			return Match{
 				Tactic: CredentialAccess, SignalID: "agent_credential_access",
 				Title: "agent read a credential-adjacent file", Detail: match, Confidence: 0.6,
@@ -306,17 +310,38 @@ func classifyExec(observation Observation, indicators IndicatorSet) (Match, bool
 
 // containsAny returns the first fragment present in value.
 func containsAny(value string, fragments []string) (string, bool) {
+	return containsAnyFold(value, fragments, false)
+}
+
+// containsAnyFold matches a path against indicator fragments, optionally
+// ignoring case.
+//
+// Folding is per-platform rather than global. NTFS does not distinguish case,
+// so an indicator written C:\Users must match an event reporting c:\users --
+// otherwise the conventional spelling is the only one detected, and lowercase
+// is not an exotic way to write a path. On Linux the same two strings are two
+// different files, and folding them would let an indicator match something it
+// does not name.
+func containsAnyFold(value string, fragments []string, ignoreCase bool) (string, bool) {
 	normalised := strings.ReplaceAll(value, `\`, "/")
+	if ignoreCase {
+		value = strings.ToLower(value)
+		normalised = strings.ToLower(normalised)
+	}
 	for _, fragment := range fragments {
 		if fragment == "" {
 			continue
 		}
-		if strings.Contains(value, fragment) {
+		candidate := fragment
+		if ignoreCase {
+			candidate = strings.ToLower(candidate)
+		}
+		if strings.Contains(value, candidate) {
 			return fragment, true
 		}
 		// Windows paths reach a classifier that may be running with POSIX
 		// indicators when an event is forwarded, so compare both separators.
-		if normalisedFragment := strings.ReplaceAll(fragment, `\`, "/"); strings.Contains(normalised, normalisedFragment) {
+		if normalisedFragment := strings.ReplaceAll(candidate, `\`, "/"); strings.Contains(normalised, normalisedFragment) {
 			return fragment, true
 		}
 	}
