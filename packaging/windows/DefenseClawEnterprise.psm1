@@ -4531,7 +4531,7 @@ function Set-DefenseClawManagedServices {
     $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName
     $sensorHelperRegistered = $false
     if (-not [string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperPath) -and
-        (Test-Path -LiteralPath $Layout.SensorHelperPath)) {
+        (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.SensorHelperPath)) {
         $sensorHelperImage = Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName
         Assert-DefenseClawOwnedServiceOrAbsent -Name $sensorHelperServiceName
         if (Test-DefenseClawServiceExists -Name $sensorHelperServiceName) {
