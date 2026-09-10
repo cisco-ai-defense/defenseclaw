@@ -658,6 +658,26 @@ can only explain a gateway that is already up. Add `--os linux|darwin|windows`
 to plan for a platform you are not standing on, or `--json` to feed a
 deployment tool.
 
+It can also apply what it finds missing:
+
+```bash
+defenseclaw agent discovery runtime permissions --grant
+```
+
+Every command is printed before anything runs, and the confirmation is not
+skippable without `--yes`. `--revert` undoes exactly what `--grant` applied.
+On Linux that is one `setcap` on the gateway binary; on Windows it is the
+three audit subcategories plus the command-line policy, which needs an
+already-elevated prompt. Nothing grants more than the requirement it names —
+notably there is no blanket SACL on Windows, because auditing every object on
+a filesystem to catch credential reads creates far more exposure than the
+detection is worth.
+
+macOS Full Disk Access is the one thing no amount of privilege can automate:
+TCC does not let any process grant it, to itself or anything else. The command
+opens the exact settings pane instead, which is the whole of what is
+achievable. Managed installs skip it via an MDM PPPC profile.
+
 It also checks. Each line reads `[granted]`, `[MISSING]`, or `[unknown]` for
 the host you are on, so the output is a list of gaps rather than a list of
 requirements. `[unknown]` means this process cannot verify that grant from

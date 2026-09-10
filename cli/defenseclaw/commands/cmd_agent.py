@@ -2344,6 +2344,7 @@ _RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
         {
             "plane": "inference heartbeat (A)",
             "needs": "nothing for this user's processes; elevation for all",
+            "probe": "root",
             "why": "OpenProcess on another user's process needs an elevated token",
             "how": "run the gateway elevated",
         },
@@ -2421,13 +2422,129 @@ def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
     return None
 
 
+# _GRANT_PLANS are the commands that close a gap, per OS.
+#
+# Every one is idempotent, scoped to exactly what a plane needs, and printed
+# before it runs. None of them widens anything beyond the requirement it
+# names -- notably there is no blanket SACL on Windows, because auditing
+# every object on a filesystem to catch credential reads would generate far
+# more exposure than the detection is worth.
+#
+# macOS is absent on purpose. Its remaining grant is Full Disk Access, which
+# TCC does not let any process grant to itself or to another, at any
+# privilege level. The command opens the exact settings pane instead and
+# waits for the operator, which is the whole of what is achievable.
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+
+_WINDOWS_AUDIT_SUBCATEGORIES = (
+    "Process Creation",
+    "User Account Management",
+    "Sensitive Privilege Use",
+)
+
+_WINDOWS_AUDIT_REG_KEY = (
+    r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+)
+
+
+def _linux_grant_commands(binary: str, revert: bool) -> list[list[str]]:
+    if revert:
+        return [["setcap", "-r", binary]]
+    return [["setcap", _LINUX_GRANT_CAPS, binary]]
+
+
+def _windows_grant_commands(revert: bool) -> list[list[str]]:
+    setting = "disable" if revert else "enable"
+    commands = [
+        ["auditpol", "/set", f"/subcategory:{name}",
+         f"/success:{setting}", f"/failure:{setting}"]
+        for name in _WINDOWS_AUDIT_SUBCATEGORIES
+    ]
+    commands.append([
+        "reg", "add", _WINDOWS_AUDIT_REG_KEY,
+        "/v", "ProcessCreationIncludeCmdLine_Enabled",
+        "/t", "REG_DWORD", "/d", "0" if revert else "1", "/f",
+    ])
+    return commands
+
+
+def _render_command(command: list[str]) -> str:
+    return " ".join(part if " " not in part else f'"{part}"' for part in command)
+
+
+def _run_grant_commands(commands: list[list[str]], *, elevate: bool) -> int:
+    """Run the grant commands, returning how many failed."""
+    from defenseclaw import ux
+
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    failed = 0
+    for command in commands:
+        runnable = command
+        if elevate and sys.platform != "win32":
+            # -n so a host with no cached credential fails loudly instead of
+            # blocking on a prompt nobody is watching.
+            runnable = ["sudo", "-n", *command]
+        try:
+            completed = subprocess.run(
+                runnable, capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+            ux.warn(f"{_render_command(command)}: {exc}", indent="    ")
+            failed += 1
+            continue
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            reason = detail[0] if detail else f"exit {completed.returncode}"
+            ux.warn(f"{_render_command(command)}: {reason}", indent="    ")
+            failed += 1
+            continue
+        ux.ok(_render_command(command), indent="    ")
+    return failed
+
+
+def _open_full_disk_access_pane() -> None:
+    """Open the Full Disk Access pane, which is as far as automation goes."""
+    from defenseclaw import ux
+
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    target = (
+        "x-apple.systempreferences:com.apple.preference.security"
+        "?Privacy_AllFiles"
+    )
+    try:
+        subprocess.run(["open", target], capture_output=True, timeout=15, check=False)
+        ux.ok("opened Privacy & Security > Full Disk Access", indent="    ")
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        ux.warn(f"could not open System Settings: {exc}", indent="    ")
+    ux.subhead(
+        "Add the process that launches the gateway -- the terminal or the "
+        "daemon, not the gateway binary. TCC grants to the responsible "
+        "process, and no privilege level can set this for you.",
+        indent="    ",
+    )
+
+
 @discovery_runtime.command("permissions")
 @click.option("--json", "as_json", is_flag=True, help="Output the grants as JSON.")
 @click.option("--os", "target_os",
               type=click.Choice(["darwin", "linux", "windows"]),
               default=None, help="Report for another OS instead of this one.")
+@click.option("--grant", is_flag=True,
+              help="Apply the grants this host is missing. Shows every command first.")
+@click.option("--revert", is_flag=True,
+              help="Undo what --grant applied.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
 @pass_ctx
-def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -> None:
+def runtime_permissions(
+    app: AppContext,
+    as_json: bool,
+    target_os: str | None,
+    grant: bool,
+    revert: bool,
+    yes: bool,
+) -> None:
     """What each runtime plane needs, and how to grant it.
 
     Answerable before anything is running, which is the point: an operator
@@ -2447,14 +2564,14 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
 
     for_this_host = target_os is None
     evaluated = []
-    for grant in grants:
-        if grant["needs"] == "nothing":
+    for entry in grants:
+        if entry["needs"] == "nothing":
             # Nothing to grant is not an unknown. Rendering it as one would
             # bury the entries that do need action among ones that never will.
             state: bool | None = True
         else:
-            state = _evaluate_grant(grant.get("probe"), for_this_host)  # type: ignore[arg-type]
-        evaluated.append({**grant, "granted": state})
+            state = _evaluate_grant(entry.get("probe"), for_this_host)  # type: ignore[arg-type]
+        evaluated.append({**entry, "granted": state})
 
     if as_json:
         click.echo(json.dumps(
@@ -2470,8 +2587,11 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
         indent="  ",
     )
     missing = 0
-    for grant in evaluated:
-        state = grant["granted"]
+    for entry in evaluated:
+        # Deliberately not named `grant`: that is the flag parameter, and
+        # shadowing it left the loop's last dict bound to the name, so the
+        # command believed --grant had been passed on every invocation.
+        state = entry["granted"]
         if state is True:
             mark = "[granted]"
         elif state is False:
@@ -2479,11 +2599,11 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
             missing += 1
         else:
             mark = "[unknown]"
-        ux.subhead(f"{mark} {grant['plane']}", indent="  ")
-        ux.subhead(f"needs: {grant['needs']}", indent="    ")
-        ux.subhead(f"why:   {grant['why']}", indent="    ")
-        if grant["how"] and state is not True:
-            ux.subhead(f"grant: {grant['how']}", indent="    ")
+        ux.subhead(f"{mark} {entry['plane']}", indent="  ")
+        ux.subhead(f"needs: {entry['needs']}", indent="    ")
+        ux.subhead(f"why:   {entry['why']}", indent="    ")
+        if entry["how"] and state is not True:
+            ux.subhead(f"grant: {entry['how']}", indent="    ")
     if for_this_host:
         if missing:
             ux.warn(f"{missing} grant(s) missing on this host", indent="  ")
@@ -2499,6 +2619,86 @@ def runtime_permissions(app: AppContext, as_json: bool, target_os: str | None) -
         "In a managed enterprise install the gateway is deliberately "
         "de-privileged and a separate sensor helper holds these instead; see "
         "the AI Discovery docs.",
+        indent="  ",
+    )
+
+    if not (grant or revert):
+        return
+    if not for_this_host:
+        raise SystemExit("--grant and --revert only apply to the host you are on")
+    _apply_grants(resolved, revert=revert, assume_yes=yes)
+
+
+def _apply_grants(resolved: str, *, revert: bool, assume_yes: bool) -> None:
+    """Apply, or undo, the grants that can be automated on this host.
+
+    Everything here changes privileged machine state, so it prints the exact
+    commands first and asks. An operator who cannot see what is about to run
+    cannot consent to it, and these are not changes to discover afterwards.
+    """
+    from defenseclaw import ux
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    verb = "revert" if revert else "grant"
+    ux.section(f"AI discovery runtime permissions: {verb}")
+
+    commands: list[list[str]] = []
+    elevate = False
+    manual: list[str] = []
+
+    if resolved == "linux":
+        binary = resolve_gateway_binary()
+        if not binary:
+            raise SystemExit(
+                "cannot find defenseclaw-gateway on PATH; capabilities attach to "
+                "the binary, so there is nothing to grant them to")
+        commands = _linux_grant_commands(binary, revert)
+        elevate = os.geteuid() != 0
+    elif resolved == "windows":
+        commands = _windows_grant_commands(revert)
+        if _probe_root() is False:
+            raise SystemExit(
+                "machine-wide audit policy needs an elevated token; re-run this "
+                "from an elevated prompt")
+    elif resolved == "darwin":
+        # Root is a matter of how the gateway is launched, not something to
+        # set here, and Full Disk Access cannot be granted by any process.
+        manual.append(
+            "run the gateway as root -- the packaged LaunchDaemon already does")
+        if not revert:
+            manual.append("grant Full Disk Access, opened below")
+
+    if not commands and not manual:
+        ux.ok("nothing to do on this platform", indent="  ")
+        return
+
+    if commands:
+        ux.subhead("These commands will run:", indent="  ")
+        for command in commands:
+            prefix = "sudo " if elevate and sys.platform != "win32" else ""
+            ux.subhead(f"{prefix}{_render_command(command)}", indent="    ")
+    for note in manual:
+        ux.subhead(f"manual: {note}", indent="    ")
+
+    if commands and not assume_yes and not click.confirm(
+        f"Apply {len(commands)} change(s) to this machine?", default=False,
+    ):
+        raise SystemExit(1)
+
+    failed = _run_grant_commands(commands, elevate=elevate) if commands else 0
+
+    if resolved == "darwin" and not revert:
+        _open_full_disk_access_pane()
+
+    if failed:
+        raise SystemExit(
+            f"{failed} of {len(commands)} change(s) failed; nothing was retried "
+            "and the rest were applied. Re-run to see the current state")
+    if commands:
+        ux.ok(f"{len(commands)} change(s) applied", indent="  ")
+    ux.subhead(
+        "Re-run 'defenseclaw agent discovery runtime permissions' to confirm, "
+        "and restart the gateway so the planes pick the new privilege up.",
         indent="  ",
     )
 

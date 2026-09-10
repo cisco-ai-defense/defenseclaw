@@ -401,3 +401,101 @@ def test_runtime_permissions_does_not_probe_another_host_os():
     for entry in payload["grants"]:
         if entry["needs"] != "nothing":
             assert entry["granted"] is None, entry
+
+
+def test_grant_commands_are_scoped_and_reversible():
+    """These commands change privileged machine state, so pin their shape.
+
+    Two properties matter more than the exact strings: every grant has an
+    exact inverse, and nothing grants more than the requirement it names.
+    A blanket filesystem SACL would satisfy the Windows file-event gap and
+    is deliberately absent -- auditing every object to catch credential
+    reads creates more exposure than the detection is worth.
+    """
+    from defenseclaw.commands.cmd_agent import (
+        _linux_grant_commands,
+        _windows_grant_commands,
+    )
+
+    granted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", False)
+    reverted = _linux_grant_commands("/opt/defenseclaw/bin/defenseclaw-gateway", True)
+    assert granted == [[
+        "setcap", "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep",
+        "/opt/defenseclaw/bin/defenseclaw-gateway",
+    ]]
+    assert reverted == [["setcap", "-r", "/opt/defenseclaw/bin/defenseclaw-gateway"]]
+
+    win_grant = _windows_grant_commands(False)
+    win_revert = _windows_grant_commands(True)
+    assert len(win_grant) == len(win_revert) == 4
+    assert all("enable" in " ".join(c) or "/d 1" in " ".join(c)
+               for c in win_grant if c[0] == "auditpol")
+    assert all("disable" in " ".join(c)
+               for c in win_revert if c[0] == "auditpol")
+    # The registry value is set to 1 by grant and 0 by revert, never removed:
+    # deleting the key would be indistinguishable from never having set it.
+    assert win_grant[-1][-3:] == ["REG_DWORD", "/d", "1"] or "1" in win_grant[-1]
+    assert "0" in win_revert[-1]
+    # Nothing here touches an ACL.
+    joined = " ".join(" ".join(c) for c in win_grant)
+    assert "SACL" not in joined and "Set-Acl" not in joined and "icacls" not in joined
+
+
+def test_grant_refuses_to_act_on_another_host_os():
+    """--grant must never run this host's commands under another OS's label."""
+    from click.testing import CliRunner
+
+    from defenseclaw.commands.cmd_agent import runtime_permissions
+
+    other = "windows" if sys.platform != "win32" else "linux"
+    result = CliRunner().invoke(runtime_permissions, ["--os", other, "--grant", "--yes"])
+    assert result.exit_code != 0
+    assert "host you are on" in result.output
+
+
+def test_grant_declined_at_the_prompt_changes_nothing(monkeypatch):
+    """Declining must not run a single command.
+
+    The confirmation is the only thing standing between a curious operator
+    and a machine-wide audit policy change, so it is asserted against the
+    plan directly rather than through whichever OS the suite happens to run
+    on -- macOS has no automatable commands at all, and would pass this
+    vacuously.
+    """
+    import click
+
+    from defenseclaw.commands import cmd_agent
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        cmd_agent, "_run_grant_commands",
+        lambda commands, elevate: ran.extend(commands) or 0,
+    )
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary", lambda: "/usr/bin/true",
+    )
+    monkeypatch.setattr(click, "confirm", lambda *a, **k: False)
+
+    with pytest.raises(SystemExit):
+        cmd_agent._apply_grants("linux", revert=False, assume_yes=False)
+    assert ran == [], ran
+
+
+def test_grant_confirmed_runs_exactly_the_planned_commands(monkeypatch):
+    """Confirming runs the plan, and only the plan."""
+    import click
+
+    from defenseclaw.commands import cmd_agent
+
+    ran: list[list[str]] = []
+    monkeypatch.setattr(
+        cmd_agent, "_run_grant_commands",
+        lambda commands, elevate: ran.extend(commands) or 0,
+    )
+    monkeypatch.setattr(
+        "defenseclaw.gateway.resolve_gateway_binary", lambda: "/usr/bin/true",
+    )
+    monkeypatch.setattr(click, "confirm", lambda *a, **k: True)
+
+    cmd_agent._apply_grants("linux", revert=False, assume_yes=False)
+    assert ran == cmd_agent._linux_grant_commands("/usr/bin/true", False)
