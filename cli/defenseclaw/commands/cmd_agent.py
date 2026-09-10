@@ -22,8 +22,8 @@ import dataclasses
 import hashlib
 import ipaddress
 import json
-import sys
 import os
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -2474,9 +2474,9 @@ def _render_command(command: list[str]) -> str:
 
 def _run_grant_commands(commands: list[list[str]], *, elevate: bool) -> int:
     """Run the grant commands, returning how many failed."""
-    from defenseclaw import ux
-
     import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
 
     failed = 0
     for command in commands:
@@ -2505,9 +2505,9 @@ def _run_grant_commands(commands: list[list[str]], *, elevate: bool) -> int:
 
 def _open_full_disk_access_pane() -> None:
     """Open the Full Disk Access pane, which is as far as automation goes."""
-    from defenseclaw import ux
-
     import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
 
     target = (
         "x-apple.systempreferences:com.apple.preference.security"
@@ -2653,7 +2653,13 @@ def _apply_grants(resolved: str, *, revert: bool, assume_yes: bool) -> None:
                 "cannot find defenseclaw-gateway on PATH; capabilities attach to "
                 "the binary, so there is nothing to grant them to")
         commands = _linux_grant_commands(binary, revert)
-        elevate = os.geteuid() != 0
+        # _probe_root rather than os.geteuid: that name does not exist on
+        # Windows, and this function is reachable there -- both from the
+        # tests that assert the Linux plan and from anyone diagnosing a
+        # cross-platform deployment. Unknown privilege elevates, because
+        # attempting sudo and being refused is recoverable while silently
+        # skipping it produces a grant that did not happen.
+        elevate = _probe_root() is not True
     elif resolved == "windows":
         commands = _windows_grant_commands(revert)
         if _probe_root() is False:
