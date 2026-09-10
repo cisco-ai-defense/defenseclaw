@@ -238,15 +238,9 @@ func readCommandLine(process windows.Handle) (string, error) {
 		unsafe.Pointer(&commandLine), unsafe.Sizeof(commandLine)); err != nil {
 		return "", err
 	}
-	length := int(commandLine.Length)
-	if length <= 0 || commandLine.Buffer == 0 {
+	length, usable := usableCmdlineBytes(int(commandLine.Length), commandLine.Buffer != 0)
+	if !usable {
 		return "", nil
-	}
-	if length > maxCmdlineBytes {
-		length = maxCmdlineBytes
-	}
-	if length%2 == 1 {
-		length--
 	}
 	buffer := make([]uint16, length/2)
 	if err := readRemote(process, commandLine.Buffer,
@@ -254,6 +248,29 @@ func readCommandLine(process windows.Handle) (string, error) {
 		return "", err
 	}
 	return windows.UTF16ToString(buffer), nil
+}
+
+// usableCmdlineBytes normalises a PEB command-line length into a byte count
+// safe to allocate and index, reporting false when there is nothing to read.
+//
+// Every value here comes out of another process's memory, and this runs
+// against every process on the host, so it is not a place to assume
+// well-formedness. The odd-length case is the sharp one: a length of 1 is
+// not a whole UTF-16 unit, rounding down makes it 0, and &buffer[0] on the
+// resulting empty slice panics -- taking the sensor, and the gateway it runs
+// in, down with it.
+func usableCmdlineBytes(length int, hasBuffer bool) (int, bool) {
+	if length <= 0 || !hasBuffer {
+		return 0, false
+	}
+	if length > maxCmdlineBytes {
+		length = maxCmdlineBytes
+	}
+	length -= length % 2
+	if length == 0 {
+		return 0, false
+	}
+	return length, true
 }
 
 func readRemote(process windows.Handle, address uintptr, into unsafe.Pointer, size uintptr) error {

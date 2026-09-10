@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from defenseclaw.tui.app import PANEL_SHORTCUTS, PANELS
 from defenseclaw.tui.panels.runtime import (
     RuntimePanelAction,
@@ -158,3 +159,65 @@ def test_scan_and_refresh_map_to_the_nested_cli_commands() -> None:
     assert scan is not None and scan.argv == ("agent", "discovery", "runtime", "scan")
     refresh = model.command_for(RuntimePanelAction.REFRESH)
     assert refresh is not None and refresh.argv[:3] == ("agent", "discovery", "runtime")
+
+
+@pytest.mark.asyncio
+async def test_load_runtime_model_renders_without_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opening the Runtime panel must not crash the TUI.
+
+    ``_load_runtime_model`` called ``self._render_body()``, which
+    ``DefenseClawTUI`` does not define. Textual workers default to
+    ``exit_on_error=True``, so the AttributeError after the fetch took the
+    whole TUI down. The panel-model tests never touched this method, which is
+    why 1043 green TUI tests said nothing about it.
+    """
+    from types import SimpleNamespace
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    payload = {
+        "enabled": True,
+        "scanned_at": "2026-09-09T12:00:00Z",
+        "findings": [],
+        "planes": [
+            {
+                "plane": "a",
+                "name": "inference heartbeat",
+                "available": True,
+                "running": True,
+                "mechanism": "ps(1)",
+            }
+        ],
+    }
+    monkeypatch.setattr("defenseclaw.tui.app._fetch_ai_runtime", lambda _config: payload)
+    config = SimpleNamespace(
+        gateway=SimpleNamespace(api_port=18970, host="127.0.0.1", token="token")
+    )
+    app = DefenseClawTUI(config=config)
+
+    async with app.run_test(size=(150, 40)) as pilot:
+        await app._load_runtime_model()  # noqa: SLF001 - app-level polling contract.
+        await pilot.pause()
+
+    assert app.runtime_model.snapshot is not None
+
+
+def test_the_app_defines_every_render_method_the_runtime_loader_calls() -> None:
+    """A cheap guard against the same typo returning under a different name."""
+    import inspect
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    source = inspect.getsource(DefenseClawTUI._load_runtime_model)
+    called = {
+        name.split("(")[0]
+        for name in source.split("self.")[1:]
+        if name.startswith("_render")
+    }
+    for method in called:
+        assert hasattr(DefenseClawTUI, method), (
+            f"_load_runtime_model calls self.{method}(), which does not exist; "
+            "the worker raises AttributeError and Textual exits the app"
+        )

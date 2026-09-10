@@ -226,13 +226,18 @@ type esRename struct {
 	Source esFile `json:"source"`
 }
 
-// Endpoint Security event type numbers used here. The numeric form is what
-// eslogger emits; the names are from ESMessage.h.
+// Endpoint Security event type numbers used here. eslogger emits the numeric
+// form, so these must match es_event_type_t in
+// <EndpointSecurity/ESTypes.h> exactly -- the enum is positional, and a wrong
+// number is not an error anywhere: the event simply never matches and the
+// plane goes quiet about a whole tactic class. CREATE and EXIT were wrong for
+// exactly that reason, so darwin_test.go asserts these against literals
+// rather than against the constants themselves.
 const (
 	esEventTypeNotifyExec   = 9
 	esEventTypeNotifyOpen   = 10
-	esEventTypeNotifyCreate = 12
-	esEventTypeNotifyExit   = 31
+	esEventTypeNotifyCreate = 13
+	esEventTypeNotifyExit   = 15
 	esEventTypeNotifyRename = 25
 )
 
@@ -270,7 +275,12 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 
 	var payload esEvent
 	if len(message.Event) > 0 {
-		_ = json.Unmarshal(message.Event, &payload)
+		if err := json.Unmarshal(message.Event, &payload); err != nil {
+			// A message whose event member will not decode carries nothing
+			// usable. Dropping it is right; carrying on into the switch with
+			// a half-filled payload is how a nil dereference gets reached.
+			return Event{}, false
+		}
 	}
 
 	switch message.EventType {
@@ -290,6 +300,8 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 		return base, true
 
 	case esEventTypeNotifyExit:
+		// No payload is needed: the exiting pid is the message's own process,
+		// which base already carries.
 		base.Kind = KindExit
 		return base, true
 
@@ -302,6 +314,9 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 		return base, true
 
 	case esEventTypeNotifyCreate:
+		if payload.Create == nil {
+			return Event{}, false
+		}
 		path := payload.Create.Destination.ExistingFile.Path
 		if path == "" && payload.Create.Destination.NewPath.Filename != "" {
 			path = filepath.Join(

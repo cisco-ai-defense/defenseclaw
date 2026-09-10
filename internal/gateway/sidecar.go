@@ -801,6 +801,12 @@ func (s *Sidecar) claimAIDiscoveryRun() (*inventory.ContinuousDiscoveryService, 
 // Run starts all subsystems as independent goroutines. Each subsystem runs
 // in its own goroutine so that a gateway disconnect does not stop the watcher
 // or API server. Run blocks until ctx is cancelled, then shuts everything down.
+// sidecarWorkerCount is how many goroutines in runRestartable can send into
+// errCh: config manager, gateway loop, watcher, API, guardrail, AI discovery,
+// AI runtime planes, IPC server. Keep it in step when adding one -- the
+// accompanying test fails if the two drift.
+const sidecarWorkerCount = 8
+
 func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	if err := s.beginObservabilityV8Run(); err != nil {
 		return err
@@ -965,7 +971,12 @@ func (s *Sidecar) Run(ctx context.Context) (runErr error) {
 	s.attachApplicationProtectionObserver(runCtx, apiToken)
 
 	var wg sync.WaitGroup
-	errCh := make(chan error, 7)
+	// One slot per worker that can report an error. Nothing drains this
+	// channel until after wg.Wait(), so a worker whose send blocks never
+	// reaches its deferred wg.Done() and the gateway hangs on shutdown
+	// instead of exiting. Sized from the count rather than a literal so
+	// adding a worker cannot quietly overrun it again.
+	errCh := make(chan error, sidecarWorkerCount)
 
 	configPath := s.currentConfig().ConfigFilePath
 	if strings.TrimSpace(configPath) == "" {

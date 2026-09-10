@@ -204,3 +204,71 @@ func TestParseESTimeFallsBackToNow(t *testing.T) {
 		t.Error("an empty time should fall back to now")
 	}
 }
+
+// TestEndpointSecurityEventNumbersMatchTheSDK pins the es_event_type_t values
+// against literals, deliberately not against the constants.
+//
+// eslogger emits event_type as a number and the enum is positional, so a
+// wrong value is silent: nothing errors, the case simply never matches, and
+// the plane goes quiet about an entire tactic class. CREATE and EXIT were
+// wrong (12 and 31 rather than 13 and 15), which meant macOS never saw a
+// LaunchAgent persistence write and never called ObserveExit, so lineage
+// records lived until TTL. A test written in terms of the constants would
+// have passed throughout.
+//
+// Values from <EndpointSecurity/ESTypes.h>. If Apple ever renumbers, this
+// fails loudly, which is the point.
+func TestEndpointSecurityEventNumbersMatchTheSDK(t *testing.T) {
+	for name, want := range map[string]int{
+		"ES_EVENT_TYPE_NOTIFY_EXEC":   9,
+		"ES_EVENT_TYPE_NOTIFY_OPEN":   10,
+		"ES_EVENT_TYPE_NOTIFY_CREATE": 13,
+		"ES_EVENT_TYPE_NOTIFY_EXIT":   15,
+		"ES_EVENT_TYPE_NOTIFY_RENAME": 25,
+	} {
+		got := map[string]int{
+			"ES_EVENT_TYPE_NOTIFY_EXEC":   esEventTypeNotifyExec,
+			"ES_EVENT_TYPE_NOTIFY_OPEN":   esEventTypeNotifyOpen,
+			"ES_EVENT_TYPE_NOTIFY_CREATE": esEventTypeNotifyCreate,
+			"ES_EVENT_TYPE_NOTIFY_EXIT":   esEventTypeNotifyExit,
+			"ES_EVENT_TYPE_NOTIFY_RENAME": esEventTypeNotifyRename,
+		}[name]
+		if got != want {
+			t.Errorf("%s = %d, want %d -- the plane will silently never see this event",
+				name, got, want)
+		}
+	}
+}
+
+// TestTranslateSurvivesAMalformedOrEmptyPayload keeps a hostile or merely
+// unexpected message from panicking the reader goroutine, which runs inside
+// the gateway process: a nil dereference there takes down far more than the
+// plane. Every event type must decline rather than crash.
+func TestTranslateSurvivesAMalformedOrEmptyPayload(t *testing.T) {
+	source := &darwinSource{}
+	for _, test := range []struct {
+		name      string
+		eventType int
+		event     string
+	}{
+		{"create with no event member", esEventTypeNotifyCreate, ""},
+		{"create with an empty object", esEventTypeNotifyCreate, `{}`},
+		{"create with a null payload", esEventTypeNotifyCreate, `{"create": null}`},
+		{"create with the wrong shape", esEventTypeNotifyCreate, `{"create": []}`},
+		{"exec with no payload", esEventTypeNotifyExec, `{}`},
+		{"open with a null payload", esEventTypeNotifyOpen, `{"open": null}`},
+		{"rename with the wrong shape", esEventTypeNotifyRename, `{"rename": 7}`},
+		{"unparseable event member", esEventTypeNotifyCreate, `{"create":`},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message := esMessage{EventType: test.eventType}
+			if test.event != "" {
+				message.Event = []byte(test.event)
+			}
+			// The assertion is that this returns rather than panics.
+			if _, ok := source.translate(message); ok {
+				t.Error("a malformed payload produced an event")
+			}
+		})
+	}
+}

@@ -10977,7 +10977,7 @@ class DefenseClawTUI(App[None]):
         payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
         if payload is not None:
             self.runtime_model.set_snapshot(payload)
-        self._render_body()
+        self._render_chrome()
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
