@@ -114,16 +114,37 @@ func readTable(family uint32) ([]Connection, error) {
 	if size == 0 {
 		return nil, nil
 	}
-	buffer := make([]byte, size)
-	ret, _, _ = procGetExtendedTCPTable.Call(
-		uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size)),
-		0, uintptr(family), tcpTableOwnerPIDAll, 0,
-	)
-	if ret != 0 {
-		return nil, fmt.Errorf("GetExtendedTcpTable(family=%d): %w", family, windows.Errno(ret))
+	// Retry when the table outgrows the size the first call reported. Sizing
+	// and reading are two calls with a gap between them, and connections open
+	// constantly, so ERROR_INSUFFICIENT_BUFFER on the second call is an
+	// ordinary race rather than a fault. Treating it as fatal drops the whole
+	// connection table for that poll -- reported as a host with no egress,
+	// which is the reading this subsystem must never produce by accident.
+	for attempt := 0; attempt < tableGrowthRetries; attempt++ {
+		buffer := make([]byte, size)
+		ret, _, _ = procGetExtendedTCPTable.Call(
+			uintptr(unsafe.Pointer(&buffer[0])), uintptr(unsafe.Pointer(&size)),
+			0, uintptr(family), tcpTableOwnerPIDAll, 0,
+		)
+		switch ret {
+		case 0:
+			return decodeTable(buffer, family)
+		case uintptr(windows.ERROR_INSUFFICIENT_BUFFER):
+			// size now holds what the kernel says it needs; go round again.
+			continue
+		default:
+			return nil, fmt.Errorf("GetExtendedTcpTable(family=%d): %w", family, windows.Errno(ret))
+		}
 	}
-	return decodeTable(buffer, family)
+	return nil, fmt.Errorf(
+		"GetExtendedTcpTable(family=%d): the connection table grew on every one of %d attempts",
+		family, tableGrowthRetries)
 }
+
+// tableGrowthRetries bounds the size-then-read retry. A host busy enough to
+// outgrow its own table three times running is reported as an error rather
+// than retried forever.
+const tableGrowthRetries = 3
 
 // decodeTable walks the MIB_TCPTABLE_OWNER_PID layout: a uint32 entry count
 // followed by that many packed rows.

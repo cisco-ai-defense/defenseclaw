@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+	"strings"
 )
 
 func freshSnapshot(signals ...inventory.AISignal) Snapshot {
@@ -208,16 +209,7 @@ func TestNoSignalsInMatchableCategoriesIsUnobservedNotAbsence(t *testing.T) {
 
 func contains(haystack, needle string) bool {
 	return len(needle) == 0 || len(haystack) >= len(needle) &&
-		(haystack == needle || indexOf(haystack, needle) >= 0)
-}
-
-func indexOf(haystack, needle string) int {
-	for i := 0; i+len(needle) <= len(haystack); i++ {
-		if haystack[i:i+len(needle)] == needle {
-			return i
-		}
-	}
-	return -1
+		(haystack == needle || strings.Contains(haystack, needle))
 }
 
 // TestFutureDatedSnapshotIsUnobservedNotFresh closes a staleness check that

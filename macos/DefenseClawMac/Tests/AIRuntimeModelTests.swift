@@ -106,7 +106,13 @@ struct AIRuntimeModelTests {
                 expect(plane.summary.contains("ps(1)") || plane.summary.contains("unknown mechanism"),
                        "a running plane should name its mechanism")
             } else {
-                expect(plane.summary.contains("—"), "a stopped plane should state a reason")
+                // Assert the reason itself, not the dash that separates it.
+                // The em dash is in the format string, so a summary that
+                // dropped the reason entirely still contained one -- the
+                // check could not fail on the thing it was written to catch.
+                expect(!plane.reason.isEmpty, "the fixture's stopped planes carry a reason")
+                expect(plane.summary.contains(plane.reason),
+                       "a stopped plane must state its reason: \(plane.summary)")
             }
         }
         expect(snapshot.planesNotRunning.count == 2, "two planes are not running")

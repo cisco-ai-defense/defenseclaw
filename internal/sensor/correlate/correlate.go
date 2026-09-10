@@ -139,6 +139,10 @@ func (r Result) Tag() string { return "correlation:" + string(r.Verdict) }
 type Correlator struct {
 	snapshot Snapshot
 	now      func() time.Time
+	// index groups the snapshot's signals by category, built once on first
+	// use. A correlator is scoped to one poll and used from Poll only, which
+	// holds pollMu, so this needs no lock of its own.
+	index map[string][]inventory.AISignal
 }
 
 // New returns a correlator over one snapshot.
@@ -208,6 +212,33 @@ func (c *Correlator) ProviderDomain(observation Observation) Result {
 	return c.correlate(observation, []string{inventory.SignalProviderDomain}, c.matchesDomain)
 }
 
+// byCategory returns the snapshot's signals in the requested categories,
+// building the index once on first use.
+//
+// Poll calls correlate once per process, and each call used to walk the whole
+// signal list again. On a host with a large inventory that is the join's
+// dominant cost, paid per process rather than per poll.
+func (c *Correlator) byCategory(categories []string) []inventory.AISignal {
+	if c.index == nil {
+		c.index = make(map[string][]inventory.AISignal, 8)
+		for _, signal := range c.snapshot.Signals {
+			c.index[signal.Category] = append(c.index[signal.Category], signal)
+		}
+	}
+	total := 0
+	for _, category := range categories {
+		total += len(c.index[category])
+	}
+	if total == 0 {
+		return nil
+	}
+	wanted := make([]inventory.AISignal, 0, total)
+	for _, category := range categories {
+		wanted = append(wanted, c.index[category]...)
+	}
+	return wanted
+}
+
 func (c *Correlator) correlate(
 	observation Observation,
 	categories []string,
@@ -216,20 +247,13 @@ func (c *Correlator) correlate(
 	if ok, reason := c.usable(); !ok {
 		return Result{Verdict: VerdictUnobserved, Reason: reason}
 	}
-	wanted := make(map[string]bool, len(categories))
-	for _, category := range categories {
-		wanted[category] = true
-	}
 	var (
 		matchedIDs     []string
 		matchedCats    []string
 		consideredAny  bool
 		seenCategories = map[string]bool{}
 	)
-	for _, signal := range c.snapshot.Signals {
-		if !wanted[signal.Category] {
-			continue
-		}
+	for _, signal := range c.byCategory(categories) {
 		// Discovery collects this category and looked at it. That is true even
 		// for a gone signal, which is why this is set before the gone check:
 		// "the model was removed" is an observation of absence, not a failure

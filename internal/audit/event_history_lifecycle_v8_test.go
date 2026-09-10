@@ -192,7 +192,11 @@ func TestLatestLifecycleProjectionRejectsTamperingAndTransformedIdentifiers(t *t
 				t.Helper()
 				if _, err := store.db.Exec(
 					`UPDATE audit_events SET redaction_profile=? WHERE id='candidate'`,
-					retiredLegacyV7ProfileName,
+					// The literal, deliberately, not the constant the guard
+					// uses. Writing the constant means the test agrees with
+					// whatever it says, so a wrong value would pass here
+					// while pre-v8 rows quietly stopped being rejected.
+					"legacy-v7",
 				); err != nil {
 					t.Fatal(err)
 				}

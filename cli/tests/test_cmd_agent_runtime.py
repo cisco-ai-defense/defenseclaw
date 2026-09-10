@@ -248,3 +248,43 @@ def test_runtime_no_restart_says_the_change_is_not_live(
     assert result.exit_code == 0, result.output
     assert not restart_spy.calls
     assert "--no-restart" in result.output
+
+
+def test_severity_filter_narrows_the_table_and_tolerates_unknown_bands(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """--severity must filter, and must not crash on a band it does not know.
+
+    The severity of each finding arrives from the gateway over the wire, so
+    the two vocabularies can drift. ``tuple.index`` raises on a value it does
+    not hold, which ended the command in a traceback; an unrecognised band now
+    ranks last, so it is excluded from a narrowing filter rather than
+    silently promoted into one.
+    """
+    payload = {
+        "enabled": True,
+        "scanned_at": "2026-09-09T12:00:00Z",
+        "planes": [],
+        "findings": [
+            {"finding_id": "a", "severity": "critical", "process": "critproc", "score": 90},
+            {"finding_id": "b", "severity": "low", "process": "lowproc", "score": 10},
+            # A band this CLI has never heard of.
+            {"finding_id": "c", "severity": "catastrophic", "process": "weirdproc", "score": 99},
+        ],
+    }
+    monkeypatch.setattr(
+        cmd_agent, "_usage_client", lambda *a, **k: _StubClient(payload=payload)
+    )
+
+    result = _invoke("findings", "--severity", "critical")
+    assert result.exit_code == 0, result.output
+    assert "critproc" in result.output
+    assert "lowproc" not in result.output
+    assert "weirdproc" not in result.output, (
+        "an unrecognised severity was promoted into the critical filter"
+    )
+
+    unfiltered = _invoke("findings")
+    assert unfiltered.exit_code == 0, unfiltered.output
+    for process in ("critproc", "lowproc", "weirdproc"):
+        assert process in unfiltered.output

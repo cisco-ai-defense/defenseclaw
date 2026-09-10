@@ -25,6 +25,8 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 // TestSharedCatalogIsBuiltFromTheOneSignatureSet is the "one catalog, not two"
@@ -89,10 +91,12 @@ func TestModelHubClearsTheReportingFloorAlone(t *testing.T) {
 	t.Parallel()
 	// Pulling open weights onto a corporate endpoint is the setup for local
 	// shadow inference, so it must not need corroboration to surface.
-	const defaultMinRiskToReport = 30
-	if CategoryModelHub.Weight() < defaultMinRiskToReport {
+	// Bound to the real default rather than a restated 30: if the floor
+	// moves, this must follow it, not keep asserting a number that no longer
+	// governs anything.
+	if CategoryModelHub.Weight() < config.DefaultRuntimeMinRiskToReport {
 		t.Fatalf("model hub priced at %d, below the %d reporting floor",
-			CategoryModelHub.Weight(), defaultMinRiskToReport)
+			CategoryModelHub.Weight(), config.DefaultRuntimeMinRiskToReport)
 	}
 }
 

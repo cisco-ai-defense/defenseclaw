@@ -91,6 +91,14 @@ func TestPlaneCIsNeverImplied(t *testing.T) {
 			AIRuntimeConfig{Planes: []string{"a", "z"}},
 			[]string{"a"},
 		},
+		{
+			// Nothing recognised is not the same as nothing configured. A
+			// typo must not silently fall back to the default selection and
+			// start running planes the operator did not ask for.
+			"every named plane unknown selects none",
+			AIRuntimeConfig{Planes: []string{"z", "q"}},
+			[]string{},
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

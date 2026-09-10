@@ -380,7 +380,11 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 				}, sanctioned)
 			signals = append(signals, result.signals...)
 
-			state.observeUnnamedPeers(len(peersOf(nameCtx, byPID[process.PID], s.options.Resolver)))
+			// planeB already resolved every public peer and counted the ones
+			// it could not name. Walking them again here resolved each a
+			// second time and, worse, duplicated the rule for what counts as
+			// unnamed in two places that could drift apart.
+			state.observeUnnamedPeers(result.unattributedPublicPeers)
 			if len(signals) > 0 || result.unattributedPublicPeers > 0 {
 				if signal, ok := unattributedEgressSignal(state.unnamedPeerPolls); ok &&
 					isScriptable(process.Name) {
@@ -730,22 +734,6 @@ func hasLocalInference(signals []scoring.Signal) bool {
 }
 
 func isScriptable(name string) bool { return scriptableRuntimes[strings.ToLower(name)] }
-
-// peersOf returns the public peers of a process's connections that could not
-// be named, keyed by address.
-func peersOf(ctx context.Context, connections []netprobe.Connection, resolver Resolver) map[string]bool {
-	peers := make(map[string]bool, len(connections))
-	for _, connection := range connections {
-		if !connection.Public() {
-			continue
-		}
-		if hostname, _, _ := resolver.Resolve(ctx, connection); hostname != "" {
-			continue
-		}
-		peers[connection.RemoteIP.String()] = true
-	}
-	return peers
-}
 
 // findingID is stable for a process episode so repeated emissions update
 // rather than accumulate.

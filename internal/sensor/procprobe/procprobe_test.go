@@ -73,8 +73,30 @@ func TestSnapshotReportsWhatItCouldNotRead(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Snapshot(): %v", err)
 	}
-	if skipped < 0 {
-		t.Fatalf("skipped = %d", skipped)
+	// A count cannot be negative, so asserting that proves nothing. Assert
+	// what the function is for: it read this host, and every row it returned
+	// is usable.
+	if len(rows) == 0 {
+		t.Fatal("no processes at all: this test runs inside one")
+	}
+	self := false
+	for _, row := range rows {
+		if row.PID <= 0 {
+			t.Fatalf("row with no pid: %+v", row)
+		}
+		if row.Name == "" {
+			t.Fatalf("row with no name: %+v", row)
+		}
+		if row.CPUTime < 0 {
+			t.Fatalf("negative CPU time on pid %d: %s", row.PID, row.CPUTime)
+		}
+		if row.PID == os.Getpid() {
+			self = true
+		}
+	}
+	if !self {
+		t.Errorf("the snapshot did not include this test process (pid %d), "+
+			"so it is not reading the live table", os.Getpid())
 	}
 	t.Logf("%d rows readable, %d rows partial or unreadable", len(rows), skipped)
 }
