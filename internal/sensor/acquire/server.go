@@ -163,6 +163,8 @@ func (s *Server) handle(ctx context.Context, conn net.Conn) {
 		s.serveConnections(ctx, conn, request)
 	case OpEvents:
 		s.serveEvents(ctx, conn, request)
+	case OpDNS:
+		s.serveDNS(ctx, conn, request)
 	default:
 		// An unknown op is a protocol error, not something to guess at.
 		_ = writeFrame(conn, Response{

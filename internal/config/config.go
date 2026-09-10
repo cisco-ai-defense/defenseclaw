@@ -424,6 +424,40 @@ type AIRuntimeConfig struct {
 	// Defaults on. Disabling it removes the read entirely; it does not make
 	// findings score as though the inventory disagreed.
 	Correlate *bool `mapstructure:"correlate" yaml:"correlate,omitempty"`
+
+	// Acquisition selects where the privileged reads come from:
+	//
+	//   auto     read directly when this process can, ask the helper when a
+	//            managed deployment has de-privileged the gateway
+	//   direct   always read directly
+	//   helper   always ask the helper, and report blindness if it is absent
+	//
+	// Empty means auto. The distinction matters because the two failure
+	// modes read differently to an operator: "direct" on a sandboxed gateway
+	// is a plane that sees nothing, and "helper" with no helper running is a
+	// plane that says so.
+	Acquisition string `mapstructure:"acquisition" yaml:"acquisition,omitempty"`
+
+	// HelperSocket overrides where the helper listens. Empty means the
+	// deployment default.
+	HelperSocket string `mapstructure:"helper_socket" yaml:"helper_socket,omitempty"`
+}
+
+// Acquisition modes.
+const (
+	AcquisitionAuto   = "auto"
+	AcquisitionDirect = "direct"
+	AcquisitionHelper = "helper"
+)
+
+// EffectiveAcquisition resolves the acquisition mode, applying the default.
+func (c AIRuntimeConfig) EffectiveAcquisition() string {
+	switch c.Acquisition {
+	case AcquisitionDirect, AcquisitionHelper:
+		return c.Acquisition
+	default:
+		return AcquisitionAuto
+	}
 }
 
 // Defaults for the runtime planes, applied when a field is left at zero.

@@ -77,6 +77,22 @@ type Acquirer interface {
 	// Describe names the acquisition path for the coverage report, so an
 	// operator can tell a direct read from a brokered one.
 	Describe() string
+	// WideCoverage reports whether these reads see the whole host rather
+	// than only what the calling process owns.
+	//
+	// It belongs to the acquirer, not to the platform, because those two
+	// answers differ exactly when this package is doing its job: a
+	// de-privileged gateway asking a root helper has machine-wide coverage
+	// while its own euid says otherwise. Reporting the process's privilege
+	// there would understate coverage as badly as assuming it overstates it.
+	WideCoverage() bool
+	// Brokered reports whether acquisition happens out of process.
+	//
+	// Plane availability is decided differently in the two cases. Read
+	// directly, a plane is available when this platform and this process can
+	// run it. Brokered, the local probe is answering about the wrong
+	// process, and what matters is whether the helper is delivering.
+	Brokered() bool
 	// Close releases whatever the acquirer holds.
 	Close() error
 }

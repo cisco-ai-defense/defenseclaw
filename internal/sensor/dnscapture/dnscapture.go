@@ -117,6 +117,25 @@ func (c *Cache) Lookup(address string) (string, bool) {
 	return found.hostname, true
 }
 
+// Entries returns a copy of the unexpired address-to-hostname pairs.
+//
+// A copy, not the map: the caller iterates while capture keeps writing, and
+// handing out the live map would race. Expired entries are skipped rather
+// than deleted, leaving eviction to Record where the bound already lives.
+func (c *Cache) Entries() map[string]string {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	now := c.now()
+	out := make(map[string]string, len(c.entries))
+	for address, found := range c.entries {
+		if now.After(found.expires) {
+			continue
+		}
+		out[address] = found.hostname
+	}
+	return out
+}
+
 // Observed is how many answers have been recorded.
 func (c *Cache) Observed() int64 {
 	c.mu.RLock()

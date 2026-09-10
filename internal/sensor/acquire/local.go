@@ -27,6 +27,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/dnscapture"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/plane"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/procprobe"
 )
 
@@ -54,5 +55,17 @@ func (*Local) PlaneSource(homeDirs []string) plane.Source { return plane.NewSour
 func (*Local) DNSCapturer() dnscapture.Capturer { return dnscapture.New() }
 
 func (*Local) Describe() string { return "direct" }
+
+// WideCoverage asks the platform, because for a direct read the process's
+// own privilege is exactly the question.
+func (*Local) WideCoverage() bool {
+	host, err := platform.Current()
+	if err != nil {
+		return false
+	}
+	return host.WideCoverage()
+}
+
+func (*Local) Brokered() bool { return false }
 
 func (*Local) Close() error { return nil }

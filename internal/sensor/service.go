@@ -558,7 +558,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		case platform.PlaneB:
 			entry.Running = capability.Available && connectionOK
 			var limits []string
-			if !s.options.Platform.WideCoverage() {
+			if !s.options.Acquirer.WideCoverage() {
 				// Without machine-wide privilege the connection table is not
 				// the host's, it is this process's own. On macOS that is the
 				// dangerous shape: unprivileged lsof simply omits other
@@ -580,6 +580,16 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 			}
 		case platform.PlaneC:
 			entry.Running, entry.Mechanism, entry.Reason = s.hostPlaneHealth(capability)
+			if s.options.Acquirer.Brokered() {
+				// The local capability probe answered about the wrong
+				// process. It asked whether *this* process can open a
+				// netlink socket, and in a managed deployment the answer is
+				// deliberately no -- while the helper, which actually holds
+				// the plane, is delivering. Availability follows the source
+				// that is running, or the plane reports itself unavailable
+				// and running in the same breath.
+				entry.Available = entry.Running || capability.Available
+			}
 		}
 		if entry.Running {
 			entry.ObservedAt = now

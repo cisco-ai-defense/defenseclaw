@@ -26,7 +26,10 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 )
 
@@ -105,8 +108,10 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		return ctx.Err()
 	}
 
+	acquirer := chooseAcquirer(activeConfig, runtimeConfig)
 	service, err := sensor.New(sensor.Options{
 		Config:    runtimeConfig,
+		Acquirer:  acquirer,
 		Inventory: discoveryCorrelationSource{sidecar: s},
 		// The same home list the inventory scanner walks. Under launchd or a
 		// Windows service the daemon's own $HOME is not a real user's, so the
@@ -280,4 +285,40 @@ func (s *Sidecar) aiRuntimeSnapshot() *sensor.Service {
 	s.aiRuntimeMu.RLock()
 	defer s.aiRuntimeMu.RUnlock()
 	return s.aiRuntime
+}
+
+// chooseAcquirer decides where the privileged reads come from.
+//
+// The default is auto, and auto is not "try the helper and fall back". It
+// keys on deployment mode, because that is what determines whether this
+// process was de-privileged on purpose. A managed install sandboxes the
+// gateway precisely so it cannot read what the planes need, so brokering is
+// the only way it sees anything. An unmanaged install is the operator's own
+// process with whatever privilege they granted it, where inserting a broker
+// would add a failure mode and buy nothing.
+//
+// An explicit setting is honoured either way, including the combination
+// that sees nothing: "direct" on a sandboxed gateway is a legitimate thing
+// to configure while diagnosing, and the coverage report will say what it
+// found rather than quietly substituting a working path.
+func chooseAcquirer(
+	activeConfig *config.Config, runtimeConfig config.AIRuntimeConfig,
+) acquire.Acquirer {
+	managedEnterprise := managed.IsManagedEnterprise(activeConfig.DeploymentMode)
+	mode := runtimeConfig.EffectiveAcquisition()
+	if mode == config.AcquisitionAuto {
+		if managedEnterprise {
+			mode = config.AcquisitionHelper
+		} else {
+			mode = config.AcquisitionDirect
+		}
+	}
+	if mode != config.AcquisitionHelper {
+		return acquire.NewLocal()
+	}
+	socket := runtimeConfig.HelperSocket
+	if socket == "" {
+		socket = acquire.DefaultSocketPath(activeConfig.DataDir, managedEnterprise)
+	}
+	return acquire.NewHelper(socket)
 }

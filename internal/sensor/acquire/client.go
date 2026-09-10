@@ -24,7 +24,6 @@ package acquire
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"sync"
@@ -159,13 +158,8 @@ func (h *Helper) PlaneSource([]string) plane.Source {
 	return &helperPlaneSource{helper: h, buffer: plane.NewBuffer()}
 }
 
-// DNSCapturer returns a capturer that never starts.
-//
-// Passive DNS is not brokered: the answers a helper observed would have to
-// be streamed continuously to be useful, and the same naming is available
-// from the reverse resolver at lower confidence and no privilege. Reporting
-// that plainly beats a second privileged stream carrying hostnames.
-func (h *Helper) DNSCapturer() dnscapture.Capturer { return brokeredDNSUnavailable{} }
+// DNSCapturer subscribes to the helper's observed DNS answers.
+func (h *Helper) DNSCapturer() dnscapture.Capturer { return &brokeredCapturer{helper: h} }
 
 // Describe names the acquisition path for the coverage report.
 func (h *Helper) Describe() string {
@@ -177,19 +171,19 @@ func (h *Helper) Describe() string {
 	return "brokered via " + h.socketPath
 }
 
-// Close releases nothing: connections are per-request.
-func (h *Helper) Close() error { return nil }
-
-// brokeredDNSUnavailable states why passive DNS is off rather than failing
-// silently, so the plane reports reduced naming confidence with a reason.
-type brokeredDNSUnavailable struct{}
-
-func (brokeredDNSUnavailable) Start(context.Context, *dnscapture.Cache) error {
-	return errors.New(
-		"passive DNS is not brokered through the sensor helper; peers are named " +
-			"by reverse DNS at lower confidence")
+// WideCoverage is true whenever the helper is answering.
+//
+// The helper is the privileged half by construction -- a deployment that
+// installs it runs it as root or LocalSystem, because a helper without
+// privilege would broker nothing worth having. So reachability is the
+// question, and an unreachable helper is narrow coverage, not wide.
+func (h *Helper) WideCoverage() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.lastFail == nil
 }
 
-func (brokeredDNSUnavailable) Mechanism() string { return "not brokered" }
+func (h *Helper) Brokered() bool { return true }
 
-func (brokeredDNSUnavailable) Close() error { return nil }
+// Close releases nothing: connections are per-request.
+func (h *Helper) Close() error { return nil }
