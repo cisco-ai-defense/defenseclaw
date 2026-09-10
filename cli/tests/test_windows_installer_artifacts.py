@@ -941,7 +941,7 @@ def test_binary_identity_output_drain_shares_the_process_deadline(tmp_path: Path
         "package main\n"
         'import ("encoding/json"; "os"; "os/exec")\n'
         "func main() {\n"
-        ' child := exec.Command("cmd.exe", "/d", "/c", "ping -n 6 127.0.0.1 >nul")\n'
+        ' child := exec.Command("cmd.exe", "/d", "/c", "ping -n 31 127.0.0.1 >nul")\n'
         " child.Stdout = os.Stdout; child.Stderr = os.Stderr; _ = child.Start()\n"
         ' _ = json.NewEncoder(os.Stdout).Encode(map[string]any{"schema_version":1,'
         '"name":"defenseclaw-gateway","version":"1.2.3",'
@@ -976,12 +976,18 @@ def test_binary_identity_output_drain_shares_the_process_deadline(tmp_path: Path
         capture_output=True,
         text=True,
         env=env,
-        timeout=10,
+        timeout=90,
     )
     elapsed = time.monotonic() - started
     assert result.returncode != 0
     assert "identity output streams did not close within 1 seconds" in result.stdout + result.stderr
-    assert elapsed < 5
+    # elapsed also covers pwsh start-up, which costs several seconds on a cold
+    # hosted Windows runner. The previous bound was 5s against a child that
+    # itself lived ~5s, so start-up alone could exhaust the margin and the test
+    # flaked. The grandchild now lives ~30s, which separates the two outcomes
+    # unambiguously: honouring the 1s deadline finishes well inside 15s, while
+    # waiting on the inherited handle cannot finish before ~30s.
+    assert elapsed < 15
 
 
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows Authenticode")

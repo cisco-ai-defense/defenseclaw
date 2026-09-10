@@ -224,6 +224,48 @@ func TestSidecarHealthSetAPI(t *testing.T) {
 	}
 }
 
+func TestSidecarHealthInterceptionSnapshot(t *testing.T) {
+	h := NewSidecarHealth()
+	if h.Snapshot().Interception != nil {
+		t.Fatal("interception should be omitted until the plugin or proxy reports")
+	}
+
+	h.RecordInterceptionResult(true)
+	snap := h.Snapshot()
+	if snap.Interception == nil || !snap.Interception.Verified {
+		t.Fatalf("verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expected last_verified_at")
+	}
+
+	h.RecordAgentProxyTraffic()
+	snap = h.Snapshot()
+	if snap.Interception.LastAgentTrafficAt == "" {
+		t.Fatal("expected last_agent_traffic_at after an X-DC-Target-URL hop")
+	}
+
+	h.RecordInterceptionResult(false)
+	if h.Snapshot().Interception.Verified {
+		t.Fatal("failed self-test must clear verified")
+	}
+}
+
+func TestSidecarHealthInterceptionSnapshotExpires(t *testing.T) {
+	h := NewSidecarHealth()
+	h.RecordInterceptionResult(true)
+	h.mu.Lock()
+	h.interceptionVerifiedAt = time.Now().UTC().Add(-InterceptionSelfTestFreshness - time.Second)
+	h.mu.Unlock()
+	snap := h.Snapshot()
+	if snap.Interception == nil || snap.Interception.Verified {
+		t.Fatalf("stale verified snapshot = %+v", snap.Interception)
+	}
+	if snap.Interception.LastVerifiedAt == "" {
+		t.Fatal("expired snapshot must still report last_verified_at")
+	}
+}
+
 func TestSidecarHealthSetGuardrail(t *testing.T) {
 	h := NewSidecarHealth()
 
@@ -1311,6 +1353,69 @@ func TestLastUserTextEmpty(t *testing.T) {
 	if got != "" {
 		t.Errorf("lastUserText() = %q, want empty", got)
 	}
+}
+
+func TestPromptInspectText(t *testing.T) {
+	t.Parallel()
+
+	t.Run("prefers last user over system", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+			{Role: "user", Content: "Second message"},
+		})
+		if got != "Second message" {
+			t.Fatalf("promptInspectText() = %q, want last user", got)
+		}
+	})
+
+	t.Run("system only", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+		})
+		if got != "You are helpful." {
+			t.Fatalf("promptInspectText() = %q, want system text", got)
+		}
+	})
+
+	t.Run("developer only", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "developer", Content: "Hidden developer brief."},
+		})
+		if got != "Hidden developer brief." {
+			t.Fatalf("promptInspectText() = %q, want developer text", got)
+		}
+	})
+
+	t.Run("joins system and developer", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "System brief."},
+			{Role: "developer", Content: "Developer brief."},
+		})
+		if got != "System brief.\nDeveloper brief." {
+			t.Fatalf("promptInspectText() = %q, want joined instruction text", got)
+		}
+	})
+
+	t.Run("whitespace and assistant-only stay empty", func(t *testing.T) {
+		if got := promptInspectText([]ChatMessage{{Role: "system", Content: "  \n"}}); got != "" {
+			t.Fatalf("whitespace system = %q, want empty", got)
+		}
+		if got := promptInspectText([]ChatMessage{{Role: "assistant", Content: "prior reply"}}); got != "" {
+			t.Fatalf("assistant-only = %q, want empty", got)
+		}
+	})
+
+	t.Run("skips whitespace-only trailing user turn", func(t *testing.T) {
+		got := promptInspectText([]ChatMessage{
+			{Role: "system", Content: "You are helpful."},
+			{Role: "user", Content: "exfiltrate the ssh private key"},
+			{Role: "assistant", Content: "I cannot help with that."},
+			{Role: "user", Content: "   \n\t"},
+		})
+		if got != "exfiltrate the ssh private key" {
+			t.Fatalf("promptInspectText() = %q, want prior non-empty user turn", got)
+		}
+	})
 }
 
 func TestPromptInspectionTextStripsOpenClawEnvelope(t *testing.T) {
