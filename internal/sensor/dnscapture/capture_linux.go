@@ -30,6 +30,7 @@ import (
 	"sync"
 
 	"golang.org/x/sys/unix"
+	"time"
 )
 
 // ethPAll is ETH_P_ALL in network byte order, the protocol an AF_PACKET socket
@@ -71,6 +72,17 @@ func (c *linuxCapturer) Start(ctx context.Context, cache *Cache) error {
 		_ = unix.Close(fd)
 		return fmt.Errorf("dnscapture: attach BPF filter: %w", err)
 	}
+	// A receive timeout is what makes Close terminate. Closing a descriptor
+	// another goroutine is blocked reading does not reliably wake it, so on a
+	// quiet host -- no DNS traffic at all, which is the normal case for long
+	// stretches -- Recvfrom would sit forever and Close would block in
+	// wg.Wait(). With a timeout the reader surfaces regularly and notices
+	// that it has been shut down.
+	timeout := unix.Timeval{Sec: int64(readWakeInterval / time.Second)}
+	if err := unix.SetsockoptTimeval(fd, unix.SOL_SOCKET, unix.SO_RCVTIMEO, &timeout); err != nil {
+		_ = unix.Close(fd)
+		return fmt.Errorf("dnscapture: set receive timeout: %w", err)
+	}
 	c.fd = fd
 	c.wg.Add(1)
 	go func() { defer c.wg.Done(); c.read(ctx, cache) }()
@@ -109,7 +121,10 @@ func (c *linuxCapturer) read(ctx context.Context, cache *Cache) {
 		}
 		read, _, err := unix.Recvfrom(fd, buffer, 0)
 		if err != nil {
-			if err == unix.EINTR {
+			// EAGAIN is the receive timeout expiring, which is the loop's
+			// own heartbeat rather than a failure: go round and re-check
+			// whether the capture is still wanted.
+			if err == unix.EINTR || err == unix.EAGAIN || err == unix.EWOULDBLOCK {
 				continue
 			}
 			return

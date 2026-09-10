@@ -74,17 +74,50 @@ func (adapter *aiRuntimeV8Adapter) EmitSnapshot(ctx context.Context, snapshot se
 		if err := adapter.emitFinding(ctx, snapshot, finding); err != nil && firstErr == nil {
 			firstErr = err
 		}
+		if finding.AgentName == "" {
+			// Activity records are per-tactic and carry the agent. Plane A and
+			// plane B findings have no lineage behind them, so there is no
+			// agent to name -- emitting anyway would have the builder refuse
+			// the record and turn every such poll into an error. The finding
+			// itself is already emitted above; only the activity breakdown is
+			// host-plane-only.
+			continue
+		}
+		// One record per tactic, not per signal. Several signal ids map to
+		// the same tactic -- agent_persistence and agent_config_persistence
+		// both mean Persistence -- and emitting each would double-count a
+		// stage in every consumer that counts activity records.
+		seen := make(map[tactics.Tactic]bool, len(finding.Signals))
 		for _, signal := range finding.Signals {
 			tactic, ok := tactics.ForSignal(signal.ID)
-			if !ok {
+			if !ok || seen[tactic] {
 				continue
 			}
+			seen[tactic] = true
 			if err := adapter.emitActivity(ctx, snapshot, finding, tactic); err != nil && firstErr == nil {
 				firstErr = err
 			}
 		}
 	}
 	return firstErr
+}
+
+// planeHealthReason is what a plane-health record says happened.
+//
+// A running plane names its mechanism; a stopped or blind one names its
+// reason. One of the two is always present, so a reader never has to go to
+// the source to find out what happened.
+//
+// Exported to the test rather than restated there: a test that re-implements
+// this rule asserts against itself and keeps passing when the rule changes.
+func planeHealthReason(health sensor.PlaneHealth) string {
+	if health.Reason != "" {
+		return health.Reason
+	}
+	if health.Running {
+		return health.Mechanism
+	}
+	return ""
 }
 
 func runtimeOutcome(snapshot sensor.Snapshot) observability.Outcome {
@@ -131,13 +164,6 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 		if buildErr != nil {
 			return observability.Record{}, buildErr
 		}
-		// A running plane names its mechanism; a stopped or blind one names
-		// its reason. One of the two is always present, so a reader never has
-		// to go to the source to find out what happened.
-		reason := health.Reason
-		if health.Running && reason == "" {
-			reason = health.Mechanism
-		}
 		return builder.BuildLogAIRuntimePlaneHealth(observability.LogAIRuntimePlaneHealthInput{
 			Envelope:                                aiDiscoveryV8EmitEnvelope(ctx, emitCtx, "runtime"),
 			Severity:                                observability.Present(observability.SeverityInfo),
@@ -150,7 +176,7 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 			DefenseClawAIRuntimePlane:                   string(health.Plane),
 			DefenseClawAIRuntimePlaneAvailable:          health.Available,
 			DefenseClawAIRuntimePlaneRunning:            health.Running,
-			DefenseClawAIRuntimePlaneReason:             aiDiscoveryV8OptionalText(reason),
+			DefenseClawAIRuntimePlaneReason:             aiDiscoveryV8OptionalText(planeHealthReason(health)),
 		})
 	})
 	return err

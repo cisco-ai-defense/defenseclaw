@@ -3525,19 +3525,8 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
         d.pop("observability", None)
 
 
-def _prune_ai_runtime(ai_discovery: Any) -> None:
-    """Mirror Go's ``omitempty`` on the runtime block.
-
-    The Go struct omits an unset interval, floor, or window so the effective
-    default applies; the Python dataclass represents "unset" as 0, which the
-    v8 schema rejects because 0 is outside every one of those ranges. Dropping
-    the zeros keeps the two sides byte-identical and keeps a config that never
-    touched the runtime planes from failing validation on save.
-
-    ``correlate`` is dropped only when None. An explicit false must survive:
-    it is the difference between "do not consult the inventory" and "the
-    inventory disagreed".
-    """
+def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
+    """Drop the fields Go omits, without deciding whether the block survives."""
     if not isinstance(ai_discovery, dict):
         return
     runtime = ai_discovery.get("runtime")
@@ -3551,10 +3540,48 @@ def _prune_ai_runtime(ai_discovery: Any) -> None:
             runtime.pop(field_name, None)
     if runtime.get("correlate") is None:
         runtime.pop("correlate", None)
+
+
+def _prune_ai_runtime(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on the runtime block.
+
+    The Go struct omits an unset interval, floor, or window so the effective
+    default applies; the Python dataclass represents "unset" as 0, which the
+    v8 schema rejects because 0 is outside every one of those ranges. Dropping
+    the zeros keeps the two sides byte-identical and keeps a config that never
+    touched the runtime planes from failing validation on save.
+
+    ``correlate`` is dropped only when None. An explicit false must survive:
+    it is the difference between "do not consult the inventory" and "the
+    inventory disagreed".
+    """
+    _prune_ai_runtime_fields(ai_discovery)
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
     # A runtime block that says nothing beyond "off" is the default state and
     # does not belong on disk at all.
-    if runtime == {"enabled": False, "enable_host_plane": False, "dns_capture": False}:
+    #
+    # The sentinel is derived from a pruned default rather than written out,
+    # for the same reason the pruning above is shared: a literal is a drift
+    # point. Add one more field defaulting to False or 0 and a hardcoded dict
+    # stops matching, so a config that never touched the runtime planes starts
+    # persisting a redundant runtime block.
+    if runtime == _pruned_default_ai_runtime():
         ai_discovery.pop("runtime", None)
+
+
+def _pruned_default_ai_runtime() -> dict[str, Any]:
+    """The serialized shape of a runtime block an operator never configured."""
+    from dataclasses import asdict
+
+    reference: dict[str, Any] = {"runtime": asdict(AIRuntimeConfig())}
+    # Prune everything except the emptiness check itself, which is what this
+    # result feeds.
+    _prune_ai_runtime_fields(reference)
+    return reference.get("runtime", {})
 
 
 def _disabled_ai_discovery_dict() -> dict[str, Any]:

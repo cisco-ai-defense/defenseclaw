@@ -33,6 +33,7 @@ import (
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+	"time"
 )
 
 // maxBPFDevices is how many /dev/bpfN nodes to try. macOS creates them on
@@ -129,6 +130,17 @@ func (c *darwinCapturer) configure(iface string) error {
 	// Read-only: this must never be able to inject a frame.
 	seeSent := 0
 	_ = ioctlInt(c.fd, unix.BIOCSSEESENT, &seeSent)
+
+	// A read timeout is what makes Close terminate. Closing the /dev/bpf
+	// descriptor does not reliably wake a goroutine already blocked reading
+	// it, so on a quiet host -- no DNS traffic, which is ordinary for long
+	// stretches -- the reader would sit forever and Close would block in
+	// wg.Wait(). BIOCIMMEDIATE above delivers packets as they arrive; this
+	// only bounds the wait when none do.
+	wake := unix.Timeval{Sec: int64(readWakeInterval / time.Second)}
+	if err := ioctlPtr(c.fd, unix.BIOCSRTIMEOUT, unsafe.Pointer(&wake)); err != nil {
+		return fmt.Errorf("dnscapture: BIOCSRTIMEOUT: %w", err)
+	}
 
 	if err := c.attachFilter(); err != nil {
 		return err
@@ -230,7 +242,11 @@ func (c *darwinCapturer) read(ctx context.Context, cache *Cache) {
 		}
 		read, err := unix.Read(fd, buffer)
 		if err != nil {
-			if err == unix.EINTR {
+			// EAGAIN and ETIMEDOUT are the read timeout expiring, which is
+			// the loop's own heartbeat rather than a failure: go round and
+			// re-check whether the capture is still wanted.
+			if err == unix.EINTR || err == unix.EAGAIN ||
+				err == unix.EWOULDBLOCK || err == unix.ETIMEDOUT {
 				continue
 			}
 			return

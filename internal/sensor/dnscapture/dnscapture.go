@@ -61,6 +61,16 @@ type entry struct {
 	expires  time.Time
 }
 
+// readWakeInterval is how often a blocked packet read surfaces to re-check
+// whether the capture is still wanted.
+//
+// Closing a capture descriptor does not reliably interrupt a goroutine
+// already blocked reading it, so without this a quiet host -- no DNS traffic
+// for a while, which is ordinary -- leaves Close waiting on a reader that
+// never returns. Short enough that shutdown is prompt, long enough that the
+// wakeups cost nothing.
+const readWakeInterval = 2 * time.Second
+
 // Cache maps an observed address to the name that resolved to it.
 type Cache struct {
 	mu      sync.RWMutex

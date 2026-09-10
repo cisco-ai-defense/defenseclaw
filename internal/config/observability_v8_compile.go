@@ -72,6 +72,11 @@ var (
 // CompileObservabilityV8 validates and expands a typed source block into one
 // deterministic, immutable effective plan. It performs no I/O, secret
 // resolution, DNS lookup, exporter construction, or runtime mutation.
+// retiredLegacyV7ProfileName is the built-in that was removed in the v7 cut.
+// internal/audit rejects the name when it appears in a stored record, so
+// nothing may reintroduce it as a custom profile.
+const retiredLegacyV7ProfileName = "legacy-v7"
+
 func CompileObservabilityV8(source *ObservabilityV8Source) (*ObservabilityV8Plan, error) {
 	semanticProfileLock, err := resolveObservabilityV8SemanticLock()
 	if err != nil {
@@ -1906,6 +1911,17 @@ func compileObservabilityV8Profiles(source map[string]ObservabilityV8RedactionPr
 		}
 		if _, reserved := builtIns[name]; reserved {
 			return nil, nil, fmt.Errorf("observability.redaction_profiles.%s: built-in profile name is reserved", name)
+		}
+		if name == retiredLegacyV7ProfileName {
+			// The name is retired, not free. A custom profile could otherwise
+			// claim it, bucket policies could select it, and the audit writer
+			// would store it -- but the lifecycle decoder rejects that stored
+			// name, so the projection is silently dropped instead of the
+			// configuration being refused. Refuse it here, where an operator
+			// sees the error.
+			return nil, nil, fmt.Errorf(
+				"observability.redaction_profiles.%s: this profile name is retired; "+
+					"upgrades emit %q instead", name, "v7-compatible")
 		}
 		known[name] = struct{}{}
 	}

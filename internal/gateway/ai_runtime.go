@@ -39,6 +39,11 @@ const aiDiscoveryPartialResult = "partial"
 // interval does not make the subsystem look stalled.
 const aiRuntimeHealthInterval = 10 * time.Second
 
+// aiRuntimeShutdownGrace bounds how long shutdown waits for a poll already in
+// flight. Longer than any healthy acquisition, short enough that a stuck one
+// does not hold the whole gateway open.
+const aiRuntimeShutdownGrace = 15 * time.Second
+
 // discoveryCorrelationSource adapts the continuous discovery service to the
 // join's snapshot interface.
 //
@@ -172,12 +177,26 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 				_ = adapter.EmitSnapshot(ctx, snapshot)
 			}
 		case <-ctx.Done():
-			err := <-errCh
-			if err != nil && !isContextTermination(err) {
-				s.health.SetAIRuntime(StateError, err.Error(), nil)
-				return err
+			// Bounded, not indefinite. Poll does not thread its context into
+			// process and socket acquisition on every platform, so a poll that
+			// is mid-read when cancellation arrives can outlast it. Waiting
+			// forever here would hold the sidecar's WaitGroup open and turn a
+			// slow probe into a gateway that will not shut down.
+			select {
+			case err := <-errCh:
+				if err != nil && !isContextTermination(err) {
+					s.health.SetAIRuntime(StateError, err.Error(), nil)
+					return err
+				}
+				s.health.SetAIRuntime(StateStopped, "", nil)
+			case <-time.After(aiRuntimeShutdownGrace):
+				// Say so rather than exiting quietly: a plane still reading
+				// after shutdown is a fact an operator should see, and
+				// "stopped" would be a claim this code cannot make.
+				s.health.SetAIRuntime(StateError,
+					"runtime planes did not stop within "+aiRuntimeShutdownGrace.String()+
+						"; a plane was still acquiring when shutdown began", nil)
 			}
-			s.health.SetAIRuntime(StateStopped, "", nil)
 			return ctx.Err()
 		}
 	}

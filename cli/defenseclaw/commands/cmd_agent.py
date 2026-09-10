@@ -1799,6 +1799,22 @@ def discovery_scan(
 
 _RUNTIME_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
 
+
+def _runtime_severity_rank(value: object) -> int:
+    """Rank a severity from the gateway, treating anything unknown as lowest.
+
+    ``findings`` is a network payload produced by the Go sensor, so the two
+    vocabularies can drift -- a new band, a different casing. ``tuple.index``
+    raises on a value it does not hold, which would end ``--severity`` in a
+    traceback rather than a result. Ranking an unrecognised band last is the
+    safe direction: it is excluded from every narrowing filter instead of
+    being silently promoted into one.
+    """
+    text = str(value or "").strip().lower()
+    if text in _RUNTIME_SEVERITY_ORDER:
+        return _RUNTIME_SEVERITY_ORDER.index(text)
+    return len(_RUNTIME_SEVERITY_ORDER)
+
 _RUNTIME_GATEWAY_OPTIONS = (
     click.option("--gateway-host", default=None, help="Sidecar API host override."),
     click.option("--gateway-port", type=int, default=None, help="Sidecar API port override."),
@@ -2015,7 +2031,7 @@ def runtime_findings(
         cutoff = _RUNTIME_SEVERITY_ORDER.index(severity)
         findings = [
             finding for finding in findings
-            if _RUNTIME_SEVERITY_ORDER.index(str(finding.get("severity") or "info")) <= cutoff
+            if _runtime_severity_rank(finding.get("severity")) <= cutoff
         ]
     if not findings:
         ux.ok("no findings at or above the reporting floor", indent="  ")

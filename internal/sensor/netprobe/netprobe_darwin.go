@@ -54,7 +54,12 @@ func snapshot() ([]Connection, int, error) {
 	// -n and -P suppress DNS and service-name lookups. Both matter: a
 	// reverse lookup per socket would make the poll slow and, worse, would
 	// itself generate DNS traffic the DNS plane then observes.
-	cmd := processutil.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-iTCP", "-Fpn")
+	// -Ts asks for the TCP state, and T must be in the field list to receive
+	// it. Without both, -F output carries no state at all: the "(LISTEN)"
+	// suffix only ever appears in the human table. A listener would then have
+	// neither a "->" nor a state, and be discarded as unparseable -- so the
+	// local model server this plane exists to notice was invisible on macOS.
+	cmd := processutil.CommandContext(ctx, "/usr/sbin/lsof", "-nP", "-iTCP", "-Ts", "-FpfnT")
 	output, err := cmd.Output()
 	if err != nil {
 		// lsof exits non-zero when some processes could not be examined, which
@@ -75,6 +80,26 @@ func parseLsof(output string) ([]Connection, int, error) {
 	unattributed := 0
 	currentPID := 0
 
+	// A file's fields arrive in order f, n, T -- the state after the address
+	// -- so a socket cannot be finished when its address line is read. Hold
+	// it until the next file or process block opens, or until input ends.
+	var pending *Connection
+	flush := func() {
+		if pending == nil {
+			return
+		}
+		if pending.State == StateOther && pending.RemotePort == 0 {
+			// Neither a peer nor a state: nothing usable.
+			pending = nil
+			return
+		}
+		if pending.PID <= 0 {
+			unattributed++
+		}
+		connections = append(connections, *pending)
+		pending = nil
+	}
+
 	scanner := bufio.NewScanner(strings.NewReader(output))
 	scanner.Buffer(make([]byte, 0, 64<<10), 1<<20)
 	for scanner.Scan() {
@@ -84,24 +109,40 @@ func parseLsof(output string) ([]Connection, int, error) {
 		}
 		switch line[0] {
 		case 'p':
+			flush()
 			pid, err := strconv.Atoi(line[1:])
 			if err != nil {
 				currentPID = 0
 				continue
 			}
 			currentPID = pid
+		case 'f':
+			flush()
 		case 'n':
+			flush()
 			connection, ok := parseLsofAddress(line[1:])
 			if !ok {
 				continue
 			}
 			connection.PID = currentPID
-			if currentPID <= 0 {
-				unattributed++
+			pending = &connection
+		case 'T':
+			if pending == nil {
+				continue
 			}
-			connections = append(connections, connection)
+			state, ok := strings.CutPrefix(line[1:], "ST=")
+			if !ok {
+				continue
+			}
+			switch strings.ToUpper(state) {
+			case "ESTABLISHED":
+				pending.State = StateEstablished
+			case "LISTEN":
+				pending.State = StateListen
+			}
 		}
 	}
+	flush()
 	return connections, unattributed, scanner.Err()
 }
 
@@ -122,10 +163,13 @@ func parseLsofAddress(value string) (Connection, bool) {
 	local, remote, hasRemote := strings.Cut(value, "->")
 	_, localPort, _ := splitHostPort(local)
 	if !hasRemote {
-		if state != StateListen {
+		// A listener has no peer. Its state arrives on a later T line, so
+		// admit it here and let the caller decide once that line is read;
+		// rejecting on the state now is what discarded every listener.
+		if localPort == 0 {
 			return Connection{}, false
 		}
-		return Connection{LocalPort: localPort, State: StateListen}, true
+		return Connection{LocalPort: localPort, State: state}, true
 	}
 	remoteHost, remotePort, ok := splitHostPort(remote)
 	if !ok {

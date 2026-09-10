@@ -7,6 +7,7 @@ package config
 
 import (
 	"reflect"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -487,5 +488,37 @@ func TestV7CompatibleUpgradeProfileCompiles(t *testing.T) {
 		if got != want {
 			t.Errorf("%s = %q, want %q -- the upgrade would reveal what v7 redacted", class, got, want)
 		}
+	}
+}
+
+// TestRetiredLegacyV7ProfileNameCannotBeReclaimed keeps the removed built-in's
+// name from coming back as a custom profile.
+//
+// Nothing else stops it: the name would compile, bucket policies could select
+// it, and the audit writer would store it -- but the lifecycle decoder rejects
+// that stored name, so the projection is dropped in silence instead of the
+// configuration being refused. Refusing at compile time puts the error in
+// front of the operator who wrote it.
+func TestRetiredLegacyV7ProfileNameCannotBeReclaimed(t *testing.T) {
+	_, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"legacy-v7": {Extends: "sensitive"},
+		},
+	})
+	if err == nil {
+		t.Fatal("a custom profile reclaimed the retired legacy-v7 name")
+	}
+	if !strings.Contains(err.Error(), "retired") {
+		t.Errorf("error = %q, want it to say the name is retired", err)
+	}
+
+	// An ordinary custom name still works, so this is a reservation and not a
+	// blanket refusal of custom profiles.
+	if _, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"v7-compatible": {Extends: "strict"},
+		},
+	}); err != nil {
+		t.Fatalf("an ordinary custom profile was refused: %v", err)
 	}
 }

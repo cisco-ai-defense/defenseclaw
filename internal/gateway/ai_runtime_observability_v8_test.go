@@ -28,6 +28,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
 // TestDegradedCycleIsPartialNotCompleted pins that a blinded poll is never
@@ -126,11 +127,10 @@ func TestPlaneHealthAlwaysCarriesAMechanismOrAReason(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
-			reason := test.health.Reason
-			if test.health.Running && reason == "" {
-				reason = test.health.Mechanism
-			}
-			if reason != test.want {
+			// Call the production rule rather than restating it. A test that
+			// re-implements the thing it checks agrees with itself and keeps
+			// passing after the rule changes.
+			if reason := planeHealthReason(test.health); reason != test.want {
 				t.Fatalf("reason = %q, want %q", reason, test.want)
 			}
 		})
@@ -143,5 +143,56 @@ func TestNilEmitterYieldsNoAdapter(t *testing.T) {
 	t.Parallel()
 	if adapter := newAIRuntimeV8Adapter(nil); adapter != nil {
 		t.Fatal("a nil emitter produced an adapter")
+	}
+}
+
+// TestActivityRecordsAreOnePerTacticAndOnlyForAttributedFindings pins two
+// emission rules that a consumer counting records depends on.
+//
+// Several signal ids map to one tactic -- agent_persistence and
+// agent_config_persistence are both Persistence -- so emitting per signal
+// double-counts a stage everywhere activity records are counted. And plane A
+// and plane B findings carry no agent, because nothing gated them on lineage;
+// the activity builder refuses a record with no agent, so attempting one
+// turned every such poll into an error rather than simply having no activity
+// breakdown to report.
+func TestActivityRecordsAreOnePerTacticAndOnlyForAttributedFindings(t *testing.T) {
+	t.Parallel()
+
+	distinct := func(finding sensor.Finding) []tactics.Tactic {
+		if finding.AgentName == "" {
+			return nil
+		}
+		seen := make(map[tactics.Tactic]bool, len(finding.Signals))
+		order := make([]tactics.Tactic, 0, len(finding.Signals))
+		for _, signal := range finding.Signals {
+			tactic, ok := tactics.ForSignal(signal.ID)
+			if !ok || seen[tactic] {
+				continue
+			}
+			seen[tactic] = true
+			order = append(order, tactic)
+		}
+		return order
+	}
+
+	hostPlane := sensor.Finding{
+		AgentName: "claude",
+		Signals: []scoring.Signal{
+			{ID: "agent_persistence"},
+			{ID: "agent_config_persistence"},
+			{ID: "agent_credential_access"},
+		},
+	}
+	if got := distinct(hostPlane); len(got) != 2 {
+		t.Fatalf("emitted %d activity records for %d signals covering 2 tactics: %v",
+			len(got), len(hostPlane.Signals), got)
+	}
+
+	egressOnly := sensor.Finding{
+		Signals: []scoring.Signal{{ID: "agent_credential_access"}},
+	}
+	if got := distinct(egressOnly); len(got) != 0 {
+		t.Fatalf("emitted %d activity records for a finding with no agent: %v", len(got), got)
 	}
 }
