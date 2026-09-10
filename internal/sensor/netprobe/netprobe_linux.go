@@ -59,7 +59,11 @@ func snapshot() ([]Connection, int, error) {
 	if err != nil {
 		return nil, 0, err
 	}
-	owners := socketOwners()
+	wanted := make(map[string]bool, len(rows))
+	for index := range rows {
+		wanted[rows[index].inode] = true
+	}
+	owners := socketOwners(wanted)
 	unattributed := 0
 	for index := range rows {
 		if pid, ok := owners[rows[index].inode]; ok {
@@ -180,11 +184,21 @@ func parseHexAddress(value string) (net.IP, int, bool) {
 	return net.IP(address), int(port), true
 }
 
-// socketOwners maps socket inode to owning pid by walking /proc/<pid>/fd.
-// Failures are silent by design: a process that exits mid-walk, or one this
-// run may not open, is exactly the unattributed case the caller counts.
-func socketOwners() map[string]int {
-	owners := make(map[string]int, 256)
+// socketOwners maps socket inodes to the pid holding them by walking
+// /proc/<pid>/fd. Failures are silent by design: a process that exits
+// mid-walk, or one this run may not open, is exactly the unattributed case
+// the caller counts.
+//
+// wanted is the set of inodes the connection table actually produced. The
+// walk stops once every one is accounted for: a host with thousands of
+// processes has far more descriptors than sockets in the TCP table, and
+// reading every /proc/<pid>/fd entry to the end is the dominant cost of a
+// poll on exactly the machines where a poll should stay cheap.
+func socketOwners(wanted map[string]bool) map[string]int {
+	owners := make(map[string]int, len(wanted))
+	if len(wanted) == 0 {
+		return owners
+	}
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
 		return owners
@@ -204,8 +218,15 @@ func socketOwners() map[string]int {
 			if err != nil {
 				continue
 			}
-			if inode, ok := socketInode(target); ok {
-				owners[inode] = pid
+			inode, ok := socketInode(target)
+			if !ok || !wanted[inode] {
+				continue
+			}
+			owners[inode] = pid
+			if len(owners) == len(wanted) {
+				// Every socket in the table has an owner; nothing further to
+				// find.
+				return owners
 			}
 		}
 	}

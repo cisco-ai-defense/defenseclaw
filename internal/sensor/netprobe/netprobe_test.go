@@ -33,16 +33,37 @@ import (
 func TestSnapshotReadsTheConnectionTable(t *testing.T) {
 	connections, unattributed, err := Snapshot()
 	if err != nil {
-		t.Fatalf("Snapshot(): %v", err)
+		// A read failure here is an environment fact, not a defect: a
+		// container without /proc/net/tcp, or a runner without lsof, cannot
+		// exercise this path at all. The parsers carry the real risk and are
+		// tested directly, per platform, without touching the host.
+		t.Skipf("this host cannot be read: %v", err)
 	}
-	if unattributed < 0 {
-		t.Fatalf("unattributed = %d", unattributed)
+	// A count cannot be negative, so asserting that proves nothing. Assert
+	// the invariants that actually hold for any host, including one with no
+	// connections at all.
+	if unattributed > len(connections) {
+		t.Fatalf("%d unattributed out of %d connections", unattributed, len(connections))
 	}
 	attributed := 0
 	for _, connection := range connections {
 		if connection.Attributed() {
 			attributed++
+			if connection.PID <= 0 {
+				t.Fatalf("connection reports attribution with no pid: %+v", connection)
+			}
 		}
+		if connection.State == StateListen && connection.LocalPort == 0 {
+			t.Fatalf("listener with no local port: %+v", connection)
+		}
+		if connection.RemotePort != 0 && connection.RemoteIP == nil {
+			t.Fatalf("connection has a peer port but no peer address: %+v", connection)
+		}
+	}
+	if attributed+unattributed != len(connections) {
+		t.Fatalf("%d attributed + %d unattributed != %d connections: the coverage "+
+			"numbers the snapshot reports do not add up",
+			attributed, unattributed, len(connections))
 	}
 	t.Logf("%d connections, %d attributed, %d unattributed", len(connections), attributed, unattributed)
 }

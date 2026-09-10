@@ -92,3 +92,133 @@ func TestParseLsofDropsSocketsWithNeitherPeerNorState(t *testing.T) {
 			len(connections), connections)
 	}
 }
+
+// TestParseLsofAddress pins the 'n' field contract.
+//
+// lsof renders four shapes on one field and they are easy to conflate: a
+// listener, an established pair, a bracketed IPv6 pair, and a wildcard
+// listener. Decoding one as another is how a listening local model server
+// becomes an outbound connection to nowhere, or the reverse.
+func TestParseLsofAddress(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		name       string
+		value      string
+		wantOK     bool
+		wantLocal  int
+		wantRemote string
+		wantPort   int
+		wantState  State
+	}{
+		{
+			name:      "wildcard listener",
+			value:     "*:11434 (LISTEN)",
+			wantOK:    true,
+			wantLocal: 11434,
+			wantState: StateListen,
+		},
+		{
+			name:      "bound listener with no state yet",
+			value:     "127.0.0.1:8080",
+			wantOK:    true,
+			wantLocal: 8080,
+			wantState: StateOther,
+		},
+		{
+			name:       "established ipv4 pair",
+			value:      "192.168.1.10:51234->160.79.104.10:443 (ESTABLISHED)",
+			wantOK:     true,
+			wantLocal:  51234,
+			wantRemote: "160.79.104.10",
+			wantPort:   443,
+			wantState:  StateEstablished,
+		},
+		{
+			name:       "established ipv6 pair",
+			value:      "[::1]:51234->[::1]:11434 (ESTABLISHED)",
+			wantOK:     true,
+			wantLocal:  51234,
+			wantRemote: "::1",
+			wantPort:   11434,
+			wantState:  StateEstablished,
+		},
+		{
+			// A trailing state lsof may emit that is neither of the two the
+			// plane acts on must not be promoted to established.
+			name:       "close-wait is neither",
+			value:      "127.0.0.1:51234->127.0.0.1:8080 (CLOSE_WAIT)",
+			wantOK:     true,
+			wantLocal:  51234,
+			wantRemote: "127.0.0.1",
+			wantPort:   8080,
+			wantState:  StateOther,
+		},
+		{name: "empty", value: ""},
+		{name: "listener with no port", value: "*"},
+		{name: "peer with no port", value: "127.0.0.1:51234->127.0.0.1"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			t.Parallel()
+			connection, ok := parseLsofAddress(testCase.value)
+			if ok != testCase.wantOK {
+				t.Fatalf("parseLsofAddress(%q) ok = %v, want %v", testCase.value, ok, testCase.wantOK)
+			}
+			if !testCase.wantOK {
+				return
+			}
+			if connection.LocalPort != testCase.wantLocal {
+				t.Errorf("local port = %d, want %d", connection.LocalPort, testCase.wantLocal)
+			}
+			if connection.RemotePort != testCase.wantPort {
+				t.Errorf("remote port = %d, want %d", connection.RemotePort, testCase.wantPort)
+			}
+			if connection.State != testCase.wantState {
+				t.Errorf("state = %v, want %v", connection.State, testCase.wantState)
+			}
+			switch {
+			case testCase.wantRemote == "":
+				if connection.RemoteIP != nil {
+					t.Errorf("remote ip = %s, want none", connection.RemoteIP)
+				}
+			case connection.RemoteIP == nil:
+				t.Errorf("remote ip = none, want %s", testCase.wantRemote)
+			case connection.RemoteIP.String() != testCase.wantRemote:
+				t.Errorf("remote ip = %s, want %s", connection.RemoteIP, testCase.wantRemote)
+			}
+		})
+	}
+}
+
+func TestSplitHostPort(t *testing.T) {
+	t.Parallel()
+	for _, testCase := range []struct {
+		value    string
+		wantHost string
+		wantPort int
+		wantOK   bool
+	}{
+		{value: "127.0.0.1:8080", wantHost: "127.0.0.1", wantPort: 8080, wantOK: true},
+		{value: "*:443", wantHost: "*", wantPort: 443, wantOK: true},
+		{value: "[::1]:11434", wantHost: "::1", wantPort: 11434, wantOK: true},
+		{value: "[fe80::1%en0]:53", wantHost: "fe80::1%en0", wantPort: 53, wantOK: true},
+		{value: " 127.0.0.1:8080 ", wantHost: "127.0.0.1", wantPort: 8080, wantOK: true},
+		{value: "127.0.0.1", wantHost: "127.0.0.1"},
+		{value: "127.0.0.1:notaport", wantHost: "127.0.0.1"},
+		{value: "[::1]:notaport", wantHost: "::1"},
+		{value: ""},
+	} {
+		t.Run(testCase.value, func(t *testing.T) {
+			t.Parallel()
+			host, port, ok := splitHostPort(testCase.value)
+			if ok != testCase.wantOK {
+				t.Fatalf("splitHostPort(%q) ok = %v, want %v", testCase.value, ok, testCase.wantOK)
+			}
+			if host != testCase.wantHost {
+				t.Errorf("host = %q, want %q", host, testCase.wantHost)
+			}
+			if ok && port != testCase.wantPort {
+				t.Errorf("port = %d, want %d", port, testCase.wantPort)
+			}
+		})
+	}
+}

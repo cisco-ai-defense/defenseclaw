@@ -548,10 +548,26 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 			entry.Running = capability.Available && processOK
 		case platform.PlaneB:
 			entry.Running = capability.Available && connectionOK
+			var limits []string
+			if !s.options.Platform.WideCoverage() {
+				// Without machine-wide privilege the connection table is not
+				// the host's, it is this process's own. On macOS that is the
+				// dangerous shape: unprivileged lsof simply omits other
+				// users' sockets rather than listing them unattributed, so
+				// the unattributed count stays near zero and a blinded plane
+				// is indistinguishable from a host with no egress. Coverage
+				// is reported, never implied.
+				limits = append(limits,
+					"egress attribution is limited to this process's own sockets; "+
+						"run the gateway elevated for machine-wide coverage")
+			}
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less
 				// direct, and saying so beats silently downgrading confidence.
-				entry.Reason = reason
+				limits = append(limits, reason)
+			}
+			if len(limits) > 0 {
+				entry.Reason = strings.Join(limits, "; ")
 			}
 		case platform.PlaneC:
 			entry.Running, entry.Mechanism, entry.Reason = s.hostPlaneHealth(capability)
