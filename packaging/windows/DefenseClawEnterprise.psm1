@@ -2120,6 +2120,50 @@ function Get-DefenseClawCMIDBrokerImage {
         $Layout.ProviderLibraryPath, $Layout.BrokerLogPath
 }
 
+function Get-DefenseClawSensorHelperServiceName {
+    <#
+        The AI Discovery sensor helper holds the privilege the gateway is
+        deliberately denied. The gateway runs as a virtual service account so
+        a compromise cannot read user homes or arbitrary host state, which
+        also means it cannot read the process table, the Security event log,
+        or DNS -- the things the runtime planes exist to read. The helper
+        runs as LocalSystem, does nothing else, and answers a fixed question
+        set over a local socket.
+
+        Named off the gateway the same way the credential broker is, so a
+        certification install with a suffixed gateway gets a matching
+        suffixed helper rather than colliding with the production one.
+    #>
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    if ($GatewayServiceName -ceq 'DefenseClawGateway') {
+        return 'DefenseClawSensorHelper'
+    }
+    if ($GatewayServiceName -cmatch '^DefenseClawCertGateway_([a-f0-9]{10})$') {
+        return "DefenseClawSensorHelper_$($Matches[1])"
+    }
+    throw "cannot derive sensor helper service name from unexpected gateway name: $GatewayServiceName"
+}
+
+function Get-DefenseClawSensorHelperImage {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    if ([string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperPath)) {
+        throw 'sensor helper path is missing'
+    }
+    # --home-dirs is passed by the installer, never by a client. The helper
+    # watches what this line names and takes no instruction over the socket,
+    # which is what keeps a privileged event source from becoming a general
+    # purpose file reader for whoever holds the other end.
+    $homeDirs = ''
+    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperHomeDirs)) {
+        $homeDirs = ' --home-dirs "{0}"' -f $Layout.SensorHelperHomeDirs
+    }
+    return '"{0}" --managed-enterprise{1}' -f $Layout.SensorHelperPath, $homeDirs
+}
+
 function Get-DefenseClawManagedServiceNames {
     param(
         [Parameter(Mandatory)][string]$GatewayServiceName,
@@ -2128,6 +2172,7 @@ function Get-DefenseClawManagedServiceNames {
     return @(
         $GatewayServiceName,
         (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName),
+        (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName),
         $GuardianServiceName,
         (Get-DefenseClawEnumeratorServiceName -GuardianServiceName $GuardianServiceName)
     )
@@ -4480,6 +4525,52 @@ function Set-DefenseClawManagedServices {
     }
     Assert-DefenseClawServiceImagePath -Name $BrokerServiceName -ExpectedImage $brokerImage
 
+    # The AI Discovery sensor helper. Registered only when its binary was
+    # laid down, so an install that does not ship it is unchanged rather
+    # than failing on a missing image.
+    $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName
+    $sensorHelperRegistered = $false
+    if (-not [string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperPath) -and
+        (Test-Path -LiteralPath $Layout.SensorHelperPath)) {
+        $sensorHelperImage = Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName
+        Assert-DefenseClawOwnedServiceOrAbsent -Name $sensorHelperServiceName
+        if (Test-DefenseClawServiceExists -Name $sensorHelperServiceName) {
+            [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+                'config', $sensorHelperServiceName,
+                'binPath=', $sensorHelperImage,
+                'type=', 'own',
+                'start=', $configuredStart,
+                'error=', 'normal',
+                'depend=', '/',
+                'obj=', 'LocalSystem',
+                'DisplayName=', 'DefenseClaw Sensor Helper'
+            ))
+        }
+        else {
+            [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+                'create', $sensorHelperServiceName,
+                'binPath=', $sensorHelperImage,
+                'type=', 'own',
+                'start=', $configuredStart,
+                'error=', 'normal',
+                'depend=', '/',
+                'obj=', 'LocalSystem',
+                'DisplayName=', 'DefenseClaw Sensor Helper'
+            ))
+        }
+        Assert-DefenseClawServiceImagePath -Name $sensorHelperServiceName -ExpectedImage $sensorHelperImage
+        $sensorHelperRegistered = $true
+    }
+
+    # The gateway depends on the helper when one exists, so the socket is
+    # listening before the planes look for it. A gateway that starts first
+    # reports the broker unreachable, which is honest but is a coverage gap
+    # for no reason when the ordering is ours to choose.
+    $gatewayDependencies = $BrokerServiceName
+    if ($sensorHelperRegistered) {
+        $gatewayDependencies = '{0}/{1}' -f $BrokerServiceName, $sensorHelperServiceName
+    }
+
     if (Test-DefenseClawServiceExists -Name $GatewayServiceName) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'config', $GatewayServiceName,
@@ -4487,7 +4578,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', $BrokerServiceName,
+            'depend=', $gatewayDependencies,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -4499,7 +4590,7 @@ function Set-DefenseClawManagedServices {
             'type=', 'own',
             'start=', $configuredStart,
             'error=', 'normal',
-            'depend=', $BrokerServiceName,
+            'depend=', $gatewayDependencies,
             'obj=', $gatewayAccount,
             'DisplayName=', 'DefenseClaw Enterprise Gateway'
         ))
@@ -6421,6 +6512,12 @@ function Get-DefenseClawLayout {
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
         BrokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
         BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
+        SensorHelperPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-sensor-helper.exe')
+        SensorHelperServiceName = (Get-DefenseClawSensorHelperServiceName -GatewayServiceName $GatewayServiceName)
+        # Populated by the profile enumerator, the same eligible-users
+        # enumeration that renders targets.yaml. Empty means the helper
+        # watches nothing, which it reports rather than guessing at a home.
+        SensorHelperHomeDirs = ''
         BrokerPipeName = ('\\.\pipe\{0}' -f (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName))
         ProviderLibraryPath = ''
         HookPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-hook.exe')

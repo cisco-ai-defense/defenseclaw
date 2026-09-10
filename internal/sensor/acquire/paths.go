@@ -25,6 +25,8 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+
+	winpath "github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
 // SocketFileName is the sensor helper's socket, kept distinct from the UI
@@ -55,8 +57,15 @@ func DefaultSocketPath(dataDir string, managedEnterprise bool) string {
 		case "darwin":
 			return filepath.Join("/var", "run", "defenseclaw", SocketFileName)
 		case "windows":
-			return filepath.Join(
-				os.Getenv("ProgramData"), "Cisco", "DefenseClaw", "ipc", SocketFileName)
+			// The trusted managed IPC directory, resolved the same way the
+			// UI IPC socket resolves it. Guessing at ProgramData would
+			// place the socket outside the directory whose DACL and
+			// reparse checks are the entire access boundary, and the bind
+			// would be refused -- correctly, and confusingly.
+			if managed := winpath.ManagedIPCDir(); managed != "" {
+				return filepath.Join(managed, SocketFileName)
+			}
+			return ""
 		}
 	}
 	if dataDir == "" {

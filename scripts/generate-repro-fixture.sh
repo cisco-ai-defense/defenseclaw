@@ -42,6 +42,7 @@ trap 'rm -rf "${work}"' EXIT
 mkdir -p "${work}/payload"
 printf 'DefenseClawEnterprise-module-fixture-v1\n'  > "${work}/payload/DefenseClawEnterprise.psm1"
 printf 'defenseclaw-broker-fixture-v1\n'            > "${work}/payload/defenseclaw-cmid-broker.exe"
+printf 'defenseclaw-sensor-helper-fixture-v1\n'     > "${work}/payload/defenseclaw-sensor-helper.exe"
 printf 'defenseclaw-gateway-fixture-v1\n'           > "${work}/payload/defenseclaw-gateway.exe"
 printf 'defenseclaw-hook-fixture-v1\n'              > "${work}/payload/defenseclaw-hook.exe"
 printf 'defenseclaw-cli-fixture-v1\n'               > "${work}/payload/defenseclaw.exe"

@@ -143,6 +143,11 @@ func (s *Server) bindListenerForOS(ctx context.Context) (net.Listener, error) {
 // anchor. See CR spec-004:PRRT_kwDORuAK-s6aoCwa and
 // spec-004:PRRT_kwDORuAK-s6aoOZv.
 func validateWindowsSocketPathOverride(socketPath string) error {
+	return validateWindowsSocketPathFor(socketPath, SocketFileName)
+}
+
+// validateWindowsSocketPathFor is the same anchor for a named socket.
+func validateWindowsSocketPathFor(socketPath, baseName string) error {
 	if socketPath == "" {
 		return fmt.Errorf("ipc: socket path is empty")
 	}
@@ -150,8 +155,8 @@ func validateWindowsSocketPathOverride(socketPath string) error {
 		return fmt.Errorf("ipc: socket path override must be absolute: %s", socketPath)
 	}
 	clean := filepath.Clean(socketPath)
-	if filepath.Base(clean) != SocketFileName {
-		return fmt.Errorf("ipc: socket path override must end in %q (got %s)", SocketFileName, clean)
+	if filepath.Base(clean) != baseName {
+		return fmt.Errorf("ipc: socket path override must end in %q (got %s)", baseName, clean)
 	}
 	parent := filepath.Clean(filepath.Dir(clean))
 	// Shape anchor: the socket must live under an "ipc" directory. In

@@ -49,6 +49,18 @@ type ListenSpec struct {
 	// error is fatal. Ignored on Windows.
 	OwnerUID int
 	OwnerGID int
+	// BaseName is the socket filename this caller is permitted to bind.
+	// Empty means the UI IPC socket.
+	//
+	// Windows anchors a bind to the trusted managed IPC directory and, up
+	// to now, to a single hard-coded filename. The directory is what
+	// carries the security property -- it is DACL-controlled and checked
+	// for reparse points -- while the filename only distinguishes one
+	// local service from another. A second privileged service in the same
+	// directory therefore needs to name itself here rather than borrow an
+	// identity that is not its own; sharing one socket file between two
+	// different access boundaries would be the actually dangerous option.
+	BaseName string
 }
 
 // ListenSecured binds a local socket with the hardening above.
@@ -62,6 +74,9 @@ func ListenSecured(ctx context.Context, spec ListenSpec) (net.Listener, error) {
 	}
 	if spec.SocketMode == 0 {
 		spec.SocketMode = 0o660
+	}
+	if spec.BaseName == "" {
+		spec.BaseName = SocketFileName
 	}
 	return listenSecuredForOS(ctx, spec)
 }

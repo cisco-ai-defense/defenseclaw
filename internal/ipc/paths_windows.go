@@ -36,9 +36,10 @@ import (
 // unlink the socket under Program Files just as under ProgramData.
 //
 // See spec 004 REQ-02 and parity plan §4.2 C1.
-var windowsManagedIPCRelativeDir = filepath.Join(
-	"Cisco", "Cisco Secure Client", "DefenseClaw", "ipc",
-)
+// windowsManagedIPCRelativeDir is defined in internal/winpath so the
+// sensor helper resolves the identical directory without importing this
+// package, which would cycle through internal/gateway.
+var windowsManagedIPCRelativeDir = winpath.ManagedIPCRelativeDir
 
 // resolveManagedIPCSocketPath returns the managed-enterprise UDS
 // socket path on Windows. Resolves `TrustedProgramFiles` through the

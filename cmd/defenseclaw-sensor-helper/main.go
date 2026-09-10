@@ -94,30 +94,56 @@ func run() error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	// Under the Windows SCM there is no console and no signal: the service
+	// control manager expects the process to report Running within seconds
+	// and to stop when told. runUnderServiceManager takes over the
+	// lifecycle when that is where we are, and is a passthrough everywhere
+	// else. Without it the service registers, fails to answer SCM, and is
+	// killed with error 1053 -- a helper that can never start, on the one
+	// platform whose gateway most needs it.
+	return runUnderServiceManager(ctx, func(ctx context.Context) error {
+		return serve(ctx, path, uids, *socketGID, splitList(*homeDirs), logger)
+	})
+}
+
+func serve(
+	ctx context.Context,
+	path string,
+	uids []int,
+	socketGID int,
+	homeDirs []string,
+	logger *slog.Logger,
+) error {
+
 	// 0o660 with a group the gateway belongs to: the socket is reachable by
 	// exactly one other account and by nobody else. The peer uid is checked
 	// again at accept, because a mode is a filter that can be widened by an
 	// unrelated packaging change without anyone noticing.
 	listener, err := ipc.ListenSecured(ctx, ipc.ListenSpec{
-		Path:       path,
+		Path: path,
+		// Named, not borrowed. Windows anchors a bind to the trusted
+		// managed IPC directory and to a declared filename; this service
+		// has its own access boundary, so it must not share the UI IPC
+		// socket's identity.
+		BaseName:   acquire.SocketFileName,
 		SocketMode: 0o660,
 		DirMode:    0o750,
 		OwnerUID:   os.Getuid(),
-		OwnerGID:   *socketGID,
+		OwnerGID:   socketGID,
 	})
 	if err != nil {
 		return err
 	}
 
 	server := acquire.NewServer(acquire.ServerConfig{
-		HomeDirs:    splitList(*homeDirs),
+		HomeDirs:    homeDirs,
 		AllowedUIDs: uids,
 		Logger:      logger,
 	})
 
 	logger.Info("sensor helper listening",
 		"socket", path, "uid", os.Getuid(),
-		"allowed_uids", uids, "home_dirs", splitList(*homeDirs))
+		"allowed_uids", uids, "home_dirs", homeDirs)
 
 	if err := server.Serve(ctx, listener); err != nil {
 		return err

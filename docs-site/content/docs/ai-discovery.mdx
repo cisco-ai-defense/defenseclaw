@@ -781,6 +781,10 @@ With the helper running, that same sandboxed Linux gateway reports
 exfiltration chain, including file reads observed through `fanotify` — a
 syscall it cannot itself make.
 
+On Linux the helper is a systemd unit; on Windows it is an SCM service the
+enterprise installer registers alongside the gateway, which is ordered to
+start after it so the socket is listening before the planes look for it.
+
 ```bash
 systemctl enable --now defenseclaw-sensor-helper
 ```

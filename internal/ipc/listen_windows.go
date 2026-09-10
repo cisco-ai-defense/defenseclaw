@@ -26,7 +26,7 @@ func listenSecuredForOS(ctx context.Context, spec ListenSpec) (net.Listener, err
 	// An override pointing outside the dedicated directory would have
 	// its original DACL REPLACED by the baseline below -- including
 	// ACEs an unrelated installer relies on.
-	if err := validateWindowsSocketPathOverride(spec.Path); err != nil {
+	if err := validateWindowsSocketPathFor(spec.Path, spec.BaseName); err != nil {
 		return nil, err
 	}
 	dir := dirOf(spec.Path)
