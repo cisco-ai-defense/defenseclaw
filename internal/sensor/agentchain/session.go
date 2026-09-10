@@ -146,13 +146,45 @@ func (s *Session) Progressed(minimum int) bool {
 	for index, tactic := range seen {
 		timeline[index] = s.FirstAt(tactic)
 	}
-	forward := 0
-	for index := 0; index < len(timeline)-1; index++ {
-		if !timeline[index].After(timeline[index+1]) {
-			forward++
+	return longestOrderedRun(timeline) >= minimum
+}
+
+// longestOrderedRun returns the most stages the session moved through in
+// order: the longest subsequence whose chain position and first-seen time
+// both advance together.
+//
+// Counting forward-going pairs instead is not the same thing, and the
+// difference decides whether a finding is critical. Stage times [5 6 1 2]
+// contain two ascending pairs -- (5,6) and (1,2) -- so a pair count of two
+// clears a three-stage threshold, while the longest actual progression is
+// two stages. Two unrelated ascending pairs are not a chain.
+//
+// seen is already in chain order, so advancing the index is advancing the
+// stage; the quadratic walk is over at most the handful of ATT&CK tactics
+// this package tracks.
+func longestOrderedRun(timeline []time.Time) int {
+	if len(timeline) == 0 {
+		return 0
+	}
+	best := 1
+	longest := make([]int, len(timeline))
+	for index := range timeline {
+		longest[index] = 1
+		for earlier := 0; earlier < index; earlier++ {
+			if timeline[earlier].After(timeline[index]) {
+				// That stage was reached later than this one, so the two are
+				// out of order and cannot extend the same progression.
+				continue
+			}
+			if longest[earlier]+1 > longest[index] {
+				longest[index] = longest[earlier] + 1
+			}
+		}
+		if longest[index] > best {
+			best = longest[index]
 		}
 	}
-	return forward >= minimum-1
+	return best
 }
 
 // Score sums the session's observations and adds the chain bonus when the

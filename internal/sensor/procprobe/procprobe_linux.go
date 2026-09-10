@@ -86,9 +86,41 @@ func readProcess(pid int, clockTicks, pageSize int64) (Process, bool) {
 	}
 	row.PID = pid
 	row.Cmdline = readCmdline(filepath.Join(base, "cmdline"))
+	row.Name = untruncateComm(row.Name, row.Cmdline)
 	row.User = ownerOf(base)
 	return row, true
 }
+
+// untruncateComm recovers a full executable name that /proc/<pid>/stat cut off.
+//
+// The kernel caps comm at TASK_COMM_LEN-1 = 15 bytes, so ollama_llama_server
+// arrives as ollama_llama_se and text-generation-server as text-generation.
+// Both are entries in the local-model runtime table, matched by exact name, so
+// the two largest local inference servers on Linux were invisible to plane A
+// -- and to every other check keyed on the process name.
+//
+// argv[0] is not trustworthy on its own: any process can set it to anything.
+// So this only ever lengthens a name it already agrees with. If argv[0]'s
+// basename does not start with comm, comm wins and nothing is renamed.
+func untruncateComm(comm, cmdline string) string {
+	if comm == "" || cmdline == "" || len(comm) < commTruncationLimit {
+		return comm
+	}
+	argv0, _, _ := strings.Cut(cmdline, " ")
+	base := filepath.Base(strings.TrimSpace(argv0))
+	if base == "" || base == "." || base == string(filepath.Separator) {
+		return comm
+	}
+	if len(base) <= len(comm) || !strings.HasPrefix(base, comm) {
+		return comm
+	}
+	return base
+}
+
+// commTruncationLimit is TASK_COMM_LEN-1: the number of bytes the kernel keeps
+// of a process name in /proc/<pid>/stat. A comm of exactly this length is the
+// only case where truncation is possible.
+const commTruncationLimit = 15
 
 // parseStat decodes /proc/<pid>/stat.
 //

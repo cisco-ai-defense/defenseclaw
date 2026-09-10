@@ -125,6 +125,12 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		existing = &processRecord{pid: pid}
 		t.records[pid] = existing
 	}
+	// A pid that has already exited, or that now reports a different image,
+	// is a different process: the kernel recycled the number, or the process
+	// exec'd into something else. Either way the identity recorded before
+	// belongs to a process that is gone.
+	recycled := !existing.exitedAt.IsZero() || existing.name != name
+
 	existing.ppid = ppid
 	existing.responsiblePID = responsiblePID
 	existing.name = name
@@ -138,6 +144,15 @@ func (t *Tracker) recordLocked(pid, ppid, responsiblePID int, name, cmdline stri
 		} else {
 			existing.via = "cmdline"
 		}
+		return
+	}
+	if recycled {
+		// Clear rather than carry forward. The lineage gate is the whole
+		// false-positive control for the host plane, so a stale agent name on
+		// a recycled pid turns ordinary developer activity -- in this process
+		// and in every descendant of it -- into scored findings.
+		existing.agentName = ""
+		existing.via = ""
 	}
 }
 
@@ -259,7 +274,18 @@ func (t *Tracker) outermostSameAgentLocked(pid int, agentName string) int {
 		return root
 	}
 	for depth := 0; depth < maxAncestryWalk; depth++ {
+		// Prefer the responsible pid for the same reason attribution does: on
+		// macOS a shell an agent spawned is reparented away, so its ppid is
+		// launchd and only the responsible pid still points at the agent.
+		// Following ppid alone stopped at that reparenting and rooted the
+		// child at itself, splitting one agent session into one per fork --
+		// the exact fragmentation this walk exists to prevent.
 		next := current.ppid
+		if current.responsiblePID > 0 && current.responsiblePID != current.pid {
+			if _, ok := t.records[current.responsiblePID]; ok {
+				next = current.responsiblePID
+			}
+		}
 		if next <= 0 || next == InitPID || next == current.pid {
 			return root
 		}

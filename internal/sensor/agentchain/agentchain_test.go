@@ -355,3 +355,109 @@ func TestExpireBoundsTheChainToItsWindow(t *testing.T) {
 		t.Fatalf("TacticsSeen after expiry = %v, want only exfiltration", seen)
 	}
 }
+
+// TestLongestOrderedRunRejectsDisjointAscendingPairs is the shape the old
+// pair-counting missed.
+//
+// Progressed used to count every forward-going adjacent pair anywhere in the
+// timeline and compare the total against minimum-1. Two unrelated ascending
+// pairs then cleared a three-stage threshold even though the session never
+// moved through three stages in order -- and that threshold is what awards
+// the kill-chain bonus, which is what lifts a finding to critical.
+func TestLongestOrderedRunRejectsDisjointAscendingPairs(t *testing.T) {
+	at := func(seconds ...int) []time.Time {
+		base := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+		times := make([]time.Time, len(seconds))
+		for index, second := range seconds {
+			times[index] = base.Add(time.Duration(second) * time.Second)
+		}
+		return times
+	}
+
+	for _, test := range []struct {
+		name    string
+		seconds []int
+		want    int
+	}{
+		{"two disjoint ascending pairs are not a three-stage chain", []int{5, 6, 1, 2}, 2},
+		{"a genuine three-stage progression", []int{1, 2, 3}, 3},
+		{"a later stage reached first breaks the run", []int{1, 10, 2}, 2},
+		{"stages that skip one still progress", []int{1, 10, 2, 11}, 3},
+		{"fully reversed", []int{9, 5, 1}, 1},
+		{"simultaneous stages still count as ordered", []int{4, 4, 4}, 3},
+		{"single stage", []int{7}, 1},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if got := longestOrderedRun(at(test.seconds...)); got != test.want {
+				t.Fatalf("longestOrderedRun(%v) = %d, want %d", test.seconds, got, test.want)
+			}
+		})
+	}
+}
+
+// TestRecycledPidLosesTheOldAgentIdentity is the lineage gate's own integrity
+// check. The gate is the entire false-positive control for the host plane, so
+// an agent name left on a pid that now belongs to something else turns
+// ordinary developer activity -- in that process and in every descendant --
+// into scored findings.
+func TestRecycledPidLosesTheOldAgentIdentity(t *testing.T) {
+	for _, test := range []struct {
+		name  string
+		reuse func(tracker *Tracker)
+	}{
+		{
+			name: "the kernel recycled the pid after the agent exited",
+			reuse: func(tracker *Tracker) {
+				tracker.ObserveExit(200)
+				tracker.ObserveProcessTable([]ProcessRow{{PID: 200, PPID: 1, Name: "cupsd"}})
+			},
+		},
+		{
+			name: "the agent wrapper exec'd into a plain shell",
+			reuse: func(tracker *Tracker) {
+				tracker.ObserveExec(200, 1, 1, "sh", "sh -c true")
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			tracker := NewTracker()
+			tracker.ObserveProcessTable([]ProcessRow{{PID: 200, PPID: 1, Name: "claude"}})
+			if _, ok := tracker.Attribute(200); !ok {
+				t.Fatal("precondition: the agent was not attributed")
+			}
+
+			test.reuse(tracker)
+			// Something ordinary runs under the recycled pid.
+			tracker.ObserveProcessTable([]ProcessRow{{PID: 201, PPID: 200, Name: "cat"}})
+
+			if attribution, ok := tracker.Attribute(200); ok {
+				t.Errorf("the recycled pid is still attributed to %q", attribution.AgentName)
+			}
+			if attribution, ok := tracker.Attribute(201); ok {
+				t.Errorf("a child of the recycled pid was attributed to %q; "+
+					"the lineage gate would score ordinary activity", attribution.AgentName)
+			}
+		})
+	}
+}
+
+// TestSameAgentWalkFollowsTheResponsiblePid covers the macOS shape. A shell an
+// agent spawned is reparented to launchd, so its ppid no longer points at the
+// agent and only the responsible pid does. Following ppid alone rooted each
+// reparented fork at itself and split one agent session into many.
+func TestSameAgentWalkFollowsTheResponsiblePid(t *testing.T) {
+	tracker := NewTracker()
+	// The agent itself.
+	tracker.ObserveExec(300, 1, 1, "claude", "claude")
+	// A same-agent fork that has been reparented away from it.
+	tracker.ObserveExec(301, InitPID, 300, "claude", "claude")
+
+	attribution, ok := tracker.Attribute(301)
+	if !ok {
+		t.Fatal("the reparented fork was not attributed at all")
+	}
+	if attribution.RootPID != 300 {
+		t.Fatalf("RootPID = %d, want 300: the reparented fork rooted itself, "+
+			"so one agent session splits into one per fork", attribution.RootPID)
+	}
+}

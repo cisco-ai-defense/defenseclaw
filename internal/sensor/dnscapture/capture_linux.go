@@ -135,7 +135,13 @@ func dnsFilter() *unix.SockFprog {
 	instructions := []unix.SockFilter{
 		// Ethernet type at offset 12.
 		{Code: ldAbsH, K: 12},
-		{Code: jeqK, Jt: 0, Jf: 5, K: 0x0800}, // IPv4 -> continue, else try IPv6
+		// IPv4? On a miss, jump to the IPv6 ethertype test at index 6, not
+		// past it. Jf counts instructions *after* the next one, so this is
+		// 6-(1+1)=4; the earlier 5 landed on the IPv6 next-header load and
+		// skipped the ethertype check, letting any non-IP frame through
+		// whenever byte 20 happened to be 17 and bytes 54-55 happened to be
+		// port 53.
+		{Code: jeqK, Jt: 0, Jf: 4, K: 0x0800},
 		// IPv4: protocol at 23 must be UDP, source port at 34 must be 53.
 		{Code: ldAbsB, K: 23},
 		{Code: jeqK, Jt: 0, Jf: 8, K: 17},
