@@ -759,6 +759,25 @@ leave no trace, and absence is the hardest thing to alert on.
 | `--enable-host-plane` | Explicit opt-in for Plane C. Listing `c` in `planes` without this is ignored. |
 | `--dns-capture` | Name peers from the answer the process received rather than inferring from an address. Needs elevated privilege. |
 
+Two knobs are config-only, because neither belongs in a one-shot command:
+
+```yaml
+ai_discovery:
+  runtime:
+    enabled: true
+    planes: [a, b, c]
+    enable_host_plane: true
+    chain_window_min: 60          # how long a session stays open for a chain
+    sanctioned_endpoints:         # egress here is expected, not a finding
+      - api.corp.example.com
+```
+
+`chain_window_min` is the window over which stages accumulate into a kill
+chain. Too short and a patient agent never chains; too long and unrelated
+activity in the same session joins up. `sanctioned_endpoints` is where an
+environment states its own approved providers — matching egress still appears
+in the plane's output, it just stops being scored as unsanctioned.
+
 `ai_discovery.runtime.correlate` defaults on. Setting it to `false` removes the
 inventory read entirely; it does **not** make findings score as though the
 inventory disagreed.
