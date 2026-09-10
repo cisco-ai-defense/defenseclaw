@@ -491,7 +491,7 @@ function Tabs({
     {
       id: 'playground',
       label: 'Playground',
-      hint: 'Every knob, section by section',
+      hint: 'Editable policy plus fixed detector coverage',
     },
   ];
   return (

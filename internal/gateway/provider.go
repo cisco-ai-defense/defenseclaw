@@ -133,6 +133,7 @@ type ChatRequest struct {
 	Stop             json.RawMessage `json:"stop,omitempty"`
 	Tools            json.RawMessage `json:"tools,omitempty"`
 	ToolChoice       json.RawMessage `json:"tool_choice,omitempty"`
+	ResponseFormat   json.RawMessage `json:"response_format,omitempty"`
 	Fallbacks        []string        `json:"fallbacks,omitempty"` // gateway failover models (e.g. Bifrost)
 	ExtraParams      map[string]any  `json:"-"`                   // provider-specific request fields forwarded through Bifrost
 	RawBody          json.RawMessage `json:"-"`

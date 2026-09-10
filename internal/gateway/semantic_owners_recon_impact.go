@@ -25,15 +25,18 @@ import (
 )
 
 const (
-	semanticRecursiveDeleteExpression        = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))`
-	semanticSudoDiscoveryElevationExpression = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
-	semanticAccessControlExpression          = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
-	semanticDDDiskWriteExpression            = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
-	semanticNetworkSweepExpression           = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
-	semanticContainerHostEscapeExpression    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
-	semanticCryptominingExpression           = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
-	semanticMassProcessTerminationExpression = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
-	semanticPrivilegedAccountExpression      = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
+	semanticRecursiveDeleteExpression                 = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE))`
+	semanticSudoDiscoveryElevationExpression          = `f.commands.exists(c, c.argv_complete && ((c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)) || (c.program == 'find' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations) || (c.program == 'getcap' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_SEARCH in c.operations)))`
+	semanticAccessControlExpression                   = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))`
+	semanticDDDiskWriteExpression                     = `f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))`
+	semanticNetworkSweepExpression                    = `f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_NETWORK_SCAN in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_SCAN && n.target_kind in [defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_MULTI_ADDRESS_CIDR, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_RANGE, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_LIST, defenseclaw.guardrail.semantic.v1.NetworkTargetKind.NETWORK_TARGET_KIND_GENERATED]))`
+	semanticContainerHostEscapeExpression             = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))`
+	semanticCryptominingExpression                    = `f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations)`
+	semanticMassProcessTerminationExpression          = `f.commands.exists(c, c.argv_complete && c.program in ['kill', 'stop-process', 'taskkill'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PROCESS_KILL in c.operations)`
+	semanticPrivilegedAccountExpression               = `f.commands.exists(c, c.argv_complete && c.program in ['useradd', 'usermod', 'gpasswd', 'groupmems', 'adduser', 'dseditgroup', 'dscl', 'net', 'net1', 'add-localgroupmember', 'add-adgroupmember'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations)`
+	semanticWindowsAccessibilityHijackExpression      = `f.commands.exists(c, c.argv_complete && ((c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations) || (c.program in ['copy', 'copy.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_COPY in c.operations)))`
+	semanticWindowsDefenderComponentDisableExpression = `f.commands.exists(c, c.argv_complete && c.program in ['mpcmdrun', 'mpcmdrun.exe', 'dism', 'dism.exe', 'disable-windowsoptionalfeature', 'remove-windowsfeature', 'uninstall-windowsfeature', 'schtasks', 'schtasks.exe', 'add-dnsclientnrptrule'])`
+	semanticWindowsUACAutoElevationExpression         = `f.commands.exists(c, c.argv_complete && c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty', 'new-item']) && f.commands.exists(c, c.argv_complete && c.program == 'start-process')`
 )
 
 var (
@@ -51,6 +54,107 @@ func celProgramList(programs []string) string {
 }
 
 var semanticReconImpactOwners = map[string]semanticOwner{
+	"impact.windows_delete_all_shadow_copies": {
+		prerequisite:     actionfacts.ExactWindowsVSSDeleteAllShadows,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_usn_journal_delete": {
+		prerequisite:     actionfacts.ExactWindowsUSNJournalDelete,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.windows_recovery_disable_pair": {
+		prerequisite:     actionfacts.ExactWindowsRecoveryDisablePair,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_audit_policy_wipe": {
+		prerequisite:     actionfacts.ExactWindowsAuditPolicyWipePair,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.windows_recovery_store_destruction": {
+		prerequisite:     actionfacts.ExactWindowsRecoveryStoreDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_defender_multi_control_disable": {
+		prerequisite:     actionfacts.ExactWindowsDefenderMultiControlDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_defender_component_disable": {
+		prerequisite:     actionfacts.ProvesWindowsDefenderDisablement,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_registry_security_control_disable": {
+		prerequisite:     windowsRegistrySecurityControlDisablePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.windows_uac_autoelevation_hijack": {
+		prerequisite:     actionfacts.ProvesWindowsUACAutoElevationHijack,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"persistence.windows_accessibility_feature_hijack": {
+		prerequisite:     actionfacts.ProvesWindowsAccessibilityFeatureHijack,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_telemetry_disable": {
+		prerequisite:     actionfacts.ExactWindowsTelemetryDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_credential_protection_weaken": {
+		prerequisite:     actionfacts.ExactWindowsCredentialProtectionWeakening,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_amsi_disable": {
+		prerequisite:     actionfacts.ExactWindowsAMSIDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.endpoint_security_product_disable": {
+		prerequisite:     actionfacts.ExactEndpointSecurityProductDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.complete_firewall_relaxation": {
+		prerequisite:     actionfacts.ExactCompleteFirewallRelaxation,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.cloud_audit_control_destruction": {
+		prerequisite:     actionfacts.ExactCloudAuditControlDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.pam_password_capture": {
+		fallbackAliasesOnMatch: []string{"CMD-ETC-WRITE"},
+		prerequisite:           actionfacts.ExactPAMPasswordCapture,
+		suppressFallback:       authoritativeSemanticSafeNegative,
+	},
+	"tamper.posix_logging_hardening_disable": {
+		prerequisite:     actionfacts.ExactPOSIXLoggingHardeningDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.linux_security_control_disable": {
+		prerequisite:     actionfacts.ExactLinuxSecurityControlDisable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.macos_unified_log_erase": {
+		prerequisite:     actionfacts.ExactMacOSUnifiedLogErase,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"credential.macos_fake_update_prompt": {
+		prerequisite:     actionfacts.ExactFakeMacOSUpdateCredentialPrompt,
+		suppressFallback: fakeMacOSUpdateCredentialPromptSafeNegative,
+	},
+	"credential.macos_login_keychain_dump": {
+		prerequisite:     actionfacts.ExactMacOSLoginKeychainDump,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.linux_magic_sysrq_destruction": {
+		prerequisite:     actionfacts.ExactLinuxMagicSysRqDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.posix_host_halt": {
+		prerequisite:     actionfacts.ExactPOSIXHostHalt,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.posix_system_log_destruction": {
+		prerequisite:     actionfacts.ExactPOSIXSystemLogDestruction,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"CMD-RM-RF": {
 		equivalentAliases: []string{
 			"CMD-WIN-REMOVE-ITEM-RF",
@@ -104,6 +208,37 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		actionfacts.OperationAccountChange,
 		privilegedAccountDisposition,
 	),
+}
+
+func windowsRegistrySecurityControlDisablePrerequisite(facts actionfacts.Facts) bool {
+	return actionfacts.ExactWindowsRegistrySecurityControlDisable(facts) ||
+		actionfacts.ProvesWindowsUACPolicySuppression(facts)
+}
+
+// A complete static osascript argv is sufficient to reject the lexical
+// candidate when the exact T1056.002 owner does not match, even if the wider
+// shell action is partial because it contains command substitution. This keeps
+// near-miss and legitimate credential dialogs out of fallback detection.
+func fakeMacOSUpdateCredentialPromptSafeNegative(facts actionfacts.Facts) bool {
+	if facts.Authoritative() {
+		return true
+	}
+	for _, command := range facts.Commands {
+		if command.Program != "osascript" || !command.ArgvComplete {
+			continue
+		}
+		static := true
+		for _, argument := range command.Arguments {
+			if argument.Expands {
+				static = false
+				break
+			}
+		}
+		if static {
+			return true
+		}
+	}
+	return false
 }
 
 type reconImpactDisposition func(

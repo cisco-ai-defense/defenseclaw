@@ -25,7 +25,10 @@ import (
 )
 
 func TestResolveAutoMemoryUsesSharedLinkedWorktreeRoot(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	main := filepath.Join(root, "main")
 	gitDir := filepath.Join(main, ".git")
 	worktree := filepath.Join(root, "worktree")
@@ -54,7 +57,10 @@ func TestResolveAutoMemoryUsesSharedLinkedWorktreeRoot(t *testing.T) {
 }
 
 func TestResolveAutoMemoryHonorsFilePrecedence(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	project := filepath.Join(root, "project")
 	configDir := filepath.Join(root, "claude-home")
 	managed := filepath.Join(root, "managed-settings.json")

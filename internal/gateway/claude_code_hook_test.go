@@ -164,7 +164,7 @@ func TestEvaluateClaudeCodeHook_HILTPreToolUseAsks(t *testing.T) {
 		HookEventName: "PreToolUse",
 		ToolName:      "Bash",
 		ToolInput: map[string]interface{}{
-			"command": "chmod 777 /etc/shadow",
+			"command": "dd if=/dev/zero of=/dev/sda bs=1M",
 		},
 	})
 
@@ -1163,7 +1163,10 @@ func TestClaudeCodeRuntimeTargetsIncludeRecursiveAncestorAgents(t *testing.T) {
 }
 
 func TestClaudeCodeRuntimeTargetsIncludeEffectiveAutoMemory(t *testing.T) {
-	root := t.TempDir()
+	root, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
 	configDir := filepath.Join(root, "claude-home")
 	project := filepath.Join(root, "project")
 	memory := filepath.Join(root, "custom-memory")

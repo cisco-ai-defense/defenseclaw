@@ -19,14 +19,13 @@ import { TextArea, TextField } from '../ui/text-field';
 import { Toggle } from '../ui/toggle';
 
 const RULE_RECIPE_KINDS: Recipe['kind'][] = [
-  'rule:secrets',
+  'rule:secret',
   'rule:injection',
-  'rule:exfiltration',
   'rule:command',
-  'rule:path',
+  'rule:sensitive-path',
   'rule:enterprise-data',
   'rule:trust-exploit',
-  'rule:cognitive',
+  'rule:cognitive-file',
   'rule:c2',
 ];
 
@@ -139,7 +138,7 @@ export function RulesSection({
           maxHeight={180}
           onPick={(r) => {
             // Drop the rule into the file whose name matches its kind suffix
-            // (rule:secrets → secrets.yaml). Create the file if missing.
+            // (rule:secret → secret.yaml). Create the file if missing.
             const targetFilename = r.kind.split(':')[1] ?? 'misc';
             const fileIdx = policy.rule_pack.files.findIndex((f) => f.filename === targetFilename);
             if (fileIdx >= 0) {
@@ -299,7 +298,7 @@ export function RulesSection({
                             }
                             rows={3}
                             monospace
-                            hint="Evaluated only after the server establishes an authenticated tool-call boundary. Setting this field does not make an untrusted event trusted."
+                            hint="Detection prefilter evaluated only after the server establishes an authenticated tool-call boundary. A custom CEL expression cannot grant itself code-owned same-rule block authority; final compilation and enforcement happen on the DefenseClaw host."
                           />
                         </div>
                       </li>

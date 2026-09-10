@@ -35,6 +35,10 @@ func (f Facts) EnforcementProjection() Facts {
 		ActiveAgentFilesCaseInsensitive:          cloneSlice(f.ActiveAgentFilesCaseInsensitive),
 		ActiveAgentFilesCaseInsensitiveUncertain: f.ActiveAgentFilesCaseInsensitiveUncertain,
 		ActiveAgentFilesUncertain:                f.ActiveAgentFilesUncertain,
+		CloudIAMPrincipalOperations: append(
+			[]CloudIAMPrincipalOperationFact(nil),
+			f.CloudIAMPrincipalOperations...,
+		),
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,
@@ -110,6 +114,11 @@ func (f Facts) EnforcementProjection() Facts {
 	for _, fact := range f.DataFlows {
 		if retainedFlow(fact, executing) {
 			appendProjectionDataFlows(&projected, []DataFlowFact{fact})
+		}
+	}
+	for _, fact := range f.Artifacts {
+		if ownsCommand(fact.CommandID, executing) {
+			appendProjectionArtifacts(&projected, []ArtifactFact{fact})
 		}
 	}
 
@@ -195,6 +204,16 @@ func appendProjectionDataFlows(projected *Facts, facts []DataFlowFact) {
 			return
 		}
 		projected.DataFlows = append(projected.DataFlows, fact)
+	}
+}
+
+func appendProjectionArtifacts(projected *Facts, facts []ArtifactFact) {
+	for _, fact := range facts {
+		if len(projected.Artifacts) >= maxArtifactFacts {
+			markProjectionFactLimit(projected)
+			return
+		}
+		projected.Artifacts = append(projected.Artifacts, fact)
 	}
 }
 

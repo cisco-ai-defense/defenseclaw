@@ -5,9 +5,11 @@
 package gateway
 
 import (
+	"path/filepath"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
 func TestWindowsHighRiskFallbacksStayShadowWithoutTypedProof(t *testing.T) {
@@ -239,46 +241,79 @@ func TestWindowsHighRiskOwnersRequireCompleteCriticalTypedFacts(t *testing.T) {
 
 func TestWindowsPowerShellWinlogonPersistenceSemanticDispatch(t *testing.T) {
 	const (
-		connector = "windows-powershell-winlogon-test"
-		ruleID    = "CMD-WIN-REG-PERSIST"
-		key       = `'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon'`
+		ruleID = "CMD-WIN-REG-PERSIST"
+		key    = `'HKCU:\Software\Microsoft\Windows NT\CurrentVersion\Winlogon'`
 	)
-	installDefaultProfileConnector(t, connector)
-	tests := []struct {
-		name, command string
-		want          bool
+	profiles := []struct {
+		name, severity, action string
 	}{
-		{"set shell", `Set-ItemProperty -Path ` + key + ` -Name Shell -Value payload.exe`, true},
-		{"new userinit", `New-ItemProperty -Path ` + key + ` -Name:Userinit -Value payload.exe`, true},
-		{"benign value", `Set-ItemProperty -Path ` + key + ` -Name LegalNoticeText -Value Notice`, false},
-		{"dynamic name", `Set-ItemProperty -Path ` + key + ` -Name $valueName -Value payload.exe`, false},
+		{name: "default", severity: "HIGH", action: "alert"},
+		{name: "permissive", severity: "HIGH", action: "alert"},
+		{name: "strict", severity: "CRITICAL", action: "block"},
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			input := actionfacts.Input{Tool: "PowerShell", Command: test.command}
-			facts := actionfacts.Analyze(input)
-			proof, owned := trustedSemanticOwnerFindingProof(ruleID, input, facts)
-			if owned != test.want || owned && !proof.authorizes(ruleID) {
-				t.Fatalf("exact semantic owner = %t, want %t: proof=%+v facts=%+v", owned, test.want, proof, facts)
+	for _, profile := range profiles {
+		profile := profile
+		t.Run(profile.name, func(t *testing.T) {
+			const connector = "codex"
+			installToolCallCorpusProfileConnector(t, connector, profile.name)
+			tests := []struct {
+				name, command string
+				want          bool
+			}{
+				{"set shell", `Set-ItemProperty -Path ` + key + ` -Name Shell -Value payload.exe`, true},
+				{"new userinit", `New-ItemProperty -Path ` + key + ` -Name:Userinit -Value payload.exe`, true},
+				{"benign value", `Set-ItemProperty -Path ` + key + ` -Name LegalNoticeText -Value Notice`, false},
+				{"dynamic name", `Set-ItemProperty -Path ` + key + ` -Name $valueName -Value payload.exe`, false},
 			}
-
-			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
-				Input:              input,
-				LegacyText:         test.command,
-				Connector:          connector,
-				EnforcementCapable: true,
-			})
-			matched := findingWithID(findings, "CMD-SYSTEMCTL")
-			dispatched := matched != nil && matched.contributesToEnforcement()
-			if dispatched != test.want {
-				t.Fatalf("semantic dispatch = %t, want %t: %+v", dispatched, test.want, findings)
-			}
-			if !test.want {
-				for _, finding := range findings {
-					if finding.contributesToEnforcement() {
-						t.Fatalf("negative enforced through unrelated rule: %+v", findings)
+			for _, test := range tests {
+				t.Run(test.name, func(t *testing.T) {
+					input := actionfacts.Input{Tool: "PowerShell", Command: test.command}
+					facts := actionfacts.Analyze(input)
+					proof, owned := trustedSemanticOwnerFindingProof(ruleID, input, facts)
+					if owned != test.want || owned && !proof.authorizes(ruleID) {
+						t.Fatalf("exact semantic owner = %t, want %t: proof=%+v facts=%+v", owned, test.want, proof, facts)
 					}
-				}
+
+					findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+						Input:              input,
+						LegacyText:         test.command,
+						Connector:          connector,
+						EnforcementCapable: true,
+					})
+					matched := findingWithID(findings, ruleID)
+					dispatched := matched != nil && matched.contributesToEnforcement()
+					if dispatched != test.want {
+						t.Fatalf("semantic dispatch = %t, want %t: %+v", dispatched, test.want, findings)
+					}
+					if matched != nil && matched.Severity != profile.severity {
+						t.Fatalf("severity = %q, want %q: %+v", matched.Severity, profile.severity, findings)
+					}
+					if !test.want {
+						for _, finding := range findings {
+							if finding.contributesToEnforcement() {
+								t.Fatalf("negative enforced through unrelated rule: %+v", findings)
+							}
+						}
+						return
+					}
+
+					cfg := &config.Config{}
+					cfg.Guardrail.Mode = "action"
+					cfg.Guardrail.Connector = connector
+					cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile.name)
+					response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(t.Context(), codexHookRequest{
+						HookEventName: "PreToolUse",
+						ToolName:      "PowerShell",
+						ToolInput:     map[string]interface{}{"command": test.command},
+					})
+					if response.Action != profile.action || response.RawAction != profile.action ||
+						response.Severity != profile.severity || !findingStringHasRuleID(response.Findings, ruleID) {
+						t.Fatalf(
+							"response=%+v, want action/raw=%q severity=%q with %s",
+							response, profile.action, profile.severity, ruleID,
+						)
+					}
+				})
 			}
 		})
 	}

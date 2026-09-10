@@ -1,0 +1,23 @@
+{
+  "accepted": [
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/513d7c2d5bce8a0da7683e13"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/a694ffce5fb11389e0e1a440"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/c277adece3c26ea42247f3dc"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/dcb5c7a4d42cd6064de051cf"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/e2f3a9a63e0bf178bc0d9b6e"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/e8502bec3279f1d04d650915"}
+  ],
+  "candidate_labels_sha256": "d0d4b1b8a1c6654655d67deadf0bf08ed8271e6e74bc7b69f2c130c63eead15b",
+  "default_decision": "contextual_or_dual_use",
+  "notes": [
+    "Candidate generation and proof-review triage used only GPT-OSS 20B; model output remained advisory.",
+    "Acceptance never uses source provenance as proof: every accepted command contains a literal external download, executable permission, execution of the exact artifact, and broad wildcard cleanup.",
+    "Public benign-source commands remain negatives even when they perform risky administration or bulk deletion.",
+    "Unknown payloads, generic download-and-execute, exact named-file cleanup, local credential collection, persistence, shutdown, and placeholder exfiltration remain contextual unless one of the six literal proof classes is complete.",
+    "No reverse shell, bind shell, sensitive exfiltration, broad destructive wipe, or defense-disable-plus-attack candidate in this split met the literal-proof rubric without relying on a placeholder, unknown artifact behavior, inferred intent, or omitted context."
+  ],
+  "protocol": "explicit-command-proof-review-v1",
+  "reviewed_candidate_count": 406,
+  "schema_version": "1",
+  "unresolved": []
+}

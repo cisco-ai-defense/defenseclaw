@@ -56,6 +56,10 @@ func TestSkillDirsFollowsAndDeduplicatesDocumentedDirectorySymlinks(t *testing.T
 	if err := os.MkdirAll(target, 0o700); err != nil {
 		t.Fatal(err)
 	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		t.Fatal(err)
+	}
 	for _, alias := range []string{"first", "second"} {
 		if err := os.Symlink(target, filepath.Join(root, alias)); err != nil {
 			t.Skipf("directory symlinks unavailable: %v", err)
@@ -63,7 +67,7 @@ func TestSkillDirsFollowsAndDeduplicatesDocumentedDirectorySymlinks(t *testing.T
 	}
 
 	got := SkillDirs(root)
-	if len(got) != 1 || !samePath(got[0], target) {
-		t.Fatalf("SkillDirs() = %v, want canonical target %s once", got, target)
+	if len(got) != 1 || !samePath(got[0], canonicalTarget) {
+		t.Fatalf("SkillDirs() = %v, want canonical target %s once", got, canonicalTarget)
 	}
 }

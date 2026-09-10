@@ -1,0 +1,144 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/benchmark-case-v1.json",
+  "title": "DefenseClaw benchmark case v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "id", "source", "split", "surface", "payload", "truth"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._/-]*$"},
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["dataset", "revision", "original_id", "license", "redistribution"],
+      "properties": {
+        "dataset": {"type": "string", "minLength": 1, "maxLength": 120},
+        "revision": {"type": "string", "minLength": 1, "maxLength": 160},
+        "original_id": {"type": "string", "minLength": 1, "maxLength": 240},
+        "license": {"type": "string", "minLength": 1, "maxLength": 120},
+        "redistribution": {"enum": ["vendored", "download-only", "aggregate-only", "manual"]}
+      }
+    },
+    "split": {"enum": ["smoke", "development", "validation", "test"]},
+    "surface": {"enum": ["text", "action", "stateful", "code", "skill", "plugin", "mcp", "e2e"]},
+    "payload": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "direction": {"enum": ["prompt", "completion", "tool_call", "artifact"]},
+        "content": {"type": "string", "maxLength": 1048576},
+        "tool_name": {"type": "string", "maxLength": 240},
+        "command": {"type": "string", "maxLength": 1048576},
+        "argv": {"type": "array", "maxItems": 4096, "items": {"type": "string", "maxLength": 65536}},
+        "args": {},
+        "dialect": {"enum": ["", "none", "argv", "posix", "powershell", "cmd", "mixed"]},
+        "cwd": {"type": "string", "maxLength": 4096},
+        "active_home": {"type": "string", "maxLength": 4096},
+        "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
+        "filename": {"type": "string", "maxLength": 4096},
+        "target": {"type": "string", "maxLength": 4096},
+        "events": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 64,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "tool_name": {"type": "string", "maxLength": 240},
+              "command": {"type": "string", "maxLength": 1048576},
+              "argv": {"type": "array", "maxItems": 4096, "items": {"type": "string", "maxLength": 65536}},
+              "args": {},
+              "dialect": {"enum": ["", "none", "argv", "posix", "powershell", "cmd", "mixed"]},
+              "cwd": {"type": "string", "maxLength": 4096},
+              "active_home": {"type": "string", "maxLength": 4096},
+              "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
+              "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled", "unknown"]},
+              "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800}
+            }
+          }
+        }
+      }
+    },
+    "truth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["source_truth", "applicability", "expected_disposition"],
+      "properties": {
+        "source_truth": {"enum": ["benign", "malicious", "sensitive", "unknown"]},
+        "deterministic_truth": {"enum": ["deterministic_malicious", "contextual_or_dual_use", "benign"]},
+        "label_confidence": {"enum": ["high", "medium", "low"]},
+        "label_source": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "enforcement_lens": {"enum": ["monitor", "egress"]},
+        "applicability": {"enum": ["in_scope", "out_of_scope"]},
+        "expected_disposition": {"enum": ["allow", "detect_only", "block"]},
+        "expected_profile_actions": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "default": {"enum": ["allow", "alert", "confirm", "block"]},
+            "permissive": {"enum": ["allow", "alert", "confirm", "block"]},
+            "strict": {"enum": ["allow", "alert", "confirm", "block"]}
+          }
+        },
+        "categories": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 120}},
+        "rule_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 160}},
+        "exclusion_reason": {"type": "string", "maxLength": 1000},
+        "spans": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/span"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"applicability": {"const": "out_of_scope"}}},
+          "then": {"required": ["exclusion_reason"]}
+        }
+      ]
+    },
+    "strata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "platform": {"type": "string", "maxLength": 80},
+        "dialect": {"type": "string", "maxLength": 80},
+        "language": {"type": "string", "maxLength": 80},
+        "ecosystem": {"type": "string", "maxLength": 80},
+        "campaign": {"type": "string", "maxLength": 160},
+        "domain": {"type": "string", "maxLength": 160},
+        "document_type": {"type": "string", "maxLength": 160},
+        "hard_negative": {"type": "boolean"},
+        "split_group": {"type": "string", "pattern": "^[0-9a-f]{24}$"},
+        "trajectory_id": {"type": "string", "pattern": "^[0-9a-f]{24,64}$"},
+        "sequence_index": {"type": "integer", "minimum": 0},
+        "call_index": {"type": "integer", "minimum": 0}
+      },
+      "allOf": [
+        {
+          "if": {
+            "anyOf": [
+              {"required": ["trajectory_id"]},
+              {"required": ["sequence_index"]},
+              {"required": ["call_index"]}
+            ]
+          },
+          "then": {"required": ["trajectory_id", "sequence_index", "call_index"]}
+        }
+      ]
+    }
+  },
+  "$defs": {
+    "span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "label"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "rule_id": {"type": "string", "minLength": 1, "maxLength": 160}
+      }
+    }
+  }
+}

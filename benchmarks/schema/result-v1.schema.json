@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/benchmark-result-v1.json",
+  "title": "DefenseClaw benchmark prediction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "case_id", "engine", "profile", "applicable", "detected", "action", "severity", "finding_count", "duration_micros"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 160},
+    "case_id": {"type": "string", "minLength": 1, "maxLength": 240},
+    "engine": {"type": "string", "minLength": 1, "maxLength": 120},
+    "profile": {"enum": ["default", "permissive", "strict"]},
+    "applicable": {"type": "boolean"},
+    "detected": {"type": "boolean"},
+    "alerted": {"type": "boolean"},
+    "action": {"enum": ["allow", "alert", "confirm", "block", "not_applicable", "error"]},
+    "severity": {"enum": ["NONE", "LOW", "MEDIUM", "HIGH", "CRITICAL"]},
+    "route": {"enum": ["", "none", "semantic", "fallback", "mixed"]},
+    "parse_status": {"type": "string", "maxLength": 80},
+    "evaluation_status": {"type": "string", "maxLength": 80},
+    "authoritative": {"type": "boolean"},
+    "enforcement_eligible": {"type": "boolean"},
+    "detection_step_mask": {"type": "integer", "minimum": 0, "maximum": 2199023255551},
+    "enforcement_step_mask": {"type": "integer", "minimum": 0, "maximum": 2199023255551},
+    "issue_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 80, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"}},
+    "rule_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1, "maxLength": 160}},
+    "finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "audit_finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "advisory_finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "detect_only_finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "enforceable_finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "alert_finding_count": {"type": "integer", "minimum": 0, "maximum": 1000000},
+    "duration_micros": {"type": "integer", "minimum": 0},
+    "error_code": {"type": "string", "maxLength": 120},
+    "spans": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["start", "end", "label"],
+        "properties": {
+          "start": {"type": "integer", "minimum": 0},
+          "end": {"type": "integer", "minimum": 1},
+          "label": {"type": "string", "minLength": 1, "maxLength": 120},
+          "rule_id": {"type": "string", "minLength": 1, "maxLength": 160}
+        }
+      }
+    }
+  }
+}

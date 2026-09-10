@@ -44,6 +44,26 @@ func applyTrustedActionContextDisposition(
 	for index := range adjusted {
 		finding := adjusted[index]
 
+		if canonicalTrustedRuleID(finding.RuleID) ==
+			"PRIVILEGE.CONTAINER_RUNTIME_SOCKET_ACCESS" {
+			if trustedActionProvesContainerRuntimeSocketUse(enforcementFacts) {
+				finding = finding.withTrustedActionProof(
+					trustedActionContextFindingProof(
+						finding.RuleID,
+						enforcementFacts,
+					),
+				)
+			} else {
+				// Merely reading, listing, stating, or lexically mentioning a
+				// runtime socket is useful local telemetry, but it does not prove
+				// use of the privileged API. Partial parses remain visible here
+				// without gaining alert or enforcement authority.
+				finding = trustedActionAuditFinding(finding)
+			}
+			adjusted[index] = finding
+			continue
+		}
+
 		if trustedActionSensitivePathRule(finding.RuleID) {
 			switch trustedActionClassifySensitivePathRisk(enforcementFacts, finding.RuleID) {
 			case trustedActionSensitivePathUncertain:
@@ -101,6 +121,37 @@ func applyTrustedActionContextDisposition(
 		)
 	}
 	return adjusted
+}
+
+func trustedActionProvesContainerRuntimeSocketUse(
+	facts actionfacts.Facts,
+) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	for _, candidate := range facts.Paths {
+		if !matchesContainerRuntimeSocket(semanticPathValue(candidate)) ||
+			!slices.Contains(
+				[]actionfacts.PathAccess{
+					actionfacts.PathAccessConnect,
+					actionfacts.PathAccessWrite,
+					actionfacts.PathAccessAppend,
+				},
+				candidate.Access,
+			) ||
+			!trustedActionExecutingCommand(facts, candidate.CommandID) {
+			continue
+		}
+		for _, command := range facts.Commands {
+			if command.ID != candidate.CommandID {
+				continue
+			}
+			return slices.Contains(command.Operations, actionfacts.OperationConnect) ||
+				slices.Contains(command.Operations, actionfacts.OperationWrite) ||
+				slices.Contains(command.Operations, actionfacts.OperationAppend)
+		}
+	}
+	return false
 }
 
 func trustedActionContextFindingProof(
@@ -612,7 +663,25 @@ func trustedActionSameCommandPathReadFeedsExternalEgress(
 		if !oneOfFold(command.Program, "curl", "curl.exe") {
 			return trustedActionCommandProvesExternalEgress(facts, command.ID)
 		}
-		for _, source := range actionfacts.StaticCurlUploadFileSources(command) {
+		// Resolve the route per target. A global "any SOCKS observer"
+		// check would let a local HTTP observer steal a sibling noproxy
+		// upload, and a global "no SOCKS observer" check would treat
+		// HTTPS-through-SOCKS bodies as direct NetworkUpload facts.
+		for _, source := range actionfacts.StaticCurlProxyUploadFileSources(command) {
+			if source.Path != candidate.Value {
+				continue
+			}
+			for _, network := range facts.Network {
+				if network.CommandID == command.ID &&
+					network.Action == actionfacts.NetworkConnect &&
+					isExternalNetwork(network) &&
+					strings.EqualFold(network.Scheme, source.Scheme) &&
+					network.Host == source.Host && network.Port == source.Port {
+					return true
+				}
+			}
+		}
+		for _, source := range actionfacts.StaticCurlDirectUploadFileSources(command) {
 			if source.Path != candidate.Value {
 				continue
 			}
@@ -721,13 +790,16 @@ func trustedActionCommandFeedsExternalUpload(
 				!trustedActionCurlStdinFeedsExternalUpload(facts, destination) {
 				continue
 			}
-			if hasExternalUpload(facts, destination.ID) &&
-				hasDataFlowFrom(
-					facts,
-					destination.ID,
-					actionfacts.DataStdin,
-					actionfacts.DataNetwork,
-				) {
+			if !hasDataFlowFrom(
+				facts,
+				destination.ID,
+				actionfacts.DataStdin,
+				actionfacts.DataNetwork,
+			) {
+				continue
+			}
+			if hasExternalUpload(facts, destination.ID) ||
+				trustedActionCurlStdinObservedByExternalSOCKS(facts, destination) {
 				return true
 			}
 		}
@@ -743,6 +815,27 @@ func trustedActionCurlStdinFeedsExternalUpload(
 		for _, network := range facts.Network {
 			if network.CommandID == command.ID &&
 				network.Action == actionfacts.NetworkUpload &&
+				isExternalNetwork(network) &&
+				strings.EqualFold(network.Scheme, target.Scheme) &&
+				network.Host == target.Host && network.Port == target.Port {
+				return true
+			}
+		}
+	}
+	return trustedActionCurlStdinObservedByExternalSOCKS(facts, command)
+}
+
+func trustedActionCurlStdinObservedByExternalSOCKS(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) bool {
+	if command.Program != "curl" && command.Program != "curl.exe" {
+		return false
+	}
+	for _, target := range actionfacts.StaticCurlProxyStdinUploadTargets(command) {
+		for _, network := range facts.Network {
+			if network.CommandID == command.ID &&
+				network.Action == actionfacts.NetworkConnect &&
 				isExternalNetwork(network) &&
 				strings.EqualFold(network.Scheme, target.Scheme) &&
 				network.Host == target.Host && network.Port == target.Port {
