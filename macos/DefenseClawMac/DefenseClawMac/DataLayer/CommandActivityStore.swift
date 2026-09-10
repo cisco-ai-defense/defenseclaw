@@ -54,8 +54,8 @@ struct CommandActivityEntry: Identifiable, Sendable {
     var statusLabel: String {
         switch status {
         case .running: "Running"
-        case .cancelling: "Cancelling…"
-        case .finishing: "Finishing…"
+        case .cancelling: "Cancelling..."
+        case .finishing: "Finishing..."
         case .succeeded: "Exit 0"
         case .failed: "Exit \(exitCode ?? -1)"
         case .cancelled: "Cancelled"
@@ -119,7 +119,7 @@ final class CommandActivityStore {
         )
         selectedID = id
         while entries.count > Self.maximumEntries,
-              let removable = entries.lastIndex(where: { !$0.status.isActive }) {
+              let removable = entries.lastIndex(where: { $0.status != .running }) {
             entries.remove(at: removable)
         }
 
@@ -154,21 +154,21 @@ final class CommandActivityStore {
         entries[index].status = .cancelling
         Task {
             let disposition = await runner.cancel(runID: id)
-            applyCancellationDisposition(disposition, to: id)
-        }
-    }
-
-    func applyCancellationDisposition(_ disposition: CLICancellationDisposition, to id: UUID) {
-        guard let index = entries.firstIndex(where: { $0.id == id }),
-              entries[index].status == .cancelling else { return }
-        switch disposition {
-        case .requested, .alreadyRequested:
-            break
-        case .finishing, .notFound:
-            // `.notFound` can race the runner removing its state immediately
-            // before the actual result resumes here. Keep the row active so
-            // clearCompleted() cannot remove it before run() finalizes it.
-            entries[index].status = .finishing
+            guard let index = entries.firstIndex(where: { $0.id == id }),
+                  entries[index].status == .cancelling else { return }
+            switch disposition {
+            case .requested, .alreadyRequested:
+                break
+            case .finishing:
+                entries[index].status = .finishing
+            case .notFound:
+                entries[index].finishedAt = Date()
+                entries[index].status = .cancelled
+                if entries[index].output.isEmpty {
+                    entries[index].output = "Cancellation requested after the command process was no longer active.\n"
+                }
+                entries[index].suggestedNextAction = "Refresh the affected view to verify its final state."
+            }
         }
     }
 
