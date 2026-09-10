@@ -44,6 +44,14 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
 
+const (
+	// minNamingBudget keeps a short poll interval from starving reverse DNS
+	// entirely; maxNamingBudget keeps a long one from letting a stalled
+	// resolver hold a poll open past the API client's scan timeout.
+	minNamingBudget = 5 * time.Second
+	maxNamingBudget = 20 * time.Second
+)
+
 // InventoryProvider supplies the discovery snapshot the join reads.
 //
 // An interface rather than a direct dependency on the scanner so the service
@@ -59,7 +67,12 @@ type Resolver interface {
 	// naming is, and which source produced it. An empty hostname means the
 	// peer could not be named, which is a counted observation rather than a
 	// failure.
-	Resolve(connection netprobe.Connection) (hostname string, confidence float64, source string)
+	//
+	// The context carries the poll's remaining naming budget. A resolver that
+	// blocks past it must give up and report the peer unnamed: an unnamed peer
+	// is a recorded observation, whereas a poll that never returns is a dead
+	// sensor that still looks alive.
+	Resolve(ctx context.Context, connection netprobe.Connection) (hostname string, confidence float64, source string)
 }
 
 // Options configure a Service.
@@ -96,6 +109,19 @@ type Service struct {
 	hostPlane *hostPlane
 	dnsCache  *dnscapture.Cache
 	dnsCap    dnscapture.Capturer
+	// pollMu serializes Poll. The ticker and an operator-triggered scan can
+	// arrive together, and Poll mutates episodes and the lineage tracker
+	// without holding mu -- concurrent polls would race the map and can
+	// abort the gateway outright with a concurrent map write.
+	pollMu sync.Mutex
+
+	// planeAOn and planeBOn record the configured selection. Consulting it
+	// only while rendering health would let a host configured for one plane
+	// quietly run all of them, which is a privacy boundary, not a display
+	// detail.
+	planeAOn bool
+	planeBOn bool
+
 	// episodes carries per-process state between polls: the previous CPU
 	// reading, first-seen time, and how many distinct unnamed public peers the
 	// process has reached. Escalation depends on that history, so it cannot be
@@ -104,11 +130,61 @@ type Service struct {
 }
 
 type episode struct {
-	firstSeen        time.Time
-	lastCPU          time.Duration
-	lastSeen         time.Time
-	unnamedPeerCount int
-	unnamedPeers     map[string]bool
+	firstSeen time.Time
+	lastCPU   time.Duration
+	lastSeen  time.Time
+	// baselined is false until one poll has recorded lastCPU. A process's
+	// first sample carries the CPU it burned over its whole lifetime, not
+	// over one poll window, so scoring it would hand any long-lived but
+	// currently idle interpreter an inference heartbeat the moment the
+	// gateway starts. The first sample sets the baseline and scores nothing.
+	baselined bool
+	// unnamedPeerPolls counts polls in which this process showed at least one
+	// unnamed public peer -- not the number of distinct such peers. The
+	// escalation exists for a provider connection whose attribution keeps
+	// missing poll after poll; counting distinct peers would leave exactly
+	// that case pinned at one forever.
+	unnamedPeerPolls int
+}
+
+// observeCPU folds one CPU sample into the episode and reports the delta plus
+// whether it is safe to score.
+//
+// The first sample of an episode is a baseline and nothing else. A process's
+// cumulative CPU time covers its whole life, so treating the first reading as
+// one poll window's work would hand every long-lived interpreter on the host
+// an inference heartbeat the instant the gateway starts -- the machine looks
+// busiest exactly when the sensor knows least about it.
+//
+// A negative delta means the pid was reused, which restarts the episode for
+// the same reason: the counter belongs to a different process now.
+func (e *episode) observeCPU(cpuTime time.Duration, now time.Time) (time.Duration, bool) {
+	delta := cpuTime - e.lastCPU
+	reused := delta < 0
+	if reused {
+		delta = 0
+		e.firstSeen = now
+		e.baselined = false
+		e.unnamedPeerPolls = 0
+	}
+	scoreable := e.baselined
+	e.lastCPU = cpuTime
+	e.lastSeen = now
+	e.baselined = true
+	return delta, scoreable
+}
+
+// observeUnnamedPeers records that this poll saw unnamed public peers for the
+// process, counting polls rather than distinct addresses.
+//
+// The escalation exists for a provider connection whose attribution keeps
+// missing: the same address, poll after poll. Counting distinct peers would
+// pin exactly that case at one forever and never reach the threshold, which
+// is the case the weight was written for.
+func (e *episode) observeUnnamedPeers(count int) {
+	if count > 0 {
+		e.unnamedPeerPolls++
+	}
 }
 
 // New builds a service. It fails rather than defaulting when the host has no
@@ -157,6 +233,14 @@ func New(options Options) (*Service, error) {
 		episodes: make(map[int]*episode),
 		dnsCache: dnsCache,
 		dnsCap:   dnsCap,
+	}
+	for _, selected := range options.Config.EffectivePlanes() {
+		switch selected {
+		case "a":
+			service.planeAOn = true
+		case "b":
+			service.planeBOn = true
+		}
 	}
 	for _, selected := range options.Config.EffectivePlanes() {
 		if selected != "c" {
@@ -227,8 +311,19 @@ func (s *Service) Run(ctx context.Context) error {
 
 // Poll runs one sampling cycle and replaces the snapshot.
 func (s *Service) Poll(ctx context.Context) Snapshot {
+	s.pollMu.Lock()
+	defer s.pollMu.Unlock()
+
 	now := s.options.Now()
 	interval := s.options.Config.EffectivePollInterval()
+
+	// Naming peers is the only unbounded work in a poll: each cold address is
+	// a synchronous reverse lookup, so a slow resolver and a host with many
+	// new peers turn one poll into minutes. Cap the whole naming phase and
+	// let the poll's own cancellation reach it -- an unnamed peer is still a
+	// recorded observation, a poll that never returns is not.
+	nameCtx, cancelNaming := context.WithTimeout(ctx, namingBudget(interval))
+	defer cancelNaming()
 
 	processes, processSkipped, processErr := procprobe.Snapshot()
 	connections, unattributed, connectionErr := netprobe.Snapshot()
@@ -270,31 +365,27 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	for _, process := range processes {
 		live[process.PID] = true
 		state := s.episodeFor(process.PID, now)
-		cpuDelta := process.CPUTime - state.lastCPU
-		if cpuDelta < 0 {
-			// A pid was reused. Treat it as a new episode rather than as a
-			// negative delta, which would otherwise read as an idle process.
-			cpuDelta = 0
-			state.firstSeen = now
-		}
-		state.lastCPU = process.CPUTime
-		state.lastSeen = now
+		cpuDelta, scoreCPU := state.observeCPU(process.CPUTime, now)
 
-		signals := planeA(process, cpuDelta, interval)
-		result := planeB(byPID[process.PID], s.options.Providers,
-			s.options.Resolver.Resolve, sanctioned)
-		signals = append(signals, result.signals...)
-
-		for peer := range peersOf(byPID[process.PID], s.options.Resolver) {
-			if !state.unnamedPeers[peer] {
-				state.unnamedPeers[peer] = true
-				state.unnamedPeerCount++
-			}
+		var signals []scoring.Signal
+		if s.planeAOn && scoreCPU {
+			signals = append(signals, planeA(process, cpuDelta, interval)...)
 		}
-		if len(signals) > 0 || result.unattributedPublicPeers > 0 {
-			if signal, ok := unattributedEgressSignal(state.unnamedPeerCount); ok &&
-				isScriptable(process.Name) {
-				signals = append(signals, signal)
+
+		var result planeBResult
+		if s.planeBOn {
+			result = planeB(byPID[process.PID], s.options.Providers,
+				func(connection netprobe.Connection) (string, float64, string) {
+					return s.options.Resolver.Resolve(nameCtx, connection)
+				}, sanctioned)
+			signals = append(signals, result.signals...)
+
+			state.observeUnnamedPeers(len(peersOf(nameCtx, byPID[process.PID], s.options.Resolver)))
+			if len(signals) > 0 || result.unattributedPublicPeers > 0 {
+				if signal, ok := unattributedEgressSignal(state.unnamedPeerPolls); ok &&
+					isScriptable(process.Name) {
+					signals = append(signals, signal)
+				}
 			}
 		}
 		if len(signals) == 0 {
@@ -395,10 +486,26 @@ func degradedReasonsFor(snapshot Snapshot) []string {
 	return reasons
 }
 
+// namingBudget caps how long one poll may spend naming peers.
+//
+// Half the poll interval, so naming can never make polls overlap, floored so
+// a short interval still gets a usable window and ceilinged well under the
+// API client's scan timeout -- an operator-triggered scan has to answer.
+func namingBudget(interval time.Duration) time.Duration {
+	budget := interval / 2
+	if budget < minNamingBudget {
+		budget = minNamingBudget
+	}
+	if budget > maxNamingBudget {
+		budget = maxNamingBudget
+	}
+	return budget
+}
+
 func (s *Service) episodeFor(pid int, now time.Time) *episode {
 	state, ok := s.episodes[pid]
 	if !ok {
-		state = &episode{firstSeen: now, unnamedPeers: make(map[string]bool, 4)}
+		state = &episode{firstSeen: now}
 		s.episodes[pid] = state
 	}
 	return state
@@ -625,13 +732,13 @@ func isScriptable(name string) bool { return scriptableRuntimes[strings.ToLower(
 
 // peersOf returns the public peers of a process's connections that could not
 // be named, keyed by address.
-func peersOf(connections []netprobe.Connection, resolver Resolver) map[string]bool {
+func peersOf(ctx context.Context, connections []netprobe.Connection, resolver Resolver) map[string]bool {
 	peers := make(map[string]bool, len(connections))
 	for _, connection := range connections {
 		if !connection.Public() {
 			continue
 		}
-		if hostname, _, _ := resolver.Resolve(connection); hostname != "" {
+		if hostname, _, _ := resolver.Resolve(ctx, connection); hostname != "" {
 			continue
 		}
 		peers[connection.RemoteIP.String()] = true

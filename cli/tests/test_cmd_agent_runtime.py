@@ -24,7 +24,6 @@ from typing import Any
 import pytest
 import requests
 from click.testing import CliRunner
-
 from defenseclaw.commands import cmd_agent
 from defenseclaw.main import cli
 
@@ -171,3 +170,81 @@ def test_service_unavailable_becomes_an_actionable_message(monkeypatch: pytest.M
 def test_limit_must_not_be_negative(stub_client: _StubClient) -> None:
     result = _invoke("findings", "--limit", "-1")
     assert result.exit_code == 2
+
+
+class _RestartSpy:
+    """Records whether the shared restart helper was actually invoked."""
+
+    def __init__(self) -> None:
+        self.calls: list[dict[str, Any]] = []
+
+    def __call__(self, data_dir: Any, host: Any, port: Any, **kwargs: Any) -> None:
+        self.calls.append({"data_dir": data_dir, "host": host, "port": port, **kwargs})
+
+
+@pytest.fixture()
+def restart_spy(monkeypatch: pytest.MonkeyPatch) -> _RestartSpy:
+    from defenseclaw.commands import cmd_setup
+
+    spy = _RestartSpy()
+    monkeypatch.setattr(cmd_setup, "_restart_services", spy)
+    return spy
+
+
+def _config_with_runtime(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Point the CLI at a throwaway config so a real save is harmless."""
+    from defenseclaw import config as config_module
+
+    cfg = config_module.default_config()
+    cfg.data_dir = str(tmp_path)
+    cfg.save = lambda *a, **k: None  # type: ignore[method-assign]
+    monkeypatch.setattr(cmd_agent, "_require_loaded_config", lambda *a, **k: cfg)
+    return cfg
+
+
+@pytest.mark.parametrize(
+    ("subcommand", "expected_state"),
+    [("enable", True), ("disable", False)],
+)
+def test_runtime_restart_actually_restarts_the_gateway(
+    subcommand: str,
+    expected_state: bool,
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    """--restart is on by default and must bounce the gateway, not print advice.
+
+    Printing instructions instead makes the default silently mean
+    --no-restart. Enabling then collects nothing until a second command, and
+    -- the case that matters -- disabling leaves the planes reading argv and
+    sockets on a host whose operator just switched them off.
+    """
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    # Force a change so the command has something to apply.
+    cfg.ai_discovery.runtime.enabled = not expected_state
+
+    result = _invoke(subcommand, "--yes")
+
+    assert result.exit_code == 0, result.output
+    assert restart_spy.calls, (
+        "the gateway was never restarted; --restart only printed instructions"
+    )
+    assert cfg.ai_discovery.runtime.enabled is expected_state
+
+
+def test_runtime_no_restart_says_the_change_is_not_live(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+
+    result = _invoke("enable", "--yes", "--no-restart")
+
+    assert result.exit_code == 0, result.output
+    assert not restart_spy.calls
+    assert "--no-restart" in result.output

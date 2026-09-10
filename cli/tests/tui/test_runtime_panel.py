@@ -14,7 +14,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from defenseclaw.tui.app import PANELS, PANEL_SHORTCUTS
+from defenseclaw.tui.app import PANEL_SHORTCUTS, PANELS
 from defenseclaw.tui.panels.runtime import (
     RuntimePanelAction,
     RuntimePanelModel,

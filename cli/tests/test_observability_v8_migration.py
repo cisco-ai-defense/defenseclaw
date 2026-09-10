@@ -626,7 +626,9 @@ def test_v7_compatible_profile_obeys_the_go_custom_profile_rules() -> None:
     exactly what shipped once. Mirror the compiler's rules here so the fast
     gate is a real gate.
     """
-    from defenseclaw.observability.v8_migration import V7_COMPATIBLE_FIELD_CLASSES as classes
+    from defenseclaw.observability.v8_migration import V7_COMPATIBLE_FIELD_CLASSES
+
+    classes = V7_COMPATIBLE_FIELD_CLASSES
 
     assert set(classes) == {
         "metadata", "identifier", "content", "reason",

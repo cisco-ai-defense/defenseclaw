@@ -24,6 +24,7 @@ package sensor
 import (
 	"context"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -31,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/netprobe"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 )
@@ -241,3 +243,221 @@ func TestRunPollsImmediatelyThenStops(t *testing.T) {
 }
 
 var _ = catalog.CategoryFrontier
+
+// countingResolver records how many lookups a poll performed and how long the
+// caller was willing to wait, so the naming budget can be observed rather than
+// assumed.
+type countingResolver struct {
+	mu          sync.Mutex
+	calls       int
+	deadline    time.Time
+	hadDeadline bool
+}
+
+func (r *countingResolver) Resolve(
+	ctx context.Context, _ netprobe.Connection,
+) (string, float64, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	if deadline, ok := ctx.Deadline(); ok {
+		r.deadline, r.hadDeadline = deadline, true
+	}
+	return "", 0, ""
+}
+
+// TestPollIsSerializedAgainstConcurrentCallers pins the fix for a concurrent
+// map write. Poll mutates the episode map without holding the snapshot lock,
+// and an operator-triggered scan can land on top of the ticker's poll. Before
+// serialization this aborted the whole gateway, not just the sensor. Run this
+// with -race, which is how CI runs it.
+func TestPollIsSerializedAgainstConcurrentCallers(t *testing.T) {
+	service := newTestService(t, config.AIRuntimeConfig{Enabled: true}, nil)
+
+	var wait sync.WaitGroup
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			service.Poll(context.Background())
+		}()
+	}
+	wait.Wait()
+
+	if service.Snapshot().ScannedAt.IsZero() {
+		t.Fatal("no snapshot survived the concurrent polls")
+	}
+}
+
+// TestPollHonoursTheConfiguredPlaneSelection is a privacy boundary, not a
+// display preference. A host that selected only the inference plane must not
+// have its sockets read: consulting the selection only while rendering health
+// would let the documented choice mean nothing.
+func TestPollHonoursTheConfiguredPlaneSelection(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		planes    []string
+		wantNamed bool
+	}{
+		{"plane a only never names a peer", []string{"a"}, false},
+		{"plane b named peers", []string{"b"}, true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			resolver := &countingResolver{}
+			service, err := New(Options{
+				Config:    config.AIRuntimeConfig{Enabled: true, Planes: test.planes},
+				Providers: testCatalog(),
+				Platform:  allPlanesAvailable(),
+				Resolver:  resolver,
+			})
+			if err != nil {
+				t.Fatalf("New(): %v", err)
+			}
+			service.Poll(context.Background())
+
+			if got := resolver.calls > 0; got != test.wantNamed {
+				t.Fatalf("resolver used = %v (calls=%d), want %v -- "+
+					"plane B ran against the configured selection %v",
+					got, resolver.calls, test.wantNamed, test.planes)
+			}
+		})
+	}
+}
+
+// TestPollBoundsTheTimeSpentNamingPeers pins that peer naming runs under a
+// deadline derived from the poll. Each cold address is a synchronous reverse
+// lookup, so without a total budget a slow resolver turns one poll into
+// minutes and outlives the API client waiting on the scan.
+func TestPollBoundsTheTimeSpentNamingPeers(t *testing.T) {
+	resolver := &countingResolver{}
+	service, err := New(Options{
+		Config:    config.AIRuntimeConfig{Enabled: true, Planes: []string{"b"}, PollIntervalSec: 3600},
+		Providers: testCatalog(),
+		Platform:  allPlanesAvailable(),
+		Resolver:  resolver,
+	})
+	if err != nil {
+		t.Fatalf("New(): %v", err)
+	}
+	start := time.Now()
+	service.Poll(context.Background())
+
+	if resolver.calls == 0 {
+		t.Skip("this host produced no public peers to name")
+	}
+	if !resolver.hadDeadline {
+		t.Fatal("naming ran with no deadline: one slow peer can hold the poll open forever")
+	}
+	if budget := resolver.deadline.Sub(start); budget > maxNamingBudget+time.Second {
+		t.Fatalf("naming budget %s exceeds the %s ceiling even at a one-hour poll interval",
+			budget, maxNamingBudget)
+	}
+}
+
+// TestNamingBudgetTracksThePollInterval keeps the budget between its floor and
+// ceiling: never long enough for one poll's naming to overlap the next, never
+// so short that a normal interval cannot name anything.
+func TestNamingBudgetTracksThePollInterval(t *testing.T) {
+	for _, test := range []struct {
+		interval time.Duration
+		want     time.Duration
+	}{
+		{5 * time.Second, minNamingBudget},
+		{30 * time.Second, 15 * time.Second},
+		{time.Hour, maxNamingBudget},
+	} {
+		if got := namingBudget(test.interval); got != test.want {
+			t.Errorf("namingBudget(%s) = %s, want %s", test.interval, got, test.want)
+		}
+	}
+	if maxNamingBudget >= 30*time.Second {
+		t.Error("the ceiling must stay well under the API client's scan timeout")
+	}
+}
+
+// TestFirstCPUSampleIsABaselineNotAScore pins that a process's first sample
+// never scores. Cumulative CPU covers a process's whole life, so scoring the
+// first reading as one poll window's work would give every long-lived
+// interpreter on the host an inference heartbeat the moment the gateway
+// starts -- a false finding at exactly the moment the sensor knows least.
+func TestFirstCPUSampleIsABaselineNotAScore(t *testing.T) {
+	now := time.Now()
+	state := &episode{firstSeen: now}
+
+	// A python that has been running for hours before the sensor started.
+	delta, scoreable := state.observeCPU(4*time.Hour, now)
+	if scoreable {
+		t.Fatal("the first sample scored: a process older than the sensor would report a heartbeat")
+	}
+	if delta != 4*time.Hour {
+		t.Fatalf("baseline delta = %s, want the raw reading %s", delta, 4*time.Hour)
+	}
+
+	// The next poll measures real work over one window.
+	delta, scoreable = state.observeCPU(4*time.Hour+20*time.Second, now.Add(30*time.Second))
+	if !scoreable {
+		t.Fatal("the second sample did not score: the baseline never lifts")
+	}
+	if delta != 20*time.Second {
+		t.Fatalf("delta = %s, want 20s of work since the baseline", delta)
+	}
+}
+
+// TestPidReuseRestartsTheEpisode keeps a recycled pid from inheriting the
+// previous process's counters. A negative delta is the only signal available
+// that the pid now belongs to someone else.
+func TestPidReuseRestartsTheEpisode(t *testing.T) {
+	now := time.Now()
+	state := &episode{firstSeen: now.Add(-time.Hour)}
+	state.observeCPU(90*time.Minute, now)
+	state.observeUnnamedPeers(1)
+	state.observeUnnamedPeers(1)
+
+	delta, scoreable := state.observeCPU(2*time.Second, now.Add(time.Minute))
+	if delta != 0 {
+		t.Fatalf("delta = %s, want 0: a reused pid is a new episode, not an idle one", delta)
+	}
+	if scoreable {
+		t.Fatal("the reused pid scored its first sample")
+	}
+	if state.unnamedPeerPolls != 0 {
+		t.Fatalf("unnamedPeerPolls = %d, want 0: the new process inherited the old one's egress history",
+			state.unnamedPeerPolls)
+	}
+	if !state.firstSeen.Equal(now.Add(time.Minute)) {
+		t.Fatal("firstSeen still points at the previous process")
+	}
+}
+
+// TestRepeatedUnnamedEgressEscalates is the case the escalated weight was
+// written for: one provider address whose attribution keeps missing, poll
+// after poll. Counting distinct peers instead of polls pinned this at one
+// forever, so the finding it was meant to produce never appeared.
+func TestRepeatedUnnamedEgressEscalates(t *testing.T) {
+	state := &episode{}
+	for poll := 1; poll <= scoring.UnattributedEgressRepeatThreshold; poll++ {
+		// The same single unnamed peer every poll.
+		state.observeUnnamedPeers(1)
+	}
+	if state.unnamedPeerPolls != scoring.UnattributedEgressRepeatThreshold {
+		t.Fatalf("unnamedPeerPolls = %d after %d polls of the same peer, want %d",
+			state.unnamedPeerPolls, scoring.UnattributedEgressRepeatThreshold,
+			scoring.UnattributedEgressRepeatThreshold)
+	}
+
+	signal, ok := unattributedEgressSignal(state.unnamedPeerPolls)
+	if !ok {
+		t.Fatal("repeated unnamed egress produced no signal")
+	}
+	if signal.Weight != scoring.WeightUnattributedEgressEscalated {
+		t.Fatalf("weight = %d, want the escalated %d -- repetition is the corroboration",
+			signal.Weight, scoring.WeightUnattributedEgressEscalated)
+	}
+
+	// A poll with nothing unnamed must not advance the count.
+	quiet := &episode{}
+	quiet.observeUnnamedPeers(0)
+	if quiet.unnamedPeerPolls != 0 {
+		t.Fatal("a poll with no unnamed peers advanced the repeat count")
+	}
+}

@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/platform"
@@ -139,5 +140,111 @@ func TestRenderCarriesCoverageAndCorrelationAlongsideFindings(t *testing.T) {
 	correlation := rendered.Findings[0].Correlation
 	if correlation.Verdict != string(correlate.VerdictUnobserved) || correlation.Reason == "" {
 		t.Fatalf("correlation = %+v; an unobserved inventory must still say so", correlation)
+	}
+}
+
+// TestDetachAIRuntimeRemovesTheCapabilityNotJustTheLabel pins the disable
+// path. On a hot reload from enabled to disabled the poll loop stops, but the
+// service pointer used to stay reachable: GET kept reporting the planes
+// enabled and POST /runtime/scan kept polling them, reading argv and sockets
+// on a host whose operator had just switched that off. Turning a collector
+// off has to remove the capability, not only the label.
+func TestDetachAIRuntimeRemovesTheCapabilityNotJustTheLabel(t *testing.T) {
+	service, err := sensor.New(sensor.Options{
+		Config:   config.AIRuntimeConfig{Enabled: true},
+		Platform: stubRuntimePlatform{},
+		Resolver: sensor.StaticResolver{},
+	})
+	if err != nil {
+		t.Fatalf("sensor.New(): %v", err)
+	}
+
+	api := &APIServer{}
+	sidecar := &Sidecar{apiServer: api}
+	sidecar.aiRuntimeMu.Lock()
+	sidecar.aiRuntime = service
+	sidecar.aiRuntimeMu.Unlock()
+	api.SetAIRuntimeService(service)
+
+	if leased, release := api.leaseAIRuntime(); leased == nil {
+		release()
+		t.Fatal("precondition: the API has no runtime service to detach")
+	} else {
+		release()
+	}
+
+	sidecar.detachAIRuntime()
+
+	leased, release := api.leaseAIRuntime()
+	release()
+	if leased != nil {
+		t.Error("the API can still reach the runtime service after disable: " +
+			"POST /runtime/scan would keep reading argv and sockets")
+	}
+	sidecar.aiRuntimeMu.RLock()
+	held := sidecar.aiRuntime
+	sidecar.aiRuntimeMu.RUnlock()
+	if held != nil {
+		t.Error("the sidecar still holds the disabled runtime service")
+	}
+
+	// And the endpoint now reports the disabled state rather than erroring.
+	recorder := httptest.NewRecorder()
+	api.handleAIRuntimeScan(recorder, httptest.NewRequest(http.MethodPost, "/api/v1/ai-usage/runtime/scan", nil))
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Errorf("scan after disable = %d, want %d", recorder.Code, http.StatusServiceUnavailable)
+	}
+}
+
+type stubRuntimePlatform struct{}
+
+func (stubRuntimePlatform) OSType() string     { return "linux" }
+func (stubRuntimePlatform) Name() string       { return "stub" }
+func (stubRuntimePlatform) WideCoverage() bool { return false }
+func (stubRuntimePlatform) Capabilities() map[platform.Plane]platform.Capability {
+	return map[platform.Plane]platform.Capability{
+		platform.PlaneA: {Plane: platform.PlaneA, Available: true, Mechanism: "stub"},
+		platform.PlaneB: {Plane: platform.PlaneB, Available: true, Mechanism: "stub"},
+		platform.PlaneC: {Plane: platform.PlaneC, Available: false, Reason: "stub"},
+	}
+}
+
+// TestFindingsAreEmittedOncePerPollNotOncePerHealthTick pins that the health
+// cadence does not multiply findings. The ticker runs far faster than the
+// poll interval on purpose; emitting the snapshot on every tick re-sent the
+// same unchanged findings with a fresh occurrence id each time, and the
+// packaged dashboard counts those records with count_over_time.
+func TestFindingsAreEmittedOncePerPollNotOncePerHealthTick(t *testing.T) {
+	t.Parallel()
+
+	poll := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	var lastEmitted time.Time
+
+	// Before any poll completes there is nothing to emit, and the zero scan
+	// time must not read as "older than last time" either.
+	if shouldEmitAIRuntimeSnapshot(time.Time{}, lastEmitted) {
+		t.Fatal("emitted a snapshot before any poll completed")
+	}
+
+	if !shouldEmitAIRuntimeSnapshot(poll, lastEmitted) {
+		t.Fatal("the first completed poll was not emitted")
+	}
+	lastEmitted = poll
+
+	// Many health ticks pass with no new poll behind them.
+	for tick := range 12 {
+		if shouldEmitAIRuntimeSnapshot(poll, lastEmitted) {
+			t.Fatalf("health tick %d re-emitted an unchanged snapshot", tick+1)
+		}
+	}
+
+	// The next poll completes and is emitted exactly once.
+	next := poll.Add(time.Hour)
+	if !shouldEmitAIRuntimeSnapshot(next, lastEmitted) {
+		t.Fatal("a newly completed poll was not emitted")
+	}
+	lastEmitted = next
+	if shouldEmitAIRuntimeSnapshot(next, lastEmitted) {
+		t.Fatal("the same poll was emitted twice")
 	}
 }

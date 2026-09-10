@@ -67,10 +67,29 @@ func (d discoveryCorrelationSource) CorrelationSnapshot() correlate.Snapshot {
 	}
 }
 
+// detachAIRuntime drops the runtime service from both the sidecar and the API
+// server, so nothing can reach a stopped set of planes.
+//
+// Turning the feature off has to remove the capability, not just the label.
+// A stale pointer here means POST /runtime/scan still reads argv and sockets
+// on a host whose operator disabled exactly that.
+func (s *Sidecar) detachAIRuntime() {
+	s.aiRuntimeMu.Lock()
+	s.aiRuntime = nil
+	s.aiRuntimeMu.Unlock()
+	s.apiSnapshot().SetAIRuntimeService(nil)
+}
+
 // runAIRuntime starts the AI Discovery runtime planes when enabled.
 func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 	runtimeConfig := s.currentConfig().AIDiscovery.Runtime
 	if !runtimeConfig.Enabled {
+		// Detach before parking. On a hot reload from enabled to disabled the
+		// old poll loop stops, but the service pointer would otherwise stay
+		// reachable: GET would keep reporting the planes enabled and POST
+		// /runtime/scan would keep polling it -- reading argv and sockets
+		// after the operator switched the feature off.
+		s.detachAIRuntime()
 		s.health.SetAIRuntime(StateDisabled, "", nil)
 		<-ctx.Done()
 		return ctx.Err()
@@ -118,6 +137,8 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 
 	ticker := time.NewTicker(aiRuntimeHealthInterval)
 	defer ticker.Stop()
+	// The scan time of the last snapshot whose findings were emitted.
+	var lastEmitted time.Time
 	for {
 		select {
 		case err := <-errCh:
@@ -132,7 +153,18 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			return nil
 		case <-ticker.C:
 			snapshot := service.Snapshot()
+			// Health refreshes on every tick: a subsystem that stops saying
+			// anything must not be mistaken for one with nothing to say.
 			s.publishAIRuntimeHealth(snapshot)
+			// Findings do not. This ticker is deliberately faster than the
+			// poll interval, so emitting the snapshot every tick would
+			// re-send the same unchanged findings -- 360 times per poll at a
+			// one-hour interval -- and the dashboard counts records with
+			// count_over_time. Emit once per completed poll instead.
+			if !shouldEmitAIRuntimeSnapshot(snapshot.ScannedAt, lastEmitted) {
+				continue
+			}
+			lastEmitted = snapshot.ScannedAt
 			// Emission is best-effort and never blocks the planes. A
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
@@ -149,6 +181,24 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			return ctx.Err()
 		}
 	}
+}
+
+// shouldEmitAIRuntimeSnapshot reports whether this snapshot's findings have
+// already been sent.
+//
+// The health ticker is deliberately faster than the poll interval so a long
+// interval does not make the subsystem look stalled. Emitting findings on that
+// cadence would re-send an unchanged snapshot every tick -- 360 times per poll
+// at a one-hour interval -- and each emission takes a fresh occurrence id, so
+// the packaged dashboard's count_over_time multiplies one finding into
+// hundreds. Findings follow the poll; only health follows the ticker.
+func shouldEmitAIRuntimeSnapshot(scannedAt, lastEmitted time.Time) bool {
+	if scannedAt.IsZero() {
+		// No poll has completed yet. There is nothing to report, and a zero
+		// time must not be mistaken for a very old one.
+		return false
+	}
+	return scannedAt.After(lastEmitted)
 }
 
 // publishAIRuntimeHealth records the current coverage.

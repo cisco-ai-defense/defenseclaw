@@ -2240,12 +2240,48 @@ def _apply_runtime_settings(
             raise SystemExit(f"failed to save config: {exc}") from exc
         ux.ok("configuration saved", indent="  ")
 
-    if restart and changes:
+    if not changes:
+        return
+
+    if not restart:
         ux.subhead(
-            "Restart the gateway to apply: 'defenseclaw setup restart' or "
-            "restart the DefenseClaw service.",
+            "--no-restart specified: the setting is saved but the running gateway keeps "
+            "its current planes until you restart it "
+            "('defenseclaw setup restart').",
             indent="  ",
         )
+        return
+
+    # Same restart path the sibling `agent discovery enable/disable` commands
+    # use. Printing instructions instead would make --restart, which is on by
+    # default, silently mean --no-restart: enabling would not start collecting
+    # and, worse, disabling would leave the planes reading argv and sockets.
+    from defenseclaw.commands import cmd_setup
+
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
+    try:
+        cmd_setup._restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=connector,
+            connectors=connectors,
+        )
+    except Exception as exc:  # noqa: BLE001 - the config is already saved
+        ux.err(f"Gateway restart failed: {exc}", indent="  ")
+        ux.subhead(
+            "The configuration is saved. Restart the gateway to apply it: "
+            "'defenseclaw setup restart'.",
+            indent="    ",
+        )
+        raise SystemExit(1) from exc
+    if runtime.enabled:
+        ux.ok("Sidecar restarted; the runtime planes are live.", indent="  ")
+    else:
+        ux.ok("Sidecar restarted; the runtime planes are stopped.", indent="  ")
 
 
 def _normalize_scan_roots(raw: str) -> list[str]:

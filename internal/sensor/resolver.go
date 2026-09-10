@@ -84,7 +84,7 @@ func NewReverseResolver(providers *catalog.Catalog) *ReverseResolver {
 }
 
 // Resolve names a connection's peer.
-func (r *ReverseResolver) Resolve(connection netprobe.Connection) (string, float64, string) {
+func (r *ReverseResolver) Resolve(ctx context.Context, connection netprobe.Connection) (string, float64, string) {
 	if connection.RemoteIP == nil || !connection.Public() {
 		return "", 0, ""
 	}
@@ -99,7 +99,7 @@ func (r *ReverseResolver) Resolve(connection netprobe.Connection) (string, float
 	}
 	r.mu.Unlock()
 
-	hostname, confidence, source := r.lookup(address)
+	hostname, confidence, source := r.lookup(ctx, address)
 
 	r.mu.Lock()
 	if len(r.cache) >= maxReverseCacheEntries {
@@ -120,8 +120,12 @@ func (r *ReverseResolver) Resolve(connection netprobe.Connection) (string, float
 	return hostname, confidence, source
 }
 
-func (r *ReverseResolver) lookup(address string) (string, float64, string) {
-	ctx, cancel := context.WithTimeout(context.Background(), reverseTimeout)
+func (r *ReverseResolver) lookup(ctx context.Context, address string) (string, float64, string) {
+	// Per-address timeout inside the caller's budget, not instead of it: the
+	// poll owns the total, this owns one address's share of it. Deriving from
+	// ctx also means a cancelled poll stops resolving instead of running on
+	// through every remaining peer.
+	ctx, cancel := context.WithTimeout(ctx, reverseTimeout)
 	defer cancel()
 	names, err := r.resolver.LookupAddr(ctx, address)
 	if err != nil || len(names) == 0 {
@@ -159,7 +163,7 @@ type StaticResolver struct {
 }
 
 // Resolve implements Resolver.
-func (s StaticResolver) Resolve(connection netprobe.Connection) (string, float64, string) {
+func (s StaticResolver) Resolve(_ context.Context, connection netprobe.Connection) (string, float64, string) {
 	if connection.RemoteIP == nil {
 		return "", 0, ""
 	}
@@ -197,7 +201,7 @@ func NewCapturingResolver(cache *dnscapture.Cache, fallback Resolver) *Capturing
 }
 
 // Resolve implements Resolver.
-func (r *CapturingResolver) Resolve(connection netprobe.Connection) (string, float64, string) {
+func (r *CapturingResolver) Resolve(ctx context.Context, connection netprobe.Connection) (string, float64, string) {
 	if connection.RemoteIP == nil || !connection.Public() {
 		return "", 0, ""
 	}
@@ -209,5 +213,5 @@ func (r *CapturingResolver) Resolve(connection netprobe.Connection) (string, flo
 	if r.fallback == nil {
 		return "", 0, ""
 	}
-	return r.fallback.Resolve(connection)
+	return r.fallback.Resolve(ctx, connection)
 }
