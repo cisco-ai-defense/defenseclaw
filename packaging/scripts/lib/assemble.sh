@@ -187,8 +187,12 @@ fi
 
 # ---------------------------------------------------------------------------
 # Stage (c): Cisco-signature assertion for every payload file, unless
-# --allow-unsigned. The six expected filenames are pinned; refusing
-# unknown names catches a payload dir with a stray file.
+# --allow-unsigned. The seven expected filenames are pinned; refusing
+# unknown names catches a payload dir with a stray file. This list must
+# match EXPECTED_PAYLOAD_FILENAMES in
+# .github/workflows/windows-deterministic-build.yml and the stubs written
+# by scripts/generate-repro-fixture.sh -- three places, all of which the
+# gate checks, so adding a binary means editing all three.
 # ---------------------------------------------------------------------------
 _stage "stage 2/6  verify-signatures"
 EXPECTED_PAYLOAD=(
@@ -196,6 +200,7 @@ EXPECTED_PAYLOAD=(
     defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
+    defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
 )

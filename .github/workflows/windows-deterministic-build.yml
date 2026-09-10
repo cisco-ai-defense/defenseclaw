@@ -274,8 +274,8 @@ jobs:
           mkdir -p "$workdir"
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
-          # The fixture ships 6 tiny placeholder files under payload/.
-          # assemble.sh checks for exactly these six names.
+          # The fixture ships 7 tiny placeholder files under payload/.
+          # assemble.sh checks for exactly these seven names.
           ls "$workdir/payload"
           # go build -mod=vendor (from repro-flags.sh) requires a vendor/
           # tree. The outer Setup EXE has no external deps (stdlib only
