@@ -55,7 +55,6 @@ from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
 from defenseclaw.tui.panels.activity import ActivityPanelModel
 from defenseclaw.tui.panels.ai_discovery import AIDiscoveryPanelModel, AIUsageSnapshot
 from defenseclaw.tui.panels.alerts import AlertPanelAction, AlertsPanelModel
-from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.audit import AuditPanelModel, _parse_kv_details
 from defenseclaw.tui.panels.first_run import FirstRunPanelModel
 from defenseclaw.tui.panels.inventory import FAST_SCAN_CATEGORIES, InventoryPanelModel
@@ -80,6 +79,7 @@ from defenseclaw.tui.panels.overview import (
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
+from defenseclaw.tui.panels.runtime import RuntimePanelAction, RuntimePanelModel
 from defenseclaw.tui.panels.setup import (
     WIZARD_DESCRIPTIONS,
     WIZARD_HOW_TO,
