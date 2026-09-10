@@ -3416,7 +3416,8 @@ def validate_windows_copilot_hook_registration(
             "[Console]::OutputEncoding = $utf8NoBom",
             _COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT,
             "$process.StandardInput.AutoFlush = $true",
-            "[System.Threading.Tasks.TaskCreationOptions]::LongRunning",
+            "$deadline.Restart()",
+            "$process.StandardInput.Write($payload)",
             "$process.WaitForExit($remainingMS)",
             "hook --connector copilot --event ",
             "[System.Environment]::Exit(0)",
@@ -3426,6 +3427,20 @@ def validate_windows_copilot_hook_registration(
                     "stale",
                     f"registered Copilot adapter is missing byte-stream marker {marker!r}",
                 )
+
+        # Marker presence alone accepted a broken adapter: setting the console
+        # input encoding *after* ReadToEnd() has no effect on the bytes already
+        # decoded, so Copilot's UTF-8 JSON would be mangled while Doctor still
+        # reported the adapter healthy. Require the documented order.
+        encoding_at = adapter.find("[Console]::InputEncoding = $utf8NoBom")
+        read_at = adapter.find("[Console]::In.ReadToEnd()")
+        if encoding_at < 0 or read_at < 0 or encoding_at > read_at:
+            raise _InspectionError(
+                "stale",
+                "registered Copilot adapter sets the console input encoding after "
+                "reading stdin; UTF-8 payloads would be decoded with the ambient "
+                "code page",
+            )
         timeout_matches = list(_COPILOT_ADAPTER_TIMEOUT.finditer(adapter))
         if len(timeout_matches) != 1:
             raise _InspectionError(

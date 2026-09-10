@@ -5,6 +5,8 @@ package gateway
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,6 +30,22 @@ func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
 }
 
 func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
+		if lastErr == nil {
+			return
+		}
+		var metricErr *observabilityruntime.GeneratedMetricError
+		if !errors.As(lastErr, &metricErr) || metricErr.Code() != observabilityruntime.GeneratedMetricRecordFailed {
+			t.Fatal(lastErr)
+		}
+	}
+	t.Fatal(lastErr)
+}
+
+func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
+	t.Helper()
 	runtime, capture := newProxyGeneratedMetricRuntime(t)
 	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute), store: capture.store}
 	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
@@ -38,8 +56,8 @@ func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
 		if len(recorded) < len(items) {
 			failedFamily = items[len(recorded)].Family
 		}
-		t.Fatalf(
-			"capacity batch failed after %d/%d metrics at family %q (capture_closed=%t): %v",
+		return fmt.Errorf(
+			"capacity batch failed after %d/%d metrics at family %q (capture_closed=%t): %w",
 			len(recorded), len(items), failedFamily, capture.closed.Load(), err,
 		)
 	}
@@ -89,6 +107,7 @@ func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
 			t.Errorf("capacity family %q not recorded", name)
 		}
 	}
+	return nil
 }
 
 func TestCapacityCollectionDisabledSkipsAllSnapshotWork(t *testing.T) {

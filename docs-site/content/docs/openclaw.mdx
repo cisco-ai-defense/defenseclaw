@@ -120,3 +120,15 @@ Pick OpenClaw when:
 - You need fail-closed behaviour on transport failures.
 
 If you're not running OpenClaw, the [Claude Code](/docs/connectors/claudecode) connector is the closest hook-only equivalent and supports native ask on PreToolUse.
+
+## OpenClaw version compatibility
+
+OpenClaw 2026.6.8 and later can emit provider traffic through undici or
+embedded runtimes that skip a fetch-only patch. The DefenseClaw plugin
+intercepts `globalThis.fetch`, Node `http`/`https.request`, and the undici
+global dispatcher, then runs a sentinel self-test that never leaves the
+host. `defenseclaw doctor` reports **OpenClaw interception** from that
+self-test. A healthy `:4000` liveliness probe is not enough; if agent
+turns succeed while doctor says traffic is not intercepted, restart
+OpenClaw so the plugin reloads and rerun doctor. Confirm a real
+`INCOMING REQUEST` delta in `gateway.log` only when that log can grow.

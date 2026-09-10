@@ -2420,16 +2420,45 @@ func recordCrossLayerDisagreement(regex, judge *ScanVerdict) {
 // Message extraction helpers
 // ---------------------------------------------------------------------------
 
-// lastUserText extracts text from only the most recent user message.
-// Scanning the full history causes false positives when a previously flagged
-// message stays in the conversation context.
+// lastUserText extracts text from the most recent non-whitespace user
+// message. A trailing blank user turn must not hide an earlier real
+// user prompt from inspection. Scanning the full history still causes
+// false positives when a previously flagged message stays in context.
 func lastUserText(messages []ChatMessage) string {
 	for i := len(messages) - 1; i >= 0; i-- {
-		if messages[i].Role == "user" {
+		if messages[i].Role == "user" && strings.TrimSpace(messages[i].Content) != "" {
 			return messages[i].Content
 		}
 	}
 	return ""
+}
+
+// promptSideInstructionText joins non-whitespace system and developer
+// turns. Used only when lastUserText is empty so a structured
+// system-only or developer-only request still reaches pre-call
+// inspection. Assistant and tool turns are excluded so completion-side
+// history does not become a prompt scan.
+func promptSideInstructionText(messages []ChatMessage) string {
+	var parts []string
+	for _, msg := range messages {
+		switch msg.Role {
+		case "system", "developer":
+			if strings.TrimSpace(msg.Content) == "" {
+				continue
+			}
+			parts = append(parts, msg.Content)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// promptInspectText is the pre-call inspection source: the latest user
+// turn when present, otherwise prompt-side system/developer text.
+func promptInspectText(messages []ChatMessage) string {
+	if text := lastUserText(messages); strings.TrimSpace(text) != "" {
+		return text
+	}
+	return promptSideInstructionText(messages)
 }
 
 func promptInspectionText(userText string) string {

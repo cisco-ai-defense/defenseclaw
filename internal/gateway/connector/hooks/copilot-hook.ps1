@@ -28,6 +28,14 @@ try {
     if (-not (Test-Path -LiteralPath $hook -PathType Leaf)) {
         throw "DefenseClaw hook launcher is missing: $hook"
     }
+    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+    # Windows PowerShell's .NET Framework Process API has no
+    # ProcessStartInfo.StandardInputEncoding property. Process instead builds
+    # its redirected readers/writer from these console encodings. Set them
+    # before ReadToEnd so Copilot's UTF-8 JSON is decoded as UTF-8, not the
+    # console default.
+    [Console]::InputEncoding = $utf8NoBom
+    [Console]::OutputEncoding = $utf8NoBom
     $payload = [Console]::In.ReadToEnd()
     # Windows PowerShell 5.1 materializes the redirected-stream encoding marker
     # as U+FEFF even when the original Copilot JSON bytes had no BOM. JSON must
@@ -36,12 +44,6 @@ try {
     if ($payload.Length -gt 0 -and $payload[0] -eq [char]0xFEFF) {
         $payload = $payload.Substring(1)
     }
-    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
-    # Windows PowerShell's .NET Framework Process API has no
-    # ProcessStartInfo.StandardInputEncoding property. Process instead builds
-    # its redirected readers/writer from these console encodings.
-    [Console]::InputEncoding = $utf8NoBom
-    [Console]::OutputEncoding = $utf8NoBom
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $hook
@@ -58,33 +60,17 @@ try {
         throw 'DefenseClaw hook launcher did not start'
     }
     $started = $true
+    # Child stdin budget starts after the launcher exists. PowerShell 5.1
+    # startup must not steal the hook-input window, or a busy CI host
+    # fail-opens as "timed out while receiving input".
+    $deadline.Restart()
     $stdoutTask = $process.StandardOutput.ReadToEndAsync()
     $stderrTask = $process.StandardError.ReadToEndAsync()
-    # StreamWriter.WriteAsync may depend on a shared worker under Windows
-    # PowerShell 5.1. A busy host can starve that worker while the child waits
-    # for EOF, turning a tiny payload into a false timeout. Bind TextWriter's
-    # native method directly to a dedicated long-running task so no PowerShell
-    # script block crosses threads and exceptions remain observable here.
+    # stdout/stderr are already being drained, so a small synchronous write
+    # cannot deadlock. Waiting on a LongRunning Task previously burned the
+    # remaining budget when the pool was slow to schedule the writer.
     $process.StandardInput.AutoFlush = $true
-    $writeMethod = [System.IO.TextWriter].GetMethod('Write', [Type[]]@([object]))
-    $writeAction = [System.Delegate]::CreateDelegate(
-        [System.Action[object]],
-        $process.StandardInput,
-        $writeMethod
-    )
-    $stdinTask = [System.Threading.Tasks.Task]::Factory.StartNew(
-        [System.Action[object]]$writeAction,
-        [object]$payload,
-        [System.Threading.CancellationToken]::None,
-        [System.Threading.Tasks.TaskCreationOptions]::LongRunning,
-        [System.Threading.Tasks.TaskScheduler]::Default
-    )
-
-    $remainingMS = $timeoutMS - [int]$deadline.ElapsedMilliseconds
-    if ($remainingMS -le 0 -or -not $stdinTask.Wait($remainingMS)) {
-        throw "DefenseClaw hook launcher timed out after ${timeoutMS}ms while receiving input"
-    }
-    [void]$stdinTask.GetAwaiter().GetResult()
+    $process.StandardInput.Write($payload)
     $process.StandardInput.Close()
     $stdinClosed = $true
 

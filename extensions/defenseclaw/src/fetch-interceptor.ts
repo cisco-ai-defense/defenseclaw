@@ -58,6 +58,13 @@ let undici: {
   getGlobalDispatcher: () => unknown;
   setGlobalDispatcher: (d: unknown) => void;
   Dispatcher: new () => unknown;
+  request?: (
+    url: string,
+    opts?: Record<string, unknown>,
+  ) => Promise<{
+    headers?: Record<string, string | string[] | undefined>;
+    body?: { text?: () => Promise<string> };
+  }>;
 } | null = null;
 try {
   undici = _require("undici") as typeof undici;
@@ -653,10 +660,16 @@ function decodeUtf8Safe(buf: ArrayBufferView): string {
  * the cap; subsequent chunks are never read, so a pathological body
  * (GBs) never allocates past `cap` bytes. Returns the raw byte
  * sequence so the caller can decide on encoding.
+ *
+ * `cancelRemainder` defaults to true for standalone streams (sidecar
+ * overlay responses). Request.clone() tees the body; awaiting
+ * cancel() on one tee branch can stay pending until the sibling is
+ * consumed (#732), so Request peeks must pass false.
  */
 async function readStreamBounded(
   stream: ReadableStream<Uint8Array>,
   cap: number,
+  options?: { cancelRemainder?: boolean },
 ): Promise<Uint8Array> {
   const reader = stream.getReader();
   const chunks: Uint8Array[] = [];
@@ -675,12 +688,17 @@ async function readStreamBounded(
       total += value.byteLength;
     }
   } finally {
-    // Cancel the rest of the stream so the underlying transport
-    // does not keep delivering bytes we will never consume.
-    try {
-      await reader.cancel();
-    } catch {
-      /* ignore */
+    if (options?.cancelRemainder === false) {
+      // Fire-and-forget: awaiting tee-branch cancel() can deadlock
+      // against the unconsumed sibling (#732), but skipping cancel
+      // entirely leaves the rest of a multi-GB body queued.
+      void reader.cancel().catch(() => undefined);
+    } else {
+      try {
+        await reader.cancel();
+      } catch {
+        /* ignore */
+      }
     }
     try {
       reader.releaseLock();
@@ -697,11 +715,172 @@ async function readStreamBounded(
   return out;
 }
 
+function hasOwnBody(init?: RequestInit): boolean {
+  // Native fetch(request, { body: null | undefined }) inherits the
+  // Request body. Only a non-null init.body replaces it.
+  return Boolean(
+    init &&
+      Object.prototype.hasOwnProperty.call(init, "body") &&
+      init.body != null,
+  );
+}
+
+/**
+ * Classify a bounded peek. Full JSON wins; if the 64 KiB cap sliced
+ * mid-document, recover the top-level LLM key from the prefix so a
+ * large messages[] body is not treated as non-LLM.
+ */
+function classifyPeekText(text: string): LLMBodyShape {
+  if (!text) return "none";
+  try {
+    return classifyBodyShape(JSON.parse(text));
+  } catch {
+    return classifyTruncatedRootKeys(text);
+  }
+}
+
+/** Recover an LLM shape from a 64 KiB-truncated JSON object prefix. */
+function classifyTruncatedRootKeys(text: string): LLMBodyShape {
+  const keys = new Set(rootObjectKeys(text));
+  if (keys.has("messages")) return "messages";
+  if (keys.has("contents")) return "contents";
+  if (keys.has("inputs")) return "input";
+  if (keys.has("input")) return "input";
+  if (keys.has("prompt")) return "prompt";
+  return "none";
+}
+
+/**
+ * Collect object keys at depth 1 so a nested `"messages"` (or similar)
+ * cannot classify a non-LLM body after the peek cap slices the document.
+ */
+function rootObjectKeys(text: string): string[] {
+  const keys: string[] = [];
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i]!;
+    if (inString) {
+      if (escape) {
+        escape = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escape = true;
+        continue;
+      }
+      if (ch === "\"") {
+        inString = false;
+      }
+      continue;
+    }
+    if (ch === "\"") {
+      if (depth === 1) {
+        const match = /^"((?:\\.|[^"\\])*)"\s*:/.exec(text.slice(i));
+        if (match) {
+          keys.push(match[1]!.replace(/\\(.)/g, "$1"));
+          i += match[0].length - 1;
+          continue;
+        }
+      }
+      inString = true;
+      continue;
+    }
+    if (ch === "{" || ch === "[") {
+      depth++;
+      continue;
+    }
+    if (ch === "}" || ch === "]") {
+      depth = Math.max(0, depth - 1);
+    }
+  }
+  return keys;
+}
+
+function requestDuplex(value: object | undefined): "half" | undefined {
+  if (!value || !("duplex" in value)) return undefined;
+  return (value as { duplex?: unknown }).duplex === "half" ? "half" : undefined;
+}
+
+function peekConcreteBody(body: unknown): LLMBodyShape {
+  if (body == null) return "none";
+  if (typeof body === "string") {
+    return classifyPeekText(body.slice(0, BODY_PEEK_CAP_BYTES));
+  }
+  if (body instanceof Uint8Array) {
+    return classifyPeekText(decodeUtf8Safe(body.subarray(0, BODY_PEEK_CAP_BYTES)));
+  }
+  if (body instanceof ArrayBuffer) {
+    return classifyPeekText(
+      decodeUtf8Safe(new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES)),
+    );
+  }
+  // ReadableStream, FormData, Blob, etc. — consuming them would break
+  // the downstream fetch. Fall back to path-only detection.
+  return "none";
+}
+
+function combineAbortSignals(
+  requestSignal?: AbortSignal | null,
+  initSignal?: AbortSignal | null,
+): AbortSignal | null | undefined {
+  // Native fetch(request, { signal }) uses the init signal only.
+  if (initSignal) return initSignal;
+  return requestSignal;
+}
+
+/**
+ * Fetch `request` + `init` precedence used by shape detection and the
+ * proxy rewrite. Caller `init` wins, matching native Fetch.
+ */
+export function resolveEffectiveFetchInit(
+  input: RequestInfo | URL,
+  init?: RequestInit,
+): {
+  method: string;
+  headers: Headers;
+  body?: BodyInit | null;
+  signal?: AbortSignal | null;
+  redirect?: RequestRedirect;
+  credentials?: RequestCredentials;
+  cache?: RequestCache;
+  integrity?: string;
+  keepalive?: boolean;
+  mode?: RequestMode;
+  referrer?: string;
+  referrerPolicy?: ReferrerPolicy;
+} {
+  const req = input instanceof Request ? input : null;
+  const headers =
+    init?.headers != null
+      ? new Headers(init.headers)
+      : new Headers(req?.headers);
+  return {
+    method: String(init?.method ?? req?.method ?? "GET"),
+    headers,
+    body: hasOwnBody(init) ? init!.body : (req ? req.body : undefined),
+    signal: combineAbortSignals(req?.signal, init?.signal),
+    redirect: init?.redirect ?? req?.redirect,
+    credentials: init?.credentials ?? req?.credentials,
+    cache: init?.cache ?? req?.cache,
+    integrity: init?.integrity ?? req?.integrity,
+    keepalive: init?.keepalive ?? req?.keepalive,
+    mode: init?.mode ?? req?.mode,
+    referrer: init?.referrer ?? req?.referrer,
+    referrerPolicy: init?.referrerPolicy ?? req?.referrerPolicy,
+  };
+}
+
 export async function peekBodyForShape(
   input: RequestInfo | URL,
   init?: RequestInit,
 ): Promise<LLMBodyShape> {
   try {
+    // Fetch spec: a supplied init.body replaces the Request body.
+    if (hasOwnBody(init)) {
+      return peekConcreteBody(init!.body);
+    }
     if (input instanceof Request) {
       // input.clone() keeps the caller's Request body intact for the
       // downstream originalFetch call. Prefer a streaming read
@@ -714,7 +893,11 @@ export async function peekBodyForShape(
         .body;
       let bytes: Uint8Array;
       if (stream && typeof stream.getReader === "function") {
-        bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES);
+        // Do not await tee-branch cancel(): it can deadlock against
+        // the unconsumed original Request body (#732).
+        bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES, {
+          cancelRemainder: false,
+        });
       } else {
         const text = await cloned.text().catch(() => "");
         if (!text) return "none";
@@ -725,47 +908,12 @@ export async function peekBodyForShape(
         const capped = text.length > BODY_PEEK_CAP_BYTES
           ? text.slice(0, BODY_PEEK_CAP_BYTES)
           : text;
-        try {
-          return classifyBodyShape(JSON.parse(capped));
-        } catch {
-          return "none";
-        }
+        return classifyPeekText(capped);
       }
       if (bytes.byteLength === 0) return "none";
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(bytes)));
-      } catch {
-        return "none";
-      }
+      return classifyPeekText(decodeUtf8Safe(bytes));
     }
-    const body = init?.body as unknown;
-    if (body == null) return "none";
-    if (typeof body === "string") {
-      try {
-        return classifyBodyShape(JSON.parse(body.slice(0, BODY_PEEK_CAP_BYTES)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof Uint8Array) {
-      const slice = body.subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(slice)));
-      } catch {
-        return "none";
-      }
-    }
-    if (body instanceof ArrayBuffer) {
-      const view = new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES);
-      try {
-        return classifyBodyShape(JSON.parse(decodeUtf8Safe(view)));
-      } catch {
-        return "none";
-      }
-    }
-    // ReadableStream, FormData, Blob, etc. — consuming them would break
-    // the downstream fetch. Fall back to path-only detection.
-    return "none";
+    return peekConcreteBody(init?.body);
   } catch {
     return "none";
   }
@@ -899,6 +1047,83 @@ export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
   HEADER_DEFENSECLAW_TRACE_ID,
 ] as const;
 
+export interface InterceptorLayers {
+  fetch: boolean;
+  httpRequest: boolean;
+  httpsRequest: boolean;
+  httpGet: boolean;
+  undiciDispatcher: boolean;
+}
+
+export interface InterceptionSelfTest {
+  ok: boolean;
+  destination: string;
+  layers: InterceptorLayers;
+  reason: string;
+}
+
+const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
+const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
+export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
+
+function readUndiciHeader(headers: unknown, name: string): string {
+  if (headers == null) {
+    return "";
+  }
+  const wanted = name.toLowerCase();
+  if (Array.isArray(headers)) {
+    for (let i = 0; i < headers.length - 1; i += 2) {
+      if (String(headers[i]).toLowerCase() === wanted) {
+        return String(headers[i + 1]);
+      }
+    }
+    return "";
+  }
+  if (typeof headers === "object") {
+    for (const [key, value] of Object.entries(headers as Record<string, unknown>)) {
+      if (key.toLowerCase() === wanted) {
+        return Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
+      }
+    }
+  }
+  return "";
+}
+
+function completeUndiciProbe(handler: unknown): boolean {
+  const sink = handler as {
+    onConnect?: (abort: () => void) => void;
+    onHeaders?: (
+      status: number,
+      headers: Buffer[],
+      resume: () => void,
+      statusText?: string,
+    ) => boolean | void;
+    onData?: (chunk: Buffer) => boolean | void;
+    onComplete?: (trailers: Buffer[]) => void;
+    onError?: (err: Error) => void;
+  };
+  try {
+    sink.onConnect?.(() => undefined);
+    sink.onHeaders?.(
+      200,
+      [
+        Buffer.from(INTERCEPTION_PROBE_HEADER.toLowerCase()),
+        Buffer.from("1"),
+        Buffer.from("content-type"),
+        Buffer.from("application/json"),
+      ],
+      () => undefined,
+      "OK",
+    );
+    sink.onData?.(Buffer.from('{"id":"dc-intercept-probe"}'));
+    sink.onComplete?.([]);
+    return true;
+  } catch (err) {
+    sink.onError?.(err instanceof Error ? err : new Error(String(err)));
+    return false;
+  }
+}
+
 export interface CreateFetchInterceptorOptions {
   guardrailPort: number;
   /**
@@ -937,6 +1162,44 @@ export function createFetchInterceptor(
   let originalUndiciDispatcher: UndiciDispatcher | null = null;
   let egressReporter: EgressReporter | null = null;
   let chatgptCodexPassthroughWarned = false;
+  let selfTestTimer: ReturnType<typeof setInterval> | null = null;
+  const loggedInterceptHosts = new Set<string>();
+  let lastUndiciProbeDestination = "";
+
+  function describeLayers(): InterceptorLayers {
+    return {
+      fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
+      httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
+      httpsRequest: originalHttpsRequest !== null && https.request !== originalHttpsRequest,
+      httpGet: originalHttpGet !== null && http.get !== originalHttpGet,
+      undiciDispatcher: Boolean(
+        undici &&
+          originalUndiciDispatcher &&
+          undici.getGlobalDispatcher() !== originalUndiciDispatcher,
+      ),
+    };
+  }
+
+  function logStartupBanner(layers: InterceptorLayers): void {
+    console.log(
+      `[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
+        `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
+        `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`,
+    );
+  }
+
+  function noteInterceptLayer(layer: string, urlStr: string): void {
+    let host = urlStr;
+    try {
+      host = new URL(urlStr).hostname;
+    } catch {
+      // keep the raw string when URL parsing fails
+    }
+    const key = `${layer}:${host}`;
+    if (loggedInterceptHosts.has(key)) return;
+    loggedInterceptHosts.add(key);
+    console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+  }
 
   // Extract { host, path } from a URL string without throwing. Missing
   // pieces are tolerated so the caller's downstream fetch is never
@@ -1027,13 +1290,13 @@ export function createFetchInterceptor(
       let shouldIntercept = knownLLM;
       let shapeBranch: "known" | "shape" | "passthrough" = knownLLM ? "known" : "passthrough";
       let bodyShape: LLMBodyShape = "none";
+      const effective = resolveEffectiveFetchInit(input, init);
 
       // Layer 1: request-shape detection. Only peek the body when the
       // allowlist didn't already match — peeking costs a clone().
       if (!knownLLM) {
-        const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
         bodyShape = await peekBodyForShape(input, init);
-        if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
+        if (isLLMShapedRequest(urlStr, effective.method, bodyShape, guardrailPort)) {
           shouldIntercept = true;
           shapeBranch = "shape";
         }
@@ -1065,11 +1328,17 @@ export function createFetchInterceptor(
 
       // Rewrite: keep path + query, replace scheme://host with proxy.
       const proxied = `${proxyBase}${original.pathname}${original.search}`;
+      noteInterceptLayer("fetch", urlStr);
+      if (new Headers(effective.headers).get(INTERCEPTION_PROBE_HEADER) === "1") {
+        return new Response(JSON.stringify({ id: "dc-intercept-probe" }), {
+          status: 200,
+          headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+        });
+      }
 
-      // Merge all original headers and add proxy-hop headers.
-      const headers = new Headers(
-        input instanceof Request ? input.headers : (init?.headers as HeadersInit | undefined),
-      );
+      // Merge effective headers (Request + init overrides) and add
+      // proxy-hop headers. init wins, matching native Fetch (#742).
+      const headers = new Headers(effective.headers);
       const providerKey = extractProviderKey(headers);
       const proxyHdrs = buildProxyHeaders(
         original.origin,
@@ -1080,11 +1349,52 @@ export function createFetchInterceptor(
         headers.set(k, v);
       }
 
-      // Build new init, preserving all original properties.
-      const newInit: RequestInit =
-        input instanceof Request
-          ? { method: input.method, body: input.body, headers }
-          : { ...(init ?? {}), headers };
+      // Peek used a clone. Consume the original Request tee branch so
+      // the leftover sibling is not left unread.
+      let rewriteBody = effective.body;
+      if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
+        rewriteBody = input.body ?? effective.body;
+      }
+
+      // Preserve Request metadata and caller init extras (duplex, etc.),
+      // then apply the resolved method/body/signal/redirect family.
+      const duplex =
+        requestDuplex(init) ??
+        (input instanceof Request ? requestDuplex(input) : undefined) ??
+        (typeof ReadableStream !== "undefined" &&
+        rewriteBody instanceof ReadableStream
+          ? "half"
+          : undefined);
+      const newInit: RequestInit = {
+        ...(input instanceof Request
+          ? {
+              method: input.method,
+              redirect: input.redirect,
+              credentials: input.credentials,
+              cache: input.cache,
+              integrity: input.integrity,
+              keepalive: input.keepalive,
+              mode: input.mode,
+              referrer: input.referrer,
+              referrerPolicy: input.referrerPolicy,
+              signal: input.signal,
+            }
+          : {}),
+        ...(init ?? {}),
+        method: effective.method,
+        body: rewriteBody,
+        headers,
+        signal: effective.signal ?? undefined,
+        redirect: effective.redirect,
+        credentials: effective.credentials,
+        cache: effective.cache,
+        integrity: effective.integrity,
+        keepalive: effective.keepalive,
+        mode: effective.mode,
+        referrer: effective.referrer,
+        referrerPolicy: effective.referrerPolicy,
+        ...(duplex ? { duplex } : {}),
+      };
 
       if (shapeBranch === "shape") {
         console.log(
@@ -1275,6 +1585,7 @@ export function createFetchInterceptor(
       );
 
       if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
+        noteInterceptLayer("https.request", urlStr);
         let opts: NodeRequestOptions = {};
         let cb = callback;
 
@@ -1520,6 +1831,7 @@ export function createFetchInterceptor(
           );
           opts.headers = { ...existingHeaders, ...proxyHdrs };
 
+          noteInterceptLayer("undici", urlStr);
           egressReporter?.report({
             targetHost: new URL(origin).hostname,
             targetPath: pathStr,
@@ -1529,6 +1841,10 @@ export function createFetchInterceptor(
             decision: "intercept",
             reason: "undici-dispatcher",
           });
+          if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+            lastUndiciProbeDestination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+            return completeUndiciProbe(handler);
+          }
         }
 
         return (parentDispatcher as unknown as { dispatch: UndiciDispatchFn }).dispatch(opts, handler);
@@ -1545,6 +1861,138 @@ export function createFetchInterceptor(
     console.log(
       `[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`,
     );
+    const layers = describeLayers();
+    logStartupBanner(layers);
+    scheduleSelfTest();
+  }
+
+  async function verifyInterception(): Promise<InterceptionSelfTest> {
+    const layers = describeLayers();
+    const expectedDest = `${proxyBase}/v1/chat/completions`;
+    if (!originalFetch) {
+      return {
+        ok: false,
+        destination: "",
+        layers,
+        reason: "interceptor-not-started",
+      };
+    }
+    // The probe posts to INTERCEPTION_SELF_TEST_URL (a real provider host) and
+    // only short-circuits inside our own wrapper. If globalThis.fetch is not
+    // ours -- never installed, or replaced by another module after start() --
+    // the probe would become genuine unguarded egress from the guardrail
+    // itself, repeated on every verify tick. describeLayers() already reports
+    // that condition with no network call, so answer from it instead.
+    if (!layers.fetch) {
+      return {
+        ok: false,
+        destination: "",
+        layers,
+        reason: "interception-self-test-fetch-missing",
+      };
+    }
+
+    let destination = "";
+    const probeInit = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        [INTERCEPTION_PROBE_HEADER]: "1",
+      },
+      body: JSON.stringify({
+        model: "defenseclaw-intercept-probe",
+        messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
+      }),
+    };
+    try {
+      const response = await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, probeInit);
+      // Probe hops short-circuit inside the wrapper after rewrite. A
+      // 200 with the probe header means the rewrite happened and the
+      // original fetch was never used for a provider host.
+      if (response.headers.get(INTERCEPTION_PROBE_HEADER) === "1") {
+        destination = expectedDest;
+      }
+    } catch {
+      // Keep the miss path for a broken wrapper.
+    }
+
+    lastUndiciProbeDestination = "";
+    if (undici && typeof undici.request === "function" && layers.undiciDispatcher) {
+      try {
+        const response = await undici.request(INTERCEPTION_SELF_TEST_URL, probeInit);
+        await response.body?.text?.();
+      } catch {
+        // Rewrite is recorded on the dispatcher even if the sink is stubbed.
+      }
+    }
+
+    const requiredLayers =
+      layers.fetch && layers.httpsRequest && layers.httpRequest && layers.httpGet;
+    const undiciRequired = Boolean(undici);
+    const undiciOk =
+      !undiciRequired ||
+      (layers.undiciDispatcher && lastUndiciProbeDestination === expectedDest);
+    const ok = destination === expectedDest && requiredLayers && undiciOk;
+    let reason = "interception-self-test-miss";
+    if (ok) {
+      reason = "interception-self-test";
+    } else if (destination === expectedDest && requiredLayers && !undiciOk) {
+      reason = "interception-self-test-undici-miss";
+    }
+    return {
+      ok,
+      destination,
+      layers,
+      reason,
+    };
+  }
+
+  async function publishSelfTest(result: InterceptionSelfTest): Promise<void> {
+    if (!originalFetch) return;
+    const token = loadSidecarConfig().token;
+    const headers: Record<string, string> = { "Content-Type": "application/json" };
+    if (token) headers[DC_AUTH_HEADER] = `Bearer ${token}`;
+    try {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), 2_000);
+      await originalFetch(`http://127.0.0.1:${guardrailPort}/v1/events/egress`, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({
+          target_host: "api.openai.com",
+          target_path: "/v1/chat/completions",
+          body_shape: "messages",
+          looks_like_llm: true,
+          branch: "selftest",
+          decision: result.ok ? "intercept" : "allow",
+          reason: result.reason,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+    } catch {
+      // Self-test telemetry is best-effort and must not stall the plugin.
+    }
+  }
+
+  async function runSelfTest(): Promise<InterceptionSelfTest> {
+    const result = await verifyInterception();
+    console.log(
+      `[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
+        `reason=${result.reason}`,
+    );
+    await publishSelfTest(result);
+    return result;
+  }
+
+  function scheduleSelfTest(): void {
+    if (selfTestTimer) return;
+    selfTestTimer = setInterval(() => {
+      void runSelfTest();
+    }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
+    if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
+      (selfTestTimer as { unref?: () => void }).unref?.();
+    }
   }
 
   function stop(): void {
@@ -1577,10 +2025,15 @@ export function createFetchInterceptor(
       egressReporter = null;
     }
     chatgptCodexPassthroughWarned = false;
+    loggedInterceptHosts.clear();
+    if (selfTestTimer) {
+      clearInterval(selfTestTimer);
+      selfTestTimer = null;
+    }
     _shared.installed = false;
     _shared.guardrailPort = null;
     console.log("[defenseclaw] LLM fetch interceptor stopped");
   }
 
-  return { start, stop };
+  return { start, stop, describeLayers, verifyInterception, runSelfTest };
 }
