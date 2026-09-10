@@ -437,7 +437,10 @@ materializes the effective v7 choices that are needed to preserve:
   resource attributes, sampling, and metric policy;
 - Splunk sourcetype overrides and OTLP log instrumentation scope;
 - effective v7 redaction through a generated `v7-compatible` custom profile, or
-  `none` when the v7 global bypass was active;
+  `none` when the v7 global bypass was active. Every class v7 redacted stays
+  redacted; identifiers, which v7 whole-replaced, are preserved because no v8
+  profile redacts the class records join on -- see
+  [redaction](/docs/reference/redaction);
 - root-agent/subagent lifecycle, turns, executions, phases, operations, and the
   local Agent360/dashboard query contract.
 

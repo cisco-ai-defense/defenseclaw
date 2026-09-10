@@ -616,6 +616,45 @@ def test_unredacted_intent_omits_legacy_profile_and_routes_none() -> None:
     assert all(route["redaction_profile"] == "none" for route in console["routes"])
 
 
+def test_v7_compatible_profile_obeys_the_go_custom_profile_rules() -> None:
+    """The emitted profile must be loadable by the Go compiler, not just the schema.
+
+    The JSON schema only constrains the mode vocabulary; the per-class rules
+    live in internal/observability/redaction/profile.go and run at activation.
+    A migration that emits a schema-valid but compiler-invalid profile passes
+    every Python gate and then bricks the upgrade at gateway start, which is
+    exactly what shipped once. Mirror the compiler's rules here so the fast
+    gate is a real gate.
+    """
+    from defenseclaw.observability.v8_migration import V7_COMPATIBLE_FIELD_CLASSES as classes
+
+    assert set(classes) == {
+        "metadata", "identifier", "content", "reason",
+        "evidence", "error", "path", "credential",
+    }
+    # "custom redaction profile must preserve metadata and identifier classes"
+    assert classes["metadata"] == "preserve"
+    assert classes["identifier"] == "preserve"
+    # "custom redaction profile cannot preserve a dynamic field class"
+    dynamic = set(classes) - {"metadata", "identifier"}
+    assert all(classes[name] != "preserve" for name in dynamic)
+    # "custom redaction profile credential mode must be remove or whole"
+    assert classes["credential"] in {"remove", "whole"}
+    # Nothing v7 whole-replaced may be revealed: every dynamic class stays
+    # whole, which is the point of the profile.
+    assert all(classes[name] == "whole" for name in dynamic)
+
+
+def test_v7_compatible_profile_is_emitted_with_every_field_class() -> None:
+    from defenseclaw.observability.v8_migration import V7_COMPATIBLE_FIELD_CLASSES
+
+    result = _convert("config_version: 7\n", {})
+
+    profiles = _document(result)["observability"]["redaction_profiles"]
+    assert profiles["v7-compatible"]["field_classes"] == dict(V7_COMPATIBLE_FIELD_CLASSES)
+    assert profiles["v7-compatible"]["extends"] == "strict"
+
+
 @pytest.mark.parametrize("value", ["enable", "enabled", "garbage", "0", "false", "no", "off"])
 def test_redaction_environment_uses_exact_v7_truthy_vocabulary(value: str) -> None:
     result = _convert("config_version: 7\n", {"DEFENSECLAW_DISABLE_REDACTION": value})

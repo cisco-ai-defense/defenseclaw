@@ -608,13 +608,18 @@ def convert_v7_observability_to_v8(
     if _environment_true(tracked_environment.get("DEFENSECLAW_DISABLE_REDACTION", ""), _REDACTION_TRUE):
         ctx.warning("environment_decision:DEFENSECLAW_DISABLE_REDACTION")
     profile = "none" if redaction_disabled else V7_COMPATIBLE_PROFILE
-    # A redacting v7 source lands on an explicit custom profile that reproduces
-    # the v7 field-class mode vector exactly: metadata preserved, every other
-    # class whole-replaced. The former built-in that did this also swapped in
-    # v7-shaped placeholder strings; those are gone, so the tokens are canonical
-    # v8 whole-field tokens. The protection level is unchanged -- no class that
-    # was replaced is now revealed -- and the operator can see and edit the
-    # profile instead of inheriting an opaque immutable one.
+    # A redacting v7 source lands on an explicit custom profile carrying the v7
+    # field-class mode vector: every dynamic class whole-replaced, credential
+    # included. The former built-in that did this also swapped in v7-shaped
+    # placeholder strings; those are gone, so the tokens are canonical v8
+    # whole-field tokens. The operator can see and edit the profile instead of
+    # inheriting an opaque immutable one.
+    #
+    # One class does change: v7 whole-replaced identifiers and v8 preserves
+    # them, because no v8 profile -- built-in or custom -- redacts the class
+    # records join on. See V7_COMPATIBLE_FIELD_CLASSES. Nothing that v7
+    # redacted as content, reason, evidence, error, path, or credential is
+    # revealed by this migration.
 
     observability, otlp_count, audit_count, local_state = _build_observability(
         document, profile, effective_data_dir, ctx
@@ -1218,10 +1223,17 @@ def _validate_sink(sink: Mapping[str, Any], path: str, ctx: _Context) -> None:
 #: operator can inspect and change it.
 V7_COMPATIBLE_PROFILE: Final = "v7-compatible"
 
-#: The v7 field-class mode vector, reproduced exactly.
+#: The v7 field-class mode vector, as closely as a custom profile may express
+#: it. Every dynamic class is whole-replaced, exactly as v7 did. ``identifier``
+#: is the one departure: v7 whole-replaced it, and the v8 model forbids a
+#: custom profile from touching it at all -- identifiers are how records join
+#: to each other, so redacting them is reserved to built-ins, and after the
+#: legacy-v7 cut no v8 profile does it. Setting it to anything but ``preserve``
+#: makes the profile unloadable, which is the compiler refusing to let an
+#: upgrade quietly sever correlation.
 V7_COMPATIBLE_FIELD_CLASSES: Final = {
     "metadata": "preserve",
-    "identifier": "whole",
+    "identifier": "preserve",
     "content": "whole",
     "reason": "whole",
     "evidence": "whole",

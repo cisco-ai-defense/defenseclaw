@@ -433,3 +433,59 @@ func effectiveProfilePointerByName(t *testing.T, profiles []ObservabilityV8Effec
 	t.Fatalf("effective profile %q is missing", name)
 	return nil
 }
+
+// TestV7CompatibleUpgradeProfileCompiles pins the exact profile the v7->v8
+// upgrade emits, mirroring V7_COMPATIBLE_FIELD_CLASSES in
+// cli/defenseclaw/observability/v8_migration.py.
+//
+// The two live in different languages and only meet during an upgrade, on a
+// user's machine, at gateway start. The JSON schema constrains the mode
+// vocabulary but not the per-class rules, so a profile that every Python gate
+// accepts can still be refused here -- which is what happened: the migration
+// asked for identifier "whole", reproducing what the retired legacy-v7
+// built-in did, and custom profiles may not touch the class records join on.
+// The upgrade then failed after mutating the target. Pin it on this side too.
+func TestV7CompatibleUpgradeProfileCompiles(t *testing.T) {
+	emitted := map[ObservabilityV8FieldClass]ObservabilityV8FieldMode{
+		"metadata": "preserve", "identifier": "preserve",
+		"content": "whole", "reason": "whole",
+		"evidence": "whole", "error": "whole",
+		"path": "whole", "credential": "whole",
+	}
+
+	plan, err := CompileObservabilityV8(&ObservabilityV8Source{
+		RedactionProfiles: map[string]ObservabilityV8RedactionProfileSource{
+			"v7-compatible": {Extends: "strict", FieldClasses: emitted},
+		},
+	})
+	if err != nil {
+		t.Fatalf("the upgrade's v7-compatible profile no longer compiles: %v", err)
+	}
+	catalog, err := plan.RedactionProfileCatalog()
+	if err != nil {
+		t.Fatalf("the upgrade's v7-compatible profile is not loadable: %v", err)
+	}
+	profile, ok := catalog.Resolve("v7-compatible")
+	if !ok {
+		t.Fatal("the upgrade's v7-compatible profile is missing from the catalog")
+	}
+
+	// Every class v7 redacted stays redacted. A future edit that relaxes one
+	// of these silently reveals, on upgrade, data the source config hid.
+	for class, want := range map[observability.FieldClass]observabilityredaction.TransformationMode{
+		observability.FieldClassContent:    observabilityredaction.ModeWhole,
+		observability.FieldClassReason:     observabilityredaction.ModeWhole,
+		observability.FieldClassEvidence:   observabilityredaction.ModeWhole,
+		observability.FieldClassError:      observabilityredaction.ModeWhole,
+		observability.FieldClassPath:       observabilityredaction.ModeWhole,
+		observability.FieldClassCredential: observabilityredaction.ModeWhole,
+	} {
+		got, ok := profile.Mode(class)
+		if !ok {
+			t.Fatalf("%s has no resolved mode", class)
+		}
+		if got != want {
+			t.Errorf("%s = %q, want %q -- the upgrade would reveal what v7 redacted", class, got, want)
+		}
+	}
+}

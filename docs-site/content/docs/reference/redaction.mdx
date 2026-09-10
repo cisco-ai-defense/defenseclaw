@@ -185,10 +185,19 @@ writes emit their result only after verification and include `backup_path`,
 
 There is no v7 compatibility built-in. Upgrading a redacting v7 installation
 writes an ordinary custom profile named `v7-compatible` into
-`observability.redaction_profiles`, reproducing the v7 field-class mode vector
-exactly -- metadata preserved, every other class whole-replaced. Because it is a
-normal custom profile rather than an immutable built-in, you can read it, edit
-it, or point destinations somewhere else.
+`observability.redaction_profiles`, carrying the v7 field-class mode vector:
+content, reason, evidence, error, path, and credential all whole-replaced,
+metadata preserved. Because it is a normal custom profile rather than an
+immutable built-in, you can read it, edit it, or point destinations somewhere
+else.
+
+One class differs from v7, and it is a property of the v8 model rather than of
+the migration: **identifiers are preserved**. v7 whole-replaced them; no v8
+profile redacts them, and a custom profile that tries is rejected at load.
+Identifiers are what joins one record to another, so the model reserves that
+decision rather than letting a profile sever correlation silently. Nothing v7
+redacted as content, reason, evidence, error, path, or credential is revealed
+by upgrading.
 
 ## Resolution order
 
