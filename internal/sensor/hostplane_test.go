@@ -266,3 +266,61 @@ func TestBufferDropsOldestUnderPressure(t *testing.T) {
 		t.Fatalf("oldest surviving event has pid %d; the newest should have been kept", first.PID)
 	}
 }
+
+// TestScriptAgentOnDarwinAttributesItsChildren reproduces, end to end, the
+// exact event sequence a live macOS host produced.
+//
+// A shell-script agent reaches Endpoint Security as its interpreter, so the
+// exec event's Name is "bash" and the agent's identity is only in argv.
+// Its children then have to walk up to it through PPID. Both halves failed
+// at once on a real host: translate read the parent from the exec'ing
+// process's own pid, and AgentIdentity looked no further than the
+// executable name. The plane ran, saw the tactics, and gated every one of
+// them -- a busy machine reported as quiet.
+//
+// The pids are from that capture.
+func TestScriptAgentOnDarwinAttributesItsChildren(t *testing.T) {
+	t.Parallel()
+	const (
+		shellPID = 77906
+		agentPID = 77949
+		curlPID  = 77972
+	)
+	source := newFake(fullCoverage(),
+		plane.Event{
+			Kind: plane.KindExec, PID: agentPID, PPID: shellPID,
+			ResponsiblePID: shellPID,
+			// The interpreter, exactly as ES reports it.
+			Name:    "bash",
+			Cmdline: "/bin/bash /tmp/sim/claude",
+			At:      time.Now(),
+		},
+		plane.Event{
+			Kind: plane.KindExec, PID: curlPID, PPID: agentPID,
+			ResponsiblePID: agentPID,
+			Name:           "curl",
+			Cmdline:        "curl -s --max-time 3 https://transfer.sh/",
+			At:             time.Now(),
+		},
+	)
+	host := newHost(source)
+	drainInto(t, host, source, 1)
+
+	classified, gated, _, _ := host.stats()
+	if classified == 0 {
+		t.Fatalf("classified=%d gated=%d: the agent's child was not attributed to it",
+			classified, gated)
+	}
+
+	findings := host.harvest(time.Now(), 1)
+	if len(findings) != 1 {
+		t.Fatalf("harvest returned %d findings, want 1", len(findings))
+	}
+	if findings[0].AgentName != "claude" {
+		t.Fatalf("finding attributed to %q, want claude", findings[0].AgentName)
+	}
+	if findings[0].RootPID != agentPID {
+		t.Fatalf("finding rooted at pid %d, want the agent %d",
+			findings[0].RootPID, agentPID)
+	}
+}

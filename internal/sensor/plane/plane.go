@@ -150,12 +150,36 @@ type Buffer struct {
 // NewBuffer returns an empty buffer.
 func NewBuffer() *Buffer { return &Buffer{events: make(chan Event, eventBuffer)} }
 
-// Push enqueues an event, evicting the oldest when full.
+// Push enqueues an event. When the buffer is full, what gets dropped
+// depends on what the event is for.
+//
+// Exec and exit events are not interchangeable with file events. They build
+// the process tree, and the process tree is the lineage gate -- the control
+// that decides whether any other event is attributable to an agent at all.
+// Lose a file read and one signal is missing; lose the exec above it and
+// every signal from that subtree becomes unattributable, so the plane gates
+// them all and reports a busy machine as quiet.
+//
+// That is not a theoretical ordering. Measured on macOS with an AI agent
+// running: 18,546 file reads against 41 execs in fifteen seconds, nearly
+// all of them the agent reading its own config directory. Uniform
+// drop-oldest evicted the execs first, and the host plane classified
+// nothing while Endpoint Security was delivering perfectly.
+//
+// So a lineage event may evict to make room, and a file event may not. The
+// bias costs nothing when the buffer is keeping up and preserves
+// attribution when it is not.
 func (b *Buffer) Push(event Event) {
 	select {
 	case b.events <- event:
 		return
 	default:
+	}
+	if !event.Kind.lineage() {
+		// A file event that arrives at a full buffer is simply late. It does
+		// not get to displace the tree.
+		b.dropped.Add(1)
+		return
 	}
 	select {
 	case <-b.events:
@@ -168,6 +192,9 @@ func (b *Buffer) Push(event Event) {
 		b.dropped.Add(1)
 	}
 }
+
+// lineage reports whether an event kind builds the process tree.
+func (k Kind) lineage() bool { return k == KindExec || k == KindExit }
 
 // Events is the delivery channel.
 func (b *Buffer) Events() <-chan Event { return b.events }

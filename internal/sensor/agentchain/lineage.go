@@ -250,14 +250,41 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 			Via: record.via, State: StateAttributed,
 		}, true
 	}
-	// Prefer the responsible pid when the platform supplies one that differs
-	// from the parent. On macOS a shell spawned by an agent is reparented, and
-	// the responsible pid is what survives that.
+	// The parent chain is authoritative; the responsible pid is a fallback.
+	//
+	// Both are needed and the order matters. On macOS a shell an agent
+	// spawned can be reparented away, and then only the responsible pid
+	// still points back at the agent -- so it cannot be ignored. But the
+	// responsible pid is a TCC concept meaning "the process answerable for
+	// this one's permissions", which on a normal host is the session leader
+	// for everything in the session. Measured live: an agent at 77949 and
+	// both of its children reported responsible=75745, the login session.
+	// Preferring it walked straight past the agent to the session leader,
+	// found no agent there, and gated every tactic the agent had performed.
+	//
+	// So: walk parents first, and only fall back to the responsible chain
+	// when that finds nothing.
+	if found, ok := t.walkAncestryLocked(record, false); ok {
+		return found, true
+	}
+	return t.walkAncestryLocked(record, true)
+}
+
+// walkAncestryLocked climbs from record looking for an agent.
+//
+// preferResponsible selects which edge to follow when a process has both a
+// parent and a distinct responsible process.
+func (t *Tracker) walkAncestryLocked(
+	record *processRecord, preferResponsible bool,
+) (Attribution, bool) {
 	for depth, current := 1, record; depth <= maxAncestryWalk; depth++ {
 		next := current.ppid
-		if current.responsiblePID > 0 && current.responsiblePID != current.pid {
+		viaResponsible := false
+		if preferResponsible &&
+			current.responsiblePID > 0 && current.responsiblePID != current.pid {
 			if _, ok := t.records[current.responsiblePID]; ok {
 				next = current.responsiblePID
+				viaResponsible = next != current.ppid
 			}
 		}
 		if next <= 0 || next == InitPID || next == current.pid {
@@ -268,8 +295,12 @@ func (t *Tracker) attributeLocked(pid int) (Attribution, bool) {
 			return Attribution{}, false
 		}
 		if parent.agentName != "" {
+			// Which edge was actually taken to reach this parent, recorded
+			// from the step that took it. Reading it off the parent's own
+			// responsiblePID asked the wrong record and always said
+			// "ancestry", hiding the reparenting case this exists to cover.
 			via := "ancestry"
-			if parent.responsiblePID == next && next != parent.ppid {
+			if viaResponsible {
 				via = "responsible"
 			}
 			return Attribution{

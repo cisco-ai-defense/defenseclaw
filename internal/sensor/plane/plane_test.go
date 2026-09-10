@@ -51,3 +51,67 @@ func TestBufferDropCounterIsSafeUnderConcurrentPush(t *testing.T) {
 		t.Fatalf("Dropped() = %d, want %d: increments were lost to a race", got, want)
 	}
 }
+
+// TestBufferProtectsLineageUnderBackPressure pins the retention bias that
+// keeps attribution working on a busy host.
+//
+// A saturated buffer that drops uniformly loses exec events first, because
+// file events outnumber them by orders of magnitude when an AI agent is
+// reading its own configuration directory. Losing an exec does not cost one
+// signal -- it orphans an entire subtree, so the lineage gate discards
+// every tactic beneath it and the host reads as quiet.
+func TestBufferProtectsLineageUnderBackPressure(t *testing.T) {
+	t.Parallel()
+	buffer := NewBuffer()
+
+	// Fill it completely with file traffic, the way an agent's own config
+	// reads do.
+	for index := 0; index < eventBuffer; index++ {
+		buffer.Push(Event{Kind: KindFileRead, Path: "/home/dev/.claude/settings.json"})
+	}
+
+	// More file traffic must not displace anything.
+	buffer.Push(Event{Kind: KindFileRead, Path: "/home/dev/.claude/again.json"})
+
+	// An exec must get in, because the tree depends on it.
+	buffer.Push(Event{Kind: KindExec, PID: 4242, PPID: 1, Name: "claude"})
+
+	events := buffer.Events()
+	foundExec := false
+	for drained := 0; drained < eventBuffer; drained++ {
+		select {
+		case event := <-events:
+			if event.Kind == KindExec && event.Name == "claude" {
+				foundExec = true
+			}
+		default:
+			drained = eventBuffer
+		}
+	}
+	if !foundExec {
+		t.Fatal("an exec was dropped in favour of file reads: the process tree " +
+			"loses the ancestor and every tactic below it becomes unattributable")
+	}
+	if buffer.Dropped() == 0 {
+		t.Fatal("the buffer overflowed without counting a drop; reduced coverage " +
+			"has to be reported, not absorbed")
+	}
+}
+
+// TestBufferStillReportsEveryDrop keeps the counter honest for both classes.
+func TestBufferStillReportsEveryDrop(t *testing.T) {
+	t.Parallel()
+	buffer := NewBuffer()
+	for index := 0; index < eventBuffer; index++ {
+		buffer.Push(Event{Kind: KindFileRead})
+	}
+	before := buffer.Dropped()
+	buffer.Push(Event{Kind: KindFileRead})
+	if buffer.Dropped() != before+1 {
+		t.Fatalf("a refused file event was not counted: %d -> %d", before, buffer.Dropped())
+	}
+	buffer.Push(Event{Kind: KindExec})
+	if buffer.Dropped() != before+2 {
+		t.Fatalf("an eviction made room without being counted: %d", buffer.Dropped())
+	}
+}

@@ -55,3 +55,83 @@ func TestMCPDetectionRequiresRunningOneNotNamingOne(t *testing.T) {
 		})
 	}
 }
+
+// TestAgentIdentityFromInstallPath covers the two shapes where the
+// executable's own name says nothing.
+//
+// Both were found on a real macOS host. Claude Code's native install names
+// the binary after its version, and a shell-script agent reaches Endpoint
+// Security as /bin/bash with the script in argv -- Linux does not, because
+// the kernel sets comm from the script. Either miss makes every child of
+// the agent fail the lineage gate, which reports a busy machine as quiet.
+func TestAgentIdentityFromInstallPath(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		name    string
+		exeName string
+		cmdline string
+		want    string
+	}{
+		{
+			name:    "version-named binary under the agent's install root",
+			exeName: "/Users/dev/.local/share/claude/versions/2.1.267",
+			cmdline: "/Users/dev/.local/share/claude/versions/2.1.267 --print",
+			want:    "claude",
+		},
+		{
+			name:    "dot-prefixed install directory",
+			exeName: "/Users/dev/.claude/bin/runner",
+			cmdline: "/Users/dev/.claude/bin/runner",
+			want:    "claude",
+		},
+		{
+			name:    "shell script agent reaching us as its interpreter",
+			exeName: "/bin/bash",
+			cmdline: "/bin/bash /usr/local/bin/claude",
+			want:    "claude",
+		},
+		{
+			name:    "windows install path with backslashes",
+			exeName: `C:\Users\dev\AppData\Local\cursor\app\host.exe`,
+			cmdline: `C:\Users\dev\AppData\Local\cursor\app\host.exe`,
+			want:    "cursor",
+		},
+		{
+			name:    "executable name still wins when it matches",
+			exeName: "/opt/anything/claude",
+			cmdline: "/opt/anything/claude",
+			want:    "claude",
+		},
+		// The false positives this must not produce. A path segment is only
+		// an agent when the whole segment matches, so ordinary files that
+		// merely sit near an agent-shaped word stay quiet.
+		{
+			name:    "a source checkout is not an agent",
+			exeName: "/home/dev/src/claude-utils/build/tool",
+			cmdline: "/home/dev/src/claude-utils/build/tool",
+		},
+		{
+			name:    "a file inside a config dir is not the agent itself",
+			exeName: "/usr/bin/grep",
+			cmdline: "/usr/bin/grep -r token /home/dev/.claude/settings.json",
+		},
+		{
+			name:    "an unrelated binary with no agent anywhere",
+			exeName: "/usr/bin/sshd",
+			cmdline: "/usr/bin/sshd -D",
+		},
+		{
+			name:    "bare interpreter with no script",
+			exeName: "/bin/bash",
+			cmdline: "/bin/bash",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			if got := AgentIdentity(test.exeName, test.cmdline); got != test.want {
+				t.Fatalf("AgentIdentity(%q, %q) = %q, want %q",
+					test.exeName, test.cmdline, got, test.want)
+			}
+		})
+	}
+}

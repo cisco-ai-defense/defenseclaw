@@ -24,6 +24,7 @@
 package plane
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
@@ -31,12 +32,20 @@ import (
 // esExecMessage is a representative eslogger exec record, trimmed to the
 // members this source reads. Decoding is tested against the real wire shape
 // rather than a mock, because the shape is what a macOS release can change.
+//
+// process.audit_token.pid and target.audit_token.pid are deliberately the
+// same number, because that is what Endpoint Security actually emits: the
+// process performing an exec is a fork()ed child replacing its own image,
+// so it shares the pid it is becoming. An earlier version of this fixture
+// gave them different pids -- a shape the kernel never produces -- and that
+// invented difference is what let translate() read the parent from the
+// wrong field for as long as it did. The real parent is process.ppid.
 const esExecMessage = `{
   "event_type": 9,
   "time": "2026-09-09T22:15:04.123456789Z",
   "process": {
-    "audit_token": {"pid": 4242, "euid": 501},
-    "ppid": 4200,
+    "audit_token": {"pid": 4300, "euid": 501},
+    "ppid": 4242,
     "responsible_audit_token": {"pid": 4100, "euid": 501},
     "executable": {"path": "/bin/sh"}
   },
@@ -75,7 +84,11 @@ func TestDarwinDecodesExecWithLineageAndArgv(t *testing.T) {
 		t.Errorf("PID = %d, want the exec target 4300", event.PID)
 	}
 	if event.PPID != 4242 {
-		t.Errorf("PPID = %d, want the calling process 4242", event.PPID)
+		t.Errorf("PPID = %d, want the real parent 4242", event.PPID)
+	}
+	if event.PPID == event.PID {
+		t.Fatal("PPID equals PID: the ancestry walk cannot leave this process, " +
+			"so no child of an agent can ever be attributed to it")
 	}
 	// Responsible pid is what survives reparenting on macOS, and is what makes
 	// an agent -> sh -> curl chain attributable after the shell exits.
@@ -270,5 +283,63 @@ func TestTranslateSurvivesAMalformedOrEmptyPayload(t *testing.T) {
 				t.Error("a malformed payload produced an event")
 			}
 		})
+	}
+}
+
+// TestExecCarriesTheRealParentPID pins the field that made Plane C on macOS
+// structurally unable to attribute anything.
+//
+// In an ES exec message the target and message.process share a pid: the
+// process is a fork()ed child replacing its image. Reading the parent from
+// message.process.audit_token therefore yields the child's own pid, PPID
+// equals PID, and the ancestry walk cannot leave the process it starts on.
+// Every child of an agent then fails the lineage gate and the host plane
+// reports a quiet machine.
+//
+// The values are from a real capture on macOS 15: bash at 77949 spawning
+// curl at 77972, whose true parent is 77949.
+func TestExecCarriesTheRealParentPID(t *testing.T) {
+	t.Parallel()
+	const raw = `{
+	  "event_type": 9,
+	  "time": "2026-09-10T17:13:31.000000000Z",
+	  "process": {
+	    "audit_token": {"pid": 77972},
+	    "ppid": 77949,
+	    "executable": {"path": "/bin/bash"}
+	  },
+	  "event": {"exec": {
+	    "target": {
+	      "audit_token": {"pid": 77972},
+	      "responsible_audit_token": {"pid": 0},
+	      "executable": {"path": "/usr/bin/curl"}
+	    },
+	    "args": ["curl", "-s", "https://transfer.sh/"]
+	  }}
+	}`
+
+	var message esMessage
+	if err := json.Unmarshal([]byte(raw), &message); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	source := &darwinSource{buffer: NewBuffer()}
+	event, ok := source.translate(message)
+	if !ok {
+		t.Fatal("a well-formed exec message did not translate")
+	}
+	if event.PID != 77972 {
+		t.Errorf("PID = %d, want 77972", event.PID)
+	}
+	if event.PPID != 77949 {
+		t.Errorf("PPID = %d, want 77949 (the real parent, not the pid itself)", event.PPID)
+	}
+	if event.PID == event.PPID {
+		t.Fatal("PPID equals PID: the ancestry walk cannot leave this process")
+	}
+	if event.ResponsiblePID != 77949 {
+		t.Errorf("ResponsiblePID = %d, want the parent as fallback", event.ResponsiblePID)
+	}
+	if event.Name != "curl" {
+		t.Errorf("Name = %q, want the exec target", event.Name)
 	}
 }

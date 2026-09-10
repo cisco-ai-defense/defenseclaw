@@ -367,7 +367,17 @@ func (s *darwinSource) translate(message esMessage) (Event, bool) {
 		}
 		base.Kind = KindExec
 		base.PID = payload.Exec.Target.AuditToken.PID
-		base.PPID = message.Process.AuditToken.PID
+		// The parent is the exec'ing process's parent, not the exec'ing
+		// process itself.
+		//
+		// In an ES exec message, message.process is the same pid as the
+		// target: a fork()ed child that is now replacing its image. Taking
+		// its pid as the parent therefore set PPID == PID, which makes the
+		// ancestry walk self-referential -- so every child of an agent
+		// failed the lineage gate and Plane C on macOS could not attribute
+		// anything to anything. Observed live: bash at 77949 spawning curl
+		// at 77972 recorded 77972 as its own parent.
+		base.PPID = message.Process.PPID
 		base.ResponsiblePID = payload.Exec.Target.ResponsibleAudi.PID
 		if base.ResponsiblePID == 0 {
 			base.ResponsiblePID = base.PPID

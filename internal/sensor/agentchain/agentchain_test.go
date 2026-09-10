@@ -507,3 +507,70 @@ func TestRecordKeepsTheEarliestSightingWhileAdoptingConfidence(t *testing.T) {
 		t.Error("an earlier low-confidence sighting downgraded the recorded confidence")
 	}
 }
+
+// TestSessionLeaderResponsiblePIDDoesNotHideTheAgent pins the ordering
+// between the two ancestry edges.
+//
+// macOS reports a responsible pid meaning "the process answerable for this
+// one's permissions". On an ordinary host that is the login session leader
+// for everything in the session, so preferring it walks straight past the
+// agent. Measured live: an agent at 77949 and both of its children all
+// reported responsible=75745, and every tactic the agent performed was
+// gated as unattributable.
+//
+// The responsible edge still has to work -- a shell an agent spawned can be
+// reparented, leaving it the only link back -- so this pins both.
+func TestSessionLeaderResponsiblePIDDoesNotHideTheAgent(t *testing.T) {
+	t.Parallel()
+	const (
+		sessionLeader = 75745
+		shell         = 77906
+		agent         = 77949
+		child         = 77972
+	)
+	tracker := NewTracker()
+	tracker.ObserveExec(sessionLeader, 1, 0, "login", "login -pf dev")
+	tracker.ObserveExec(shell, sessionLeader, sessionLeader, "bash", "-bash")
+	tracker.ObserveExec(agent, shell, sessionLeader, "bash", "/bin/bash /usr/local/bin/claude")
+	tracker.ObserveExec(child, agent, sessionLeader, "curl", "curl -s https://transfer.sh/")
+
+	attribution, ok := tracker.Attribute(child)
+	if !ok {
+		t.Fatal("the agent's child was not attributed to it")
+	}
+	if attribution.AgentName != "claude" {
+		t.Fatalf("attributed to %q, want claude", attribution.AgentName)
+	}
+	if attribution.RootPID != agent {
+		t.Fatalf("rooted at %d, want the agent %d (the session leader is not the actor)",
+			attribution.RootPID, agent)
+	}
+}
+
+// TestReparentedShellStillReachesTheAgent keeps the fallback working: when
+// the parent chain has been broken by reparenting, the responsible pid is
+// the only remaining link and must still be followed.
+func TestReparentedShellStillReachesTheAgent(t *testing.T) {
+	t.Parallel()
+	const (
+		launchd = 1
+		agent   = 500
+		orphan  = 900
+	)
+	tracker := NewTracker()
+	tracker.ObserveExec(agent, launchd, 0, "claude", "claude --print")
+	// Reparented to launchd; only the responsible pid still names the agent.
+	tracker.ObserveExec(orphan, launchd, agent, "curl", "curl -s https://transfer.sh/")
+
+	attribution, ok := tracker.Attribute(orphan)
+	if !ok {
+		t.Fatal("a reparented child lost its agent entirely")
+	}
+	if attribution.AgentName != "claude" {
+		t.Fatalf("attributed to %q, want claude", attribution.AgentName)
+	}
+	if attribution.Via != "responsible" {
+		t.Fatalf("Via = %q, want the responsible edge to be recorded as such",
+			attribution.Via)
+	}
+}

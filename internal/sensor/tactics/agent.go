@@ -154,6 +154,24 @@ func AgentIdentity(exeName, cmdline string) string {
 	if IsAgentProcess(name) {
 		return strings.ToLower(name)
 	}
+	// An agent whose executable does not carry the agent's name still lives
+	// inside a directory that does. Claude Code's native macOS install is
+	// exactly this: the binary is
+	// ~/.local/share/claude/versions/2.1.267, so its basename is a version
+	// number and matches nothing, while the install root one level up is
+	// unambiguous. Missing it means every child of that agent fails the
+	// lineage gate and the host plane reports a quiet machine.
+	if agent := agentFromInstallPath(exeName); agent != "" {
+		return agent
+	}
+	if script := interpretedScriptOf(exeName, cmdline); script != "" {
+		if base := BaseName(script); IsAgentProcess(base) {
+			return strings.ToLower(base)
+		}
+		if agent := agentFromInstallPath(script); agent != "" {
+			return agent
+		}
+	}
 	if AgentCmdlineReason(cmdline) != "" {
 		if lowered := strings.ToLower(name); lowered != "" {
 			return lowered
@@ -162,6 +180,85 @@ func AgentIdentity(exeName, cmdline string) string {
 	}
 	return ""
 }
+
+// agentFromInstallPath names the agent that owns an executable's directory.
+//
+// Only whole path segments are considered, and only against the same
+// pattern an executable name is held to. A substring scan over the path
+// would match any file that merely happened to sit under a directory with
+// an agent-shaped name, which is a false positive on a developer machine
+// full of checkouts; a segment equal to "claude" or ".claude" is the
+// install itself.
+//
+// The final segment is skipped because it is the executable, which the
+// caller has already tested.
+func agentFromInstallPath(path string) string {
+	trimmed := strings.TrimSpace(path)
+	if trimmed == "" {
+		return ""
+	}
+	segments := strings.FieldsFunc(trimmed, func(r rune) bool {
+		return r == '/' || r == '\\'
+	})
+	if len(segments) < 2 {
+		return ""
+	}
+	for _, segment := range segments[:len(segments)-1] {
+		candidate := strings.TrimPrefix(segment, ".")
+		if candidate == "" || !IsAgentProcess(candidate) {
+			continue
+		}
+		return strings.ToLower(candidate)
+	}
+	return ""
+}
+
+// interpretedScriptOf returns the script an interpreter was asked to run.
+//
+// A script-based agent reaches Endpoint Security as its interpreter:
+// "/bin/bash /usr/local/bin/claude" execs /bin/bash, so the executable name
+// is the shell and the agent identity is only in the arguments. Linux does
+// not have this problem, because the kernel sets comm from the script.
+//
+// Only recognised interpreters are unwrapped, and only their first
+// non-flag argument. Treating any process's arguments as a source of
+// identity would let one name itself an agent by mentioning one.
+func interpretedScriptOf(exeName, cmdline string) string {
+	if !isInterpreter(BaseName(exeName)) {
+		return ""
+	}
+	fields := strings.Fields(cmdline)
+	if len(fields) < 2 {
+		return ""
+	}
+	for _, field := range fields[1:] {
+		if strings.HasPrefix(field, "-") {
+			continue
+		}
+		// Only a path is a script. "python3 -m crewai" names a module, not
+		// a file, and the established convention here is that the
+		// executable supplies the identity while the command line supplies
+		// the reason -- so a module must not be promoted to an identity.
+		if !strings.ContainsAny(field, `/\`) {
+			return ""
+		}
+		return field
+	}
+	return ""
+}
+
+// interpreters are the shells and runtimes that execute a script named on
+// their command line. The list is deliberately short: an entry here means
+// "trust this process's first argument as an executable identity".
+var interpreters = map[string]bool{
+	"sh": true, "bash": true, "zsh": true, "dash": true, "ksh": true,
+	"python": true, "python3": true, "node": true, "deno": true, "bun": true,
+	"ruby": true, "perl": true, "pwsh": true, "powershell": true,
+	"powershell.exe": true, "pwsh.exe": true, "node.exe": true,
+	"python.exe": true, "python3.exe": true,
+}
+
+func isInterpreter(name string) bool { return interpreters[strings.ToLower(name)] }
 
 // BaseName trims a path down to its executable name. It handles both
 // separators explicitly because a Windows image path reaches this code
