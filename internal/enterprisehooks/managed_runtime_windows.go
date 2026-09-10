@@ -188,6 +188,9 @@ func validateWindowsCursorManagedRuntime(
 	if err != nil {
 		return fmt.Errorf("enterprise hooks: load Cursor managed hook contract: %w", err)
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: Cursor managed gateway binding: %w", err)
+	}
 	if lock.Connector != "cursor" ||
 		len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], hooksPath) ||
@@ -413,6 +416,9 @@ func validateWindowsCodexManagedRuntime(
 			"enterprise hooks: load Codex managed hook contract: %w",
 			err,
 		)
+	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: Codex managed gateway binding: %w", err)
 	}
 	if lock.Connector != "codex" ||
 		len(lock.Locations.HookConfigPaths) != 1 ||

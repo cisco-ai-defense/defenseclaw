@@ -100,6 +100,7 @@ type claudeCodeHookResponse struct {
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
 	SuppressNotification bool   `json:"-"`
+	aiDefenseEnforced    bool
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -216,6 +217,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
 		action = "alert"
 	}
+	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
@@ -249,6 +251,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
+	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
 }
 

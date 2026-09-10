@@ -485,13 +485,8 @@ func TestGuardianServiceRequiredPrivilegesMatchBoundedRepairConsumer(t *testing.
 }
 
 func TestTransactionRollbackValidatesServiceOwnershipBeforeMutation(t *testing.T) {
-	module := string(readWindowsEnterpriseModule(t))
-	start := strings.Index(module, "function Restore-DefenseClawTransaction")
-	end := strings.Index(module, "function Complete-DefenseClawTransaction")
-	if start < 0 || end <= start {
-		t.Fatal("transaction rollback function boundaries were not found")
-	}
-	rollback := module[start:end]
+	module := strings.ReplaceAll(string(readWindowsEnterpriseModule(t)), "\r\n", "\n")
+	rollback := windowsPowerShellFunction(t, module, "Restore-DefenseClawTransaction")
 	gatewayOwnership := strings.Index(rollback, "Assert-DefenseClawOwnedServiceOrAbsent `")
 	guardianOwnership := strings.Index(
 		rollback[gatewayOwnership+1:],
@@ -504,6 +499,120 @@ func TestTransactionRollbackValidatesServiceOwnershipBeforeMutation(t *testing.T
 	guardianOwnership += gatewayOwnership + 1
 	if gatewayOwnership > stop || guardianOwnership > stop {
 		t.Fatal("transaction rollback can stop a service before proving ownership")
+	}
+
+	for _, test := range []struct {
+		name          string
+		source        string
+		firstMutation string
+	}{
+		{
+			name:          "snapshot rollback",
+			source:        rollback,
+			firstMutation: "Set-DefenseClawServiceStartMode -Name $name -StartMode 4",
+		},
+		{
+			name:          "quiescing-intent recovery",
+			source:        windowsPowerShellFunction(t, module, "Recover-DefenseClawQuiescingIntent"),
+			firstMutation: "foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName))",
+		},
+		{
+			name:          "shared recovery starter",
+			source:        windowsPowerShellFunction(t, module, "Start-DefenseClawTransactionServices"),
+			firstMutation: "Set-DefenseClawServiceStartMode -Name $name -StartMode 4",
+		},
+	} {
+		enumeratorName := strings.Index(test.source, "-Name $enumeratorServiceName `")
+		mutation := strings.Index(test.source, test.firstMutation)
+		if enumeratorName < 0 || mutation < 0 || enumeratorName >= mutation {
+			t.Fatalf("%s Enumerator ownership/mutation boundary is missing", test.name)
+		}
+		enumeratorGuard := strings.Index(test.source[enumeratorName:mutation], "-Enumerator")
+		if enumeratorGuard < 0 {
+			t.Fatalf("%s can mutate Enumerator before authenticating its exact SCM contract", test.name)
+		}
+	}
+}
+
+func TestTransactionRecoveryStartsEnumeratorBeforeCompleteReadiness(t *testing.T) {
+	module := strings.ReplaceAll(string(readWindowsEnterpriseModule(t)), "\r\n", "\n")
+	recovery := windowsPowerShellFunction(t, module, "Start-DefenseClawTransactionServices")
+	readiness := windowsPowerShellFunction(t, module, "Wait-DefenseClawEnterpriseReadiness")
+
+	enumeratorStart := strings.Index(
+		recovery,
+		"Start-DefenseClawService -Name $enumeratorServiceName",
+	)
+	enumeratorDemand := strings.Index(
+		recovery,
+		"-Name $enumeratorServiceName `\n                -StartMode 3",
+	)
+	completeReadiness := strings.Index(
+		recovery,
+		"Wait-DefenseClawEnterpriseReadiness `",
+	)
+	enumeratorFinalMode := strings.Index(
+		recovery,
+		"-StartMode $enumeratorTargetStartMode",
+	)
+	if enumeratorDemand < 0 || enumeratorStart < 0 || completeReadiness < 0 ||
+		enumeratorFinalMode < 0 || enumeratorDemand > enumeratorStart ||
+		enumeratorStart > completeReadiness || completeReadiness > enumeratorFinalMode {
+		t.Fatal("transaction recovery does not keep Enumerator demand-started through combined readiness")
+	}
+	for _, contract := range []string{
+		"[bool]$RequireEnumerator = $true",
+		"(-not $RequireEnumerator -or $enumeratorReady)",
+		"-RequireEnumerator:$enumeratorShouldRun",
+	} {
+		if !strings.Contains(readiness+recovery, contract) {
+			t.Fatalf("transaction recovery readiness contract missing %q", contract)
+		}
+	}
+	quiesce := strings.Index(recovery, "Stop-DefenseClawService -Name $name")
+	enumeratorRestore := strings.Index(
+		recovery,
+		"$enumeratorState = $states[$enumeratorServiceName]",
+	)
+	if quiesce < 0 || enumeratorRestore < 0 || quiesce > enumeratorRestore {
+		t.Fatal("transaction recovery does not quiesce managed services before Enumerator restoration")
+	}
+}
+
+func TestDeferredWindowsConfigurationRequiresRepairForActivation(t *testing.T) {
+	module := strings.ReplaceAll(string(readWindowsEnterpriseModule(t)), "\r\n", "\n")
+	reconcile := windowsPowerShellFunction(t, module, "Invoke-DefenseClawReconcileLifecycle")
+	status := windowsPowerShellFunction(t, module, "Get-DefenseClawLifecycleStatus")
+	installLike := windowsPowerShellFunction(t, module, "Invoke-DefenseClawInstallLikeLifecycle")
+
+	identity := strings.Index(reconcile, "Assert-DefenseClawMetadataIdentity `")
+	deferredGate := strings.Index(
+		reconcile,
+		"deferred configuration must be completed with Repair before Reconcile",
+	)
+	firstMutation := strings.Index(reconcile, "Invoke-DefenseClawCodexRequirementsCommand `")
+	if identity < 0 || deferredGate < 0 || firstMutation < 0 ||
+		identity > deferredGate || deferredGate > firstMutation {
+		t.Fatal("Reconcile can mutate a deferred deployment before rejecting its activation state")
+	}
+	if !strings.Contains(status, "-not $deferredConfigPending -and") {
+		t.Fatal("Status can report a deferred deployment healthy after out-of-band service activation")
+	}
+	if !strings.Contains(
+		installLike,
+		"$DeferredConfig -or $priorDeferredConfigPending",
+	) {
+		t.Fatal("Repair clears deferred activation authority before live validation")
+	}
+	readiness := strings.LastIndex(installLike, "-RequireReadiness")
+	clearMarker := strings.Index(
+		installLike,
+		"$newMetadata.deferred_config_pending = $false",
+	)
+	commit := strings.Index(installLike, "Complete-DefenseClawTransaction `")
+	if readiness < 0 || clearMarker < 0 || commit < 0 ||
+		readiness > clearMarker || clearMarker > commit {
+		t.Fatal("deferred activation marker is not cleared only after readiness and before transaction commit")
 	}
 }
 

@@ -184,6 +184,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsManagedHookContractCleanupCommand())
 	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.

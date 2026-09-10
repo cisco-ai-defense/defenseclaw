@@ -16,6 +16,11 @@ import (
 )
 
 func TestBaselineIPCDirectoryACLReappliesAfterRestart(t *testing.T) {
+	// PowerShell's canonical ManagedIPCDirectory ReadAndExecute ACE serializes
+	// to this exact mask. The gateway must preserve it on every restart rather
+	// than publishing a second, semantically similar DACL shape.
+	const wantAuthenticatedUsersMask windows.ACCESS_MASK = 0x1200a9
+
 	root, err := os.MkdirTemp(os.TempDir(), "dci-")
 	if err != nil {
 		t.Fatal(err)
@@ -58,13 +63,13 @@ func TestBaselineIPCDirectoryACLReappliesAfterRestart(t *testing.T) {
 			t.Fatalf("restart %d directory ACL: %v", restart+1, err)
 		}
 		directoryMask := allowedMaskForSID(t, dir, authenticatedUsers)
-		for _, required := range []windows.ACCESS_MASK{
-			windows.FILE_TRAVERSE, windows.FILE_LIST_DIRECTORY,
-			windows.FILE_READ_EA, windows.FILE_READ_ATTRIBUTES, windows.READ_CONTROL,
-		} {
-			if directoryMask&required == 0 {
-				t.Errorf("restart %d directory mask %#x is missing %#x", restart+1, directoryMask, required)
-			}
+		if directoryMask != wantAuthenticatedUsersMask {
+			t.Fatalf(
+				"restart %d Authenticated Users directory mask = %#x, want PowerShell canonical %#x",
+				restart+1,
+				directoryMask,
+				wantAuthenticatedUsersMask,
+			)
 		}
 		if directoryMask&(windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.WRITE_DAC) != 0 {
 			t.Fatalf("restart %d directory mask %#x grants client mutation rights", restart+1, directoryMask)
@@ -113,7 +118,8 @@ func allowedMaskForSID(t *testing.T, path string, want *windows.SID) windows.ACC
 func TestBaselineIPCACEsShapeDirectory(t *testing.T) {
 	assertBaselineIPCACEs(t, aclObjectDirectory,
 		windows.FILE_TRAVERSE|windows.FILE_LIST_DIRECTORY|
-			windows.FILE_READ_EA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL)
+			windows.FILE_READ_EA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|
+			windows.SYNCHRONIZE)
 }
 
 func TestBaselineIPCACEsDirectoryClientRightsStayReadOnly(t *testing.T) {
@@ -128,6 +134,7 @@ func TestBaselineIPCACEsDirectoryClientRightsStayReadOnly(t *testing.T) {
 		windows.FILE_READ_EA,
 		windows.FILE_READ_ATTRIBUTES,
 		windows.READ_CONTROL,
+		windows.SYNCHRONIZE,
 	} {
 		if mask&required == 0 {
 			t.Errorf("Authenticated Users directory mask %#x is missing required right %#x", mask, required)

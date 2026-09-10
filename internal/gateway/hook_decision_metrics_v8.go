@@ -40,7 +40,9 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
 	enforcementPersisted := false
 	if env.Enforced {
-		enforcementPersisted = a.emitHookEnforcementLogV8(ctx, resp, meta, connectorName)
+		enforcementPersisted = a.emitHookEnforcementLogV8(
+			ctx, resp, meta, connectorName, resp.aiDefenseEnforced,
+		)
 	}
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
 	return enforcementPersisted
@@ -58,6 +60,7 @@ func (a *APIServer) emitHookEnforcementLogV8(
 	resp agentHookResponse,
 	meta llmEventMeta,
 	connectorName string,
+	aiDefenseEnforced bool,
 ) bool {
 	emitter, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
 	if !ok || emitter == nil {
@@ -80,6 +83,10 @@ func (a *APIServer) emitHookEnforcementLogV8(
 	}
 	observedAt := time.Now().UTC()
 	enforcementID := uuid.NewString()
+	producer := hookDecisionMetricsV8Producer
+	if aiDefenseEnforced {
+		producer = audit.AIDHookEnforcementProducer
+	}
 	identity := AgentIdentityFromContext(ctx)
 	correlation := observability.Correlation{
 		RunID: proxyV8StableID(meta.RunID), RequestID: proxyV8StableID(meta.RequestID),
@@ -129,7 +136,7 @@ func (a *APIServer) emitHookEnforcementLogV8(
 			Phase:       "apply",
 			Correlation: correlation,
 			Provenance: observability.FamilyProvenanceInput{
-				Producer:         hookDecisionMetricsV8Producer,
+				Producer:         producer,
 				BinaryVersion:    version.Current().BinaryVersion,
 				ConfigGeneration: int64(snapshot.Generation()),
 				ConfigDigest:     snapshot.Digest(),
@@ -151,7 +158,7 @@ func (a *APIServer) emitHookEnforcementLogV8(
 				Action: string(audit.ActionBlock), Phase: "apply",
 				Outcome: observability.OutcomeBlocked, Correlation: correlation,
 				Provenance: observability.Provenance{
-					Producer:              hookDecisionMetricsV8Producer,
+					Producer:              producer,
 					BinaryVersion:         version.Current().BinaryVersion,
 					RegistrySchemaVersion: observability.CurrentRecordSchemaVersion,
 					ConfigGeneration:      int64(snapshot.Generation()),

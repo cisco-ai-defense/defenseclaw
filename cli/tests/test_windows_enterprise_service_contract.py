@@ -4011,6 +4011,204 @@ def test_normal_mode_timeout_and_acl_cleanup_are_bounded_and_exact() -> None:
     assert stop_fixture < cleanup.index("Remove-Item `", stop_fixture)
 
 
+def test_recovery_readiness_and_deferred_activation_order_are_fail_closed() -> None:
+    module = read(MODULE).replace("\r\n", "\n")
+
+    transaction_start = module[
+        module.index("function Start-DefenseClawTransactionServices") :
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback")
+    ]
+    enumerator_start = transaction_start.index(
+        "Start-DefenseClawService -Name $enumeratorServiceName"
+    )
+    enumerator_demand = transaction_start.index(
+        "-Name $enumeratorServiceName `\n                -StartMode 3"
+    )
+    readiness = transaction_start.index("Wait-DefenseClawEnterpriseReadiness `")
+    enumerator_final_mode = transaction_start.index(
+        "-StartMode $enumeratorTargetStartMode"
+    )
+    assert enumerator_demand < enumerator_start < readiness < enumerator_final_mode
+    assert "-RequireEnumerator:$enumeratorShouldRun" in transaction_start
+    assert "-Enumerator" in transaction_start[
+        transaction_start.index("-Name $enumeratorServiceName `") :
+        transaction_start.index(
+            "Set-DefenseClawServiceStartMode -Name $name -StartMode 4"
+        )
+    ]
+
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") :
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation")
+    ]
+    assert "-Enumerator" in restore[
+        restore.index("-Name $enumeratorServiceName `") :
+        restore.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    ]
+
+    quiescing_recovery = module[
+        module.index("function Recover-DefenseClawQuiescingIntent") :
+        module.index("function Recover-DefenseClawPendingTransaction")
+    ]
+    assert "-Enumerator" in quiescing_recovery[
+        quiescing_recovery.index("-Name $enumeratorServiceName `") :
+        quiescing_recovery.index(
+            "foreach ($name in @($GatewayServiceName, $brokerServiceName, $GuardianServiceName, $enumeratorServiceName))"
+        )
+    ]
+
+    readiness_function = module[
+        module.index("function Wait-DefenseClawEnterpriseReadiness") :
+        module.index("function Get-DefenseClawOptionalPropertyValues")
+    ]
+    assert "[bool]$RequireEnumerator = $true" in readiness_function
+    assert "(-not $RequireEnumerator -or $enumeratorReady)" in readiness_function
+
+    reconcile = module[
+        module.index("function Invoke-DefenseClawReconcileLifecycle") :
+        module.index("function Invoke-DefenseClawEnterpriseLifecycle")
+    ]
+    deferred_gate = reconcile.index(
+        "deferred configuration must be completed with Repair before Reconcile"
+    )
+    assert reconcile.index("Assert-DefenseClawMetadataIdentity `") < deferred_gate
+    assert deferred_gate < reconcile.index(
+        "Invoke-DefenseClawCodexRequirementsCommand `"
+    )
+
+    status = module[
+        module.index("function Get-DefenseClawLifecycleStatus") :
+        module.index("function Test-DefenseClawGuardianCoverageReport")
+    ]
+    assert "-not $deferredConfigPending -and" in status
+
+    install_like = module[
+        module.index("function Invoke-DefenseClawInstallLikeLifecycle") :
+        module.index("function Invoke-DefenseClawUninstallLifecycle")
+    ]
+    assert "$DeferredConfig -or $priorDeferredConfigPending" in install_like
+    clear_marker = install_like.index(
+        "$newMetadata.deferred_config_pending = $false"
+    )
+    assert install_like.rindex("-RequireReadiness", 0, clear_marker) < clear_marker
+    assert clear_marker < install_like.index(
+        "Complete-DefenseClawTransaction `", clear_marker
+    )
+
+
+def test_legacy_service_recovery_restores_only_authenticated_preimage() -> None:
+    module = read(MODULE).replace("\r\n", "\n")
+
+    states = module[
+        module.index("function Get-DefenseClawTransactionServiceStates") :
+        module.index("function Restore-DefenseClawTransactionServiceStartModes")
+    ]
+    assert states.count("recorded_in_transaction = $false") == 2
+    assert "$states[$enumeratorServiceName]" in states
+    assert "$states[$brokerServiceName]" in states
+
+    configure = module[
+        module.index("function Set-DefenseClawManagedServices") :
+        module.index("function Get-DefenseClawServiceStartMode")
+    ]
+    assert "[switch]$RestoreTransactionWithoutBroker" in configure
+    assert "[switch]$RestoreTransactionWithoutEnumerator" in configure
+    assert "-not $DeferAutomaticStart" in configure
+    assert "$gatewayDependency = if ($RestoreTransactionWithoutBroker)" in configure
+    assert "legacy transaction restore requires the Broker absent" in configure
+    assert "legacy transaction restore requires the Enumerator absent" in configure
+    assert "if (-not $RestoreTransactionWithoutBroker)" in configure
+    assert "if (-not $RestoreTransactionWithoutEnumerator)" in configure
+    assert (
+        "[Parameter(Mandatory)][AllowEmptyString()][string]$ProviderLibraryPath"
+        in configure
+    )
+
+    managed_acls = module[
+        module.index("function Set-DefenseClawManagedAcls") :
+        module.index("function Set-DefenseClawRetainedRuntimeAcls")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in managed_acls
+    assert "if (-not $AllowTransactionRecordedBrokerAbsence -or" in managed_acls
+
+    gateway_restore = module[
+        module.index("function Restore-DefenseClawTransactionGatewayWithoutBroker") :
+        module.index("function Set-DefenseClawCMIDBrokerAuthKey")
+    ]
+    ownership = gateway_restore.index("Assert-DefenseClawOwnedServiceOrAbsent `")
+    dependency = gateway_restore.index("'config', $GatewayServiceName, 'depend=', '/'")
+    environment = gateway_restore.index("Set-DefenseClawServiceEnvironment `")
+    assert ownership < dependency < environment
+    assert "exact absent Broker preimage" in gateway_restore
+    assert "-BrokerPipeName" not in gateway_restore
+    assert "-BrokerServiceName" not in gateway_restore
+    assert "-BrokerAuthKeyPath" not in gateway_restore
+
+    restore = module[
+        module.index("function Restore-DefenseClawTransaction {") :
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation")
+    ]
+    legacy_gateway = restore.index(
+        "Restore-DefenseClawTransactionGatewayWithoutBroker `"
+    )
+    broker_recheck = restore.index(
+        "Assert-DefenseClawCMIDBrokerServiceOrAbsent `", legacy_gateway
+    )
+    broker_remove = restore.index(
+        "Remove-DefenseClawService -Name $Layout.BrokerServiceName",
+        broker_recheck,
+    )
+    managed_services = restore.index("Set-DefenseClawManagedServices `", broker_remove)
+    assert legacy_gateway < broker_recheck < broker_remove < managed_services
+    assert "-RestoreTransactionWithoutBroker:(" in restore
+    assert "-RestoreTransactionWithoutEnumerator:(" in restore
+    assert "-AllowTransactionRecordedBrokerAbsence:(" in restore
+
+    activation = module[
+        module.index("function Assert-DefenseClawRestoredTransactionReadyForActivation") :
+        module.index("function Start-DefenseClawTransactionServices")
+    ]
+    assert "-AllowTransactionRecordedBrokerAbsence:$brokerAbsentPreimage" in activation
+    assert "-AllowTransactionRecordedEnumeratorAbsence:$enumeratorAbsentPreimage" in activation
+
+    start = module[
+        module.index("function Start-DefenseClawTransactionServices") :
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback")
+    ]
+    first_mutation = start.index("Set-DefenseClawServiceStartMode -Name $name -StartMode 4")
+    assert start.index("Assert-DefenseClawCMIDBrokerServiceOrAbsent `") < first_mutation
+    assert start.index("Restore-DefenseClawTransactionGatewayWithoutBroker `") < start.index(
+        "Remove-DefenseClawService -Name $brokerServiceName"
+    )
+    assert "if ([bool]$gateway.running)" in start
+    assert "Restore-DefenseClawTransactionServiceStartModes `" in start
+    assert "-RequireBroker:([bool]$broker.existed)" in start
+
+    deployment = module[
+        module.index("function Assert-DefenseClawEnterpriseDeployment") :
+        module.index("function Get-DefenseClawLifecycleStatus")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in deployment
+    assert "-not $ServicingTransaction" in deployment
+    assert "authenticated servicing preimage requires Broker to remain absent" in deployment
+    assert "-ExpectedDependencies $gatewayDependencies" in deployment
+
+    smoke = read(
+        ROOT / "packaging/windows/tests/enterprise-uninstall-transaction-smoke.ps1"
+    )
+    managed_acls_mock = smoke[
+        smoke.index("function script:Set-DefenseClawManagedAcls") :
+        smoke.index("function script:Invoke-DefenseClawEnumeratorRefresh")
+    ]
+    assert "[switch]$AllowTransactionRecordedBrokerAbsence" in managed_acls_mock
+    readiness_mock = smoke[
+        smoke.index("function script:Wait-DefenseClawEnterpriseReadiness") :
+        smoke.index("function script:Wait-DefenseClawFreshGuardianReconcile")
+    ]
+    assert "[bool]$RequireBroker = $true" in readiness_mock
+    assert "readiness-require-broker:{0}" in readiness_mock
+
+
 def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatible() -> None:
     module = read(MODULE)
     smoke = read(UNINSTALL_TRANSACTION_SMOKE)
@@ -5309,3 +5507,105 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
 
     assert "Invoke-DefenseClawNamespaceSweep" not in module
     assert "Remove-DefenseClawSweepPath" not in module
+
+
+def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> None:
+    """Retained connector entries need durable CAS authority across retries."""
+    module = read(MODULE)
+    cleanup = read(ROOT / "internal/cli/windows_managed_hook_contract_cleanup_windows.go")
+    connector_cleanup = read(
+        ROOT / "internal/gateway/connector/managed_hook_contract_purge_windows.go"
+    )
+    connector_state = read(ROOT / "internal/gateway/connector/connector_state.go")
+    cursor_secure = read(
+        ROOT / "internal/enterprisehooks/install_windows_cursor_secure.go"
+    )
+    connector_cleanup_test = read(
+        ROOT / "internal/gateway/connector/managed_hook_contract_purge_windows_test.go"
+    )
+
+    state_purge = module[
+        module.index("function Get-DefenseClawStatePurgeIntent") :
+        module.index("function Invoke-DefenseClawCommittedUninstallCleanup")
+    ]
+    pre_layout = module[
+        module.index("function Invoke-DefenseClawPreLayoutRecovery") :
+        module.index("function Get-DefenseClawTargetRuntimePreparationMode")
+    ]
+    rollback = module[
+        module.index("function Restore-DefenseClawTransactionWithManagedHooksRollback") :
+        module.index("function Assert-DefenseClawInstallRollbackIntentCommitTimestamp")
+    ]
+    purge_writer = module[
+        module.index("function Write-DefenseClawStatePurgeIntentAtomic") :
+        module.index("function Get-DefenseClawSelfUninstallReceipt")
+    ]
+    smoke = read(
+        ROOT / "packaging/windows/tests/enterprise-uninstall-transaction-smoke.ps1"
+    )
+
+    assert 'IdentitySHA256' in cleanup
+    assert 'windowsManagedHookContractCleanupIdentitySHA256' in cleanup
+    assert 'ApplicationStarted' not in cleanup[
+        cleanup.index("type windowsManagedHookContractCleanupIdentity struct") :
+        cleanup.index("type windowsManagedHookContractCleanupReport struct")
+    ]
+    assert 'writeEnterpriseHookProtectedFile(path, body)' in cleanup
+    assert 'writeWindowsTargetRuntimeProtectedJSON(path, receipt)' not in cleanup
+    assert 'errors.Is(' in cleanup
+    assert 'ErrWindowsManagedHookContractCleanupSuperseded' in cleanup
+    assert 'contract_cleanup_identity_sha256' in state_purge
+    assert 'contract_cleanup_receipt_sha256' not in state_purge
+    assert "'contract_locks_pending'" in state_purge
+    assert "'contract_locks_finalized'" in state_purge
+    assert "'state_root_removed'" in state_purge
+    assert state_purge.count('Write-DefenseClawStatePurgeIntentAtomic `') == 3
+    assert '[IO.File]::Replace($temporary, $destination, $null, $true)' in purge_writer
+    assert '[IO.File]::Move($temporary, $destination)' in purge_writer
+    assert 'Microsoft.PowerShell.Management\\Move-Item' not in purge_writer
+    assert purge_writer.index('Set-DefenseClawPathAcl `') < purge_writer.index(
+        '[IO.File]::Replace('
+    )
+    assert 'Write-DefenseClawJsonAtomic `' not in state_purge
+    assert "$phaseValue -ceq 'contract_locks_pending'" in state_purge
+    assert "$phaseValue -ceq 'contract_locks_finalized'" in state_purge
+    assert "$phaseValue -ceq 'state_root_removed'" in state_purge
+    assert "-cin @(" not in state_purge
+    assert '-NativeCleanupSource $nativeCleanupSource' in pre_layout
+    assert "$Sources['gateway']" in pre_layout
+    assert 'retained-state Install requires the authenticated' in pre_layout
+    assert 'predates scope-bound connector cleanup ' in module
+    assert 'authority; refusing Purge' in module
+    assert 'legacy state-purge intent cannot authorize user contract cleanup' not in module
+    assert 'Remove-DefenseClawManagedHookContractCleanupReceipt' in rollback
+    assert '-AllowPrepared' in rollback
+    assert 'windowsManagedHookContractEntrySHA256' in connector_cleanup
+    assert 'lock.UpdatedAt' not in connector_cleanup[
+        connector_cleanup.index("func windowsManagedHookContractEntrySHA256") :
+        connector_cleanup.index("func validManagedHookContractEntrySHA256")
+    ]
+    assert 'ManagedGatewayServiceName string' in connector_state
+    assert 'json:"managed_gateway_service_name,omitempty"' in connector_state
+    assert 'os.Getenv(WindowsGatewayServiceNameEnv)' in connector_state
+    assert 'ValidateWindowsManagedHookContractGatewayServiceBinding' in connector_state
+    assert 'NewHookContractLockEntryForMode(' in cursor_secure
+    assert 'ValidateWindowsManagedHookContractGatewayServiceBinding(lock)' in cursor_secure
+    assert 'identity.GatewayServiceName' in cleanup[
+        cleanup.index("func captureWindowsManagedHookContractCleanupReceipt") :
+        cleanup.index("func readWindowsManagedHookContractCleanupReceipt")
+    ]
+    assert 'Superseded' in connector_cleanup
+    assert 'TestDelayedPurgePreservesSameContractPublishedByNewGatewayScope' in (
+        connector_cleanup_test
+    )
+    assert 'TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope' in (
+        connector_cleanup_test
+    )
+    assert 'TestCleanupCaptureRejectsLegacyUnboundEntry' in connector_cleanup_test
+    assert 'TestCleanupClaimMissingStateRequiresPersistedMutationBarrier' in (
+        connector_cleanup_test
+    )
+    assert "'pending-native-finalized-crash-retry'" in smoke
+    assert "'contract-cleanup-after-native'" in smoke
+    assert "'legacy-schema1-before-state-delete'" in smoke
+    assert 'HarnessRealManagedContractCleanup' in smoke

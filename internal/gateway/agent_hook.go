@@ -145,6 +145,10 @@ type agentHookResponse struct {
 	// finalization. Evaluators must not dispatch notifications before the
 	// matching audit facts are durable.
 	SuppressNotification bool `json:"-"`
+	// aiDefenseEnforced is trusted in-process provenance derived from the AID
+	// verdict before local asset-policy merging. It is never accepted from or
+	// serialized to a connector hook.
+	aiDefenseEnforced bool
 }
 
 func hookSourceReason(resp agentHookResponse) string {
@@ -1767,6 +1771,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	rawActionBeforeAssets := rawAction
 	caps := profile.Capabilities
 	action, wouldBlock := mapHookActionForProfile(rawAction, mode, req.HookEventName, caps, profile, req.Payload)
+	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	severity := verdict.Severity
 	reason := verdict.Reason
 	findings := verdict.Findings
@@ -1823,6 +1828,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
+	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
 }
 

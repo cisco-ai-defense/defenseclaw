@@ -230,11 +230,12 @@ func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
 					HookEventName: "UserPromptSubmit",
 					SessionID:     "session-active-alert-" + connector,
 				}, agentHookResponse{
-					Action:       "block",
-					RawAction:    "block",
-					Severity:     "HIGH",
-					Mode:         "action",
-					EvaluationID: "evaluation-active-alert-" + connector,
+					Action:            "block",
+					RawAction:         "block",
+					Severity:          "HIGH",
+					Mode:              "action",
+					EvaluationID:      "evaluation-active-alert-" + connector,
+					aiDefenseEnforced: true,
 				}, HookAuditEnvelope{Enforced: true}, false)
 
 				if len(capture.records) != mode.wantRecords {
@@ -257,6 +258,9 @@ func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
 					!enforcement.Mandatory() {
 					t.Fatalf("enforcement identity=%+v connector=%q action=%q outcome=%q",
 						enforcement.Identity(), enforcement.Connector(), enforcement.Action(), enforcement.Outcome())
+				}
+				if got := enforcement.Provenance().Producer; got != audit.AIDHookEnforcementProducer {
+					t.Errorf("enforcement producer=%q want=%q", got, audit.AIDHookEnforcementProducer)
 				}
 				if mode.wantFloor {
 					body, present := enforcement.Body()
@@ -326,8 +330,9 @@ func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.
 		ToolName:      "shell",
 	}
 	resp := agentHookResponse{
-		Action:    "block",
-		RawAction: "block",
+		Action:            "block",
+		RawAction:         "block",
+		aiDefenseEnforced: true,
 		// NONE proves severity cannot suppress an enforced block's Active Alert.
 		Severity:     "NONE",
 		Reason:       "AI Defense blocked the request",

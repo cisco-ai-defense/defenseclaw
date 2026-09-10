@@ -119,6 +119,7 @@ type codexHookResponse struct {
 	RedactionEnabled     *bool  `json:"-"`
 	SourceReason         string `json:"-"`
 	SuppressNotification bool   `json:"-"`
+	aiDefenseEnforced    bool
 }
 
 // handleCodexHook + enrichCodexHookContext were deleted in the
@@ -273,6 +274,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	if mode == "action" && rawAction == "confirm" {
 		action = "alert"
 	}
+	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	assetContextEligible := false
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
@@ -311,6 +313,7 @@ func (a *APIServer) evaluateCodexHook(ctx context.Context, req codexHookRequest)
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
 	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
+	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
 }
 
@@ -896,6 +899,13 @@ func mergeCodexToolResultVerdicts(
 			untrusted.RedactionEnabled != nil && *untrusted.RedactionEnabled
 		merged.RedactionEnabled = &enabled
 	}
+	// A segmented result is AID-enforced only when an AID-originated block
+	// survives as the merged effective block. In particular, a cloud block
+	// clamped out of trusted source must not lend provenance to a separate
+	// local-policy block in the untrusted segment.
+	merged.aiDefenseBlock = normalizeCodexAction(merged.Action) == "block" &&
+		(source.aiDefenseBlock && normalizeCodexAction(source.Action) == "block" ||
+			untrusted.aiDefenseBlock && normalizeCodexAction(untrusted.Action) == "block")
 	return &merged
 }
 

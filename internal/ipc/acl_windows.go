@@ -162,7 +162,9 @@ func baselineIPCACEsForGatewaySID(
 	// both object classes. Authenticated Users: per-class mask.
 	//
 	// Directory mask: FILE_TRAVERSE (execute the dir) + FILE_LIST_DIRECTORY
-	// (list child names) + FILE_READ_EA, FILE_READ_ATTRIBUTES, and READ_CONTROL.
+	// (list child names) + FILE_READ_EA, FILE_READ_ATTRIBUTES, READ_CONTROL, and
+	// SYNCHRONIZE. The latter keeps this exact mask aligned with the installer's
+	// canonical FileSystemRights::ReadAndExecute ACE (0x1200a9).
 	// Windows AF_UNIX path resolution needs the extended-attribute read, while
 	// the metadata rights let AVC inspect and validate a newly recreated
 	// endpoint after a gateway restart. FILE_ADD_FILE is REFUSED —
@@ -177,7 +179,7 @@ func baselineIPCACEsForGatewaySID(
 	// refused (not present in GENERIC_WRITE for FILE objects).
 	const directoryTraverseListInspect windows.ACCESS_MASK = windows.FILE_TRAVERSE |
 		windows.FILE_LIST_DIRECTORY | windows.FILE_READ_EA |
-		windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL
+		windows.FILE_READ_ATTRIBUTES | windows.READ_CONTROL | windows.SYNCHRONIZE
 	const socketReadWrite windows.ACCESS_MASK = windows.GENERIC_READ | windows.GENERIC_WRITE
 
 	var authUsersMask windows.ACCESS_MASK

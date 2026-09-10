@@ -806,6 +806,112 @@ func TestManagedAIDOnly_NativeHookAccountingFollowsFinalAssetOutcome(t *testing.
 	}
 }
 
+// TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance drives the real
+// native hook handler, AID evaluator, local asset-policy merge, observability
+// runtime, SQLite projection, and AVC count query. A final block is not enough:
+// the block must have been supplied by AID and actually enforced by the
+// connector. Local MCP policy still receives its durable enforcement companion
+// but must never be relabelled as an AI Defense Active Alert.
+func TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance(t *testing.T) {
+	routes := []struct {
+		connector string
+		body      string
+	}{
+		{
+			connector: "codex",
+			body:      `{"hook_event_name":"PreToolUse","session_id":"active-alert-codex","tool_name":"mcp__rogue__search","tool_input":{"query":"status"}}`,
+		},
+		{
+			connector: "claudecode",
+			body:      `{"hook_event_name":"PreToolUse","session_id":"active-alert-claude","tool_name":"mcp__rogue__search","tool_input":{"query":"status"}}`,
+		},
+		{
+			connector: "cursor",
+			body:      `{"hook_event_name":"preToolUse","session_id":"active-alert-cursor","tool_name":"mcp__rogue__search","tool_input":{"query":"status"}}`,
+		},
+	}
+
+	for _, route := range routes {
+		t.Run(route.connector, func(t *testing.T) {
+			fixture := newSidecarV8BootstrapFixture(t, 8, "")
+			cfg := &config.Config{DeploymentMode: managed.DeploymentModeManagedEnterprise}
+			cfg.Guardrail.Connector = route.connector
+			cfg.Guardrail.Mode = "action"
+			cfg.AssetPolicy = config.DefaultAssetPolicy()
+			cfg.AssetPolicy.Enabled = true
+			cfg.AssetPolicy.Mode = config.AssetPolicyModeAction
+			cfg.AssetPolicy.MCP.RegistryRequired = true
+			cfg.AssetPolicy.MCP.Registry = []config.AssetPolicyRule{{Name: "trusted"}}
+
+			inspector := &stubAIDInspector{verdict: &ScanVerdict{
+				Action: "allow", Severity: "NONE", Scanner: "ai-defense",
+			}}
+			api := NewAPIServer(
+				"127.0.0.1:0", NewSidecarHealth(), nil,
+				fixture.store, fixture.logger, cfg,
+			)
+			api.inspectToolScanTimeout = 5 * time.Second
+			api.SetCiscoInspector(inspector)
+			fixture.sidecar.setAPIServer(api)
+			bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+				t.Context(), fixture.configPath, fixture.raw,
+			)
+			if err != nil || !bound {
+				t.Fatalf("observability bootstrap bound=%t error=%v", bound, err)
+			}
+
+			local := invokeNativeSkillHook(t, api, route.connector, route.body)
+			if local.Action != "block" {
+				t.Fatalf("local asset-policy action=%q, want block", local.Action)
+			}
+			counts, err := fixture.store.GetCounts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if counts.Alerts != 0 {
+				t.Fatalf("Active Alerts after local-only block=%d, want 0", counts.Alerts)
+			}
+
+			// Disable the local policy and make AID return the block for the
+			// second real hook request. No finding is required: provenance and
+			// actual enforcement, not finding count or severity, define the alert.
+			cfg.AssetPolicy.Enabled = false
+			inspector.verdict = &ScanVerdict{
+				Action: "block", Severity: "NONE", Scanner: "ai-defense",
+			}
+			aid := invokeNativeSkillHook(t, api, route.connector, route.body)
+			if aid.Action != "block" {
+				t.Fatalf("AID action=%q, want block", aid.Action)
+			}
+			counts, err = fixture.store.GetCounts()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if counts.Alerts != 1 {
+				t.Fatalf("Active Alerts after AID block=%d, want 1", counts.Alerts)
+			}
+
+			events, err := fixture.store.ListEvents(100)
+			if err != nil {
+				t.Fatal(err)
+			}
+			producers := make(map[string]int)
+			for _, event := range events {
+				if event.Action == string(audit.ActionBlock) && event.Enforced {
+					producers[event.Actor]++
+				}
+			}
+			if producers[hookDecisionMetricsV8Producer] != 1 ||
+				producers[audit.AIDHookEnforcementProducer] != 1 {
+				t.Fatalf("enforcement producers=%v, want one local and one AID record", producers)
+			}
+			if inspector.calls != 2 {
+				t.Fatalf("AID calls=%d, want 2", inspector.calls)
+			}
+		})
+	}
+}
+
 func TestManagedAIDOnly_NativeHookAccountingSyntheticParity(t *testing.T) {
 	tests := []struct {
 		name        string

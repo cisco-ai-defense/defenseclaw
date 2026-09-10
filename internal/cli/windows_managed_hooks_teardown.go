@@ -112,6 +112,8 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 		action := action
 		var jsonOutput bool
 		var purgeContractLocks bool
+		var contractCleanupReceipt string
+		var contractCleanupScope string
 		child := &cobra.Command{
 			Use:          action,
 			Short:        action + " managed hook machine-wiring teardown",
@@ -119,7 +121,12 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			Args:         cobra.NoArgs,
 			SilenceUsage: true,
 			RunE: func(cmd *cobra.Command, _ []string) error {
-				report, err := runWindowsManagedHooksTeardown(action, purgeContractLocks)
+				report, err := runWindowsManagedHooksTeardown(
+					action,
+					purgeContractLocks,
+					contractCleanupReceipt,
+					contractCleanupScope,
+				)
 				if jsonOutput {
 					if encodeErr := json.NewEncoder(cmd.OutOrStdout()).Encode(report); encodeErr != nil {
 						if err == nil {
@@ -154,6 +161,20 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 			},
 		}
 		child.Flags().BoolVar(&jsonOutput, "json", false, "emit machine-readable JSON")
+		if action == "prepare" || action == "finalize" {
+			child.Flags().StringVar(
+				&contractCleanupReceipt,
+				"contract-cleanup-receipt",
+				"",
+				"pre-created protected connector-contract cleanup receipt",
+			)
+			child.Flags().StringVar(
+				&contractCleanupScope,
+				"contract-cleanup-scope",
+				"",
+				"exact lifecycle scope SHA-256",
+			)
+		}
 		if action == "finalize" {
 			child.Flags().BoolVar(
 				&purgeContractLocks,
@@ -170,6 +191,8 @@ func newWindowsManagedHooksTeardownCommand() *cobra.Command {
 func runWindowsManagedHooksTeardown(
 	action string,
 	purgeContractLocks bool,
+	contractCleanupReceipt string,
+	contractCleanupScope string,
 ) (windowsManagedHooksTeardownReport, error) {
 	report := windowsManagedHooksTeardownReport{
 		SchemaVersion: windowsManagedHooksTeardownSchema,
@@ -317,8 +340,56 @@ func runWindowsManagedHooksTeardown(
 		codexTargets,
 		cursorTargets,
 	)
+	var cleanupReceiptPath string
+	if strings.TrimSpace(contractCleanupReceipt) != "" ||
+		strings.TrimSpace(contractCleanupScope) != "" {
+		cleanupReceiptPath, err = requireWindowsManagedHookContractCleanupReceiptPath(
+			contractCleanupReceipt,
+			"managed hook contract cleanup receipt",
+			action == "prepare",
+		)
+		if err != nil {
+			return fail(err)
+		}
+		if !validWindowsManagedHookContractCleanupScope(contractCleanupScope) {
+			return fail(errors.New("managed hook contract cleanup scope is invalid"))
+		}
+	}
 	switch action {
 	case "prepare":
+		if cleanupReceiptPath != "" {
+			reusePrepared := false
+			if _, statErr := os.Lstat(cleanupReceiptPath); statErr == nil {
+				var existing windowsManagedHookContractCleanupReceipt
+				existing, err = readWindowsManagedHookContractCleanupReceipt(cleanupReceiptPath)
+				if err == nil && existing.Phase == windowsManagedHookContractCleanupPrepared {
+					err = validateWindowsManagedHookContractCleanupReceiptBinding(
+						existing,
+						identity,
+						contractCleanupScope,
+					)
+					reusePrepared = err == nil
+				}
+			} else if !errors.Is(statErr, os.ErrNotExist) {
+				err = statErr
+			}
+			if err == nil && !reusePrepared {
+				var cleanupReceipt windowsManagedHookContractCleanupReceipt
+				cleanupReceipt, err = captureWindowsManagedHookContractCleanupReceipt(
+					identity,
+					contractCleanupScope,
+				)
+				if err == nil {
+					err = writeWindowsManagedHookContractCleanupReceipt(
+						cleanupReceiptPath,
+						cleanupReceipt,
+					)
+				}
+			}
+			if err != nil {
+				break
+			}
+		}
 		report.EnrollmentTargetCount = len(identity.ClaudeTargetSIDs) +
 			len(identity.CodexTargets) + len(identity.CursorTargets)
 		var rollbackCompleted bool
@@ -411,6 +482,28 @@ func runWindowsManagedHooksTeardown(
 				journal.Phase,
 			)
 		}
+		if err == nil && purgeContractLocks && cleanupReceiptPath == "" {
+			err = errors.New("managed hook contract purge requires its protected cleanup receipt")
+		}
+		if err == nil && cleanupReceiptPath != "" {
+			var cleanupReceipt windowsManagedHookContractCleanupReceipt
+			cleanupReceipt, err = readWindowsManagedHookContractCleanupReceipt(
+				cleanupReceiptPath,
+			)
+			if err == nil {
+				err = validateWindowsManagedHookContractCleanupReceiptBinding(
+					cleanupReceipt,
+					journal,
+					contractCleanupScope,
+				)
+			}
+			if err == nil && purgeContractLocks {
+				_, _, _, err = applyWindowsManagedHookContractCleanupReceipt(
+					cleanupReceiptPath,
+					cleanupReceipt,
+				)
+			}
+		}
 		if err == nil {
 			var surviving int
 			surviving, err = verifyWindowsManagedHooksTeardownClean(opts, journal.Targets)
@@ -420,7 +513,6 @@ func runWindowsManagedHooksTeardown(
 			report.CollectedGenerationCount, err = finalizeWindowsManagedHooksTeardown(
 				journal,
 				report.JournalPath,
-				purgeContractLocks,
 			)
 		}
 		if err == nil {
@@ -1063,7 +1155,6 @@ func restoreWindowsManagedHooksRuntimeSelectors(
 func finalizeWindowsManagedHooksTeardown(
 	journal windowsManagedHooksTeardownJournal,
 	journalPath string,
-	purgeContractLocks bool,
 ) (int, error) {
 	collected := 0
 	for _, target := range journal.Targets {
@@ -1084,25 +1175,6 @@ func finalizeWindowsManagedHooksTeardown(
 			)
 		}
 		collected += removed
-		if purgeContractLocks {
-			err := enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege(
-				func() error {
-					return connector.ClearManagedHookContractLockEntryForOwner(
-						target.DataDir,
-						target.Connector,
-						target.SID,
-					)
-				},
-			)
-			if err != nil {
-				return collected, fmt.Errorf(
-					"purge %s managed hook contract lock for %s: %w",
-					target.Connector,
-					target.SID,
-					err,
-				)
-			}
-		}
 	}
 	journal.Phase = "finalized"
 	if err := writeWindowsManagedHooksTeardownJournal(journalPath, journal); err != nil {

@@ -3492,12 +3492,20 @@ func alertEffectiveSeveritySQL() string {
 	END`
 }
 
+// AIDHookEnforcementProducer is the authenticated provenance stamped on the
+// durable enforcement companion only when Cisco AI Defense supplied the block
+// that the connector actually enforced. Historical connector-hook companions
+// without this marker are intentionally ambiguous and do not enter Active
+// Alerts.
+const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
+
 // activeAIDHookBlockSQL identifies the durable enforcement companion emitted
-// after a managed-enterprise connector hook actually applies an AI Defense
-// block. Managed enterprise makes AI Defense the sole hook-lane decision maker,
-// so the connector-sourced block companion is the authoritative AVC counter
-// fact. Severity, findings, advisory outcomes, health events, and legacy hook
-// summaries are deliberately irrelevant.
+// after a connector hook actually applies an AI Defense block. The actor
+// column is the canonical event-history projection of provenance.producer; it
+// is checked rather than inferring origin from the final action because local
+// MCP/asset policy can independently turn an AID allow into a block. Severity,
+// findings, advisory outcomes, health events, and legacy or provenance-
+// ambiguous hook summaries are deliberately irrelevant.
 func activeAIDHookBlockSQL() string {
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	return `(
@@ -3505,6 +3513,7 @@ func activeAIDHookBlockSQL() string {
 		AND event.event_name = 'enforcement.block.applied'
 		AND event.source = 'connector'
 		AND COALESCE(event.enforced, 0) = 1
+		AND event.actor = '` + AIDHookEnforcementProducer + `'
 		AND ` + canonicalOutcome + ` IN ('block','blocked')
 	)`
 }

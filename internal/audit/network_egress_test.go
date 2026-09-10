@@ -585,7 +585,10 @@ func TestStore_GetCounts_ActiveAlertsCountsOnlyEnforcedAIDHookBlocks(t *testing.
 		('canonical-deny', ?, 'enforcement', 'gateway', '', 'INFO',
 		 'enforcement.action', 'action.applied',
 		 '{"defenseclaw.enforcement.effective_action":"deny"}', 'connector', 1),
-		('canonical-medium-block', ?, 'enforcement', 'gateway', '', 'MEDIUM',
+		('canonical-medium-block', ?, 'enforcement', 'gateway.hook.aid.enforcement', '', 'MEDIUM',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('local-policy-block', ?, 'enforcement', 'gateway', '', 'HIGH',
 		 'enforcement.action', 'enforcement.block.applied',
 		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
 		('health-error', ?, 'sink-failure', 'gateway', '', 'ERROR',
@@ -593,7 +596,7 @@ func TestStore_GetCounts_ActiveAlertsCountsOnlyEnforcedAIDHookBlocks(t *testing.
 		('detection-only', ?, 'scan-finding', 'scanner', '', 'HIGH',
 		 'security.finding', 'finding.observed',
 		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', 'scanner', 0)`,
-		stamp, stamp, stamp, stamp); err != nil {
+		stamp, stamp, stamp, stamp, stamp); err != nil {
 		t.Fatalf("insert canonical alert fixtures: %v", err)
 	}
 
@@ -637,7 +640,13 @@ func TestStore_GetCounts_ActiveAlertsCountsAIDHookBlockUntilAcknowledged(t *test
 	) VALUES
 		('high-finding', ?, 'scan-finding', 'scanner', '', 'HIGH',
 		 'security.finding', 'finding.observed', '{}', 'scanner', 0),
-		('aid-hook-block', ?, 'block', 'gateway', '', 'INFO',
+		('aid-hook-block', ?, 'block', 'gateway.hook.aid.enforcement', '', 'INFO',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('local-hook-block', ?, 'block', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('ambiguous-legacy-hook-block', ?, 'block', 'gateway', '', 'HIGH',
 		 'enforcement.action', 'enforcement.block.applied',
 		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
 		('medium-allow', ?, 'allow', 'gateway', '', 'MEDIUM',
@@ -652,7 +661,7 @@ func TestStore_GetCounts_ActiveAlertsCountsAIDHookBlockUntilAcknowledged(t *test
 		('unenforced-connector-block', ?, 'block', 'gateway', '', 'HIGH',
 		 'enforcement.action', 'enforcement.block.applied',
 		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 0)`,
-		stamp, stamp, stamp, stamp, stamp, stamp); err != nil {
+		stamp, stamp, stamp, stamp, stamp, stamp, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
 	// Only the actual connector-hook enforcement companion counts. Severity,

@@ -141,6 +141,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		RedactionEnabled:     resp.RedactionEnabled,
 		SourceReason:         resp.SourceReason,
 		SuppressNotification: resp.SuppressNotification,
+		aiDefenseEnforced:    resp.aiDefenseEnforced,
 	}
 }
 
@@ -160,5 +161,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		RedactionEnabled:     resp.RedactionEnabled,
 		SourceReason:         resp.SourceReason,
 		SuppressNotification: resp.SuppressNotification,
+		aiDefenseEnforced:    resp.aiDefenseEnforced,
 	}
 }
