@@ -71,9 +71,10 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    # Retained for command-line compatibility, but rejected before bootstrap
-    # creation until late config publication can authenticate and prepare all
-    # enrolled user runtimes before any service activation.
+    # Stages an installed but disabled deployment with protected placeholder
+    # policy. Activation is allowed only through a later Repair that supplies
+    # BOTH authenticated Config and Manifest inputs; direct file-drop/start is
+    # deliberately not an activation contract.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
     # Protected parent directory for the installer's one-shot bootstrap
@@ -3132,15 +3133,13 @@ $result = $null
 $failureMessage = $null
 $exitCode = 0
 try {
-    # Deferred installation cannot authenticate or precreate per-user target
-    # runtimes because targets.yaml does not exist yet. Fail before the
-    # bootstrap environment creates its first protected staging directory;
-    # the module repeats this check as defense in depth for direct callers.
-    if ($DeferredConfig) {
-        throw (
-            '-DeferredConfig is temporarily unavailable: secure target ' +
-            'runtime preparation requires authenticated targets.yaml during Install'
-        )
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
+    if ($DeferredConfig -and
+        (-not [string]::IsNullOrWhiteSpace($Config) -or
+            -not [string]::IsNullOrWhiteSpace($Manifest))) {
+        throw '-DeferredConfig cannot be combined with -Config or -Manifest'
     }
     $bootstrapEnvironment = New-DefenseClawBootstrapEnvironment
     $modulePath = [IO.Path]::GetFullPath(
@@ -3208,6 +3207,35 @@ try {
     if ($modeSupplied -and $Action -ne 'Install' -and $Action -ne 'Upgrade' -and $Action -ne 'Repair') {
         throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
     }
+    if ($DeferredConfig) {
+        # Use a real, valid managed-enterprise policy and an empty target set so
+        # the ordinary authenticated install transaction can establish every
+        # machine artifact and ACL. All services remain disabled. A later
+        # Repair with both real inputs performs target preparation and the
+        # guardian-first service activation transaction.
+        $renderRoot = $bootstrapEnvironment.Path
+        $deferredConnectors = @('codex')
+        $deferredConfigPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-config-placeholder.yaml'
+        )
+        $deferredManifestPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-targets-placeholder.yaml'
+        )
+        [IO.File]::WriteAllText(
+            $deferredConfigPath,
+            (Get-DefenseClawRenderedEnterpriseConfig `
+                -Mode observe -Connectors $deferredConnectors),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            $deferredManifestPath,
+            (Get-DefenseClawRenderedEnterpriseTargets `
+                -Connectors $deferredConnectors -Profiles @()),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $Config = $deferredConfigPath
+        $Manifest = $deferredManifestPath
+    }
     if ($modeSupplied) {
         $renderedConnectors = ConvertTo-DefenseClawConnectorList -Connector $Connector
         $renderedConfigBody = Get-DefenseClawRenderedEnterpriseConfig `
@@ -3274,9 +3302,8 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
-        # Retained in the module invocation shape for CLI compatibility. The
-        # entry gate above rejects it before bootstrap creation, and the module
-        # repeats that rejection for direct callers.
+        # Marks the protected installed metadata as awaiting a complete Repair;
+        # the module keeps every managed service disabled until then.
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath

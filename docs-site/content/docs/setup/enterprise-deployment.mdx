@@ -546,6 +546,23 @@ and certification harness resolve their default roots through Windows
 known-folder APIs; changing process environment variables cannot redirect
 them.
 
+The signed standalone Setup also supports installation before tenant policy is
+available. `/install` with neither `CONFIG` nor `MANIFEST` automatically creates
+a protected placeholder deployment, records `deferred_config_pending=true`, and
+leaves the broker, gateway, guardian, and enumerator disabled. Deliver the real
+policy as one complete activation transaction:
+
+```powershell
+DefenseClawSetup.exe /repair CONFIG=C:\staging\config.yaml MANIFEST=C:\staging\targets.yaml
+```
+
+Both files are required. This Repair authenticates them, prepares every enabled
+target runtime, runs a fresh guardian reconcile, starts all four services, and
+clears the pending marker only after readiness succeeds. Copying files directly
+into the installed directories or calling `Start-Service` is not supported and
+must not be used as a late-configuration mechanism. Upgrade is rejected while
+configuration remains pending; Purge remains available for recovery.
+
 `-CertificationCodexHome` is a harness-only unsigned-scope marker, not a fleet
 layout option or an implicit core-mode switch. The module accepts it only when
 both service names carry the same exact

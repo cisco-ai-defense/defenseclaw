@@ -301,6 +301,97 @@ func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
 	}
 }
 
+func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	dispatcher, notifications := newWiringDispatcher()
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
+	api.SetNotifier(dispatcher)
+	fixture.sidecar.setAPIServer(api)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("observability bootstrap bound=%t error=%v", bound, err)
+	}
+
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-finalized-block",
+		SessionID: "session-finalized-block",
+		PolicyID:  "policy-finalized-block",
+	})
+	req := agentHookRequest{
+		ConnectorName: "cursor",
+		HookEventName: "beforeShellExecution",
+		SessionID:     "session-finalized-block",
+		ToolName:      "shell",
+	}
+	resp := agentHookResponse{
+		Action:    "block",
+		RawAction: "block",
+		// NONE proves severity cannot suppress an enforced block's Active Alert.
+		Severity:     "NONE",
+		Reason:       "AI Defense blocked the request",
+		SourceReason: "AI Defense blocked the request",
+		Mode:         "action",
+		EvaluationID: "evaluation-finalized-block",
+		RuleIDs:      []string{"aid-policy-block"},
+	}
+
+	finalization := api.finalizeAgentHook(
+		ctx, "cursor", req, resp, nil, []byte(`{"hook_event_name":"beforeShellExecution"}`),
+		time.Millisecond, false, nil,
+	)
+	if !finalization.Enforced || !finalization.EnforcementPersisted || !finalization.AuditPersisted {
+		t.Fatalf("finalization=%+v, want enforced block with both records persisted", finalization)
+	}
+	counts, err := fixture.store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 1 {
+		t.Fatalf("Active Alerts before notification = %d, want 1", counts.Alerts)
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorAuditRows := 0
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) {
+			connectorAuditRows++
+		}
+	}
+	if connectorAuditRows != 1 {
+		t.Fatalf("connector-hook audit rows before notification = %d, want 1", connectorAuditRows)
+	}
+
+	api.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+	if got := notifications.WaitFor(t, 1); len(got) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(got))
+	}
+}
+
+func TestHookFinalizationNotificationGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		result hookFinalizationResult
+		want   bool
+	}{
+		{name: "ordinary audit persisted", result: hookFinalizationResult{AuditPersisted: true}, want: true},
+		{name: "ordinary audit missing", result: hookFinalizationResult{}, want: false},
+		{name: "block both persisted", result: hookFinalizationResult{AuditPersisted: true, EnforcementPersisted: true, Enforced: true}, want: true},
+		{name: "block connector audit missing", result: hookFinalizationResult{EnforcementPersisted: true, Enforced: true}, want: false},
+		{name: "block active alert missing", result: hookFinalizationResult{AuditPersisted: true, Enforced: true}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.result.notificationReady(); got != test.want {
+				t.Fatalf("notificationReady() = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
 func TestHookDecisionSharesSessionStartExecutionIdentityRealShape(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs"})
 	payload := map[string]interface{}{

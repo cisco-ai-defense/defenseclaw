@@ -29,19 +29,21 @@ func (a *APIServer) emitHookDecisionObservabilityV8(
 	resp agentHookResponse,
 	env HookAuditEnvelope,
 	panicked bool,
-) {
+) bool {
 	if a == nil || ctx == nil {
-		return
+		return false
 	}
 	meta, connectorName, ok := a.hookDecisionMeta(ctx, req)
 	if !ok {
-		return
+		return false
 	}
 	a.emitHookDecisionLogV8(ctx, req, resp, env, panicked, meta, connectorName)
+	enforcementPersisted := false
 	if env.Enforced {
-		a.emitHookEnforcementLogV8(ctx, resp, meta, connectorName)
+		enforcementPersisted = a.emitHookEnforcementLogV8(ctx, resp, meta, connectorName)
 	}
 	a.recordHookDecisionMetricsV8(ctx, req, resp, env, panicked, meta, connectorName)
+	return enforcementPersisted
 }
 
 // emitHookEnforcementLogV8 materializes the enforcement companion declared by
@@ -56,14 +58,16 @@ func (a *APIServer) emitHookEnforcementLogV8(
 	resp agentHookResponse,
 	meta llmEventMeta,
 	connectorName string,
-) {
+) bool {
 	emitter, ok := a.observabilityV8RuntimeEmitter().(sidecarRuntimeEmitter)
 	if !ok || emitter == nil {
-		return
+		return false
 	}
 	severity := observability.NormalizeSeverity(firstNonEmpty(resp.Severity, "HIGH"))
 	if !severity.Valid || !severity.Present || severity.CleanEvaluation {
-		return
+		// Severity is metadata for an enforced block, never an admission gate.
+		// Active Alerts counts the block regardless of the upstream label.
+		severity = observability.NormalizeSeverity("HIGH")
 	}
 	logLevel := severity.LogLevel
 	if logLevel == "" {
@@ -108,9 +112,9 @@ func (a *APIServer) emitHookEnforcementLogV8(
 		producerKey,
 	)
 	if err != nil {
-		return
+		return false
 	}
-	_, _ = emitter.Emit(ctx, metadata, func(
+	outcome, err := emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -178,6 +182,7 @@ func (a *APIServer) emitHookEnforcementLogV8(
 			MandatoryEnforcedOutcome:              true,
 		})
 	})
+	return err == nil && outcome.LocalPersisted()
 }
 
 func (a *APIServer) emitHookDecisionLogV8(

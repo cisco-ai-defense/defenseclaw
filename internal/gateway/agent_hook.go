@@ -141,6 +141,10 @@ type agentHookResponse struct {
 	// SourceReason is retained only for canonical v8 routing. Reason remains
 	// the connector-safe response projection and is never reused as source.
 	SourceReason string `json:"-"`
+	// SuppressNotification retains evaluator-side asset-policy ownership until
+	// finalization. Evaluators must not dispatch notifications before the
+	// matching audit facts are durable.
+	SuppressNotification bool `json:"-"`
 }
 
 func hookSourceReason(resp agentHookResponse) string {
@@ -233,8 +237,8 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 				enrichAgentHookSpan(ctx, req, resp, elapsed)
 				enrichAgentHookSpanPanic(ctx)
 				if !finalized {
-					persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
-					if persisted {
+					finalization := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, true, nil)
+					if finalization.AuditPersisted {
 						if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 							fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 								connectorName, req.HookEventName, err)
@@ -375,17 +379,18 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			runtime.EmitLLMEvent(a, ctx, req, b, payload, rawEventIDs)
 		}
 
-		persisted := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
+		finalization := a.finalizeAgentHook(ctx, connectorName, req, resp, rawEventIDs, b, elapsed, panicked, hookCompatibilityExtra(profile))
 		if err := chainFinalization.attach(ctx, resp.EvaluationID); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] tool-call chain finalization failed connector=%s event=%s: %v\n",
 				connectorName, req.HookEventName, err)
 		}
-		if persisted {
+		if finalization.AuditPersisted {
 			if err := a.finalizeHookCorrelationReceipt(ctx, req.CorrelationReceipt); err != nil {
 				fmt.Fprintf(os.Stderr, "[gateway] hook receipt finalization failed connector=%s event=%s: %v\n",
 					connectorName, req.HookEventName, err)
 			}
 		}
+		a.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
 		finalized = true
 		a.recordManagedAIDFailOpenForSelectedNativeHookResult(
 			accountingCtx, managedAIDFailOpenGate, resp.Action, panicked,
@@ -410,6 +415,16 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 	}
 }
 
+type hookFinalizationResult struct {
+	AuditPersisted       bool
+	EnforcementPersisted bool
+	Enforced             bool
+}
+
+func (result hookFinalizationResult) notificationReady() bool {
+	return result.AuditPersisted && (!result.Enforced || result.EnforcementPersisted)
+}
+
 func (a *APIServer) finalizeAgentHook(
 	ctx context.Context,
 	connectorName string,
@@ -420,8 +435,11 @@ func (a *APIServer) finalizeAgentHook(
 	elapsed time.Duration,
 	panicked bool,
 	extra map[string]string,
-) bool {
-	auditPersisted := false
+) hookFinalizationResult {
+	// Treat a block response as enforced unless identity stamping proves
+	// otherwise. If identity stamping itself panics, notification stays
+	// fail-closed behind canonical enforcement persistence.
+	result := hookFinalizationResult{Enforced: resp.Action == "block"}
 	safeSection := func(section string, fn func()) {
 		defer func() {
 			if recovered := recover(); recovered != nil {
@@ -465,6 +483,7 @@ func (a *APIServer) finalizeAgentHook(
 	env.Extra = mergeHookEnvelopeExtra(env.Extra, extra)
 	safeSection("identity", func() {
 		a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
+		result.Enforced = env.Enforced
 		// These fields describe the already-active HTTP/hook span. They are
 		// independent of metric export and must remain available even when the
 		// destination collects traces but not metrics.
@@ -486,14 +505,52 @@ func (a *APIServer) finalizeAgentHook(
 
 	if !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {
-			a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			result.EnforcementPersisted = a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 		})
 
 		safeSection("audit", func() {
-			auditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
+			result.AuditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
 		})
 	}
-	return auditPersisted
+	return result
+}
+
+// dispatchFinalizedAgentHookNotification prevents a user-visible notification
+// from getting ahead of its durable audit facts. Enforced blocks require both
+// the connector audit row and the canonical enforcement.block.applied record
+// that backs AVC Active Alerts.
+func (a *APIServer) dispatchFinalizedAgentHookNotification(
+	ctx context.Context,
+	req agentHookRequest,
+	resp agentHookResponse,
+	finalization hookFinalizationResult,
+) {
+	if resp.SuppressNotification {
+		return
+	}
+	if !finalization.notificationReady() {
+		if finalization.Enforced {
+			fmt.Fprintf(
+				os.Stderr,
+				"[gateway] hook block notification suppressed until durable audit finalization connector=%s event=%s connector_audit=%t enforcement_audit=%t\n",
+				req.ConnectorName,
+				req.HookEventName,
+				finalization.AuditPersisted,
+				finalization.EnforcementPersisted,
+			)
+		}
+		return
+	}
+	a.dispatchAgentHookNotification(
+		req,
+		resp.Action,
+		resp.RawAction,
+		resp.Severity,
+		hookSourceReason(resp),
+		resp.WouldBlock,
+		hookEvaluationContext{EvaluationID: resp.EvaluationID, RuleIDs: resp.RuleIDs},
+		sinkPolicyFor(ctx, resp.RedactionEnabled),
+	)
 }
 
 func (a *APIServer) hookDecisionMeta(
@@ -1745,17 +1802,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		}
 	}
 
-	// Emit the per-rule findings BEFORE dispatching the OS toast
-	// so the notification can carry the same evaluation_id +
-	// rule_ids surfaced on the audit row + HTTP response.
+	// Emit per-rule findings before finalization so the eventual notification,
+	// audit row, and HTTP response share the same evaluation_id + rule_ids.
 	evalCtx := a.emitHookRuleFindings(ctx, req.ConnectorName, req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
-	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchAgentHookNotification(req, action, rawAction, severity, reason, wouldBlock, evalCtx,
-			sinkPolicyFor(ctx, verdict.RedactionEnabled))
-	}
 	// A configured block message overrides the user-facing reason on block
-	// verdicts only. The audit row + notification dispatched above keep the
+	// verdicts only. The audit row and post-finalization notification keep the
 	// original verdict reason, so telemetry retains the "why" while the agent
 	// shows the operator's message. Resolved per connector.
 	responseReason := resolveHookBlockReasonForConfig(a.scannerCfg, req.ConnectorName, action, reason)
@@ -1770,6 +1822,7 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
 	return resp
 }
 

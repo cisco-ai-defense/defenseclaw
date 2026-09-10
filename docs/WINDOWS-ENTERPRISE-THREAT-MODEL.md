@@ -184,6 +184,11 @@ not an administrator authority even though it is a machine service.
 7. `-NoStart` deliberately commits a disabled, stopped deployment. Only a
    complete later `Repair` without `-NoStart` may activate it; raw service
    starts are not an activation API. Failure rolls back and returns non-zero.
+8. A standalone Setup with no policy inputs uses the same disabled-state
+   boundary with protected placeholder config and an empty manifest. Protected
+   metadata records the pending state. Only `Repair` with both authenticated
+   policy files may prepare target runtimes, activate services, and clear it;
+   Upgrade and partial Repair fail before transaction mutation.
 
 ### Guardian reconcile
 
@@ -310,6 +315,9 @@ not an administrator authority even though it is a machine service.
   complete fresh drain interval before any service becomes startable.
 - `-NoStart` is a staged-disabled state, not permission to call SCM directly.
   Activation is a complete lifecycle transaction with a fresh guardian gate.
+- A deferred-config deployment is likewise staged-disabled. Direct policy
+  file-drop is not activation; only a complete Repair can clear its protected
+  pending marker and make the four services startable.
 - Target-owned managed reads are bounded independently of a prior metadata
   check. Managed helper downgrade preservation is disabled so an attacker
   cannot pin arbitrary bytes with a synthetic newer schema marker. The

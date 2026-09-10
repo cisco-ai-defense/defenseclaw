@@ -6704,6 +6704,13 @@ function Get-DefenseClawDeploymentMetadata {
         [void](Assert-DefenseClawManagedHooksActivationRecord `
             -Record $activationProperty.Value)
     }
+    $deferredConfigProperty = $metadata.PSObject.Properties[
+        'deferred_config_pending'
+    ]
+    if ($null -ne $deferredConfigProperty -and
+        $deferredConfigProperty.Value -isnot [bool]) {
+        throw 'deployment metadata has an invalid deferred configuration result'
+    }
     foreach ($pair in @(
         @('install_root', $Layout.InstallRoot),
         @('state_root', $Layout.StateRoot)
@@ -6832,6 +6839,7 @@ function New-DefenseClawDeploymentMetadata {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [bool]$Installed = $true,
+        [bool]$DeferredConfigPending = $false,
         $ManagedHooksActivation
     )
     # Every new metadata writer preserves the authenticated activation
@@ -6897,6 +6905,7 @@ function New-DefenseClawDeploymentMetadata {
         deployment_mode = 'managed_enterprise'
         core_hardening_certification = [bool]$Layout.CoreHardeningCertification
         installed = $Installed
+        deferred_config_pending = [bool]($Installed -and $DeferredConfigPending)
         install_root = $Layout.InstallRoot
         state_root = $Layout.StateRoot
         gateway_service = $GatewayServiceName
@@ -14558,6 +14567,9 @@ function Wait-DefenseClawEnterpriseReadiness {
     $brokerReady = $false
     $gatewayReady = $false
     $guardianReady = $false
+    $enumeratorReady = $false
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName `
+        -GuardianServiceName $GuardianServiceName
     do {
         $broker = Microsoft.PowerShell.Management\Get-Service `
             -Name $Layout.BrokerServiceName `
@@ -14571,12 +14583,18 @@ function Wait-DefenseClawEnterpriseReadiness {
                 -GatewayServiceName $GatewayServiceName `
                 -GuardianServiceName $GuardianServiceName
         }
-        if ($gatewayReady -and $guardianReady) {
+        $enumerator = Microsoft.PowerShell.Management\Get-Service `
+            -Name $enumeratorServiceName `
+            -ErrorAction SilentlyContinue
+        $enumeratorReady = $null -ne $enumerator -and
+            $enumerator.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
+        if ($brokerReady -and $gatewayReady -and
+            $guardianReady -and $enumeratorReady) {
             return
         }
         Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds 500
     } while ([DateTime]::UtcNow -lt $deadline)
-    throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady"
+    throw "enterprise readiness timed out: broker_ready=$brokerReady gateway_ready=$gatewayReady guardian_ready=$guardianReady enumerator_ready=$enumeratorReady"
 }
 
 function Get-DefenseClawOptionalPropertyValues {
@@ -15788,6 +15806,14 @@ function Get-DefenseClawLifecycleStatus {
     $gatewayState = Get-DefenseClawServiceState -Name $GatewayServiceName
     $brokerState = Get-DefenseClawServiceState -Name $Layout.BrokerServiceName
     $guardianState = Get-DefenseClawServiceState -Name $GuardianServiceName
+    $enumeratorServiceName = Get-DefenseClawEnumeratorServiceName `
+        -GuardianServiceName $GuardianServiceName
+    $enumeratorState = Get-DefenseClawServiceState -Name $enumeratorServiceName
+    $deferredConfigPending = [bool](
+        $installed -and
+        $null -ne $metadata.PSObject.Properties['deferred_config_pending'] -and
+        [bool]$metadata.deferred_config_pending
+    )
     $gatewayReady = $false
     $guardianReady = $false
     $codexRequirementsReady = $false
@@ -15864,6 +15890,7 @@ function Get-DefenseClawLifecycleStatus {
         $gatewayState -eq 'running' -and
             $brokerState -eq 'running' -and
             $guardianState -eq 'running' -and
+            $enumeratorState -eq 'running' -and
             $gatewayReady -and
             $guardianReady -and
             $codexRequirementsReady -and
@@ -15874,6 +15901,7 @@ function Get-DefenseClawLifecycleStatus {
         $gatewayState -eq 'absent' -and
             $brokerState -eq 'absent' -and
             $guardianState -eq 'absent' -and
+            $enumeratorState -eq 'absent' -and
             -not $pending -and
             $errors.Count -eq 0
     }
@@ -15896,12 +15924,15 @@ function Get-DefenseClawLifecycleStatus {
         install_root = $Layout.InstallRoot
         state_root = $Layout.StateRoot
         transaction_pending = [bool]$pending
+        deferred_config_pending = $deferredConfigPending
         gateway_service = $GatewayServiceName
         broker_service = $Layout.BrokerServiceName
         guardian_service = $GuardianServiceName
+        enumerator_service = $enumeratorServiceName
         gateway_service_state = $gatewayState
         broker_service_state = $brokerState
         guardian_service_state = $guardianState
+        enumerator_service_state = $enumeratorState
         gateway_ready = [bool]$gatewayReady
         guardian_ready = [bool]$guardianReady
         codex_machine_requirements_ready = [bool]$codexRequirementsReady
@@ -19574,7 +19605,8 @@ function Get-DefenseClawTargetRuntimePreparationMode {
         [Parameter(Mandatory)]
         [ValidateSet('Install', 'Upgrade', 'Repair')]
         [string]$Action,
-        [Parameter(Mandatory)][bool]$ManifestPresent
+        [Parameter(Mandatory)][bool]$ManifestPresent,
+        [switch]$PrepareDeferredActivation
     )
     if (-not $ManifestPresent) {
         throw (
@@ -19583,6 +19615,12 @@ function Get-DefenseClawTargetRuntimePreparationMode {
         )
     }
     if ($Action -eq 'Install') { return 'prepare' }
+    if ($PrepareDeferredActivation) {
+        if ($Action -ne 'Repair') {
+            throw 'deferred configuration activation requires Repair'
+        }
+        return 'prepare'
+    }
     return 'validate'
 }
 
@@ -19597,9 +19635,35 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         [switch]$RefreshClaudeEffectivePolicyAttestation,
         [switch]$InstallRootCreatedForTransaction,
         [switch]$StateRootCreatedForTransaction,
+        [switch]$DeferredConfig,
         [switch]$NoStart
     )
     $metadata = Get-DefenseClawDeploymentMetadata -Layout $Layout
+    $priorDeferredConfigPending = [bool](
+        $null -ne $metadata -and
+        $null -ne $metadata.PSObject.Properties['deferred_config_pending'] -and
+        [bool]$metadata.deferred_config_pending
+    )
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
+    if ($DeferredConfig -and
+        (-not $Sources.ContainsKey('config') -or
+            -not $Sources.ContainsKey('manifest'))) {
+        throw 'deferred Install requires protected placeholder config and manifest inputs'
+    }
+    if ($priorDeferredConfigPending) {
+        if ($Action -ne 'Repair') {
+            throw 'deferred configuration must be completed with Repair before Upgrade'
+        }
+        if (-not $Sources.ContainsKey('config') -or
+            -not $Sources.ContainsKey('manifest')) {
+            throw 'deferred configuration Repair requires both -Config and -Manifest'
+        }
+        if ($NoStart) {
+            throw 'deferred configuration Repair must activate services and cannot use -NoStart'
+        }
+    }
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
@@ -19936,7 +20000,8 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $targetRuntimePreparationMode =
             Get-DefenseClawTargetRuntimePreparationMode `
                 -Action $Action `
-                -ManifestPresent $targetRuntimeManifestPresent
+                -ManifestPresent $targetRuntimeManifestPresent `
+                -PrepareDeferredActivation:$priorDeferredConfigPending
         if ($Action -eq 'Install') {
             # New-DefenseClawTransaction has durably recorded every managed
             # service as absent and the install-preparation receipt is bound
@@ -19953,9 +20018,14 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         # Freeze the profile-derived target set while Enumerator and Guardian
         # are stopped. The protected target-runtime plan below then hashes the
         # exact manifest generation Guardian must prove before activation.
-        Invoke-DefenseClawEnumeratorRefresh `
-            -Layout $Layout `
-            -GatewayServiceName $GatewayServiceName
+        # A deferred first stage deliberately retains its empty placeholder:
+        # discovering users here would mutate their profiles before real policy
+        # exists. The authenticated completion Repair performs this refresh.
+        if (-not $DeferredConfig) {
+            Invoke-DefenseClawEnumeratorRefresh `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName
+        }
         # Resolve and publish every target root before SCM activation or any
         # gateway/guardian process can write user state. Only a fresh Install
         # may create an absent root; Upgrade/Repair authenticate every
@@ -20169,6 +20239,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
+            -DeferredConfigPending:([bool]$DeferredConfig) `
             -ManagedHooksActivation $managedHooksActivation
         Write-DefenseClawJsonAtomic -Value $newMetadata -Path $Layout.MetadataPath
         Set-DefenseClawManagedAcls -Layout $Layout -GatewayServiceName $GatewayServiceName
@@ -20314,7 +20385,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -GuardianServiceName $GuardianServiceName `
                 -RequireReadiness
         }
-        # -NoStart intentionally leaves both services disabled. Enabling them
+        # -NoStart intentionally leaves all managed services disabled. Enabling them
         # without first running a fresh guardian reconcile would let a queued
         # SCM restart violate the guardian-before-gateway invariant.
         Complete-DefenseClawTransaction -SnapshotPath $snapshot -Layout $Layout
@@ -20843,9 +20914,9 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$InstallerSource,
         [string]$ModuleSource,
         [int]$SelfUninstallCallerPID,
-        # Retained for command-line compatibility, but rejected before layout
-        # resolution until late config publication has an authenticated target
-        # runtime preparation and activation transaction.
+        # Initial late-configuration stage. The bootstrap supplies protected
+        # placeholder policy and the lifecycle leaves every service disabled;
+        # only a later Repair with both authenticated policy files can activate.
         [switch]$DeferredConfig
     )
     Assert-DefenseClawServiceName -Name $GatewayServiceName
@@ -20853,18 +20924,13 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     if ([string]::Equals($GatewayServiceName, $GuardianServiceName, [StringComparison]::OrdinalIgnoreCase)) {
         throw 'gateway and guardian Windows service names must be distinct'
     }
-    # Blocker 039 requires every enabled target runtime to be authenticated
-    # and prepared before any managed service can write user state. A
-    # deferred-config Install has no targets.yaml from which to derive that
-    # authority, and the legacy late-drop path has no transactional activation
-    # boundary. Reject it before resolving layout paths, opening the lifecycle
-    # lock, creating roots, or touching SCM; a normal Install with an
-    # authenticated manifest remains the supported path.
-    if ($DeferredConfig) {
-        throw (
-            '-DeferredConfig is temporarily unavailable: secure target ' +
-            'runtime preparation requires authenticated targets.yaml during Install'
-        )
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
+    if ($DeferredConfig -and
+        ([string]::IsNullOrWhiteSpace($Config) -or
+            [string]::IsNullOrWhiteSpace($Manifest))) {
+        throw 'deferred Install requires protected placeholder config and manifest inputs'
     }
     $certificationServiceScope = [Text.RegularExpressions.Regex]::IsMatch(
         $GatewayServiceName,
@@ -21274,6 +21340,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
             -RefreshClaudeEffectivePolicyAttestation:$AttestClaudeEffectivePolicy `
             -InstallRootCreatedForTransaction:$installRootCreatedForTransaction `
             -StateRootCreatedForTransaction:$stateRootCreatedForTransaction `
+            -DeferredConfig:$DeferredConfig `
             -NoStart:($NoStart -or $DeferredConfig)
     }
     finally {

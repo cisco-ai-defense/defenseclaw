@@ -68,6 +68,17 @@ try {
                 -Name Test-DefenseClawSourceDescriptorPublishesReplacement `
                 -CommandType Function
         ).ScriptBlock
+        $readinessSource = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Wait-DefenseClawEnterpriseReadiness `
+                -CommandType Function
+        ).ScriptBlock.ToString()
+        if ($readinessSource -cnotmatch (
+                'if\s*\(\$brokerReady\s+-and\s+\$gatewayReady\s+-and\s+' +
+                '\$guardianReady\s+-and\s+\$enumeratorReady\)'
+            )) {
+            throw 'enterprise readiness does not require all four managed services'
+        }
 
         function Assert-Harness {
             param(
@@ -2028,6 +2039,7 @@ targets:
                 [Parameter(Mandatory)][string]$GatewayServiceName,
                 [Parameter(Mandatory)][string]$GuardianServiceName,
                 $ManagedHooksActivation,
+                [bool]$DeferredConfigPending = $false,
                 [bool]$Installed = $true
             )
             if ($null -eq $ManagedHooksActivation) {
@@ -2040,6 +2052,9 @@ targets:
             }
             return [pscustomobject]@{
                 installed = [bool]$Installed
+                deferred_config_pending = [bool](
+                    $Installed -and $DeferredConfigPending
+                )
                 hashes = [ordered]@{ prior = 'hash' }
                 managed_hooks_activation = $ManagedHooksActivation
                 updated_at = [DateTime]::UtcNow.ToString('o')
@@ -7451,6 +7466,30 @@ targets:
         Assert-Harness `
             -Condition ($lowercaseInstallPreparationMode -ceq 'prepare') `
             -Message 'lowercase Install action skipped target preparation'
+        $deferredRepairPreparationMode =
+            Get-DefenseClawTargetRuntimePreparationMode `
+                -Action Repair `
+                -ManifestPresent $true `
+                -PrepareDeferredActivation
+        Assert-Harness `
+            -Condition ($deferredRepairPreparationMode -ceq 'prepare') `
+            -Message 'deferred configuration Repair did not prepare target runtimes'
+        $deferredUpgradeRejected = $false
+        try {
+            $null = Get-DefenseClawTargetRuntimePreparationMode `
+                -Action Upgrade `
+                -ManifestPresent $true `
+                -PrepareDeferredActivation
+        }
+        catch {
+            $deferredUpgradeRejected = [bool](
+                $_.Exception.Message -like
+                    '*deferred configuration activation requires Repair*'
+            )
+        }
+        Assert-Harness `
+            -Condition $deferredUpgradeRejected `
+            -Message 'deferred configuration activation accepted Upgrade'
         $missingManifestRejected = $false
         try {
             $null = Get-DefenseClawTargetRuntimePreparationMode `
@@ -7471,6 +7510,8 @@ targets:
             install = 'prepare'
             upgrade = 'validate'
             repair = 'validate'
+            deferred_repair = 'prepare'
+            deferred_upgrade = 'rejected'
             lowercase_install = 'prepare'
             missing_manifest = 'rejected'
         })
@@ -7845,7 +7886,20 @@ targets:
         }
 
         $deferredModuleGate = $enterpriseSource.IndexOf(
-            '-DeferredConfig is temporarily unavailable',
+            'deferred Install requires protected placeholder config and manifest inputs',
+            [StringComparison]::Ordinal
+        )
+        $installLikeSource = [string](
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Invoke-DefenseClawInstallLikeLifecycle `
+                -CommandType Function
+        ).ScriptBlock
+        $deferredEnumerationGate = $installLikeSource.IndexOf(
+            'if (-not $DeferredConfig)',
+            [StringComparison]::Ordinal
+        )
+        $enumeratorRefresh = $installLikeSource.IndexOf(
+            'Invoke-DefenseClawEnumeratorRefresh',
             [StringComparison]::Ordinal
         )
         $deferredModuleInvocationRejected = $false
@@ -7857,12 +7911,12 @@ targets:
         catch {
             $deferredModuleInvocationRejected = [bool](
                 $_.Exception.Message -like
-                    '*-DeferredConfig is temporarily unavailable*'
+                    '*deferred Install requires protected placeholder*'
             )
         }
         Assert-Harness `
             -Condition $deferredModuleInvocationRejected `
-            -Message 'module invocation did not reject deferred config at entry'
+            -Message 'module invocation accepted deferred config without protected placeholders'
         $moduleLayoutResolution = $enterpriseSource.IndexOf(
             'Resolve-DefenseClawCertificationCodexHome',
             [StringComparison]::Ordinal
@@ -7870,8 +7924,8 @@ targets:
         $bootstrapInstallerSource = Microsoft.PowerShell.Management\Get-Content `
             -LiteralPath $InstallerPath `
             -Raw
-        $deferredBootstrapGate = $bootstrapInstallerSource.IndexOf(
-            '-DeferredConfig is temporarily unavailable',
+        $deferredBootstrapPlaceholder = $bootstrapInstallerSource.IndexOf(
+            'deferred-config-placeholder.yaml',
             [StringComparison]::Ordinal
         )
         $bootstrapEnvironmentCreation = $bootstrapInstallerSource.IndexOf(
@@ -7882,15 +7936,18 @@ targets:
             -Condition (
                 $deferredModuleGate -ge 0 -and
                 $moduleLayoutResolution -gt $deferredModuleGate -and
-                $deferredBootstrapGate -ge 0 -and
-                $bootstrapEnvironmentCreation -gt $deferredBootstrapGate
+                $bootstrapEnvironmentCreation -ge 0 -and
+                $deferredBootstrapPlaceholder -gt $bootstrapEnvironmentCreation -and
+                $deferredEnumerationGate -ge 0 -and
+                $enumeratorRefresh -gt $deferredEnumerationGate
             ) `
-            -Message 'deferred config can reach layout or bootstrap mutation'
+            -Message 'deferred config placeholders are not created inside the protected bootstrap environment'
         $installRollbackContractResults.Add([pscustomobject]@{
-            name = 'deferred-config-rejected-before-mutation'
-            bootstrap_gate_precedes_environment = $true
-            module_gate_precedes_layout = $true
-            module_invocation_rejected = $deferredModuleInvocationRejected
+            name = 'deferred-config-protected-two-stage-contract'
+            bootstrap_placeholder_is_protected = $true
+            first_stage_enumeration_skipped = $true
+            incomplete_direct_module_call_rejected_before_layout = $true
+            module_invocation_rejected_without_placeholders = $deferredModuleInvocationRejected
         })
 
         $boundedFixtureRoot = Microsoft.PowerShell.Management\Join-Path `

@@ -757,7 +757,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 	for _, original := range []agentHookResponse{
 		{
 			Action: "allow", RawAction: "allow", Severity: "NONE",
-			Reason: "standalone allow", Mode: "action",
+			Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 		},
 		{
 			Action: "block", RawAction: "block", Severity: "CRITICAL",
@@ -773,6 +773,7 @@ func TestSafeApplyAgentHookToolChainsPreservesOriginalOnPanicBeforeCommit(t *tes
 			if got.Action != original.Action || got.RawAction != original.RawAction ||
 				got.Reason != original.Reason ||
 				got.EvaluationID != original.EvaluationID ||
+				got.SuppressNotification != original.SuppressNotification ||
 				!slices.Equal(got.Findings, original.Findings) ||
 				!slices.Equal(got.RuleIDs, original.RuleIDs) {
 				t.Fatalf(
@@ -841,7 +842,7 @@ func TestSafeApplyAgentHookToolChainsPreservesCommittedDenyOnPanic(t *testing.T)
 	}
 	original := agentHookResponse{
 		Action: "allow", RawAction: "allow", Severity: "NONE",
-		Reason: "standalone allow", Mode: "action",
+		Reason: "standalone allow", Mode: "action", SuppressNotification: true,
 	}
 
 	discoveryCapture := &toolChainHookCapture{}
@@ -893,6 +894,7 @@ func TestSafeApplyAgentHookToolChainsPreservesCommittedDenyOnPanic(t *testing.T)
 		0,
 	)
 	if got.Action != "block" || got.RawAction != "block" || got.WouldBlock ||
+		!got.SuppressNotification ||
 		!slices.Contains(got.RuleIDs, guardrail.ToolChainPrivilegeDiscoveryThenElevation) {
 		t.Fatalf("post-commit panic response=%+v", got)
 	}
