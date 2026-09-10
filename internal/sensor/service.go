@@ -32,6 +32,7 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/agentchain"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/catalog"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
@@ -90,8 +91,13 @@ type Options struct {
 	// targets.yaml.
 	HomeDirs []string
 	// NewPlaneSource builds the Plane C acquisition. Injectable so the host
-	// plane is testable without a kernel event source.
+	// plane is testable without a kernel event source. When set it overrides
+	// whatever the Acquirer would have supplied.
 	NewPlaneSource func(homeDirs []string) plane.Source
+	// Acquirer is where the privileged reads come from: directly from this
+	// process, or brokered by a helper that holds the privilege the gateway
+	// deliberately does not. Defaults to reading directly.
+	Acquirer acquire.Acquirer
 	// Now is injectable so the poll loop is testable without sleeping.
 	Now func() time.Time
 }
@@ -208,13 +214,16 @@ func New(options Options) (*Service, error) {
 	if options.Now == nil {
 		options.Now = time.Now
 	}
+	if options.Acquirer == nil {
+		options.Acquirer = acquire.NewLocal()
+	}
 	var (
 		dnsCache *dnscapture.Cache
 		dnsCap   dnscapture.Capturer
 	)
 	if options.Config.DNSCapture {
 		dnsCache = dnscapture.NewCache()
-		dnsCap = dnscapture.New()
+		dnsCap = options.Acquirer.DNSCapturer()
 	}
 	if options.Resolver == nil {
 		reverse := NewReverseResolver(options.Providers)
@@ -225,7 +234,7 @@ func New(options Options) (*Service, error) {
 		}
 	}
 	if options.NewPlaneSource == nil {
-		options.NewPlaneSource = plane.NewSource
+		options.NewPlaneSource = options.Acquirer.PlaneSource
 	}
 	service := &Service{
 		options:  options,
@@ -325,8 +334,8 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 	nameCtx, cancelNaming := context.WithTimeout(ctx, namingBudget(interval))
 	defer cancelNaming()
 
-	processes, processSkipped, processErr := procprobe.Snapshot()
-	connections, unattributed, connectionErr := netprobe.Snapshot()
+	processes, processSkipped, processErr := s.options.Acquirer.Processes(ctx)
+	connections, unattributed, connectionErr := s.options.Acquirer.Connections(ctx)
 
 	byPID := make(map[int][]netprobe.Connection, len(processes))
 	for _, connection := range connections {
