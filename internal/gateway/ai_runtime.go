@@ -307,10 +307,24 @@ func chooseAcquirer(
 	managedEnterprise := managed.IsManagedEnterprise(activeConfig.DeploymentMode)
 	mode := runtimeConfig.EffectiveAcquisition()
 	if mode == config.AcquisitionAuto {
-		if managedEnterprise {
+		mode = config.AcquisitionDirect
+		// Broker only where this process was de-privileged on purpose and a
+		// helper is therefore installed. Both halves matter.
+		//
+		// Managed alone is not the test: on macOS the managed gateway runs
+		// as root, because the cloud auth provider has to re-perm its
+		// per-machine credential store, so it can read everything directly
+		// and a broker would add a failure mode for nothing. Linux sandboxes
+		// its gateway to an unprivileged account with no capabilities, and
+		// Windows runs it as a virtual service account; those are the cases
+		// that need the helper.
+		//
+		// Privilege alone is not the test either: an unmanaged workstation
+		// gateway running without sudo also lacks wide coverage, and there
+		// is no helper installed for it to ask. It should read what it can
+		// and report the shortfall, not dial a socket nobody is serving.
+		if managedEnterprise && !acquire.NewLocal().WideCoverage() {
 			mode = config.AcquisitionHelper
-		} else {
-			mode = config.AcquisitionDirect
 		}
 	}
 	if mode != config.AcquisitionHelper {

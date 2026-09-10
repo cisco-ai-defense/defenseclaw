@@ -62,7 +62,26 @@ type darwinSource struct {
 	// the filtering happens here, immediately after decode and before the
 	// event reaches the buffer.
 	watched []string
+
+	// refusal is whatever eslogger said on stderr before giving up. Endpoint
+	// Security declines a client that lacks Full Disk Access, and the
+	// process exits within milliseconds -- so this is the only place the
+	// real reason exists.
+	refusalMu sync.Mutex
+	refusal   string
+
+	// exited is closed when the eslogger process has been reaped. One
+	// goroutine owns cmd.Wait(); everything else waits on this.
+	exited chan struct{}
 }
+
+// esStartupProbe is how long Start waits to see whether eslogger survives.
+//
+// Endpoint Security refuses a client and exits immediately, so a process
+// still alive after this window has a client and is delivering. Paying it
+// once at plane start buys the difference between "running" and "refused",
+// which is the difference between a quiet host and a blind one.
+const esStartupProbe = 2 * time.Second
 
 // NewSource returns the macOS Plane C source.
 func NewSource(homeDirs []string) Source {
@@ -136,17 +155,73 @@ func (s *darwinSource) Start(ctx context.Context) error {
 	go func() {
 		defer s.wg.Done()
 		// eslogger writes its Full Disk Access refusal to stderr and exits.
-		// Draining it keeps the pipe from filling and lets the reason surface.
+		// Keep the text: it names the exact grant the operator has to make,
+		// and discarding it -- which this did -- left the plane reporting
+		// itself as running while Endpoint Security had refused it.
 		scanner := bufio.NewScanner(stderr)
 		for scanner.Scan() {
-			_ = scanner.Text()
+			line := strings.TrimSpace(scanner.Text())
+			if line == "" {
+				continue
+			}
+			s.refusalMu.Lock()
+			if s.refusal == "" {
+				s.refusal = line
+			}
+			s.refusalMu.Unlock()
 		}
 	}()
+
+	// A refused client dies at once, so watch for that before claiming the
+	// plane is up.
+	//
+	// This goroutine owns cmd.Wait() for the lifetime of the source. Close
+	// kills the process and waits on this instead of calling Wait a second
+	// time, which would fail and, worse, race the pipe teardown against the
+	// reader.
+	exited := make(chan struct{})
+	go func() { defer close(exited); _ = cmd.Wait() }()
+	s.exited = exited
+
+	select {
+	case <-exited:
+		s.wg.Wait()
+		s.buffer.Close()
+		s.mu.Lock()
+		s.closed = true
+		s.mu.Unlock()
+		return fmt.Errorf("plane: %s", s.startupRefusal())
+	case <-time.After(esStartupProbe):
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+
 	go func() {
 		<-ctx.Done()
 		_ = s.Close()
 	}()
 	return nil
+}
+
+// startupRefusal renders why eslogger gave up.
+//
+// Endpoint Security's own message names the TCC authorization, which is the
+// actionable part, so it is preferred over anything this package could
+// invent. The fallback still has to say something an operator can act on:
+// an empty reason is the one thing a blinded plane must never report.
+func (s *darwinSource) startupRefusal() string {
+	s.refusalMu.Lock()
+	refusal := s.refusal
+	s.refusalMu.Unlock()
+	if refusal == "" {
+		return "eslogger exited immediately without a reason; Endpoint Security " +
+			"needs Full Disk Access for the process that launches the gateway"
+	}
+	if strings.Contains(refusal, "TCC") || strings.Contains(refusal, "NOT_PERMITTED") {
+		return refusal + " -- grant Full Disk Access to the process that launches " +
+			"the gateway (System Settings > Privacy & Security > Full Disk Access)"
+	}
+	return refusal
 }
 
 func (s *darwinSource) Close() error {
@@ -161,7 +236,9 @@ func (s *darwinSource) Close() error {
 
 	if cmd != nil && cmd.Process != nil {
 		_ = cmd.Process.Kill()
-		_ = cmd.Wait()
+	}
+	if s.exited != nil {
+		<-s.exited
 	}
 	s.wg.Wait()
 	s.buffer.Close()
