@@ -46,5 +46,7 @@ const (
 	maxPaths                = 256
 	maxNetwork              = 128
 	maxDataFlows            = 256
+	maxArtifacts            = 64
+	maxArchiveLineages      = 64
 	maxIssues               = 8
 )

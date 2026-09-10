@@ -171,6 +171,7 @@ func analyze(input Input) Facts {
 			dialect = DialectArgv
 		}
 		parsed := analyzeStructuredArgv(argv, startID, 0, dialect)
+		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
@@ -187,6 +188,7 @@ func analyze(input Input) Facts {
 			base.markAmbiguous(IssueConflictingSources)
 		}
 		parsed := parseCommandAs(command, dialect, startID, 0)
+		parsed.curlCapabilities = authenticatedCurlCapabilities(input.CurlCapabilities)
 		expandBoundedInlineInterpreters(&parsed, 0)
 		classifyOutput(&parsed)
 		enforceAnalyzeAuthority(&parsed)
@@ -1758,7 +1760,8 @@ func equivalentCommandStructure(left, right parseOutput) bool {
 	if len(left.commands) != len(right.commands) ||
 		!equalComparableSlices(left.paths, right.paths) ||
 		!equalComparableSlices(left.network, right.network) ||
-		!equalComparableSlices(left.dataFlows, right.dataFlows) {
+		!equalComparableSlices(left.dataFlows, right.dataFlows) ||
+		!equalComparableSlices(left.artifacts, right.artifacts) {
 		return false
 	}
 	for index := range left.commands {

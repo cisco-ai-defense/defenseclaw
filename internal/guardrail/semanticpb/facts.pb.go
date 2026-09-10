@@ -899,21 +899,118 @@ func (DataKind) EnumDescriptor() ([]byte, []int) {
 	return file_facts_proto_rawDescGZIP(), []int{12}
 }
 
+type ArtifactRole int32
+
+const (
+	ArtifactRole_ARTIFACT_ROLE_UNSPECIFIED ArtifactRole = 0
+	ArtifactRole_ARTIFACT_ROLE_PRODUCE     ArtifactRole = 1
+	ArtifactRole_ARTIFACT_ROLE_CONSUME     ArtifactRole = 2
+)
+
+// Enum value maps for ArtifactRole.
+var (
+	ArtifactRole_name = map[int32]string{
+		0: "ARTIFACT_ROLE_UNSPECIFIED",
+		1: "ARTIFACT_ROLE_PRODUCE",
+		2: "ARTIFACT_ROLE_CONSUME",
+	}
+	ArtifactRole_value = map[string]int32{
+		"ARTIFACT_ROLE_UNSPECIFIED": 0,
+		"ARTIFACT_ROLE_PRODUCE":     1,
+		"ARTIFACT_ROLE_CONSUME":     2,
+	}
+)
+
+func (x ArtifactRole) Enum() *ArtifactRole {
+	p := new(ArtifactRole)
+	*p = x
+	return p
+}
+
+func (x ArtifactRole) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ArtifactRole) Descriptor() protoreflect.EnumDescriptor {
+	return file_facts_proto_enumTypes[13].Descriptor()
+}
+
+func (ArtifactRole) Type() protoreflect.EnumType {
+	return &file_facts_proto_enumTypes[13]
+}
+
+func (x ArtifactRole) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ArtifactRole.Descriptor instead.
+func (ArtifactRole) EnumDescriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{13}
+}
+
+type ArtifactKind int32
+
+const (
+	ArtifactKind_ARTIFACT_KIND_UNSPECIFIED ArtifactKind = 0
+	ArtifactKind_ARTIFACT_KIND_ARCHIVE     ArtifactKind = 1
+)
+
+// Enum value maps for ArtifactKind.
+var (
+	ArtifactKind_name = map[int32]string{
+		0: "ARTIFACT_KIND_UNSPECIFIED",
+		1: "ARTIFACT_KIND_ARCHIVE",
+	}
+	ArtifactKind_value = map[string]int32{
+		"ARTIFACT_KIND_UNSPECIFIED": 0,
+		"ARTIFACT_KIND_ARCHIVE":     1,
+	}
+)
+
+func (x ArtifactKind) Enum() *ArtifactKind {
+	p := new(ArtifactKind)
+	*p = x
+	return p
+}
+
+func (x ArtifactKind) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ArtifactKind) Descriptor() protoreflect.EnumDescriptor {
+	return file_facts_proto_enumTypes[14].Descriptor()
+}
+
+func (ArtifactKind) Type() protoreflect.EnumType {
+	return &file_facts_proto_enumTypes[14]
+}
+
+func (x ArtifactKind) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ArtifactKind.Descriptor instead.
+func (ArtifactKind) EnumDescriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{14}
+}
+
 // Facts is the closed, bounded CEL activation for one trusted tool call.
 // It is private in-process policy material and must not be logged, audited,
 // persisted, or exposed through an API.
 type Facts struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	Tool          string                 `protobuf:"bytes,1,opt,name=tool,proto3" json:"tool,omitempty"`
-	Cwd           string                 `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`
-	ActiveHome    string                 `protobuf:"bytes,3,opt,name=active_home,json=activeHome,proto3" json:"active_home,omitempty"`
-	Parse         *ParseResult           `protobuf:"bytes,4,opt,name=parse,proto3" json:"parse,omitempty"`
-	Commands      []*CommandFact         `protobuf:"bytes,5,rep,name=commands,proto3" json:"commands,omitempty"`
-	Paths         []*PathFact            `protobuf:"bytes,6,rep,name=paths,proto3" json:"paths,omitempty"`
-	Network       []*NetworkFact         `protobuf:"bytes,7,rep,name=network,proto3" json:"network,omitempty"`
-	DataFlows     []*DataFlowFact        `protobuf:"bytes,8,rep,name=data_flows,json=dataFlows,proto3" json:"data_flows,omitempty"`
-	unknownFields protoimpl.UnknownFields
-	sizeCache     protoimpl.SizeCache
+	state           protoimpl.MessageState    `protogen:"open.v1"`
+	Tool            string                    `protobuf:"bytes,1,opt,name=tool,proto3" json:"tool,omitempty"`
+	Cwd             string                    `protobuf:"bytes,2,opt,name=cwd,proto3" json:"cwd,omitempty"`
+	ActiveHome      string                    `protobuf:"bytes,3,opt,name=active_home,json=activeHome,proto3" json:"active_home,omitempty"`
+	Parse           *ParseResult              `protobuf:"bytes,4,opt,name=parse,proto3" json:"parse,omitempty"`
+	Commands        []*CommandFact            `protobuf:"bytes,5,rep,name=commands,proto3" json:"commands,omitempty"`
+	Paths           []*PathFact               `protobuf:"bytes,6,rep,name=paths,proto3" json:"paths,omitempty"`
+	Network         []*NetworkFact            `protobuf:"bytes,7,rep,name=network,proto3" json:"network,omitempty"`
+	DataFlows       []*DataFlowFact           `protobuf:"bytes,8,rep,name=data_flows,json=dataFlows,proto3" json:"data_flows,omitempty"`
+	Artifacts       []*ArtifactFact           `protobuf:"bytes,9,rep,name=artifacts,proto3" json:"artifacts,omitempty"`
+	ArchiveLineages []*ArchiveArtifactLineage `protobuf:"bytes,10,rep,name=archive_lineages,json=archiveLineages,proto3" json:"archive_lineages,omitempty"`
+	unknownFields   protoimpl.UnknownFields
+	sizeCache       protoimpl.SizeCache
 }
 
 func (x *Facts) Reset() {
@@ -998,6 +1095,20 @@ func (x *Facts) GetNetwork() []*NetworkFact {
 func (x *Facts) GetDataFlows() []*DataFlowFact {
 	if x != nil {
 		return x.DataFlows
+	}
+	return nil
+}
+
+func (x *Facts) GetArtifacts() []*ArtifactFact {
+	if x != nil {
+		return x.Artifacts
+	}
+	return nil
+}
+
+func (x *Facts) GetArchiveLineages() []*ArchiveArtifactLineage {
+	if x != nil {
+		return x.ArchiveLineages
 	}
 	return nil
 }
@@ -1658,11 +1769,187 @@ func (x *DataFlowFact) GetTo() DataKind {
 	return DataKind_DATA_KIND_UNSPECIFIED
 }
 
+type ArtifactFact struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CommandId     int64                  `protobuf:"varint,1,opt,name=command_id,json=commandId,proto3" json:"command_id,omitempty"`
+	Role          ArtifactRole           `protobuf:"varint,2,opt,name=role,proto3,enum=defenseclaw.guardrail.semantic.v1.ArtifactRole" json:"role,omitempty"`
+	Kind          ArtifactKind           `protobuf:"varint,3,opt,name=kind,proto3,enum=defenseclaw.guardrail.semantic.v1.ArtifactKind" json:"kind,omitempty"`
+	Value         string                 `protobuf:"bytes,4,opt,name=value,proto3" json:"value,omitempty"`
+	Normalized    string                 `protobuf:"bytes,5,opt,name=normalized,proto3" json:"normalized,omitempty"`
+	Absolute      bool                   `protobuf:"varint,6,opt,name=absolute,proto3" json:"absolute,omitempty"`
+	Resolved      string                 `protobuf:"bytes,7,opt,name=resolved,proto3" json:"resolved,omitempty"`
+	Identity      string                 `protobuf:"bytes,8,opt,name=identity,proto3" json:"identity,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArtifactFact) Reset() {
+	*x = ArtifactFact{}
+	mi := &file_facts_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArtifactFact) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArtifactFact) ProtoMessage() {}
+
+func (x *ArtifactFact) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArtifactFact.ProtoReflect.Descriptor instead.
+func (*ArtifactFact) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *ArtifactFact) GetCommandId() int64 {
+	if x != nil {
+		return x.CommandId
+	}
+	return 0
+}
+
+func (x *ArtifactFact) GetRole() ArtifactRole {
+	if x != nil {
+		return x.Role
+	}
+	return ArtifactRole_ARTIFACT_ROLE_UNSPECIFIED
+}
+
+func (x *ArtifactFact) GetKind() ArtifactKind {
+	if x != nil {
+		return x.Kind
+	}
+	return ArtifactKind_ARTIFACT_KIND_UNSPECIFIED
+}
+
+func (x *ArtifactFact) GetValue() string {
+	if x != nil {
+		return x.Value
+	}
+	return ""
+}
+
+func (x *ArtifactFact) GetNormalized() string {
+	if x != nil {
+		return x.Normalized
+	}
+	return ""
+}
+
+func (x *ArtifactFact) GetAbsolute() bool {
+	if x != nil {
+		return x.Absolute
+	}
+	return false
+}
+
+func (x *ArtifactFact) GetResolved() string {
+	if x != nil {
+		return x.Resolved
+	}
+	return ""
+}
+
+func (x *ArtifactFact) GetIdentity() string {
+	if x != nil {
+		return x.Identity
+	}
+	return ""
+}
+
+type ArchiveArtifactLineage struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Identity      string                 `protobuf:"bytes,1,opt,name=identity,proto3" json:"identity,omitempty"`
+	ProducedBy    int64                  `protobuf:"varint,2,opt,name=produced_by,json=producedBy,proto3" json:"produced_by,omitempty"`
+	ConsumedBy    int64                  `protobuf:"varint,3,opt,name=consumed_by,json=consumedBy,proto3" json:"consumed_by,omitempty"`
+	Normalized    string                 `protobuf:"bytes,4,opt,name=normalized,proto3" json:"normalized,omitempty"`
+	Authoritative bool                   `protobuf:"varint,5,opt,name=authoritative,proto3" json:"authoritative,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ArchiveArtifactLineage) Reset() {
+	*x = ArchiveArtifactLineage{}
+	mi := &file_facts_proto_msgTypes[10]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ArchiveArtifactLineage) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ArchiveArtifactLineage) ProtoMessage() {}
+
+func (x *ArchiveArtifactLineage) ProtoReflect() protoreflect.Message {
+	mi := &file_facts_proto_msgTypes[10]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ArchiveArtifactLineage.ProtoReflect.Descriptor instead.
+func (*ArchiveArtifactLineage) Descriptor() ([]byte, []int) {
+	return file_facts_proto_rawDescGZIP(), []int{10}
+}
+
+func (x *ArchiveArtifactLineage) GetIdentity() string {
+	if x != nil {
+		return x.Identity
+	}
+	return ""
+}
+
+func (x *ArchiveArtifactLineage) GetProducedBy() int64 {
+	if x != nil {
+		return x.ProducedBy
+	}
+	return 0
+}
+
+func (x *ArchiveArtifactLineage) GetConsumedBy() int64 {
+	if x != nil {
+		return x.ConsumedBy
+	}
+	return 0
+}
+
+func (x *ArchiveArtifactLineage) GetNormalized() string {
+	if x != nil {
+		return x.Normalized
+	}
+	return ""
+}
+
+func (x *ArchiveArtifactLineage) GetAuthoritative() bool {
+	if x != nil {
+		return x.Authoritative
+	}
+	return false
+}
+
 var File_facts_proto protoreflect.FileDescriptor
 
 const file_facts_proto_rawDesc = "" +
 	"\n" +
-	"\vfacts.proto\x12!defenseclaw.guardrail.semantic.v1\"\xbd\x03\n" +
+	"\vfacts.proto\x12!defenseclaw.guardrail.semantic.v1\"\xf2\x04\n" +
 	"\x05Facts\x12\x12\n" +
 	"\x04tool\x18\x01 \x01(\tR\x04tool\x12\x10\n" +
 	"\x03cwd\x18\x02 \x01(\tR\x03cwd\x12\x1f\n" +
@@ -1673,7 +1960,10 @@ const file_facts_proto_rawDesc = "" +
 	"\x05paths\x18\x06 \x03(\v2+.defenseclaw.guardrail.semantic.v1.PathFactR\x05paths\x12H\n" +
 	"\anetwork\x18\a \x03(\v2..defenseclaw.guardrail.semantic.v1.NetworkFactR\anetwork\x12N\n" +
 	"\n" +
-	"data_flows\x18\b \x03(\v2/.defenseclaw.guardrail.semantic.v1.DataFlowFactR\tdataFlows\"\xe1\x01\n" +
+	"data_flows\x18\b \x03(\v2/.defenseclaw.guardrail.semantic.v1.DataFlowFactR\tdataFlows\x12M\n" +
+	"\tartifacts\x18\t \x03(\v2/.defenseclaw.guardrail.semantic.v1.ArtifactFactR\tartifacts\x12d\n" +
+	"\x10archive_lineages\x18\n" +
+	" \x03(\v29.defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineageR\x0farchiveLineages\"\xe1\x01\n" +
 	"\vParseResult\x12F\n" +
 	"\x06status\x18\x01 \x01(\x0e2..defenseclaw.guardrail.semantic.v1.ParseStatusR\x06status\x12D\n" +
 	"\adialect\x18\x02 \x01(\x0e2*.defenseclaw.guardrail.semantic.v1.DialectR\adialect\x12D\n" +
@@ -1740,7 +2030,29 @@ const file_facts_proto_rawDesc = "" +
 	"\x0ffrom_command_id\x18\x01 \x01(\x03R\rfromCommandId\x12\"\n" +
 	"\rto_command_id\x18\x02 \x01(\x03R\vtoCommandId\x12?\n" +
 	"\x04from\x18\x03 \x01(\x0e2+.defenseclaw.guardrail.semantic.v1.DataKindR\x04from\x12;\n" +
-	"\x02to\x18\x04 \x01(\x0e2+.defenseclaw.guardrail.semantic.v1.DataKindR\x02to*\xf6\x01\n" +
+	"\x02to\x18\x04 \x01(\x0e2+.defenseclaw.guardrail.semantic.v1.DataKindR\x02to\"\xc1\x02\n" +
+	"\fArtifactFact\x12\x1d\n" +
+	"\n" +
+	"command_id\x18\x01 \x01(\x03R\tcommandId\x12C\n" +
+	"\x04role\x18\x02 \x01(\x0e2/.defenseclaw.guardrail.semantic.v1.ArtifactRoleR\x04role\x12C\n" +
+	"\x04kind\x18\x03 \x01(\x0e2/.defenseclaw.guardrail.semantic.v1.ArtifactKindR\x04kind\x12\x14\n" +
+	"\x05value\x18\x04 \x01(\tR\x05value\x12\x1e\n" +
+	"\n" +
+	"normalized\x18\x05 \x01(\tR\n" +
+	"normalized\x12\x1a\n" +
+	"\babsolute\x18\x06 \x01(\bR\babsolute\x12\x1a\n" +
+	"\bresolved\x18\a \x01(\tR\bresolved\x12\x1a\n" +
+	"\bidentity\x18\b \x01(\tR\bidentity\"\xbc\x01\n" +
+	"\x16ArchiveArtifactLineage\x12\x1a\n" +
+	"\bidentity\x18\x01 \x01(\tR\bidentity\x12\x1f\n" +
+	"\vproduced_by\x18\x02 \x01(\x03R\n" +
+	"producedBy\x12\x1f\n" +
+	"\vconsumed_by\x18\x03 \x01(\x03R\n" +
+	"consumedBy\x12\x1e\n" +
+	"\n" +
+	"normalized\x18\x04 \x01(\tR\n" +
+	"normalized\x12$\n" +
+	"\rauthoritative\x18\x05 \x01(\bR\rauthoritative*\xf6\x01\n" +
 	"\vParseStatus\x12\x1c\n" +
 	"\x18PARSE_STATUS_UNSPECIFIED\x10\x00\x12\x1f\n" +
 	"\x1bPARSE_STATUS_NOT_APPLICABLE\x10\x01\x12\x19\n" +
@@ -1873,7 +2185,14 @@ const file_facts_proto_rawDesc = "" +
 	"\x10DATA_KIND_STDOUT\x10\x02\x12\x12\n" +
 	"\x0eDATA_KIND_FILE\x10\x03\x12\x15\n" +
 	"\x11DATA_KIND_NETWORK\x10\x04\x12\x15\n" +
-	"\x11DATA_KIND_PROCESS\x10\x05BMZKgithub.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb;semanticpbb\x06proto3"
+	"\x11DATA_KIND_PROCESS\x10\x05*c\n" +
+	"\fArtifactRole\x12\x1d\n" +
+	"\x19ARTIFACT_ROLE_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15ARTIFACT_ROLE_PRODUCE\x10\x01\x12\x19\n" +
+	"\x15ARTIFACT_ROLE_CONSUME\x10\x02*H\n" +
+	"\fArtifactKind\x12\x1d\n" +
+	"\x19ARTIFACT_KIND_UNSPECIFIED\x10\x00\x12\x19\n" +
+	"\x15ARTIFACT_KIND_ARCHIVE\x10\x01BMZKgithub.com/defenseclaw/defenseclaw/internal/guardrail/semanticpb;semanticpbb\x06proto3"
 
 var (
 	file_facts_proto_rawDescOnce sync.Once
@@ -1887,62 +2206,70 @@ func file_facts_proto_rawDescGZIP() []byte {
 	return file_facts_proto_rawDescData
 }
 
-var file_facts_proto_enumTypes = make([]protoimpl.EnumInfo, 13)
-var file_facts_proto_msgTypes = make([]protoimpl.MessageInfo, 9)
+var file_facts_proto_enumTypes = make([]protoimpl.EnumInfo, 15)
+var file_facts_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_facts_proto_goTypes = []any{
-	(ParseStatus)(0),       // 0: defenseclaw.guardrail.semantic.v1.ParseStatus
-	(Dialect)(0),           // 1: defenseclaw.guardrail.semantic.v1.Dialect
-	(IssueCode)(0),         // 2: defenseclaw.guardrail.semantic.v1.IssueCode
-	(CommandKind)(0),       // 3: defenseclaw.guardrail.semantic.v1.CommandKind
-	(CommandEffect)(0),     // 4: defenseclaw.guardrail.semantic.v1.CommandEffect
-	(QuoteKind)(0),         // 5: defenseclaw.guardrail.semantic.v1.QuoteKind
-	(OperationKind)(0),     // 6: defenseclaw.guardrail.semantic.v1.OperationKind
-	(PathAccess)(0),        // 7: defenseclaw.guardrail.semantic.v1.PathAccess
-	(PathFlavor)(0),        // 8: defenseclaw.guardrail.semantic.v1.PathFlavor
-	(NetworkScope)(0),      // 9: defenseclaw.guardrail.semantic.v1.NetworkScope
-	(NetworkTargetKind)(0), // 10: defenseclaw.guardrail.semantic.v1.NetworkTargetKind
-	(NetworkAction)(0),     // 11: defenseclaw.guardrail.semantic.v1.NetworkAction
-	(DataKind)(0),          // 12: defenseclaw.guardrail.semantic.v1.DataKind
-	(*Facts)(nil),          // 13: defenseclaw.guardrail.semantic.v1.Facts
-	(*ParseResult)(nil),    // 14: defenseclaw.guardrail.semantic.v1.ParseResult
-	(*CommandFact)(nil),    // 15: defenseclaw.guardrail.semantic.v1.CommandFact
-	(*ArgumentFact)(nil),   // 16: defenseclaw.guardrail.semantic.v1.ArgumentFact
-	(*RedirectFact)(nil),   // 17: defenseclaw.guardrail.semantic.v1.RedirectFact
-	(*WrapperFact)(nil),    // 18: defenseclaw.guardrail.semantic.v1.WrapperFact
-	(*PathFact)(nil),       // 19: defenseclaw.guardrail.semantic.v1.PathFact
-	(*NetworkFact)(nil),    // 20: defenseclaw.guardrail.semantic.v1.NetworkFact
-	(*DataFlowFact)(nil),   // 21: defenseclaw.guardrail.semantic.v1.DataFlowFact
+	(ParseStatus)(0),               // 0: defenseclaw.guardrail.semantic.v1.ParseStatus
+	(Dialect)(0),                   // 1: defenseclaw.guardrail.semantic.v1.Dialect
+	(IssueCode)(0),                 // 2: defenseclaw.guardrail.semantic.v1.IssueCode
+	(CommandKind)(0),               // 3: defenseclaw.guardrail.semantic.v1.CommandKind
+	(CommandEffect)(0),             // 4: defenseclaw.guardrail.semantic.v1.CommandEffect
+	(QuoteKind)(0),                 // 5: defenseclaw.guardrail.semantic.v1.QuoteKind
+	(OperationKind)(0),             // 6: defenseclaw.guardrail.semantic.v1.OperationKind
+	(PathAccess)(0),                // 7: defenseclaw.guardrail.semantic.v1.PathAccess
+	(PathFlavor)(0),                // 8: defenseclaw.guardrail.semantic.v1.PathFlavor
+	(NetworkScope)(0),              // 9: defenseclaw.guardrail.semantic.v1.NetworkScope
+	(NetworkTargetKind)(0),         // 10: defenseclaw.guardrail.semantic.v1.NetworkTargetKind
+	(NetworkAction)(0),             // 11: defenseclaw.guardrail.semantic.v1.NetworkAction
+	(DataKind)(0),                  // 12: defenseclaw.guardrail.semantic.v1.DataKind
+	(ArtifactRole)(0),              // 13: defenseclaw.guardrail.semantic.v1.ArtifactRole
+	(ArtifactKind)(0),              // 14: defenseclaw.guardrail.semantic.v1.ArtifactKind
+	(*Facts)(nil),                  // 15: defenseclaw.guardrail.semantic.v1.Facts
+	(*ParseResult)(nil),            // 16: defenseclaw.guardrail.semantic.v1.ParseResult
+	(*CommandFact)(nil),            // 17: defenseclaw.guardrail.semantic.v1.CommandFact
+	(*ArgumentFact)(nil),           // 18: defenseclaw.guardrail.semantic.v1.ArgumentFact
+	(*RedirectFact)(nil),           // 19: defenseclaw.guardrail.semantic.v1.RedirectFact
+	(*WrapperFact)(nil),            // 20: defenseclaw.guardrail.semantic.v1.WrapperFact
+	(*PathFact)(nil),               // 21: defenseclaw.guardrail.semantic.v1.PathFact
+	(*NetworkFact)(nil),            // 22: defenseclaw.guardrail.semantic.v1.NetworkFact
+	(*DataFlowFact)(nil),           // 23: defenseclaw.guardrail.semantic.v1.DataFlowFact
+	(*ArtifactFact)(nil),           // 24: defenseclaw.guardrail.semantic.v1.ArtifactFact
+	(*ArchiveArtifactLineage)(nil), // 25: defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
 }
 var file_facts_proto_depIdxs = []int32{
-	14, // 0: defenseclaw.guardrail.semantic.v1.Facts.parse:type_name -> defenseclaw.guardrail.semantic.v1.ParseResult
-	15, // 1: defenseclaw.guardrail.semantic.v1.Facts.commands:type_name -> defenseclaw.guardrail.semantic.v1.CommandFact
-	19, // 2: defenseclaw.guardrail.semantic.v1.Facts.paths:type_name -> defenseclaw.guardrail.semantic.v1.PathFact
-	20, // 3: defenseclaw.guardrail.semantic.v1.Facts.network:type_name -> defenseclaw.guardrail.semantic.v1.NetworkFact
-	21, // 4: defenseclaw.guardrail.semantic.v1.Facts.data_flows:type_name -> defenseclaw.guardrail.semantic.v1.DataFlowFact
-	0,  // 5: defenseclaw.guardrail.semantic.v1.ParseResult.status:type_name -> defenseclaw.guardrail.semantic.v1.ParseStatus
-	1,  // 6: defenseclaw.guardrail.semantic.v1.ParseResult.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
-	2,  // 7: defenseclaw.guardrail.semantic.v1.ParseResult.issues:type_name -> defenseclaw.guardrail.semantic.v1.IssueCode
-	3,  // 8: defenseclaw.guardrail.semantic.v1.CommandFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.CommandKind
-	1,  // 9: defenseclaw.guardrail.semantic.v1.CommandFact.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
-	4,  // 10: defenseclaw.guardrail.semantic.v1.CommandFact.effect:type_name -> defenseclaw.guardrail.semantic.v1.CommandEffect
-	16, // 11: defenseclaw.guardrail.semantic.v1.CommandFact.arguments:type_name -> defenseclaw.guardrail.semantic.v1.ArgumentFact
-	6,  // 12: defenseclaw.guardrail.semantic.v1.CommandFact.operations:type_name -> defenseclaw.guardrail.semantic.v1.OperationKind
-	17, // 13: defenseclaw.guardrail.semantic.v1.CommandFact.redirects:type_name -> defenseclaw.guardrail.semantic.v1.RedirectFact
-	18, // 14: defenseclaw.guardrail.semantic.v1.CommandFact.wrappers:type_name -> defenseclaw.guardrail.semantic.v1.WrapperFact
-	5,  // 15: defenseclaw.guardrail.semantic.v1.ArgumentFact.quote:type_name -> defenseclaw.guardrail.semantic.v1.QuoteKind
-	7,  // 16: defenseclaw.guardrail.semantic.v1.RedirectFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
-	7,  // 17: defenseclaw.guardrail.semantic.v1.PathFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
-	8,  // 18: defenseclaw.guardrail.semantic.v1.PathFact.flavor:type_name -> defenseclaw.guardrail.semantic.v1.PathFlavor
-	11, // 19: defenseclaw.guardrail.semantic.v1.NetworkFact.action:type_name -> defenseclaw.guardrail.semantic.v1.NetworkAction
-	9,  // 20: defenseclaw.guardrail.semantic.v1.NetworkFact.scope:type_name -> defenseclaw.guardrail.semantic.v1.NetworkScope
-	10, // 21: defenseclaw.guardrail.semantic.v1.NetworkFact.target_kind:type_name -> defenseclaw.guardrail.semantic.v1.NetworkTargetKind
-	12, // 22: defenseclaw.guardrail.semantic.v1.DataFlowFact.from:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
-	12, // 23: defenseclaw.guardrail.semantic.v1.DataFlowFact.to:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
-	24, // [24:24] is the sub-list for method output_type
-	24, // [24:24] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	16, // 0: defenseclaw.guardrail.semantic.v1.Facts.parse:type_name -> defenseclaw.guardrail.semantic.v1.ParseResult
+	17, // 1: defenseclaw.guardrail.semantic.v1.Facts.commands:type_name -> defenseclaw.guardrail.semantic.v1.CommandFact
+	21, // 2: defenseclaw.guardrail.semantic.v1.Facts.paths:type_name -> defenseclaw.guardrail.semantic.v1.PathFact
+	22, // 3: defenseclaw.guardrail.semantic.v1.Facts.network:type_name -> defenseclaw.guardrail.semantic.v1.NetworkFact
+	23, // 4: defenseclaw.guardrail.semantic.v1.Facts.data_flows:type_name -> defenseclaw.guardrail.semantic.v1.DataFlowFact
+	24, // 5: defenseclaw.guardrail.semantic.v1.Facts.artifacts:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactFact
+	25, // 6: defenseclaw.guardrail.semantic.v1.Facts.archive_lineages:type_name -> defenseclaw.guardrail.semantic.v1.ArchiveArtifactLineage
+	0,  // 7: defenseclaw.guardrail.semantic.v1.ParseResult.status:type_name -> defenseclaw.guardrail.semantic.v1.ParseStatus
+	1,  // 8: defenseclaw.guardrail.semantic.v1.ParseResult.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
+	2,  // 9: defenseclaw.guardrail.semantic.v1.ParseResult.issues:type_name -> defenseclaw.guardrail.semantic.v1.IssueCode
+	3,  // 10: defenseclaw.guardrail.semantic.v1.CommandFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.CommandKind
+	1,  // 11: defenseclaw.guardrail.semantic.v1.CommandFact.dialect:type_name -> defenseclaw.guardrail.semantic.v1.Dialect
+	4,  // 12: defenseclaw.guardrail.semantic.v1.CommandFact.effect:type_name -> defenseclaw.guardrail.semantic.v1.CommandEffect
+	18, // 13: defenseclaw.guardrail.semantic.v1.CommandFact.arguments:type_name -> defenseclaw.guardrail.semantic.v1.ArgumentFact
+	6,  // 14: defenseclaw.guardrail.semantic.v1.CommandFact.operations:type_name -> defenseclaw.guardrail.semantic.v1.OperationKind
+	19, // 15: defenseclaw.guardrail.semantic.v1.CommandFact.redirects:type_name -> defenseclaw.guardrail.semantic.v1.RedirectFact
+	20, // 16: defenseclaw.guardrail.semantic.v1.CommandFact.wrappers:type_name -> defenseclaw.guardrail.semantic.v1.WrapperFact
+	5,  // 17: defenseclaw.guardrail.semantic.v1.ArgumentFact.quote:type_name -> defenseclaw.guardrail.semantic.v1.QuoteKind
+	7,  // 18: defenseclaw.guardrail.semantic.v1.RedirectFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
+	7,  // 19: defenseclaw.guardrail.semantic.v1.PathFact.access:type_name -> defenseclaw.guardrail.semantic.v1.PathAccess
+	8,  // 20: defenseclaw.guardrail.semantic.v1.PathFact.flavor:type_name -> defenseclaw.guardrail.semantic.v1.PathFlavor
+	11, // 21: defenseclaw.guardrail.semantic.v1.NetworkFact.action:type_name -> defenseclaw.guardrail.semantic.v1.NetworkAction
+	9,  // 22: defenseclaw.guardrail.semantic.v1.NetworkFact.scope:type_name -> defenseclaw.guardrail.semantic.v1.NetworkScope
+	10, // 23: defenseclaw.guardrail.semantic.v1.NetworkFact.target_kind:type_name -> defenseclaw.guardrail.semantic.v1.NetworkTargetKind
+	12, // 24: defenseclaw.guardrail.semantic.v1.DataFlowFact.from:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
+	12, // 25: defenseclaw.guardrail.semantic.v1.DataFlowFact.to:type_name -> defenseclaw.guardrail.semantic.v1.DataKind
+	13, // 26: defenseclaw.guardrail.semantic.v1.ArtifactFact.role:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactRole
+	14, // 27: defenseclaw.guardrail.semantic.v1.ArtifactFact.kind:type_name -> defenseclaw.guardrail.semantic.v1.ArtifactKind
+	28, // [28:28] is the sub-list for method output_type
+	28, // [28:28] is the sub-list for method input_type
+	28, // [28:28] is the sub-list for extension type_name
+	28, // [28:28] is the sub-list for extension extendee
+	0,  // [0:28] is the sub-list for field type_name
 }
 
 func init() { file_facts_proto_init() }
@@ -1955,8 +2282,8 @@ func file_facts_proto_init() {
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_facts_proto_rawDesc), len(file_facts_proto_rawDesc)),
-			NumEnums:      13,
-			NumMessages:   9,
+			NumEnums:      15,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

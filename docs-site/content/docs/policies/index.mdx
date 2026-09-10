@@ -290,7 +290,13 @@ For each category a judge flags, it also emits a `signal_strength` label derived
 | ✗ | ✓ | `needs_review` |
 | ✗ | ✗ | `weak_signal` |
 
-The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/security_suite/eval_corpus/README.md) for the scorecard.
+The Go-side tool-judge aggregation ignores `weak_signal`. A `needs_review`
+finding can alert but cannot block by itself. Blocking requires an actionable
+corroborated category or strong structural exfiltration/destruction evidence;
+ordinary authorized coding context therefore does not become a block merely
+because one ambiguous category fired. Read the
+[contextual judge benchmark](/docs/llm-judge-benchmark) for the production-path
+F1, false-positive, benign-block, latency, token, and cost results.
 
 Judge configuration is split by detector under `judge/`. For example, the
 injection judge declares its categories and severity mapping in

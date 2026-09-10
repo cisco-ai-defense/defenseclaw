@@ -266,6 +266,22 @@ func TestStaticCurlFTPControlRequestComponents(t *testing.T) {
 			want: components("ftp", "one.example", 0, token),
 		},
 		{
+			name: "later lazy form failure keeps earlier sequential account",
+			argv: []string{
+				"curl", "--ftp-account", token, "ftp://one.example/", "--next",
+				"--form", "x=@/missing", "https://two.example/",
+			},
+			want: components("ftp", "one.example", 0, token),
+		},
+		{
+			name: "parallel later upload failure closes earlier account",
+			argv: []string{
+				"curl", "--parallel", "--ftp-account", token,
+				"ftp://one.example/", "--next", "--upload-file",
+				"/missing/payload", "https://two.example/",
+			},
+		},
+		{
 			name: "later malformed form type aborts before prior login",
 			argv: []string{
 				"curl", "--ftp-account", token, "ftp://one.example/", "--next",

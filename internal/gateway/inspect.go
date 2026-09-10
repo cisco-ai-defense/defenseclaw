@@ -747,11 +747,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// Judge lane (J3-3b): forward the tool args to the LLM judge for
 	// connectors opted into the tool_call direction via
 	// guardrail.judge.hook_connectors + EffectiveStrategy("tool_call").
-	// Tool-call args are agent-initiated input, so they are judged under
-	// the "prompt" direction (injection + exfil). The shipped default
-	// (regex_only) returns nil and no LLM round-trip happens. Runs after
-	// the regex/AID lanes so regex_judge can skip the round-trip when the
-	// local lanes already condemned the call.
+	// Tool-call args use the dedicated tool-injection judge. Sending this
+	// surface through the ordinary prompt judges loses the tool's semantic
+	// boundary: it can mistake source-code strings for instructions while
+	// missing destructive or exfiltrating command effects. The shipped
+	// default (regex_only) returns nil and no LLM round-trip happens. Runs
+	// after the regex/AID lanes so regex_judge can skip the round-trip when
+	// the local lanes already condemned the call.
 	if jv := a.runHookJudge(ctx, "tool_call", "prompt", req.Connector, argsStr, toolName, verdict); jv != nil {
 		verdict = mergeWithJudgeVerdict(verdict, jv)
 	}
@@ -1238,9 +1240,8 @@ func (a *APIServer) hookJudgeInspect(ctx context.Context, req *ToolInspectReques
 //     tool-call args, "completion" for tool output / completions,
 //     "prompt" for prompts. Maps to the --detection-strategy-* flags
 //     fu/setup writes onto `setup guardrail`.
-//   - judgeDirection is the proxy-lane vocabulary RunJudges speaks:
-//     "prompt" runs injection + exfil (+ PII-prompt); "completion" the
-//     PII-completion judge.
+//   - judgeDirection is the proxy-lane vocabulary RunJudges speaks for
+//     message/tool-result content. Tool calls bypass it and use RunToolJudge.
 //
 // The judge round-trip is bounded by its OWN timeout (JudgeConfig.HookTimeout,
 // else defaultHookJudgeTimeout) derived from the supplied parent ctx —
@@ -1308,7 +1309,12 @@ func (a *APIServer) runHookJudge(ctx context.Context, strategyDirection, judgeDi
 	if strings.EqualFold(toolName, "message") {
 		toolName = ""
 	}
-	v := a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+	var v *ScanVerdict
+	if strings.EqualFold(strategyDirection, "tool_call") {
+		v = a.hookJudge.RunToolJudge(jctx, toolName, content)
+	} else {
+		v = a.hookJudge.RunJudges(jctx, judgeDirection, content, toolName)
+	}
 	if v == nil || v.JudgeFailed {
 		// Degrade LOUD: surface the judge unavailability so operators
 		// can see the lane fell back to the regex/AID verdict rather

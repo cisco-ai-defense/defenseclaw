@@ -4,6 +4,12 @@ This directory contains the public benchmark harness, schemas, dataset lock,
 normalizers, authored conformance fixtures, and published scorecard for
 DefenseClaw's deterministic guardrails.
 
+The separate [`llm_judge/`](llm_judge/) lane runs local Ollama models through
+DefenseClaw's production `LLMJudge` request, shipped rule-pack prompts, JSON
+parser, and verdict mapping. It combines those predictions with the same
+datasets and deterministic engine used by this benchmark. Tool-risk training
+and protected corpora are outside this lane.
+
 All external sources are publicly accessible and revision-pinned in
 [`datasets.lock.json`](datasets.lock.json). Source records are downloaded into
 an ignored local data directory and are not committed. The harness never
