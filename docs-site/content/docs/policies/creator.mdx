@@ -13,17 +13,35 @@ keywords:
 import PolicyCreator from "@/components/policy-creator";
 
 Two ways in: step through a six-screen wizard and we'll assemble a complete policy (**Quick
-Start**), or open every knob the engine reads, section by section (**Playground**). Both tabs share
-the same draft policy, so you can interview-then-tweak, and either side surfaces a live OPA verdict
-in your browser as you go.
+Start**), or edit the policy surfaces supported by the creator section by section (**Playground**).
+Both tabs share the same draft policy, so you can interview-then-tweak. The browser preview evaluates
+the OPA/Rego policy domains; the creator separately inventories deterministic detector coverage that
+is compiled into DefenseClaw.
 
 <Callout type="info" title="No data leaves the page">
 The wizard ships compiled WebAssembly copies of the bundled Rego (admission, guardrail, firewall,
-audit, skill_actions). Evaluation happens entirely in your browser — your draft policy and the
-inputs you test against are never uploaded. Saved progress lives in `localStorage`.
+audit, skill_actions). OPA evaluation happens entirely in your browser — your draft policy and the
+inputs you test against are never uploaded. Saved progress lives in `localStorage`. The Live Test
+does not execute ActionFacts parsers, CEL, regex, YARA, or bounded tool-call chains.
 </Callout>
 
 <PolicyCreator />
+
+## Current creator coverage
+
+The creator loads its editable rule catalog from the same generated assets as the repository
+profiles. In this snapshot, Balanced/default exposes 188 declared rules (184 enabled), Permissive
+188 (180 enabled), and Strict 187 (all enabled). Each profile carries 81 CEL declarations and 61
+`tool_call_only` rules. The recipe picker exposes every generated rule family, and Quick Start rule
+and correlator IDs are checked against all three profiles in the Policy Creator test suite.
+
+The **Deterministic coverage** Playground section is intentionally an inventory rather than an
+editor. It shows six ActionFacts capability groups, 18 fixed bounded chains (eight
+enforcement-capable and ten alert-only), five alert-only MCP-description YARA signatures, five
+selectable high-assurance packs, and the staged SSH integrity contract. Selectable packs can be
+layered directly into the custom rule pack; the generated asset is checked against the canonical
+repository YAML. For the proof model and the complete rule inventory, see
+[Deterministic detection reference](/docs/policies/deterministic-detection).
 
 ## Power features
 
@@ -31,8 +49,8 @@ These small affordances exist on top of the two main tabs to shorten the most co
 
 | Feature | Where | What it does |
 | --- | --- | --- |
-| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that pipes the in-progress policy through OPA-WASM against canned scenarios. Lets you watch the verdict change as you click cards. |
-| **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
+| **Live preview drawer** | Quick Start (every step except Review) | Floating bottom-right pane that evaluates the in-progress admission, guardrail, firewall, audit, or skill-actions Rego policy against canned scenarios. |
+| **Custom test input** | Live Test pane (in the drawer or on the Review step) | Switch the OPA/Rego input source from "canned scenario" to "custom input" and paste your own JSON. Per-domain drafts persist to `localStorage`. Re-evaluates 250 ms after you stop typing. |
 | **`⌘K` / `Ctrl-K` palette** | Playground | Fuzzy-search every section and knob ("hilt severity", "splunk hec token", "block threshold"). Selecting a result expands the matching section, scrolls to it, and flashes a brief outline. |
 | **Syntax-highlighted Rego editor** | Playground → Custom Rego | Zero-dependency editor: transparent textarea over a tokenized overlay. Tab inserts 2 spaces, Shift-Tab dedents. Highlighting is presentation-only — `opa check` runs on your host at install time. |
 | **Copy share link** | Quick Start Review + Playground Review | Encodes the current policy into the URL fragment as `gzip + base64url`, copies the link to your clipboard. The fragment never leaves your browser as a network request, but the link itself contains the policy — share it like you would the YAML. |
@@ -53,7 +71,7 @@ yellow banner explaining which check failed instead of clobbering your draft.
   <Card
     title="Playground"
     href="#"
-    description="18 collapsible sections covering every knob the engine reads. Use this for fine-tuning the Quick Start output, hand-authoring rule packs, or writing custom Rego snippets."
+    description="Collapsible editors for the policy surfaces the creator can safely emit, plus repository-backed visibility into fixed deterministic detectors. Use this for fine-tuning Quick Start output, authoring rule packs, or writing custom Rego snippets."
   />
 </Cards>
 
@@ -76,9 +94,10 @@ findings block installs); Strict is for regulated workloads where false-positive
 
 <Step>
 
-**Step 2 — What to block.** Nine cards grouped under four headers (Data leaks, Network exfiltration,
-Code execution, LLM-layer attacks). Multi-select. Each card lists exactly which rules it enables
-and which firewall destinations it adds — deep-link to the
+**Step 2 — What to block.** Ten cards grouped under five headers (Data leaks, Network exfiltration,
+Code execution, LLM-layer attacks, Multi-step attack patterns). Multi-select. Each card lists the
+bundled rule IDs, firewall destinations, guardrail patterns, or editable session-correlator patterns
+it enables — deep-link to the
 [regex cookbook](/docs/policies/regex-cookbook) to see the patterns it ships.
 
 </Step>
@@ -109,7 +128,7 @@ Secrets are referenced by env var name only — never typed inline.
 
 <Step>
 
-**Step 6 — Review.** Inline policy summary plus the live OPA test pane: pick a canned scenario (a
+**Step 6 — Review.** Inline policy summary plus the OPA/Rego-only Live Test pane: pick a canned scenario (a
 CRITICAL secret in a skill, an MCP install with a sketchy domain, a quarantined plugin), see the
 verdict (`blocked` / `allowed` / `quarantined`), and tweak earlier steps until it matches intent.
 Then **Open in Playground →** hands you off to the full editor with everything pre-filled. The
@@ -132,11 +151,12 @@ defenseclaw policy activate my-policy
 | Severity matrix  | `skill_actions.<sev>` (runtime/file/install) plus per-scanner `scanner_overrides.<scanner>.<sev>`.                                     |
 | Admission        | `admission.scan_on_install`, `admission.allow_list_bypass_scan`, and `first_party_allow_list` entries.                                 |
 | Guardrail        | `guardrail.block_threshold` / `alert_threshold`, `guardrail.hilt`, `guardrail.patterns`, `severity_mappings`, Cisco trust level.       |
-| Rule pack        | Per-file CEL expressions with required regex fallback, plus regex-only rules (`policies/guardrail/<pack>/rules/<filename>.yaml`).       |
+| Rule pack        | Per-file regex rules and CEL candidate expressions, including `tool_call_only` scoping (`policies/guardrail/<pack>/rules/<filename>.yaml`). |
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
-| Session correlator (Layer 5) | `correlator` array — sliding-window attack patterns (lethal trifecta, escalation chain, destructive flow). Mirrors `internal/guardrail/correlator.go`. |
+| Session correlator (Layer 5) | The two editable post-event correlator patterns bundled in `correlation-patterns.yaml`. These are distinct from the 18 fixed ActionFacts chains. |
+| Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 18 bounded tool-call chains, and the five MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
 | Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
 | Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
@@ -149,6 +169,20 @@ defenseclaw policy activate my-policy
 
 ## Limits to know about
 
+- **Live Test is OPA/Rego-only.** It evaluates the five bundled WASM policy domains: admission,
+  guardrail, firewall, audit, and skill actions. It does not run the Go ActionFacts parser, compile
+  CEL, execute RE2 rules, scan MCP descriptions with YARA, or replay bounded chains. Use the exported
+  policy on a DefenseClaw host and run the repository test/benchmark harness for those lanes.
+- **Fixed deterministic detectors are read-only.** The 18 bounded chains and five YARA signatures
+  shown by the creator are repository-owned runtime/scanner capabilities, not arbitrary policy
+  programs. The creator can display their coverage and the active posture, but it does not rewrite
+  their implementations. The two Layer-5 session correlator patterns remain separately editable.
+- **CEL does not grant block authority.** A custom CEL expression is a bounded detection selector
+  evaluated at an authenticated tool-call boundary. A match cannot make itself enforcement-safe.
+  Blocking still requires an eligible synchronous connector, the active profile's disposition, and
+  a complete code-owned proof pinned to the same rule ID. Unsupported, ambiguous, conditional, or
+  over-budget facts remain detection-only. Browser validation is preflight only; final CEL
+  compilation and admission happen on the DefenseClaw host.
 - **Rego compilation is offline.** The wizard exports `data.json` (read by the bundled Rego at runtime)
   and any custom snippets you author. It does *not* recompile the shipped Rego — for that you still
   need `opa build` on the host. The lint in the Custom Rego section catches the obvious shape

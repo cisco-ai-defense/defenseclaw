@@ -1,0 +1,14 @@
+version: 1
+category: infrastructure-destruction-protection
+rules:
+  - id: impact.iac_full_destroy
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['terraform', 'tofu', 'pulumi'] &&
+      (('destroy' in c.argv) || ('-destroy' in c.argv)))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Full infrastructure-as-code destruction"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, infrastructure-as-code, production-safety]

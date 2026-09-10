@@ -148,6 +148,18 @@ def bundled_guardrail_profiles_dir() -> Path | None:
     return None
 
 
+def bundled_mcp_yara_rules_dir() -> Path | None:
+    """DefenseClaw's supplemental MCP tool-description YARA rules."""
+    candidates = [
+        _DATA_DIR / "policies" / "yara" / "mcp-tools",
+        _REPO_ROOT / "policies" / "yara" / "mcp-tools",
+    ]
+    for candidate in candidates:
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
 def bundled_openshell_policies_dir() -> Path | None:
     """OpenShell policy templates (default.rego, default-data.yaml, etc.)."""
     candidates = [

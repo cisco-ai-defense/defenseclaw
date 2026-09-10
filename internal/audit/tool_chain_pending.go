@@ -117,7 +117,9 @@ type ToolChainResetForTerminalEventSessionResult struct {
 type persistedToolChainPending struct {
 	connector, invocation, session, preEvent, preInput, projectionFP string
 	ruleset, parseStatus                                             string
-	detectionSteps, enforcementSteps                                 uint16
+	detectionSteps, enforcementSteps                                 uint64
+	enforcementJoinDigests                                           [guardrail.ToolChainCount]string
+	enforcementOutputJoinDigests                                     [guardrail.ToolChainCount]string
 	prepared, expires                                                int64
 }
 
@@ -267,13 +269,17 @@ func (repo *ToolChainRepository) preparePendingTx(
 		repo.store.sqliteBusyObservabilityV8(), `INSERT INTO guardrail_chain_pending_actions (
 			connector_instance_id, tool_invocation_digest, session_value_digest,
 			pre_semantic_event_id, pre_input_fingerprint, projection_fingerprint,
-			ruleset_fingerprint, parse_status, detection_step_mask,
-			enforcement_step_mask, prepared_time_unix_nano, expires_time_unix_nano
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ruleset_fingerprint, parse_status, detection_step_mask,
+		enforcement_step_mask, enforcement_join_digests,
+		enforcement_output_join_digests,
+		prepared_time_unix_nano, expires_time_unix_nano
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(input.ConnectorInstanceID), input.ToolInvocationDigest, session,
 		string(input.PreSemanticEventID), input.PreInputFingerprint, projectionFP,
 		input.RulesetFingerprint, string(input.Projection.ParseStatus),
 		input.Projection.DetectionStepMask, input.Projection.EnforcementStepMask,
+		encodeToolChainJoinDigests(input.Projection.EnforcementJoinDigests),
+		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
 		unixNano(now), unixNano(expires))
 	if err != nil {
 		return ToolChainPreparePendingResult{}, err
@@ -381,18 +387,37 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		return ToolChainResolvePendingResult{Status: ToolChainPendingExpired}, nil
 	}
 	projection := guardrail.ToolChainProjection{
-		ParseStatus:         actionfacts.ParseStatus(pending.parseStatus),
-		DetectionStepMask:   pending.detectionSteps,
-		EnforcementStepMask: pending.enforcementSteps,
+		ParseStatus:                  actionfacts.ParseStatus(pending.parseStatus),
+		DetectionStepMask:            pending.detectionSteps,
+		EnforcementStepMask:          pending.enforcementSteps,
+		EnforcementJoinDigests:       pending.enforcementJoinDigests,
+		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
 	}
 	if projection.DetectionStepMask == 0 {
+		// A successfully resolved but semantically unrelated tool call still
+		// consumes one position in the bounded event window. Persist only this
+		// content-free marker; otherwise an attacker could stretch a nominally
+		// eight-event proof across an unbounded number of successful calls.
+		observation, observeErr := repo.observeTx(ctx, tx, ToolChainObserveInput{
+			SemanticEventID:     input.TerminalSemanticEventID,
+			ConnectorInstanceID: input.ConnectorInstanceID,
+			InputFingerprint:    input.TerminalInputFingerprint,
+			RulesetFingerprint:  input.RulesetFingerprint,
+			Projection:          projection,
+			DenyEligible:        false,
+		}, now)
+		if observeErr != nil {
+			return ToolChainResolvePendingResult{}, observeErr
+		}
 		if err := deleteToolChainPending(
 			ctx, tx, repo, input.ConnectorInstanceID, session,
 			input.ToolInvocationDigest,
 		); err != nil {
 			return ToolChainResolvePendingResult{}, err
 		}
-		return ToolChainResolvePendingResult{Status: ToolChainPendingResolved}, nil
+		return ToolChainResolvePendingResult{
+			Status: ToolChainPendingResolved, Observation: observation,
+		}, nil
 	}
 	observation, err := repo.observeTx(ctx, tx, ToolChainObserveInput{
 		SemanticEventID:     input.TerminalSemanticEventID,
@@ -913,10 +938,12 @@ func loadToolChainPending(
 	invocationDigest string,
 ) (persistedToolChainPending, bool, error) {
 	var pending persistedToolChainPending
+	var enforcementJoinDigests, enforcementOutputJoinDigests string
 	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id,
 		tool_invocation_digest, session_value_digest, pre_semantic_event_id,
 		pre_input_fingerprint, projection_fingerprint, ruleset_fingerprint,
 		parse_status, detection_step_mask, enforcement_step_mask,
+		enforcement_join_digests, enforcement_output_join_digests,
 		prepared_time_unix_nano, expires_time_unix_nano
 		FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
@@ -925,7 +952,9 @@ func loadToolChainPending(
 		&pending.connector, &pending.invocation, &pending.session,
 		&pending.preEvent, &pending.preInput, &pending.projectionFP,
 		&pending.ruleset, &pending.parseStatus, &pending.detectionSteps,
-		&pending.enforcementSteps, &pending.prepared, &pending.expires,
+		&pending.enforcementSteps, &enforcementJoinDigests,
+		&enforcementOutputJoinDigests,
+		&pending.prepared, &pending.expires,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return persistedToolChainPending{}, false, nil
@@ -933,6 +962,16 @@ func loadToolChainPending(
 	if err != nil {
 		return persistedToolChainPending{}, false, err
 	}
+	joins, joinErr := decodeToolChainJoinDigests(enforcementJoinDigests)
+	if joinErr != nil {
+		return persistedToolChainPending{}, true, ErrToolChainIntegrity
+	}
+	pending.enforcementJoinDigests = joins
+	outputJoins, outputJoinErr := decodeToolChainJoinDigests(enforcementOutputJoinDigests)
+	if outputJoinErr != nil {
+		return persistedToolChainPending{}, true, ErrToolChainIntegrity
+	}
+	pending.enforcementOutputJoinDigests = outputJoins
 	return pending, true, nil
 }
 
@@ -1136,9 +1175,11 @@ func validatePersistedToolChainPending(pending persistedToolChainPending) error 
 		return ErrToolChainIntegrity
 	}
 	projection := guardrail.ToolChainProjection{
-		ParseStatus:         actionfacts.ParseStatus(pending.parseStatus),
-		DetectionStepMask:   pending.detectionSteps,
-		EnforcementStepMask: pending.enforcementSteps,
+		ParseStatus:                  actionfacts.ParseStatus(pending.parseStatus),
+		DetectionStepMask:            pending.detectionSteps,
+		EnforcementStepMask:          pending.enforcementSteps,
+		EnforcementJoinDigests:       pending.enforcementJoinDigests,
+		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
 	}
 	if err := validatePendingToolChainProjection(projection); err != nil {
 		return ErrToolChainIntegrity
@@ -1154,9 +1195,16 @@ func validatePendingToolChainProjection(projection guardrail.ToolChainProjection
 	if err := guardrail.ValidateToolChainProjection(projection); err != nil {
 		return err
 	}
-	predecessorMask := uint16(0)
+	predecessorMask := guardrail.ToolChainArtifactMutationBarrier
 	for _, definition := range guardrail.ToolChainDefinitions() {
 		predecessorMask |= definition.Step1Bit
+		if definition.Step3Bit != 0 {
+			predecessorMask |= definition.Step2Bit
+		}
+		if definition.RequiresTerminalSuccess {
+			predecessorMask |= definition.Step2Bit | definition.Step3Bit |
+				definition.MutationBit
+		}
 	}
 	if projection.DetectionStepMask&^predecessorMask != 0 {
 		return errors.New("audit: pending tool-chain projection contains a terminal step")
@@ -1176,7 +1224,9 @@ func sameToolChainPending(
 		pending.ruleset == input.RulesetFingerprint &&
 		pending.parseStatus == string(input.Projection.ParseStatus) &&
 		pending.detectionSteps == input.Projection.DetectionStepMask &&
-		pending.enforcementSteps == input.Projection.EnforcementStepMask
+		pending.enforcementSteps == input.Projection.EnforcementStepMask &&
+		pending.enforcementJoinDigests == input.Projection.EnforcementJoinDigests &&
+		pending.enforcementOutputJoinDigests == input.Projection.EnforcementOutputJoinDigests
 }
 
 func deleteToolChainPending(

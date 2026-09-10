@@ -719,6 +719,12 @@ func toBifrostChatRequest(provider schemas.ModelProvider, model string, req *Cha
 			bReq.Params.ToolChoice = &tc
 		}
 	}
+	if len(req.ResponseFormat) > 0 {
+		var responseFormat interface{}
+		if err := json.Unmarshal(req.ResponseFormat, &responseFormat); err == nil {
+			bReq.Params.ResponseFormat = &responseFormat
+		}
+	}
 	if len(req.ExtraParams) > 0 {
 		bReq.Params.ExtraParams = req.ExtraParams
 	}

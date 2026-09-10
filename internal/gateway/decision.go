@@ -110,6 +110,72 @@ func guardrailRuntimeActionForGuardrail(gc *config.GuardrailConfig, severity str
 	return guardrailRuntimeActionForGuardrailConnector(gc, "", severity, confirmable)
 }
 
+func guardrailRuntimeActionForFindings(
+	cfg *config.Config,
+	connector string,
+	findings []RuleFinding,
+	confirmable bool,
+) string {
+	action := guardrailActionAllow
+	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
+		action = guardrailRuntimeActionForConnector(
+			cfg, connector, HighestSeverity(enforceable), confirmable,
+		)
+	}
+	if alerts := alertOnlyRuleFindings(findings); len(alerts) > 0 {
+		candidate := guardrailRuntimeActionForConnector(
+			cfg, connector, HighestSeverity(alerts), confirmable,
+		)
+		if candidate == guardrailActionBlock || candidate == guardrailActionConfirm {
+			candidate = guardrailActionAlert
+		}
+		action = strongerGuardrailAction(action, candidate)
+	}
+	return action
+}
+
+func guardrailRuntimeActionForGuardrailFindings(
+	gc *config.GuardrailConfig,
+	findings []RuleFinding,
+	confirmable bool,
+) string {
+	action := guardrailActionAllow
+	if enforceable := enforceableRuleFindings(findings); len(enforceable) > 0 {
+		action = guardrailRuntimeActionForGuardrail(
+			gc, HighestSeverity(enforceable), confirmable,
+		)
+	}
+	if alerts := alertOnlyRuleFindings(findings); len(alerts) > 0 {
+		candidate := guardrailRuntimeActionForGuardrail(
+			gc, HighestSeverity(alerts), confirmable,
+		)
+		if candidate == guardrailActionBlock || candidate == guardrailActionConfirm {
+			candidate = guardrailActionAlert
+		}
+		action = strongerGuardrailAction(action, candidate)
+	}
+	return action
+}
+
+func strongerGuardrailAction(left, right string) string {
+	rank := func(action string) int {
+		switch action {
+		case guardrailActionBlock:
+			return 3
+		case guardrailActionConfirm:
+			return 2
+		case guardrailActionAlert:
+			return 1
+		default:
+			return 0
+		}
+	}
+	if rank(right) > rank(left) {
+		return right
+	}
+	return left
+}
+
 // guardrailRuntimeActionForConnector mirrors guardrailRuntimeAction but
 // resolves the block/alert threshold from the request connector's effective
 // rule pack (guardrail.connectors[X].rule_pack_dir, falling back to the

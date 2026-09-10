@@ -92,10 +92,18 @@ const (
 	findingEnforcementInherit findingEnforcement = iota
 	findingEnforcementAllowed
 	findingEnforcementDetectionOnly
+	// findingEnforcementAlertOnly preserves a visible runtime alert while
+	// imposing a hard ceiling below confirm/block in every posture profile.
+	findingEnforcementAlertOnly
 )
 
 func (f RuleFinding) contributesToEnforcement() bool {
-	return f.enforcement != findingEnforcementDetectionOnly
+	return f.enforcement != findingEnforcementDetectionOnly &&
+		f.enforcement != findingEnforcementAlertOnly
+}
+
+func (f RuleFinding) contributesToAlertOnly() bool {
+	return f.enforcement == findingEnforcementAlertOnly
 }
 
 // ---------------------------------------------------------------------------

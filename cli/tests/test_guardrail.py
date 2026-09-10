@@ -3617,15 +3617,15 @@ class TestInitGuardrailInstall(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 
-def _permissive_rules_dir() -> Path:
-    """Locate the permissive rule-pack `rules/` directory.
+def _profile_rules_dir(profile: str) -> Path:
+    """Locate one rule pack's `rules/` directory.
 
     Prefers the git-tracked editable source under `<repo>/policies/`; falls
     back to the bundled build copy under `defenseclaw/_data/policies/`.
     """
     here = Path(__file__).resolve()
     repo_root = here.parents[2]  # cli/tests/ -> cli/ -> <repo>
-    source = repo_root / "policies" / "guardrail" / "permissive" / "rules"
+    source = repo_root / "policies" / "guardrail" / profile / "rules"
     if source.is_dir():
         return source
     bundled = (
@@ -3634,32 +3634,32 @@ def _permissive_rules_dir() -> Path:
         / "_data"
         / "policies"
         / "guardrail"
-        / "permissive"
+        / profile
         / "rules"
     )
     return bundled
 
 
-def _load_permissive_rules(filename: str) -> dict:
-    """Load a permissive rule file and index its rules by id."""
-    path = _permissive_rules_dir() / filename
+def _load_profile_rules(profile: str, filename: str) -> dict:
+    """Load a profile rule file and index its rules by id."""
+    path = _profile_rules_dir(profile) / filename
     data = yaml.safe_load(path.read_text())
     return {rule["id"]: rule for rule in data["rules"]}
 
 
-class PermissivePackRegexCoverage(unittest.TestCase):
-    """Each previously-evaded payload must now match the intended rule.
+class StrictPackRegexCoverage(unittest.TestCase):
+    """Strict preserves broad regex coverage for previously-evaded payloads.
 
-    These are regression tests for the permissive-pack regex drift fixes.
-    Before the backports, every `assertRegexMatches` below FAILED (the
-    narrower pattern did not match the payload); after, they PASS.
+    Balanced/default and permissive intentionally suppress or lower the
+    noisiest members of this set. Strict remains the opt-in profile for broad
+    visibility, so the original bypass corpus belongs here.
     """
 
     @classmethod
     def setUpClass(cls):
-        cls.c2 = _load_permissive_rules("c2.yaml")
-        cls.commands = _load_permissive_rules("commands.yaml")
-        cls.paths = _load_permissive_rules("sensitive-paths.yaml")
+        cls.c2 = _load_profile_rules("strict", "c2.yaml")
+        cls.commands = _load_profile_rules("strict", "commands.yaml")
+        cls.paths = _load_profile_rules("strict", "sensitive-paths.yaml")
 
     def _assert_rule_matches(self, rule: dict, payload: str, *, severity: str):
         rx = re.compile(rule["pattern"])
@@ -3787,6 +3787,25 @@ class PermissivePackRegexCoverage(unittest.TestCase):
             re.search(self.commands["CMD-REVSHELL-NC"]["pattern"], chain),
             msg="F-1908: netcat rule must fire on the combined chain",
         )
+
+
+class BalancedPermissiveNoisePosture(unittest.TestCase):
+    """Broad dual-use regexes stay non-blocking outside strict."""
+
+    def test_noisy_rules_are_disabled_or_lowered(self):
+        for profile in ("default", "permissive"):
+            with self.subTest(profile=profile):
+                commands = _load_profile_rules(profile, "commands.yaml")
+                paths = _load_profile_rules(profile, "sensitive-paths.yaml")
+
+                self.assertEqual(commands["CMD-PIPE-CURL"]["expression"], "false")
+                self.assertEqual(commands["CMD-PIPE-CURL"]["pattern"], "a^")
+                self.assertEqual(commands["CMD-PIPE-CURL"]["severity"], "HIGH")
+                self.assertEqual(paths["PATH-ENV-FILE"]["expression"], "false")
+                self.assertEqual(paths["PATH-ENV-FILE"]["pattern"], "a^")
+
+                for rule_id in ("CMD-PIPE-WGET", "CMD-PIPE-BASE64"):
+                    self.assertEqual(commands[rule_id]["severity"], "HIGH")
 
 
 if __name__ == "__main__":

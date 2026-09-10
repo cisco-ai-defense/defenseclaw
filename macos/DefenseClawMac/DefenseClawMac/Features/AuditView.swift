@@ -107,7 +107,7 @@ struct AuditView: View {
         )) {
             if let event = selectedEvent {
                 auditInspector(event)
-                    .inspectorColumnWidth(min: 360, ideal: 480)
+                    .dcInspectorColumnWidth()
             }
         }
         .searchable(text: $search, placement: .toolbar, prompt: "Search action, target, details")
@@ -119,11 +119,13 @@ struct AuditView: View {
                     Label("Export JSON", systemImage: "square.and.arrow.up")
                 }
                 .keyboardShortcut("e", modifiers: .command)
+                .dcQuickHelp("Export audit events as JSON")
                 Button {
                     load(reset: true)
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .dcQuickHelp("Refresh audit events")
             }
         }
         .task {

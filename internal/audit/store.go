@@ -1765,6 +1765,42 @@ var migrations = []migration{
 		description: "scan findings: add compact distinct lifecycle projection",
 		apply:       migrateFindingLifecycleState,
 	},
+	{
+		description: "guardrails: bind bounded chain enforcement to opaque resource lineage",
+		apply:       migrateToolChainLineageState,
+	},
+	{
+		description: "guardrails: bind transformed artifact chains to opaque derived lineage",
+		apply:       migrateToolChainDerivedLineageState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to nine result slots",
+		apply:       migrateToolChainExpandedCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to ten result slots",
+		apply:       migrateToolChainTenSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to eleven result slots",
+		apply:       migrateToolChainElevenSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to twelve result slots",
+		apply:       migrateToolChainTwelveSlotCatalogState,
+	},
+	{
+		description: "guardrails: expand bounded chain catalog to thirteen result slots",
+		apply:       migrateToolChainThirteenSlotCatalogState,
+	},
+	{
+		description: "guardrails: widen bounded chain masks and add result slots fourteen through seventeen",
+		apply:       migrateToolChainFourteenSlotWideMaskState,
+	},
+	{
+		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
+		apply:       migrateToolChainEighteenSlotWideMaskState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
@@ -2101,7 +2137,7 @@ var knownTables = map[string]bool{
 	"correlation_pending_operations":    true,
 	"correlation_receipts":              true,
 	"correlation_identity_claims":       true,
-	// Bounded, content-free state for the six fixed tool-call chains.
+	// Bounded, content-free state for nine fixed tool-call chain slots.
 	"guardrail_chain_partitions":         true,
 	"guardrail_chain_events":             true,
 	"guardrail_chain_deny_receipts":      true,

@@ -115,6 +115,8 @@ struct SetupDefinitionsParityTests {
         customProviderBuilderDropsStaleFamilyOptions()
         customProviderValidationCatchesUnsafeInputs()
         observabilityBuilderCoversPresetSpecificInputs()
+        splunkHECDefaultsToVerifiedTLS()
+        secureSetupSecretsUseChildEnvironment()
         webhookBuilderCoversCurrentNotifierOptions()
         webhookValidationRequiresProviderCredentials()
         print("Setup definition parity tests passed")
@@ -533,6 +535,94 @@ struct SetupDefinitionsParityTests {
             "enabled": "yes",
         ], false)[0]
         expect(value(after: "--signals", in: galileo) == "traces", "Galileo emits traces only")
+    }
+
+    private static func splunkHECDefaultsToVerifiedTLS() {
+        guard let wizard = TUIWizards.all.first(where: { $0.id == "observability" }),
+              let field = wizard.fields.first(where: { $0.key == "verify-tls-hec" }) else {
+            expect(false, "Splunk HEC TLS field exists")
+            return
+        }
+        expect(field.defaultValue == "yes", "Splunk HEC verifies TLS by default")
+
+        let omittedToggle = TUIWizards.observabilityCommands([
+            "action": "add",
+            "preset": "splunk-hec",
+        ], false)[0]
+        expect(omittedToggle.contains("--verify-tls"), "omitted HEC TLS setting fails secure")
+        expect(!omittedToggle.contains("--no-verify-tls"), "omitted HEC TLS setting never disables verification")
+
+        let explicitOptOut = TUIWizards.observabilityCommands([
+            "action": "add",
+            "preset": "splunk-hec",
+            "host": "splunk.example",
+            "verify-tls-hec": "no",
+        ], false)[0]
+        expect(!explicitOptOut.contains("--no-verify-tls"), "remote HEC cannot disable TLS verification")
+        expect(explicitOptOut.contains("--verify-tls"), "remote HEC is forced to verify TLS")
+        expect(
+            TUIWizards.observabilityValidation([
+                "action": "add",
+                "preset": "splunk-hec",
+                "host": "splunk.example",
+                "port": "8088",
+                "verify-tls-hec": "no",
+            ]) != nil,
+            "remote HEC TLS opt-out shows a validation error"
+        )
+
+        for host in ["localhost", "collector.localhost", "127.0.0.1", "127.42.7.9", "::1", "[::1]"] {
+            let values = [
+                "action": "add",
+                "preset": "splunk-hec",
+                "host": host,
+                "port": "8088",
+                "verify-tls-hec": "no",
+            ]
+            expect(TUIWizards.observabilityValidation(values) == nil, "\(host) permits local TLS opt-out")
+            expect(
+                TUIWizards.observabilityCommands(values, false)[0].contains("--no-verify-tls"),
+                "\(host) emits the explicit local TLS opt-out"
+            )
+        }
+    }
+
+    private static func secureSetupSecretsUseChildEnvironment() {
+        let cases: [(id: String, field: String, environmentKey: String, values: [String: String])] = [
+            ("splunk", "access-token", "SPLUNK_ACCESS_TOKEN", ["mode": "splunk-o11y", "access-token": "private-value"]),
+            ("splunk", "hec-token", "DEFENSECLAW_SPLUNK_HEC_TOKEN", ["mode": "splunk-enterprise", "hec-token": "private-value"]),
+            ("observability", "token", "DEFENSECLAW_SETUP_OBSERVABILITY_TOKEN", ["action": "add", "preset": "datadog", "token": "private-value"]),
+            ("splunk-dashboards", "o11y-api-token", "SFX_AUTH_TOKEN", ["action": "apply", "o11y-api-token": "private-value"]),
+        ]
+
+        for item in cases {
+            guard let wizard = TUIWizards.all.first(where: { $0.id == item.id }),
+                  let field = wizard.fields.first(where: { $0.key == item.field }) else {
+                expect(false, "\(item.id) secure field exists")
+                continue
+            }
+            let message = SetupSecretTransportPolicy.validationMessage(
+                wizard: wizard,
+                values: item.values,
+                visibleFields: [field]
+            )
+            expect(message == nil, "\(item.id) accepts its child-environment secret transport")
+            let environment = wizard.secretEnvironment?(item.values) ?? [:]
+            expect(environment[item.environmentKey] == "private-value", "\(item.id) exports its documented child environment key")
+            let arguments = wizard.commandBuilder?(item.values, false).flatMap { $0 } ?? []
+            expect(!arguments.contains("private-value"), "\(item.id) secret never enters argv")
+
+            var withoutSecret = item.values
+            withoutSecret[item.field] = ""
+            expect(
+                SetupSecretTransportPolicy.validationMessage(
+                    wizard: wizard,
+                    values: withoutSecret,
+                    visibleFields: [field]
+                ) == nil,
+                "\(item.id) preserves non-secret setup operations"
+            )
+        }
     }
 
     private static func webhookBuilderCoversCurrentNotifierOptions() {

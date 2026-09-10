@@ -64,3 +64,16 @@ described in [`SECURITY-TEST-SUITE.md`](SECURITY-TEST-SUITE.md), and connector
 contract tests under `internal/gateway/connector/`. The public CLI examples are
 validated separately against the real Click command tree by
 [`../scripts/check_docs_cli_commands.py`](../scripts/check_docs_cli_commands.py).
+
+## Known issues / OpenClaw version compatibility
+
+OpenClaw 2026.6.8+ can emit provider traffic through undici and embedded
+runtimes that skip a fetch-only interceptor. The DefenseClaw plugin now
+patches `globalThis.fetch`, `http`/`https.request`, and the undici global
+dispatcher, then publishes an interception self-test on
+`POST /v1/events/egress` (`branch=selftest`). `defenseclaw doctor` reads
+`/health.interception.verified` for proxy connectors and warns when the
+installed OpenClaw version is in that range. A live `:4000` port or a
+stale `INCOMING REQUEST` count is not proof of agent-path enforcement;
+confirm the OpenClaw interception row and, when logs can grow, a real
+`INCOMING REQUEST` delta.

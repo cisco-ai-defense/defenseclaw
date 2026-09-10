@@ -19,6 +19,18 @@ import (
 
 var ssnListCandidatePattern = regexp.MustCompile(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
 
+var (
+	nodeEvalInvocationPattern    = regexp.MustCompile(`(?i)\bnode(?:js)?\s+(?:-e|--eval)(?:\s+|=)`)
+	childProcessExecSinkPattern  = regexp.MustCompile(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*exec(?:Sync)?\s*\(\s*$`)
+	childProcessSpawnSinkPattern = regexp.MustCompile(`(?is)(?:\brequire\s*\(\s*["'](?:node:)?child_process["']\s*\)|\bchild_process)\s*\.\s*spawn(?:Sync)?\s*\(\s*["'](?:/bin/)?(?:ba|da|z|k)?sh["']\s*,\s*\[\s*["']-c["']\s*,\s*$`)
+)
+
+var windowsRegistryPersistencePatterns = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)(?:hkcu|hkey_current_user|hklm|hkey_local_machine)[\\/]software[\\/]microsoft[\\/]windows[\\/]currentversion[\\/](?:run|runonce)(?:["']|\s)`),
+	regexp.MustCompile(`(?i)(?:hkcu|hkey_current_user|hklm|hkey_local_machine)[\\/]software[\\/]microsoft[\\/]windows nt[\\/]currentversion[\\/]winlogon["']?\s+.*(?:/v(?::|\s+)|-(?:name|property)(?::|\s+))(?:shell|userinit)\b`),
+	regexp.MustCompile(`(?i)(?:hklm|hkey_local_machine)[\\/]system[\\/]currentcontrolset[\\/]services[\\/][^\\/\s"']+["']?\s+.*(?:/v(?::|\s+)|-(?:name|property)(?::|\s+))(?:imagepath|servicedll)\b`),
+}
+
 // ibanLengthsByCountry mirrors the fixed national lengths in the SWIFT ISO
 // 13616 IBAN Registry (release 102, June 2026). A MOD97-valid string is not an
 // IBAN unless its country participates in the registry and its length matches
@@ -86,21 +98,29 @@ func firstAcceptedRegexMatchAt(pattern *regexp.Regexp, text string, accept func(
 }
 
 func findAcceptedLocalPIIMatch(original, normalized string, pattern *regexp.Regexp) (match string, wasNormalized, ok bool) {
+	loc, source, wasNormalized, ok := findAcceptedLocalPIILoc(original, normalized, pattern)
+	if !ok {
+		return "", false, false
+	}
+	return source[loc[0]:loc[1]], wasNormalized, true
+}
+
+func findAcceptedLocalPIILoc(original, normalized string, pattern *regexp.Regexp) (loc []int, source string, wasNormalized, ok bool) {
 	acceptOriginal := func(match string, start, end int) bool {
 		return acceptedLocalPIIMatchAt(original, match, start, end)
 	}
 	if loc := firstAcceptedRegexMatchAt(pattern, original, acceptOriginal); loc != nil {
-		return original[loc[0]:loc[1]], false, true
+		return loc, original, false, true
 	}
 	if normalized != original {
 		acceptNormalized := func(match string, start, end int) bool {
 			return acceptedLocalPIIMatchAt(normalized, match, start, end)
 		}
 		if loc := firstAcceptedRegexMatchAt(pattern, normalized, acceptNormalized); loc != nil {
-			return normalized[loc[0]:loc[1]], true, true
+			return loc, normalized, true, true
 		}
 	}
-	return "", false, false
+	return nil, "", false, false
 }
 
 func findAcceptedLocalSecretMatch(
@@ -149,12 +169,230 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 	switch ruleID {
 	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN":
 		return credibleSSNContext(text, start, end)
+	case "ENT-EMAIL-BULK":
+		return credibleEmailContext(text, match, start, end)
 	case "ENT-BULK-CSV-PII":
 		return credibleBulkCSVContext(text, start, end)
 	case "SEC-PRIVKEY":
 		return secretshape.ValidPrivateKeyPEMAt(text, start)
+	case "CMD-RM-RF":
+		return acceptedRecursiveRootDeleteAt(text, start, end)
+	case "CMD-WIN-REG-PERSIST":
+		for _, pattern := range windowsRegistryPersistencePatterns {
+			if pattern.MatchString(text) {
+				return true
+			}
+		}
+		return false
 	}
 	return true
+}
+
+// acceptedRecursiveRootDeleteAt rejects destructive command literals that are
+// merely data inside a node -e JavaScript program. Outside node's eval payload,
+// CMD-RM-RF retains its existing behavior. Inside one, the matched literal must
+// be a direct argument to a child_process shell-execution sink and begin in a
+// shell command position.
+func acceptedRecursiveRootDeleteAt(text string, start, end int) bool {
+	script, scriptOffset, ok := nodeEvalPayloadContaining(text, start, end)
+	if !ok {
+		return true
+	}
+
+	relativeStart := start - scriptOffset
+	relativeEnd := end - scriptOffset
+	stringStart, contentStart, ok := javascriptStringContaining(script, relativeStart, relativeEnd)
+	if !ok {
+		return false
+	}
+	prefix := script[:stringStart]
+	if !childProcessExecSinkPattern.MatchString(prefix) &&
+		!childProcessSpawnSinkPattern.MatchString(prefix) {
+		return false
+	}
+	return destructiveShellCommandPosition(script[contentStart:relativeStart])
+}
+
+func nodeEvalPayloadContaining(text string, start, end int) (string, int, bool) {
+	for _, invocation := range nodeEvalInvocationPattern.FindAllStringIndex(text, -1) {
+		payloadStart, payloadEnd, ok := shellArgumentRange(text, invocation[1])
+		if ok && start >= payloadStart && end <= payloadEnd {
+			return text[payloadStart:payloadEnd], payloadStart, true
+		}
+	}
+	return "", 0, false
+}
+
+// shellArgumentRange returns the source span inside the immediate shell word.
+// It deliberately handles only ordinary quoted/unquoted node -e arguments;
+// unresolved shell expansions abstain from the JavaScript-specific suppression.
+func shellArgumentRange(text string, offset int) (int, int, bool) {
+	for offset < len(text) && (text[offset] == ' ' || text[offset] == '\t') {
+		offset++
+	}
+	if offset >= len(text) {
+		return 0, 0, false
+	}
+	quote := text[offset]
+	if quote == '\'' || quote == '"' || quote == '`' {
+		start := offset + 1
+		for index := start; index < len(text); index++ {
+			if quote != '\'' && text[index] == '\\' {
+				index++
+				continue
+			}
+			if text[index] == quote {
+				return start, index, true
+			}
+		}
+		return 0, 0, false
+	}
+
+	start := offset
+	for offset < len(text) && !strings.ContainsRune(" \t\r\n;|&", rune(text[offset])) {
+		offset++
+	}
+	return start, offset, offset > start
+}
+
+// javascriptStringContaining performs just enough lexical analysis to prove
+// that the regex match is inside one JavaScript string argument. It does not
+// resolve variables, concatenation, interpolation, or other dynamic code.
+func javascriptStringContaining(script string, targetStart, targetEnd int) (int, int, bool) {
+	for index := 0; index < len(script); index++ {
+		quote := script[index]
+		if quote != '\'' && quote != '"' && quote != '`' {
+			continue
+		}
+		stringStart := index
+		contentStart := index + 1
+		for index++; index < len(script); index++ {
+			if script[index] == '\\' {
+				index++
+				continue
+			}
+			if script[index] != quote {
+				continue
+			}
+			// CMD-RM-RF's regex consumes a closing quote as the critical-path
+			// boundary, so permit the target span to include this delimiter.
+			if targetStart >= contentStart && targetEnd <= index+1 {
+				return stringStart, contentStart, true
+			}
+			break
+		}
+	}
+	return 0, 0, false
+}
+
+func destructiveShellCommandPosition(prefix string) bool {
+	for _, separator := range []string{"\n", ";", "&&", "||"} {
+		if index := strings.LastIndex(prefix, separator); index >= 0 {
+			prefix = prefix[index+len(separator):]
+		}
+	}
+	fields := strings.Fields(prefix)
+	for index := 0; index < len(fields); index++ {
+		field := fields[index]
+		switch {
+		case field == "sudo", field == "command", field == "env", field == "nohup":
+			continue
+		case strings.HasPrefix(field, "-"):
+			continue
+		case strings.Contains(field, "=") && !strings.HasPrefix(field, "="):
+			continue
+		case (field == "sh" || field == "bash" || field == "dash" || field == "zsh" || field == "ksh" ||
+			strings.HasSuffix(field, "/sh") || strings.HasSuffix(field, "/bash")) &&
+			index+1 < len(fields) && fields[index+1] == "-c":
+			index++
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// credibleEmailContext removes operational addresses and documentation
+// examples from the generic email detector. Those strings are common in agent
+// instructions but are not evidence that a person record is being exposed.
+// The exclusions are intentionally phrased as closed, high-signal contexts;
+// ordinary contact, customer, employee, patient, invoice, and structured-data
+// records remain eligible even when they use synthetic example domains.
+func credibleEmailContext(text, match string, start, end int) bool {
+	lower := strings.ToLower(text)
+	matchLower := strings.ToLower(match)
+	if strings.Contains(lower, "string literal") ||
+		strings.Contains(lower, "typical format") ||
+		strings.Contains(lower, "common format") {
+		return false
+	}
+	for _, phrase := range []string{
+		"format email message", "send email with", "send e-mail to",
+		"email an alert", "email it with", "emailing to", "bcc to",
+	} {
+		if strings.Contains(lower, phrase) {
+			return false
+		}
+	}
+	if strings.Contains(lower, "ssh") &&
+		!strings.Contains(lower, "email:") &&
+		!strings.Contains(lower, "email address") {
+		return false
+	}
+	if strings.HasSuffix(matchLower, ".compute.amazonaws.com") ||
+		emailDomainLooksLikeNumericHost(matchLower) {
+		return false
+	}
+	if start >= 0 && end >= start && end <= len(text) {
+		tail := strings.TrimLeft(text[end:], " \t\r\n\"'`")
+		if strings.HasPrefix(tail, ":") {
+			return false
+		}
+		// Git/SSH host aliases can contain dots and suffixes, so the generic
+		// email regex may stop early at an apparent TLD in a locator such as
+		// git@github.com-work:cisco/repo.git. Treat a contiguous host suffix
+		// followed by ':' as a remote locator rather than a person address.
+		if colon := strings.IndexByte(tail, ':'); colon > 0 {
+			hostSuffix := tail[:colon]
+			if strings.IndexFunc(hostSuffix, func(char rune) bool {
+				return !((char >= 'a' && char <= 'z') ||
+					(char >= 'A' && char <= 'Z') ||
+					(char >= '0' && char <= '9') || char == '.' || char == '-')
+			}) == -1 {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func emailDomainLooksLikeNumericHost(email string) bool {
+	_, domain, ok := strings.Cut(email, "@")
+	if !ok {
+		return false
+	}
+	labels := strings.Split(domain, ".")
+	if len(labels) < 3 {
+		return false
+	}
+	numeric := 0
+	for _, label := range labels[:len(labels)-1] {
+		if label == "" {
+			return false
+		}
+		allDigits := true
+		for _, char := range label {
+			if char < '0' || char > '9' {
+				allDigits = false
+				break
+			}
+		}
+		if allDigits {
+			numeric++
+		}
+	}
+	return numeric >= 2
 }
 
 func acceptedRuleMatch(ruleID, match string) bool {

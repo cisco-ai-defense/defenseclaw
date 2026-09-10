@@ -766,6 +766,9 @@ func (r *EventRouter) scanInboundPrompt(sessionKey, messageID, model, content st
 	if content == "" {
 		return
 	}
+	if r.judge != nil {
+		r.judge.ObserveSessionPrompt(ContextWithSessionID(context.Background(), sessionKey), content)
+	}
 	start := time.Now()
 
 	verdict := scanLocalPatterns("prompt", content)
@@ -1306,27 +1309,32 @@ func (r *EventRouter) handleToolCall(evt EventFrame) {
 	// managed_enterprise: the judge is a local decision-maker — disabled so
 	// AID stays authoritative.
 	if !ManagedEnterpriseActive() && r.judge != nil && len(payload.Args) > 0 {
-		go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage) {
-			r.judgeSem <- struct{}{}
-			defer func() { <-r.judgeSem }()
-			ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-			defer cancel()
-			verdict := r.judge.RunToolJudge(ctx, tool, string(args))
-			if verdict.Severity != "NONE" {
-				// Keep stderr redacted, but retain the source reason for the v8
-				// route-specific redaction boundary.
-				fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
-					tool, verdict.Severity, redaction.Reason(verdict.Reason))
-				r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
-					fmt.Sprintf("severity=%s findings=%d reason=%s",
-						verdict.Severity, len(verdict.Findings),
-						stripLogInjectionRunes(verdict.Reason)))
-				r.recordEventRouterGuardrailMetricsV8(ctx, eventRouterGuardrailMetricObservation{
-					meta: meta, tool: tool, action: verdict.Action,
-					severity: verdict.Severity, observedAt: time.Now().UTC(),
-				})
-			}
-		}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args)
+		judgeCtx := ContextWithSessionID(context.Background(), payload.SessionID)
+		judgeSample, judgeEligible := r.judge.prepareToolJudgeSample(judgeCtx, payload.Tool, string(payload.Args))
+		if judgeEligible {
+			go func(tool, sessionID, toolID string, meta llmEventMeta, args json.RawMessage, sample string) {
+				r.judgeSem <- struct{}{}
+				defer func() { <-r.judgeSem }()
+				judgeCtx := ContextWithSessionID(context.Background(), sessionID)
+				ctx, cancel := context.WithTimeout(judgeCtx, 60*time.Second)
+				defer cancel()
+				verdict := r.judge.runToolJudgeSample(ctx, tool, string(args), sample)
+				if verdict.Severity != "NONE" {
+					// Keep stderr redacted, but retain the source reason for the v8
+					// route-specific redaction boundary.
+					fmt.Fprintf(os.Stderr, "[sidecar] LLM JUDGE flagged tool call: %s severity=%s %s\n",
+						tool, verdict.Severity, redaction.Reason(verdict.Reason))
+					r.logStreamToolAction(sessionID, string(audit.ActionGatewayToolCallJudgeFlagged), tool, toolID,
+						fmt.Sprintf("severity=%s findings=%d reason=%s",
+							verdict.Severity, len(verdict.Findings),
+							stripLogInjectionRunes(verdict.Reason)))
+					r.recordEventRouterGuardrailMetricsV8(ctx, eventRouterGuardrailMetricObservation{
+						meta: meta, tool: tool, action: verdict.Action,
+						severity: verdict.Severity, observedAt: time.Now().UTC(),
+					})
+				}
+			}(payload.Tool, payload.SessionID, payload.ID, toolObservation.meta, payload.Args, judgeSample)
+		}
 	}
 
 	toolObservation.dangerous = dangerous

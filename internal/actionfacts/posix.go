@@ -270,12 +270,13 @@ func projectPOSIXStatement(
 	}
 
 	command := CommandFact{
-		ID:              out.nextCommandID(),
-		ParentCommandID: parentID,
-		PipelineID:      pipelineID,
-		Dialect:         DialectPOSIX,
-		Effect:          EffectExecute,
-		ArgvComplete:    true,
+		ID:                   out.nextCommandID(),
+		ParentCommandID:      parentID,
+		PipelineID:           pipelineID,
+		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+		Dialect:              DialectPOSIX,
+		Effect:               EffectExecute,
+		ArgvComplete:         true,
 	}
 	if len(call.Assigns) > 0 {
 		// Prefix assignments can change executable lookup and runtime startup
@@ -353,15 +354,38 @@ func projectPOSIXWord(word *syntax.Word) ArgumentFact {
 	} else if quote == "" {
 		quote = QuoteNone
 	}
+	staticValue := value.String()
 	result := ArgumentFact{
-		Value:   value.String(),
+		Value:   staticValue,
 		Quote:   quote,
 		Expands: expands || unquotedExpansion,
 	}
 	if result.Expands {
+		if !expands && unquotedExpansion && quote == QuoteNone {
+			result.StaticGlob = staticValue
+		}
 		result.Value = ""
 	}
 	return result
+}
+
+func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
+	if stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown {
+		return true
+	}
+	for _, ancestor := range stack {
+		switch typed := ancestor.(type) {
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.CaseClause,
+			*syntax.IfClause, *syntax.WhileClause, *syntax.Subshell:
+			return true
+		case *syntax.BinaryCmd:
+			switch typed.Op {
+			case syntax.AndStmt, syntax.OrStmt, syntax.PipeAll:
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func posixUnquotedExpansion(part syntax.WordPart, atWordStart bool) bool {
@@ -502,6 +526,10 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			out.markPartial(IssueUnsupportedConstruct)
 			continue
 		}
+		if redirection.Op == syntax.Hdoc || redirection.Op == syntax.DashHdoc {
+			projectPOSIXLiteralHeredoc(redirection, command, out)
+			continue
+		}
 		if redirection.Op == syntax.DplIn || redirection.Op == syntax.DplOut {
 			fd := int64(0)
 			access := PathAccessRead
@@ -565,6 +593,14 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			}
 			fd = parsed
 		}
+		if fd == 0 && command.LiteralStdinComplete {
+			// Redirect ordering could replace the heredoc as stdin. The private
+			// projection deliberately does not model that mixed form.
+			command.LiteralStdin = ""
+			command.LiteralStdinComplete = false
+			command.LiteralStdinAmbiguous = true
+			out.markPartial(IssueUnsupportedConstruct)
+		}
 		target := projectPOSIXWord(redirection.Word)
 		if !target.Expands && len(target.Value) > maxScalarBytes {
 			out.markLimit(IssueInputLimit)
@@ -589,10 +625,78 @@ func projectPOSIXRedirects(redirections []*syntax.Redirect, command *CommandFact
 			command.ArgvComplete = false
 			out.markPartial(IssueDynamicWord)
 		}
-		if redirection.Hdoc != nil {
+	}
+}
+
+func projectPOSIXLiteralHeredoc(
+	redirection *syntax.Redirect,
+	command *CommandFact,
+	out *parseOutput,
+) {
+	if redirection == nil || command == nil || redirection.Op != syntax.Hdoc ||
+		redirection.Hdoc == nil {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if command.LiteralStdinComplete || command.LiteralStdinAmbiguous {
+		command.LiteralStdin = ""
+		command.LiteralStdinComplete = false
+		command.LiteralStdinAmbiguous = true
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	if redirection.N != nil {
+		parsed, err := strconv.ParseInt(redirection.N.Value, 10, 64)
+		if err != nil || parsed != 0 {
 			out.markPartial(IssueUnsupportedConstruct)
+			return
 		}
 	}
+	if posixDescriptorIsRedirected(command, 0) {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	delimiter := projectPOSIXWord(redirection.Word)
+	body := projectPOSIXWord(redirection.Hdoc)
+	if delimiter.Expands || delimiter.Quote != QuoteSingle ||
+		delimiter.Value == "" || body.Expands || len(body.Value) > maxScalarBytes ||
+		strings.ContainsRune(body.Value, '\x00') {
+		out.markPartial(IssueUnsupportedConstruct)
+		return
+	}
+	command.LiteralStdin = body.Value
+	command.LiteralStdinComplete = true
+}
+
+func posixDescriptorIsRedirected(command *CommandFact, fd int64) bool {
+	if command == nil {
+		return false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.FD == fd || fd == 1 && redirect.FD == -1 {
+			return true
+		}
+	}
+	return false
+}
+
+// StaticPOSIXCatLiteralStdinOutput returns the exact stdout bytes of a direct
+// cat invocation fed by the bounded quoted-heredoc projection. Cat options,
+// file operands, wrappers, and competing stdin redirects are excluded.
+func StaticPOSIXCatLiteralStdinOutput(command CommandFact) (string, bool) {
+	if command.Dialect != DialectPOSIX || command.Effect != EffectExecute ||
+		command.Program != "cat" || !command.ArgvComplete ||
+		len(command.Argv) != 1 || len(command.Arguments) != 1 ||
+		len(command.Wrappers) != 0 || !command.LiteralStdinComplete ||
+		command.LiteralStdinAmbiguous {
+		return "", false
+	}
+	for _, redirect := range command.Redirects {
+		if redirect.FD == 0 {
+			return "", false
+		}
+	}
+	return command.LiteralStdin, true
 }
 
 func posixDescriptorAlreadyRedirectedToNull(

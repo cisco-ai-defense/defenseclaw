@@ -456,14 +456,15 @@ func TestBifrostE2E_RequestConversion(t *testing.T) {
 		temp := float64(0.7)
 		topP := float64(0.9)
 		req := &ChatRequest{
-			Model:       "gpt-4",
-			Messages:    []ChatMessage{{Role: "user", Content: "hi"}},
-			Temperature: &temp,
-			TopP:        &topP,
-			MaxTokens:   intPtr(100),
-			Stop:        json.RawMessage(`["END","STOP"]`),
-			Tools:       json.RawMessage(`[{"type":"function","function":{"name":"get_weather"}}]`),
-			Fallbacks:   []string{"anthropic/claude-3-sonnet", "bedrock/anthropic.claude-3-haiku"},
+			Model:          "gpt-4",
+			Messages:       []ChatMessage{{Role: "user", Content: "hi"}},
+			Temperature:    &temp,
+			TopP:           &topP,
+			MaxTokens:      intPtr(100),
+			Stop:           json.RawMessage(`["END","STOP"]`),
+			Tools:          json.RawMessage(`[{"type":"function","function":{"name":"get_weather"}}]`),
+			ResponseFormat: json.RawMessage(`{"type":"json_object"}`),
+			Fallbacks:      []string{"anthropic/claude-3-sonnet", "bedrock/anthropic.claude-3-haiku"},
 		}
 
 		bReq := toBifrostChatRequest(schemas.OpenAI, "gpt-4", req)
@@ -487,6 +488,13 @@ func TestBifrostE2E_RequestConversion(t *testing.T) {
 		}
 		if len(bReq.Params.Tools) != 1 {
 			t.Errorf("expected 1 tool, got %d", len(bReq.Params.Tools))
+		}
+		if bReq.Params.ResponseFormat == nil {
+			t.Fatal("response_format not propagated")
+		}
+		responseFormat, ok := (*bReq.Params.ResponseFormat).(map[string]interface{})
+		if !ok || responseFormat["type"] != "json_object" {
+			t.Errorf("response_format = %#v, want json_object", *bReq.Params.ResponseFormat)
 		}
 		if len(bReq.Fallbacks) != 2 {
 			t.Fatalf("expected 2 fallbacks, got %d", len(bReq.Fallbacks))

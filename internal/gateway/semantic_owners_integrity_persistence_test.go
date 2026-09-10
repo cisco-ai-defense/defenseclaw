@@ -30,6 +30,7 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"C2-METADATA-AWS",
 		"CMD-CRONTAB",
 		"CMD-SYSTEMCTL",
+		"CMD-WIN-REG-PERSIST",
 		"COG-AGENTS-MD",
 		"COG-MEMORY",
 		"COG-OPENCLAW-JSON",
@@ -42,6 +43,7 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"persistence.shell_profile_write",
 		"persistence.ssh_authorized_keys_command",
 		"privilege.container_runtime_socket_access",
+		"privilege.sudoers_unrestricted_nopasswd",
 		"source.git_config_exec",
 		"source.git_remote_tamper",
 		"tamper.detector_state_write",
@@ -81,6 +83,55 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 	history := semanticOwnerForRule("integrity.history_tamper")
 	if slices.Contains(history.claimedIDs(true), "PATH-HISTORY") {
 		t.Fatal("command history owner claimed the filesystem history rule")
+	}
+}
+
+func TestUnrestrictedSudoersGrantPrerequisite(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"direct literal", `echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/service`, true},
+		{"pipeline literal", `echo 'restricted-service ALL=(ALL:ALL) NOPASSWD: ALL' | tee /etc/sudoers.d/service >/dev/null`, true},
+		{"printf literal", `printf '%s\n' '%ops ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/ops`, true},
+		{"base64 literal", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogQUxM' | base64 -d > /etc/sudoers.d/service`, true},
+		{"base64 padded literal", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogQUxMCg==' | base64 --decode >> /etc/sudoers.d/service`, true},
+		{"sed append literal", `sed -i '$ a restricted-service ALL=(ALL) NOPASSWD: ALL' /etc/sudoers`, true},
+		{"sed substitution literal", `sed -i 's/# USERNAME ALL=(ALL) NOPASSWD: ALL/restricted-service ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers.d/99-incident-template`, true},
+		{"quoted heredoc literal", "cat > /etc/sudoers.d/service << 'EOF'\n# service account\nrestricted-service ALL=(ALL) NOPASSWD: ALL\nEOF", true},
+		{"quoted heredoc redirect order", "cat << 'EOF' > /etc/sudoers.d/service\nrestricted-service ALL=(ALL:ALL) NOPASSWD: ALL\nEOF", true},
+		{"staged heredoc sed copy", "cat > /tmp/service.conf << 'EOF'\ndefault_user ALL=(ALL) NOPASSWD: ALL\nEOF\nsed -i 's/default_user/restricted-service/' /tmp/service.conf\ncp /tmp/service.conf /etc/sudoers.d/service", true},
+		{"staged literal copy", "echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /tmp/service.conf; cp /tmp/service.conf /etc/sudoers.d/service", true},
+		{"scoped grant", `echo 'restricted-service ALL=(ALL) NOPASSWD: /usr/bin/systemctl restart api' > /etc/sudoers.d/service`, false},
+		{"staged scoped grant", "cat > /tmp/service.conf << 'EOF'\ndefault_user ALL=(ALL) NOPASSWD: /usr/bin/id\nEOF\nsed -i 's/default_user/restricted-service/' /tmp/service.conf\ncp /tmp/service.conf /etc/sudoers.d/service", false},
+		{"staged mismatched copy source", "echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /tmp/one; cp /tmp/two /etc/sudoers.d/service", false},
+		{"staged intervening overwrite", "echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /tmp/service.conf; cp safe.conf /tmp/service.conf; cp /tmp/service.conf /etc/sudoers.d/service", false},
+		{"quoted heredoc scoped grant", "cat > /etc/sudoers.d/service << 'EOF'\nrestricted-service ALL=(ALL) NOPASSWD: /usr/bin/id\nEOF", false},
+		{"expanding heredoc", "cat > /etc/sudoers.d/service << EOF\n$USER ALL=(ALL) NOPASSWD: ALL\nEOF", false},
+		{"intermediate script heredoc", "cat > /tmp/setup.sh << 'EOF'\necho 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/service\nEOF", false},
+		{"sed scoped substitution", `sed -i 's/# USER/restricted-service ALL=(ALL) NOPASSWD: /usr/bin/id/' /etc/sudoers.d/service`, false},
+		{"sed backup suffix", `sed -i.bak 's/# USER/restricted-service ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers.d/service`, false},
+		{"sed multiple targets", `sed -i 's/# USER/restricted-service ALL=(ALL) NOPASSWD: ALL/' /etc/sudoers.d/one /etc/sudoers.d/two`, false},
+		{"sed execute command", `sed -i 'e id' /etc/sudoers.d/service`, false},
+		{"base64 scoped grant", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogL3Vzci9iaW4vaWQ=' | base64 -d > /etc/sudoers.d/service`, false},
+		{"base64 positional input", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogQUxM' | base64 -d payload.b64 > /etc/sudoers.d/service`, false},
+		{"root grant", `echo 'root ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/root`, false},
+		{"documentation search", `rg 'restricted-service ALL=(ALL) NOPASSWD: ALL' /repo/docs`, false},
+		{"commented grant", `echo '# restricted-service ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/service`, false},
+		{"dynamic principal", `echo "$USER ALL=(ALL) NOPASSWD: ALL" > /etc/sudoers.d/service`, false},
+		{"sudoers sibling escape", `echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/../fixture`, false},
+	}
+	owner := semanticIntegrityPersistenceOwners["privilege.sudoers_unrestricted_nopasswd"]
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool: "shell", Command: test.command, CWD: "/repo", ActiveHome: "/home/alice",
+			})
+			if got := owner.prerequisite(facts); got != test.want {
+				t.Fatalf("prerequisite=%t, want %t; facts=%+v", got, test.want, facts)
+			}
+		})
 	}
 }
 
@@ -541,6 +592,37 @@ func TestSemanticIntegrityPersistenceExpressionsCompile(t *testing.T) {
 	}
 }
 
+func TestGlobalLDPreloadInstallOwnerBoundaries(t *testing.T) {
+	contract := exactFallbackContracts["persistence.global_ld_preload_install"]
+	if contract.proves == nil || contract.detectionOnly {
+		t.Fatal("global LD_PRELOAD contract must retain an enforcement proof")
+	}
+	for _, test := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{"overwrite", "echo '/usr/local/lib/libguard.so' > /etc/ld.so.preload", true},
+		{"append", "printf '%s\\n' /usr/local/lib/libguard.so >> /etc/ld.so.preload", true},
+		{"versioned shared object", "echo /usr/local/lib/libguard.so.2 >> /etc/ld.so.preload", true},
+		{"read", "cat /etc/ld.so.preload", false},
+		{"clear during remediation", "echo '' > /etc/ld.so.preload", false},
+		{"dynamic content", "echo \"$LIBRARY\" > /etc/ld.so.preload", false},
+		{"non shared object", "echo /tmp/loader.txt > /etc/ld.so.preload", false},
+		{"process local", "LD_PRELOAD=/usr/local/lib/libguard.so /usr/bin/true", false},
+		{"fixture", "echo /tmp/lib.so > /repo/fixtures/etc/ld.so.preload", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := actionfacts.Analyze(actionfacts.Input{
+				Tool: "shell", Command: test.command, CWD: "/repo",
+			})
+			if got := contract.proves(actionfacts.Input{}, facts); got != test.want {
+				t.Fatalf("eligible=%t want=%t facts=%+v", got, test.want, facts)
+			}
+		})
+	}
+}
+
 func TestGeneratedActiveInstructionRulesUseFilesystemNeutralExpression(t *testing.T) {
 	t.Parallel()
 
@@ -746,6 +828,9 @@ func TestHistoryTamperBashStyleClearGrammarIsDetectionOnly(t *testing.T) {
 		{"history -w -c", true},
 		{"history -cw /dev/null", true},
 		{"history -wc /dev/null", true},
+		{"history -cr", false},
+		{"history -c -r", false},
+		{"history -rc", true},
 		{"history -c | cat", false},
 	} {
 		test := test
@@ -765,6 +850,15 @@ func TestHistoryTamperBashStyleClearGrammarIsDetectionOnly(t *testing.T) {
 	}
 	if contract := exactFallbackContracts["integrity.history_tamper"]; !contract.detectionOnly {
 		t.Fatal("shell-specific history fallback must remain detection-only")
+	}
+}
+
+func TestCrontabOwnerAndFallbackAreDetectionOnly(t *testing.T) {
+	if owner := semanticIntegrityPersistenceOwners["CMD-CRONTAB"]; !owner.detectionOnly {
+		t.Fatal("CMD-CRONTAB semantic owner must remain detection-only")
+	}
+	if contract := exactFallbackContracts["CMD-CRONTAB"]; !contract.detectionOnly {
+		t.Fatal("CMD-CRONTAB fallback contract must remain detection-only")
 	}
 }
 
@@ -873,10 +967,15 @@ func TestIntegrityPersistenceMutationPathPrecision(t *testing.T) {
 		{"history fixture", "truncate -s 0 /repo/testdata/.bash_history", "PATH-HISTORY", "/repo", "/home/alice", false},
 		{"sudoers write", "tee /etc/sudoers", "PATH-ETC-SUDOERS", "/repo", "/home/alice", true},
 		{"sudoers read", "cat /etc/sudoers", "PATH-ETC-SUDOERS", "/repo", "/home/alice", false},
-		{"active profile", "printf x > /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
+		{"active profile write", "printf x > /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
+		{"active profile append", "printf x >> /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
+		{"active profile delete", "rm /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", true},
 		{"profile read", "cat /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
+		{"active profile list", "ls -l /home/alice/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
+		{"active profile copy source", "cp /home/alice/.zshrc /tmp/zshrc.copy", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"different home profile list", "ls -l /home/bob/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"different home profile copy source", "cp /home/bob/.zshrc /tmp/zshrc.copy", "persistence.shell_profile_write", "/repo", "/home/alice", false},
+		{"nested dotfile staging profile", "printf x > /var/lib/dotfiles/users/alice/.bashrc", "persistence.shell_profile_write", "/repo", "/Users/alice", false},
 		{"profile fixture", "printf x > /repo/fixtures/.zshrc", "persistence.shell_profile_write", "/repo", "/home/alice", false},
 		{"active git hook", "printf x > .git/hooks/pre-commit", "persistence.git_hook_write", "/repo", "/home/alice", true},
 		{"sample git hook", "printf x > .git/hooks/pre-commit.sample", "persistence.git_hook_write", "/repo", "/home/alice", false},

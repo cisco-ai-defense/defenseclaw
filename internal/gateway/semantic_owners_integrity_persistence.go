@@ -17,7 +17,9 @@
 package gateway
 
 import (
+	"encoding/base64"
 	"path"
+	"regexp"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -37,11 +39,18 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"CMD-CRONTAB": {
 		prerequisite:     crontabInstallPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		// Installing a schedule is dual-use. Without proof of the scheduled
+		// payload, this is a useful persistence signal but not sufficient
+		// evidence for a synchronous block.
+		detectionOnly: true,
 	},
 	"CMD-SYSTEMCTL": {
-		matchedOnlyAliases: []string{"CMD-WIN-REG-PERSIST"},
-		prerequisite:       schedulerInstallPrerequisite,
-		suppressFallback:   authoritativeSemanticSafeNegative,
+		prerequisite:     schedulerInstallPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"CMD-WIN-REG-PERSIST": {
+		prerequisite:     windowsRegistryPersistencePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"COG-AGENTS-MD": activeAgentInstructionMutationOwner("AGENTS.md"),
 	"COG-MEMORY":    activeAgentInstructionMutationOwner("MEMORY.md"),
@@ -86,6 +95,10 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"PATH-ETC-SUDOERS": integrityMutationOwner(
 		matchesSudoersCandidate, matchesActiveSudoers, nil,
 	),
+	"privilege.sudoers_unrestricted_nopasswd": {
+		prerequisite:     unrestrictedSudoersGrantPrerequisite,
+		suppressFallback: func(actionfacts.Facts) bool { return true },
+	},
 	"PATH-SSH-DIR": {
 		prerequisite:     sshAuthorizedKeysStructuredPrerequisite,
 		suppressFallback: sshAuthorizedKeysPathSafeNegative,
@@ -95,7 +108,9 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"persistence.shell_profile_write": integrityMutationOwner(
-		matchesShellProfileCandidate, matchesActiveShellProfile, nil,
+		matchesShellProfileCandidate,
+		matchesActiveShellProfile,
+		matchesSafeShellProfileCandidate,
 	),
 	"persistence.git_hook_write": integrityMutationOwner(
 		matchesGitHookCandidate,
@@ -701,21 +716,29 @@ func schedulerInstallPrerequisite(facts actionfacts.Facts) bool {
 			if hasOperation(command, actionfacts.OperationSchedule) {
 				return true
 			}
-		case "reg", "reg.exe", "set-itemproperty", "sp",
-			"new-itemproperty":
-			if !hasOperation(command, actionfacts.OperationConfigChange) {
-				continue
-			}
-			for _, candidate := range facts.Paths {
-				if candidate.CommandID == command.ID &&
-					candidate.Access == actionfacts.PathAccessWrite &&
-					matchesActiveRegistryPersistence(command, candidate) {
-					return true
-				}
+		}
+	}
+	return windowsRegistryPersistencePrerequisite(facts) ||
+		integrityMutationPrerequisite(matchesActiveSchedulerPath)(facts)
+}
+
+func windowsRegistryPersistencePrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Effect != actionfacts.EffectExecute ||
+			!command.ArgvComplete ||
+			!oneOfFold(command.Program, "reg", "reg.exe", "set-itemproperty", "sp", "new-itemproperty") ||
+			!hasOperation(command, actionfacts.OperationConfigChange) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessWrite &&
+				matchesActiveRegistryPersistence(command, candidate) {
+				return true
 			}
 		}
 	}
-	return integrityMutationPrerequisite(matchesActiveSchedulerPath)(facts)
+	return false
 }
 
 func systemctlInstallForm(argv []string) bool {
@@ -1564,6 +1587,60 @@ func matchesSudoersCandidate(value string) bool {
 		strings.Contains(value, "/etc/sudoers.d/")
 }
 
+func matchesGlobalLDPreload(
+	_ actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	return canonicalSemanticPath(semanticPathValue(candidate)) == "/etc/ld.so.preload" &&
+		(candidate.Access == actionfacts.PathAccessWrite ||
+			candidate.Access == actionfacts.PathAccessAppend)
+}
+
+// globalLDPreloadInstallPrerequisite proves a system-wide loader injection
+// only when a closed literal producer writes one absolute shared-object path
+// to the active preload file. Merely reading the file, clearing it during
+// remediation, setting process-local LD_PRELOAD, or writing opaque/dynamic
+// content is not enough to enforce this rule.
+func globalLDPreloadInstallPrerequisite(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	for _, target := range facts.Paths {
+		if !matchesGlobalLDPreload(facts, target) {
+			continue
+		}
+		destination, ok := integrityCommandByID(facts, target.CommandID)
+		if !ok || !integrityCommandMutatesPath(destination, target) ||
+			destination.ControlFlowUncertain {
+			continue
+		}
+		for _, source := range facts.Commands {
+			if !sudoersLiteralOutputReachesDestination(facts, source, destination) {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(source)
+			if ok && literalSharedObjectPath(content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func literalSharedObjectPath(content string) bool {
+	if strings.ContainsRune(content, '\x00') {
+		return false
+	}
+	value := strings.TrimSpace(strings.ReplaceAll(content, "\r\n", "\n"))
+	if value == "" || !strings.HasPrefix(value, "/") ||
+		strings.IndexFunc(value, func(r rune) bool { return r == '\n' || r == '\r' || r == '\t' || r == ' ' }) >= 0 {
+		return false
+	}
+	base := path.Base(path.Clean(value))
+	marker := strings.Index(base, ".so")
+	return marker > 0 && (marker+3 == len(base) || base[marker+3] == '.')
+}
+
 func matchesActiveSudoers(
 	_ actionfacts.Facts,
 	candidate actionfacts.PathFact,
@@ -1571,6 +1648,267 @@ func matchesActiveSudoers(
 	value := canonicalSemanticPath(semanticPathValue(candidate))
 	return value == "/etc/sudoers" ||
 		integritySingleChild(value, "/etc/sudoers.d")
+}
+
+var unrestrictedSudoersGrantLine = regexp.MustCompile(
+	`^(%?[A-Za-z_][A-Za-z0-9_.-]*|ALL)[\t ]+ALL[\t ]*=[\t ]*\([\t ]*ALL(?:[\t ]*:[\t ]*ALL)?[\t ]*\)[\t ]+NOPASSWD[\t ]*:[\t ]*ALL[\t ]*$`,
+)
+
+// unrestrictedSudoersGrantPrerequisite accepts only authoritative,
+// enforcement-eligible literal content whose resolved destination is an
+// active sudoers target. It supports a closed set of direct writers and
+// staged writer/sed/copy flows, while rejecting expandable heredocs,
+// variables, command substitutions, aliases, includes, and opaque transforms.
+func unrestrictedSudoersGrantPrerequisite(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() || !facts.EnforcementEligible() {
+		return false
+	}
+	if stagedUnrestrictedSudoersCopy(facts) {
+		return true
+	}
+	for _, target := range facts.Paths {
+		if !integrityMutationAccess(target.Access) ||
+			!matchesActiveSudoers(facts, target) {
+			continue
+		}
+		destination, ok := integrityCommandByID(facts, target.CommandID)
+		if !ok || !integrityCommandMutatesPath(destination, target) ||
+			destination.ControlFlowUncertain {
+			continue
+		}
+		if content, mutationTarget, proven :=
+			actionfacts.StaticPOSIXSedInPlaceLiteralMutation(destination); proven && mutationTarget == target.Value &&
+			containsUnrestrictedSudoersGrant(content) {
+			return true
+		}
+		for _, source := range facts.Commands {
+			if !sudoersLiteralOutputReachesDestination(facts, source, destination) {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(source)
+			if !ok {
+				continue
+			}
+			if sudoersBase64StdinDecoder(destination) {
+				content, ok = decodeBoundedSudoersBase64(content)
+			}
+			if ok && containsUnrestrictedSudoersGrant(content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func stagedUnrestrictedSudoersCopy(facts actionfacts.Facts) bool {
+	for copyIndex, command := range facts.Commands {
+		source, destination, ok := exactPOSIXCopyEndpoints(facts, command)
+		if !ok || !matchesActiveSudoers(facts, destination) {
+			continue
+		}
+		for writerIndex := 0; writerIndex < copyIndex; writerIndex++ {
+			writer := facts.Commands[writerIndex]
+			if writer.ControlFlowUncertain || writer.Effect != actionfacts.EffectExecute {
+				continue
+			}
+			content, ok := sudoersLiteralCommandOutput(writer)
+			if !ok || !commandWritesResolvedPath(facts, writer.ID, source.Resolved) {
+				continue
+			}
+			valid := true
+			for mutationIndex := writerIndex + 1; mutationIndex < copyIndex; mutationIndex++ {
+				mutation := facts.Commands[mutationIndex]
+				if !commandMutatesExactResolvedPath(facts, mutation.ID, source.Resolved) {
+					continue
+				}
+				mutated, target, applied := actionfacts.ApplyStaticPOSIXSedInPlaceLiteralMutation(
+					mutation,
+					content,
+				)
+				if !applied || canonicalSemanticPath(target) != canonicalSemanticPath(source.Resolved) {
+					valid = false
+					break
+				}
+				content = mutated
+			}
+			if valid && containsUnrestrictedSudoersGrant(content) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func exactPOSIXCopyEndpoints(
+	facts actionfacts.Facts,
+	command actionfacts.CommandFact,
+) (actionfacts.PathFact, actionfacts.PathFact, bool) {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		command.Program != "cp" || command.Effect != actionfacts.EffectExecute ||
+		command.ControlFlowUncertain || !command.ArgvComplete ||
+		len(command.Argv) != 3 || len(command.Wrappers) != 0 ||
+		len(command.Redirects) != 0 ||
+		!hasOperation(command, actionfacts.OperationCopy) {
+		return actionfacts.PathFact{}, actionfacts.PathFact{}, false
+	}
+	var source, destination actionfacts.PathFact
+	readCount := 0
+	writeCount := 0
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != command.ID || !candidate.Absolute || candidate.Resolved == "" {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessRead:
+			source = candidate
+			readCount++
+		case actionfacts.PathAccessWrite:
+			destination = candidate
+			writeCount++
+		}
+	}
+	if readCount != 1 || writeCount != 1 || source.Resolved == destination.Resolved {
+		return actionfacts.PathFact{}, actionfacts.PathFact{}, false
+	}
+	return source, destination, true
+}
+
+func commandWritesResolvedPath(facts actionfacts.Facts, commandID int64, resolved string) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID == commandID && candidate.Resolved == resolved &&
+			(candidate.Access == actionfacts.PathAccessWrite ||
+				candidate.Access == actionfacts.PathAccessAppend) {
+			return true
+		}
+	}
+	return false
+}
+
+func commandMutatesExactResolvedPath(facts actionfacts.Facts, commandID int64, resolved string) bool {
+	for _, candidate := range facts.Paths {
+		if candidate.CommandID != commandID || candidate.Resolved != resolved {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend, actionfacts.PathAccessDelete:
+			return true
+		}
+	}
+	return false
+}
+
+func sudoersBase64StdinDecoder(command actionfacts.CommandFact) bool {
+	if !strings.EqualFold(command.Program, "base64") ||
+		!hasOperation(command, actionfacts.OperationDecode) ||
+		len(command.Argv) < 2 {
+		return false
+	}
+	decode := false
+	for _, argument := range command.Argv[1:] {
+		if argument == "--decode" {
+			decode = true
+			continue
+		}
+		if len(argument) < 2 || argument[0] != '-' {
+			return false
+		}
+		for _, option := range argument[1:] {
+			if option != 'd' {
+				return false
+			}
+			decode = true
+		}
+	}
+	return decode
+}
+
+func decodeBoundedSudoersBase64(encoded string) (string, bool) {
+	const maximumEncodedSudoersBytes = 4096
+	if encoded == "" || len(encoded) > maximumEncodedSudoersBytes ||
+		strings.IndexFunc(encoded, func(value rune) bool {
+			return !strings.ContainsRune("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/=", value)
+		}) != -1 {
+		return "", false
+	}
+	for _, encoding := range []*base64.Encoding{
+		base64.StdEncoding.Strict(),
+		base64.RawStdEncoding.Strict(),
+	} {
+		decoded, err := encoding.DecodeString(encoded)
+		if err == nil {
+			return string(decoded), true
+		}
+	}
+	return "", false
+}
+
+func sudoersLiteralOutputReachesDestination(
+	facts actionfacts.Facts,
+	source actionfacts.CommandFact,
+	destination actionfacts.CommandFact,
+) bool {
+	if source.Effect != actionfacts.EffectExecute ||
+		source.ControlFlowUncertain || !source.ArgvComplete {
+		return false
+	}
+	if source.ID == destination.ID {
+		return true
+	}
+	return source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
+		hasCommandDataFlow(
+			facts,
+			source.ID,
+			destination.ID,
+			actionfacts.DataStdout,
+			actionfacts.DataStdin,
+		)
+}
+
+func sudoersLiteralCommandOutput(command actionfacts.CommandFact) (string, bool) {
+	if command.Dialect != actionfacts.DialectPOSIX ||
+		len(command.Argv) != len(command.Arguments) {
+		return "", false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands {
+			return "", false
+		}
+	}
+	switch strings.ToLower(command.Program) {
+	case "cat":
+		return actionfacts.StaticPOSIXCatLiteralStdinOutput(command)
+	case "echo":
+		if len(command.Argv) != 2 || strings.HasPrefix(command.Argv[1], "-") {
+			return "", false
+		}
+		return command.Argv[1], true
+	case "printf":
+		if len(command.Argv) != 3 ||
+			(command.Argv[1] != `%s\n` && command.Argv[1] != "%s") {
+			return "", false
+		}
+		return command.Argv[2], true
+	default:
+		return "", false
+	}
+}
+
+func containsUnrestrictedSudoersGrant(content string) bool {
+	if strings.ContainsRune(content, '\x00') {
+		return false
+	}
+	for _, line := range strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") ||
+			!unrestrictedSudoersGrantLine.MatchString(line) {
+			continue
+		}
+		principal := strings.Fields(line)[0]
+		if !strings.EqualFold(strings.TrimPrefix(principal, "%"), "root") {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesSSHDirectoryCandidate(value string) bool {
@@ -1660,6 +1998,28 @@ func matchesActiveShellProfile(
 	default:
 		return false
 	}
+}
+
+func matchesSafeShellProfileCandidate(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	value := canonicalSemanticPath(semanticPathValue(candidate))
+	if value == "" || matchesActiveShellProfile(facts, candidate) {
+		return false
+	}
+	if strings.HasSuffix(value, ".sample") ||
+		strings.HasSuffix(value, ".example") {
+		return true
+	}
+	// Once ActionFacts has resolved a complete path, a profile-shaped basename
+	// outside the active home is not an active startup file. This distinction is
+	// important for dotfile repositories such as
+	// /var/lib/dotfiles/users/alice/.bashrc: the nested /users/alice suffix must
+	// not acquire the authority of /Users/alice/.bashrc.
+	return isAbsoluteSemanticPath(value) &&
+		matchesShellProfileCandidate(value) &&
+		value != "/etc/profile"
 }
 
 func matchesGitHookCandidate(value string) bool {

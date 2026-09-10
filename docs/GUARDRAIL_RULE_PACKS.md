@@ -3,6 +3,8 @@
 Operator CEL authoring and engine behavior are maintained in the published
 [CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/authoring/)
 and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/engine/).
+The complete shipped detector inventory and enforcement boundaries are in the
+[deterministic detection reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/deterministic-detection/).
 Recipes, suppressions, and verification steps remain in the broader
 [policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 
@@ -35,6 +37,8 @@ that separation explicit in code and tests.
   [`../policies/guardrail/default/`](../policies/guardrail/default/),
   [`../policies/guardrail/permissive/`](../policies/guardrail/permissive/), and
   [`../policies/guardrail/strict/`](../policies/guardrail/strict/).
+- Opt-in high-assurance use cases:
+  [`../policies/guardrail-use-cases/`](../policies/guardrail-use-cases/).
 
 Any format or precedence change must update both language implementations and
 their focused tests.
@@ -65,3 +69,36 @@ Durable ordered-chain enforcement is limited to authenticated connector hooks
 with canonical connector/session correlation. The audit store persists only
 bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or
 ActionFacts.
+
+## Opt-in high-assurance profiles
+
+The `policies/guardrail-use-cases/` directories are complete selectable rule
+packs layered over the embedded balanced defaults by the existing partial-pack
+inheritance contract. They are intentionally not enabled by the default,
+permissive, or strict profiles.
+
+- `privacy-high-assurance` blocks only the selected structured PII families
+  that have the strongest deterministic validation and excludes noisier
+  email, phone, passport, driver's-license, unformatted-SSN, and NHS patterns.
+- `cloud-production-protection` blocks a closed set of destructive AWS,
+  Google Cloud, and Azure CLI operations. Assign it to a production-scoped
+  connector; resource-name heuristics are not treated as production proof.
+- `database-destruction-protection` blocks statically supplied unbounded SQL
+  deletes and schema-wide destructive statements for a closed list of clients.
+- `kubernetes-production-protection` blocks named namespace deletion and a
+  closed set of `delete --all` workload forms for production-scoped contexts.
+- `infrastructure-destruction-protection` blocks unscoped Terraform, OpenTofu,
+  and Pulumi destruction while allowing plans, previews, and targeted changes.
+
+Cloud, SQL, Kubernetes, and infrastructure rules use semantic-only `a^` regex fallbacks. A complete
+ActionFacts parse, an exact code-owned prerequisite, a successful CEL result,
+and same-rule proof are all required for enforcement. Unsupported or dynamic
+forms do not gain blocking authority.
+
+The vendored low-support conformance matrices live in
+`benchmarks/fixtures/cloud-production-conformance-v1.jsonl` and
+`benchmarks/fixtures/database-destruction-conformance-v1.jsonl`, with matching
+Kubernetes and infrastructure matrices beside them. They verify covered
+positives and parser hard negatives without executing any command.
+Population noise must be reported from the much larger benign trace corpora,
+not inferred from these authored matrices.

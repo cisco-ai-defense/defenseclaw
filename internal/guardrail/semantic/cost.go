@@ -55,6 +55,14 @@ var semanticSizeBounds = [...]sizeBound{
 	{"f.network.@items.host", maxScalarBytes},
 	{"f.network.@items.normalized_host", maxScalarBytes},
 	{"f.data_flows", maxDataFlows},
+	{"f.artifacts", maxArtifacts},
+	{"f.artifacts.@items.value", maxScalarBytes},
+	{"f.artifacts.@items.normalized", maxScalarBytes},
+	{"f.artifacts.@items.resolved", maxScalarBytes},
+	{"f.artifacts.@items.identity", maxScalarBytes},
+	{"f.archive_lineages", maxArchiveLineages},
+	{"f.archive_lineages.@items.identity", maxScalarBytes},
+	{"f.archive_lineages.@items.normalized", maxScalarBytes},
 }
 
 type boundedCostEstimator struct{}

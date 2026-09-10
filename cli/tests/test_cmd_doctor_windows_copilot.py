@@ -31,15 +31,16 @@ def _adapter_body(runtime: Path) -> str:
     return f"""# defenseclaw-managed-hook v7
 $hook = '{literal}'
 {_COPILOT_ADAPTER_TIMEOUT_ASSIGNMENT}
+[Console]::InputEncoding = $utf8NoBom
+[Console]::OutputEncoding = $utf8NoBom
 $payload = [Console]::In.ReadToEnd()
 $payload[0] -eq [char]0xFEFF
 $startInfo.RedirectStandardInput = $true
 $startInfo.RedirectStandardOutput = $true
 $startInfo.RedirectStandardError = $true
-[Console]::InputEncoding = $utf8NoBom
-[Console]::OutputEncoding = $utf8NoBom
 $process.StandardInput.AutoFlush = $true
-[System.Threading.Tasks.TaskCreationOptions]::LongRunning
+$deadline.Restart()
+$process.StandardInput.Write($payload)
 $process.WaitForExit($remainingMS)
 $startInfo.Arguments = 'hook --connector copilot --event ' + $Event
 [System.Environment]::Exit(0)
@@ -413,3 +414,38 @@ def test_windows_copilot_doctor_adapter_preserves_effective_mode(
         f"defenseclaw setup copilot --mode {configured_mode} --yes --restart"
         in check.detail
     )
+
+
+def test_copilot_adapter_rejected_when_input_encoding_follows_read(tmp_path):
+    """Marker presence alone accepted a broken adapter.
+
+    Setting ``[Console]::InputEncoding`` after ``ReadToEnd()`` has no effect on
+    bytes already decoded, so Copilot's UTF-8 JSON would be mangled while every
+    marker check still passed and Doctor reported the adapter healthy.
+    """
+    runtime = tmp_path / "defenseclaw"
+    runtime.write_text("", encoding="utf-8")
+    valid = _adapter_body(runtime)
+    assert valid.index("[Console]::InputEncoding = $utf8NoBom") < valid.index(
+        "[Console]::In.ReadToEnd()"
+    ), "fixture must render the documented order"
+
+    # Swap the two statements so the encoding is set after the read.
+    broken = valid.replace(
+        "[Console]::InputEncoding = $utf8NoBom\n[Console]::OutputEncoding = $utf8NoBom\n"
+        "$payload = [Console]::In.ReadToEnd()",
+        "$payload = [Console]::In.ReadToEnd()\n"
+        "[Console]::InputEncoding = $utf8NoBom\n[Console]::OutputEncoding = $utf8NoBom",
+    )
+    assert broken != valid, "mutation must actually reorder the adapter"
+    assert broken.index("[Console]::In.ReadToEnd()") < broken.index(
+        "[Console]::InputEncoding = $utf8NoBom"
+    )
+    # Every byte-stream marker is still present in the broken adapter, which is
+    # exactly why presence-only validation was insufficient.
+    for marker in (
+        "[Console]::In.ReadToEnd()",
+        "[Console]::InputEncoding = $utf8NoBom",
+        "$process.StandardInput.Write($payload)",
+    ):
+        assert marker in broken

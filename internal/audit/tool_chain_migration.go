@@ -7,8 +7,8 @@ package audit
 
 import "fmt"
 
-// migrateToolChainState adds the bounded, content-free state used by the six
-// fixed tool-call chains. Store.applyMigration owns the surrounding
+// migrateToolChainState adds the bounded, content-free state used by the eighteen
+// fixed tool-call chain slots. Store.applyMigration owns the surrounding
 // transaction.
 func migrateToolChainState(ex dbExecer) error {
 	_, err := ex.Exec(`
@@ -42,17 +42,21 @@ func migrateToolChainState(ex dbExecer) error {
 			parse_status TEXT NOT NULL CHECK (parse_status IN (
 				'not_applicable','complete','partial','unsupported','invalid','limit_exceeded','ambiguous')),
 			detection_step_mask INTEGER NOT NULL
-				CHECK (detection_step_mask BETWEEN 0 AND 4095),
+				CHECK (detection_step_mask BETWEEN 0 AND 17592186044415),
 			enforcement_step_mask INTEGER NOT NULL
-				CHECK (enforcement_step_mask BETWEEN 0 AND 4095 AND
+				CHECK (enforcement_step_mask BETWEEN 0 AND 17592186044415 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
+			enforcement_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(enforcement_join_digests) <= 791),
+			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(enforcement_output_join_digests) <= 791),
 			detected_chain_mask INTEGER NOT NULL
-				CHECK (detected_chain_mask BETWEEN 0 AND 63),
+				CHECK (detected_chain_mask BETWEEN 0 AND 262143),
 			enforcement_safe_chain_mask INTEGER NOT NULL
-				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 63 AND
+				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 262143 AND
 					(enforcement_safe_chain_mask & ~detected_chain_mask) = 0),
 			denied_chain_mask INTEGER NOT NULL
-				CHECK (denied_chain_mask BETWEEN 0 AND 63 AND
+				CHECK (denied_chain_mask BETWEEN 0 AND 262143 AND
 					(denied_chain_mask & ~enforcement_safe_chain_mask) = 0),
 			stable_action_id TEXT CHECK (
 				(denied_chain_mask = 0 AND stable_action_id IS NULL) OR
@@ -89,20 +93,32 @@ func migrateToolChainState(ex dbExecer) error {
 				'chain.privilege_discovery_then_elevation',
 				'chain.secret_manager_read_then_egress',
 				'chain.secret_read_then_egress',
-				'chain.workload_identity_then_lateral_execution')),
+				'chain.workload_identity_then_lateral_execution',
+				'chain.download_decode_execute_same_artifact',
+				'chain.download_then_execute_same_artifact',
+				'chain.sensitive_egress_artifact_then_execute',
+				'chain.firewall_trust_expansion_then_destination_use',
+				'chain.sqlserver_xp_cmdshell_enable_then_invoke',
+				'chain.kubernetes_privileged_host_root_write_apply_exec',
+				'chain.wireless_capture_then_deauth_same_bssid',
+				'chain.secretsdump_then_psexec_same_target_principal',
+				'chain.cloud_iam_principal_create_then_admin_attach_same_principal',
+				'chain.kubernetes_privileged_cronjob_patch_then_create_job',
+				'chain.sql_command_udf_create_then_invoke_same_function',
+				'chain.reverse_shell_payload_write_then_persistence_install_same_artifact')),
 			chain_version TEXT NOT NULL CHECK (length(chain_version) BETWEEN 1 AND 16),
 			detected_chain_mask INTEGER NOT NULL
-				CHECK (detected_chain_mask BETWEEN 0 AND 63),
+				CHECK (detected_chain_mask BETWEEN 0 AND 262143),
 			enforcement_safe_chain_mask INTEGER NOT NULL
-				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 63 AND
+				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 262143 AND
 					(enforcement_safe_chain_mask & ~detected_chain_mask) = 0),
 			denied_chain_mask INTEGER NOT NULL
-				CHECK (denied_chain_mask BETWEEN 1 AND 63 AND
+				CHECK (denied_chain_mask BETWEEN 1 AND 262143 AND
 					(denied_chain_mask & ~enforcement_safe_chain_mask) = 0),
 			stable_action_id TEXT NOT NULL CHECK (
 				length(stable_action_id) = 68 AND substr(stable_action_id, 1, 4) = 'gca_' AND
 				substr(stable_action_id, 5) NOT GLOB '*[^0-9a-f]*'),
-			severity TEXT NOT NULL CHECK (severity = 'HIGH'),
+			severity TEXT NOT NULL CHECK (severity IN ('HIGH','CRITICAL')),
 			delivery_count INTEGER NOT NULL CHECK (delivery_count >= 1),
 			first_observed_time_unix_nano INTEGER NOT NULL
 				CHECK (first_observed_time_unix_nano > 0),

@@ -1,0 +1,46 @@
+version: 1
+category: cloud-production-protection
+rules:
+  - id: impact.cloud_bulk_data_delete
+    expression: >-
+      f.commands.exists(c, c.argv_complete && ((c.program == 'aws' &&
+      (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) ||
+      ('s3api' in c.argv && 'delete-objects' in c.argv))) ||
+      (c.program == 'gcloud' && 'storage' in c.argv && 'rm' in c.argv &&
+      (('--recursive' in c.argv) || ('-r' in c.argv))) ||
+      (c.program == 'az' && 'storage' in c.argv && 'delete-batch' in c.argv)))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Bulk deletion of cloud-hosted data"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, cloud, production-safety]
+
+  - id: impact.cloud_resource_delete
+    expression: >-
+      f.commands.exists(c, c.argv_complete && ((c.program == 'aws' &&
+      ('delete' in c.argv || 'delete-bucket' in c.argv ||
+      'delete-db-instance' in c.argv || 'delete-table' in c.argv ||
+      'delete-stack' in c.argv || 'terminate-instances' in c.argv ||
+      'delete-cluster' in c.argv)) ||
+      (c.program == 'gcloud' && 'delete' in c.argv) ||
+      (c.program == 'az' && 'delete' in c.argv)))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Deletion of cloud infrastructure or a managed data service"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, cloud, production-safety]
+
+  - id: tamper.cloud_audit_control_destruction
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['aws', 'gcloud'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Destroy an exact cloud audit-logging control"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [defense-evasion, tampering, cloud, audit-logging, production-safety]

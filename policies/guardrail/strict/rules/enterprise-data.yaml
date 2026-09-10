@@ -51,10 +51,17 @@ rules:
     tags: [pii, financial]
 
   - id: ENT-US-PHONE
-    pattern: '\b(?:\+1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b'
+    pattern: '(?:\+1(?:[\s.-]?\d){10}\b|\(\d{3}\)[\s.-]?\d{3}[\s.-]?\d{4}\b|\b\d{3}[\s.-]\d{3}[\s.-]\d{4}\b|(?i:\b(?:phone|mobile|telephone|contact|tel|whatsapp)\b[^\r\n\d]{0,32}(?:\+?1[\s.-]?)?(?:\(?\d{3}\)?[\s.-]?)\d{3}[\s.-]?\d{4}\b))'
     title: "US phone number"
     severity: MEDIUM
     confidence: 0.50
+    tags: [pii]
+
+  - id: ENT-PHONE-E164
+    pattern: '(?:^|[\s:(])\+\d{1,3}(?:[\s.-]?\d){7,14}\b'
+    title: "International E.164-style phone number"
+    severity: MEDIUM
+    confidence: 0.55
     tags: [pii]
 
   - id: ENT-EMAIL-BULK
@@ -93,7 +100,7 @@ rules:
     tags: [pii, hipaa]
 
   - id: ENT-NHS-NUMBER
-    pattern: '\b\d{3}[\s]?\d{3}[\s]?\d{4}\b'
+    pattern: '(?i:\b(?:nhs(?:\s+(?:number|no\.?|id))?|national health service(?:\s+(?:number|no\.?|id))?)\b[^\r\n\d]{0,24}\d{3}[\s]?\d{3}[\s]?\d{4}\b|\b\d{3}[\s]?\d{3}[\s]?\d{4}\b[^\r\nA-Za-z]{0,8}(?:nhs(?:\s+(?:number|no\.?|id))?|national health service(?:\s+(?:number|no\.?|id))?)\b)'
     title: "UK NHS number pattern"
     severity: HIGH
     confidence: 0.40

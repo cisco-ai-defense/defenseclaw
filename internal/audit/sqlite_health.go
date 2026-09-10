@@ -45,14 +45,33 @@ func (s *Store) CollectSQLiteHealth(ctx context.Context) (SQLiteHealthSnapshot, 
 	} else if !os.IsNotExist(statErr) {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: inspect SQLite WAL health: %w", statErr)
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&snapshot.PageCount); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_page_count", s.sqliteBusyObservabilityV8(), func() error {
+		return s.db.QueryRowContext(ctx, "PRAGMA page_count").Scan(&snapshot.PageCount)
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: read SQLite page count: %w", err)
 	}
-	if err := s.db.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&snapshot.FreelistCount); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_freelist_count", s.sqliteBusyObservabilityV8(), func() error {
+		return s.db.QueryRowContext(ctx, "PRAGMA freelist_count").Scan(&snapshot.FreelistCount)
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: read SQLite freelist count: %w", err)
 	}
 	startedAt := time.Now()
-	if _, err := s.db.ExecContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)"); err != nil {
+	if err := retryBusyObserved(ctx, "sqlite_health_wal_checkpoint", s.sqliteBusyObservabilityV8(), func() error {
+		// wal_checkpoint returns (busy, log, checkpointed). ExecContext discarded
+		// that row, so a checkpoint blocked by a reader looked successful and the
+		// recorded CheckpointMs described work that never happened. Scan the row
+		// and report a blocked checkpoint as busy so retryBusyObserved retries it
+		// -- the phrasing is what isSQLiteBusy matches.
+		var busy, walFrames, checkpointed int
+		if scanErr := s.db.QueryRowContext(ctx, "PRAGMA wal_checkpoint(PASSIVE)").
+			Scan(&busy, &walFrames, &checkpointed); scanErr != nil {
+			return scanErr
+		}
+		if busy != 0 {
+			return fmt.Errorf("sqlite_busy: wal_checkpoint(PASSIVE) was blocked")
+		}
+		return nil
+	}); err != nil {
 		return SQLiteHealthSnapshot{}, fmt.Errorf("audit: checkpoint SQLite health: %w", err)
 	}
 	snapshot.CheckpointMs = float64(time.Since(startedAt).Milliseconds())

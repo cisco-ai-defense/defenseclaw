@@ -22,6 +22,7 @@ import sys
 import tempfile
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -42,7 +43,9 @@ from defenseclaw.commands.cmd_doctor import (
     _check_hilt_support,
     _check_hook_health,
     _check_llm_api_key,
+    _check_openclaw_transport_advisory,
     _check_openhands_hooks,
+    _check_proxy_interception,
     _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
@@ -161,6 +164,174 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1)
         warn_checks = [c for c in result.checks if c["status"] == "warn"]
         self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+
+    def test_proxy_interception_fails_when_self_test_misses(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("not being intercepted", result.checks[0]["detail"])
+
+    def test_proxy_interception_passes_when_self_test_verified(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(
+            cfg,
+            result,
+            live_health={
+                "interception": {
+                    "verified": True,
+                    "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "last_agent_traffic_at": "2026-09-04T12:00:00Z",
+                }
+            },
+        )
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.passed, 1, result.checks)
+        self.assertIn("self-test", result.checks[0]["detail"])
+        self.assertIn("agent traffic", result.checks[0]["detail"])
+
+    def test_proxy_interception_fails_when_self_test_is_stale(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _check_proxy_interception(
+            cfg,
+            result,
+            live_health={"interception": {"verified": True, "last_verified_at": stale}},
+        )
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("stale", result.checks[0]["detail"])
+
+    def test_proxy_interception_skips_zeptoclaw_only(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, port=4000, connector="zeptoclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.checks, [])
+
+    def test_proxy_interception_skips_hook_connectors(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, port=4000, connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.checks, [])
+
+    def test_proxy_interception_fails_when_document_absent(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"guardrail": {"state": "running"}})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.to_dict()["exit_code"], 1)
+        self.assertIn("has not reported an interceptor self-test", result.checks[0]["detail"])
+
+    def test_disabled_openclaw_is_skipped_by_interception_and_transport_checks(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                model="openai/gpt-4",
+                port=4000,
+                connector="openclaw",
+                connectors={"openclaw": PerConnectorGuardrailConfig(enabled=False)},
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        interception = _DoctorResult()
+        _check_proxy_interception(
+            cfg,
+            interception,
+            live_health={"interception": {"verified": False}},
+        )
+        self.assertEqual(interception.checks, [])
+
+        advisory = _DoctorResult()
+        signal = SimpleNamespace(version="2026.6.8", installed=True)
+        with patch(
+            "defenseclaw.inventory.agent_discovery.discover_agents",
+            return_value=SimpleNamespace(agents={"openclaw": signal}),
+        ):
+            _check_openclaw_transport_advisory(cfg, advisory)
+        self.assertEqual(advisory.checks, [])
+
+    def test_openclaw_transport_advisory_for_2026_6(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        signal = SimpleNamespace(version="2026.6.8", installed=True)
+        with patch(
+            "defenseclaw.inventory.agent_discovery.discover_agents",
+            return_value=SimpleNamespace(agents={"openclaw": signal}),
+        ):
+            _check_openclaw_transport_advisory(cfg, result)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("2026.6.8", result.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):

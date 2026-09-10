@@ -610,7 +610,7 @@ func isEnterprisePIIRuleID(ruleID string) bool {
 	switch strings.ToUpper(strings.TrimSpace(ruleID)) {
 	case "ENT-BULK-SSN", "ENT-BULK-SSN-NOHYPHEN",
 		"ENT-CC-VISA", "ENT-CC-MC", "ENT-CC-AMEX", "ENT-CC-DISCOVER",
-		"ENT-IBAN", "ENT-US-PHONE", "ENT-EMAIL-BULK", "ENT-PASSPORT-US",
+		"ENT-IBAN", "ENT-US-PHONE", "ENT-PHONE-E164", "ENT-EMAIL-BULK", "ENT-PASSPORT-US",
 		"ENT-DL-CA", "ENT-MEDICAL-RECORD", "ENT-DOB-PATTERN", "ENT-NHS-NUMBER",
 		"ENT-BULK-CSV-PII", "ENT-BULK-JSON-PII":
 		return true
