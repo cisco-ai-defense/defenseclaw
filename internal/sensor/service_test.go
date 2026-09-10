@@ -156,8 +156,16 @@ func TestApplyCorrelationAttenuatesOnlyLocalInference(t *testing.T) {
 		{ID: "shadow_ai_egress", Weight: 50},
 	}
 	got := applyCorrelation(signals, correlate.Result{Verdict: correlate.VerdictAccounted})
-	if got[0].Weight != scoring.WeightSanctionedEgress {
-		t.Errorf("local inference attenuated to %d, want %d", got[0].Weight, scoring.WeightSanctionedEgress)
+	// Assert the scaled weight, not a constant that merely happens to equal
+	// it. Comparing against WeightSanctionedEgress passed only while two
+	// unrelated numbers coincided: it would fail when that constant moved,
+	// for a reason having nothing to do with attenuation, and could keep
+	// passing when the scale itself changed.
+	want := int(float64(scoring.WeightLocalRuntimeProcess) * scoring.CorroboratedWeightScale)
+	if got[0].Weight != want {
+		t.Errorf("local inference attenuated to %d, want %d (%d scaled by %v)",
+			got[0].Weight, want, scoring.WeightLocalRuntimeProcess,
+			scoring.CorroboratedWeightScale)
 	}
 	if got[1].Weight != 50 {
 		t.Errorf("egress weight was discounted to %d; an inventoried model file says nothing "+

@@ -159,7 +159,7 @@ func (s *windowsSource) Start(ctx context.Context) error {
 	hasProcessEvents, hasCommandLines := probeAuditCoverage()
 	coverage := Coverage{
 		Mechanism: "Windows Security event log (wevtapi)",
-		Kinds:     []Kind{KindExec, KindExit, KindFileRead, KindIdentity, KindPrivilege},
+		Kinds:     []Kind{KindExec, KindExit, KindIdentity, KindPrivilege},
 	}
 	if !hasProcessEvents {
 		coverage.MissingKinds = append(coverage.MissingKinds, KindExec, KindExit)
@@ -175,10 +175,17 @@ func (s *windowsSource) Start(ctx context.Context) error {
 	}
 	// File-object access needs a SACL on each watched file, which is almost
 	// never configured. Say so rather than implying the coverage exists.
-	coverage.MissingKinds = append(coverage.MissingKinds, KindFileWrite)
+	//
+	// Both file kinds, not just writes. Event 4663 becomes a read or a write
+	// depending on the access mask, but the same per-object SACL gates both
+	// and Start does not probe for it -- so claiming reads are covered while
+	// writes are missing describes a state this source cannot verify it is
+	// in. Coverage has to say what it can currently deliver, and without a
+	// SACL that is neither.
+	coverage.MissingKinds = append(coverage.MissingKinds, KindFileRead, KindFileWrite)
 	coverage.Limitations = append(coverage.Limitations,
-		"file events require a SACL on each audited object; without one, credential reads are "+
-			"not observable through the Security channel")
+		"file events require a SACL on each audited object; without one, neither credential "+
+			"reads nor persistence writes are observable through the Security channel")
 	s.coverage = coverage
 
 	s.wg.Add(1)

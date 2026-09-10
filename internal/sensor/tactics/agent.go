@@ -69,6 +69,60 @@ var agentCmdlinePatterns = []struct {
 // these rather than directly. They are agent processes in their own right.
 var mcpProcessPattern = regexp.MustCompile(`(?i)(mcp[-_]server|server[-_]mcp|modelcontextprotocol)`)
 
+// mcpInterpreters are the runtimes an MCP server is normally launched through,
+// where the thing being executed is an argument rather than argv[0].
+var mcpInterpreters = map[string]bool{
+	"node": true, "nodejs": true, "npx": true, "bun": true, "deno": true,
+	"python": true, "python3": true, "uv": true, "uvx": true, "pipx": true,
+	"ruby": true, "php": true, "java": true, "dotnet": true,
+}
+
+// isMCPProcess reports whether this command line *runs* an MCP server, as
+// opposed to merely naming one.
+//
+// The pattern used to be applied to the whole command line, unanchored. That
+// made `vim mcp-server.py`, `grep mcp_server /var/log/system.log` and
+// `open notes/modelcontextprotocol.md` all agent processes -- and because an
+// agent identity opens the lineage gate for the process and every descendant,
+// an editor or a shell became an agent root and everything under it became
+// scoreable. The gate is the host plane's entire false-positive control, so
+// naming a file must not open it.
+//
+// Matching argv[0] alone is too narrow: a real server is usually launched as
+// `node /opt/mcp-server-fs/index.js`, `python3 -m mcp_server_git` or
+// `npx @modelcontextprotocol/server-filesystem`. So the token also counts
+// when it appears in what an interpreter was asked to run -- which `vim` and
+// `grep` are not.
+func isMCPProcess(cmdline string) bool {
+	fields := strings.Fields(cmdline)
+	if len(fields) == 0 {
+		return false
+	}
+	if mcpProcessPattern.MatchString(BaseName(fields[0])) {
+		return true
+	}
+	if !mcpInterpreters[strings.ToLower(BaseName(fields[0]))] {
+		return false
+	}
+	for index := 1; index < len(fields); index++ {
+		argument := fields[index]
+		if strings.HasPrefix(argument, "-") {
+			// -m/--module take the thing to run as their value.
+			if argument == "-m" || argument == "--module" {
+				if index+1 < len(fields) &&
+					mcpProcessPattern.MatchString(fields[index+1]) {
+					return true
+				}
+				index++
+			}
+			continue
+		}
+		// The first non-flag argument to an interpreter is what it runs.
+		return mcpProcessPattern.MatchString(argument)
+	}
+	return false
+}
+
 // IsAgentProcess reports whether an executable name is itself a known agent.
 func IsAgentProcess(exeName string) bool {
 	return agentProcessPattern.MatchString(BaseName(exeName))
@@ -81,7 +135,7 @@ func AgentCmdlineReason(cmdline string) string {
 	if text == "" {
 		return ""
 	}
-	if mcpProcessPattern.MatchString(text) {
+	if isMCPProcess(text) {
 		return "MCP server process"
 	}
 	for _, candidate := range agentCmdlinePatterns {

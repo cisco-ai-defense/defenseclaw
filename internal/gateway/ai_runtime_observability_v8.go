@@ -40,6 +40,13 @@ import (
 // dominate a record.
 const maxRuntimeSignalsPerRecord = 32
 
+// runtimeSignalsByteBudget mirrors defenseclaw.ai.runtime.signals'
+// max_utf8_bytes in schemas/telemetry/v8/operations.yaml. The budget covers
+// the whole array, so it has to hold what maxRuntimeSignalsPerRecord is
+// willing to send -- the two disagreed by an order of magnitude, and a
+// finding whose trail exceeded the budget lost the entire record.
+const runtimeSignalsByteBudget = 2048
+
 // aiRuntimeV8Adapter emits runtime-plane records through the canonical v8
 // pipeline. There is no v7 path: the retired ai_discovery envelope had no
 // producer and this subsystem never had one.
@@ -295,16 +302,30 @@ func runtimeSeverity(band string) observability.Severity {
 // something derived from what the process was doing.
 func renderRuntimeSignals(finding sensor.Finding) []string {
 	rendered := make([]string, 0, len(finding.Signals))
+	weights := make(map[string]int, len(finding.Signals))
 	for _, signal := range finding.Signals {
 		if signal.ID == "" {
 			continue
 		}
 		rendered = append(rendered, fmt.Sprintf("%s=%d", signal.ID, signal.Weight))
+		weights[rendered[len(rendered)-1]] = signal.Weight
 	}
-	sort.Strings(rendered)
+	// Select by weight, then order the survivors lexically.
+	//
+	// Sorting first and cutting the tail keeps the alphabetically earliest
+	// signals, which has nothing to do with which ones explain the score: a
+	// trail truncated that way can drop the heaviest evidence and keep the
+	// lightest. Ties break on the rendered string so the result is stable.
+	sort.SliceStable(rendered, func(i, j int) bool {
+		if weights[rendered[i]] != weights[rendered[j]] {
+			return weights[rendered[i]] > weights[rendered[j]]
+		}
+		return rendered[i] < rendered[j]
+	})
 	if len(rendered) > maxRuntimeSignalsPerRecord {
 		rendered = rendered[:maxRuntimeSignalsPerRecord]
 	}
+	sort.Strings(rendered)
 	return rendered
 }
 
@@ -312,11 +333,24 @@ func renderRuntimeSignals(finding sensor.Finding) []string {
 func renderRuntimeProviders(finding sensor.Finding) []string {
 	rendered := make([]string, 0, len(finding.Providers))
 	seen := make(map[string]bool, len(finding.Providers))
+	// Keep the strongest attribution per hostname, not the first one seen.
+	// A DNS answer this host actually resolved (0.95) and a PTR record (0.6)
+	// can name the same peer, and provider order carries no guarantee about
+	// which arrives first -- so keeping the first would report the weaker
+	// confidence for a peer that was directly observed.
+	best := make(map[string]sensor.ProviderReach, len(finding.Providers))
 	for _, provider := range finding.Providers {
-		if provider.Hostname == "" || seen[provider.Hostname] {
+		if provider.Hostname == "" {
 			continue
 		}
-		seen[provider.Hostname] = true
+		if existing, ok := best[provider.Hostname]; ok &&
+			existing.Confidence >= provider.Confidence {
+			continue
+		}
+		best[provider.Hostname] = provider
+	}
+	for hostname, provider := range best {
+		seen[hostname] = true
 		rendered = append(rendered, fmt.Sprintf("%s|%s|%.2f",
 			provider.Hostname, provider.Category, provider.Confidence))
 	}

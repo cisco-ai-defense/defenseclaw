@@ -219,3 +219,39 @@ func indexOf(haystack, needle string) int {
 	}
 	return -1
 }
+
+// TestFutureDatedSnapshotIsUnobservedNotFresh closes a staleness check that
+// only looked one way.
+//
+// age is negative when the scan time is ahead of now, so a simple "older
+// than the maximum" comparison passes for an arbitrarily future snapshot. A
+// complete snapshot that matches nothing yields unaccounted, which escalates,
+// so a skewed clock inflated severity rather than merely confusing it.
+func TestFutureDatedSnapshotIsUnobservedNotFresh(t *testing.T) {
+	now := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	observation := Observation{PID: 4242, ExeName: "python3"}
+
+	for _, test := range []struct {
+		name     string
+		scanTime time.Time
+		want     Verdict
+	}{
+		{"fresh", now.Add(-time.Minute), VerdictUnaccounted},
+		{"a little skew is tolerated", now.Add(5 * time.Second), VerdictUnaccounted},
+		{"stale", now.Add(-time.Hour), VerdictUnobserved},
+		{"an hour in the future", now.Add(time.Hour), VerdictUnobserved},
+		{"a year in the future", now.Add(365 * 24 * time.Hour), VerdictUnobserved},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			correlator := New(Snapshot{
+				Signals:  []inventory.AISignal{modelSignal("some-other-model")},
+				ScanTime: test.scanTime,
+				Complete: true,
+			})
+			correlator.now = func() time.Time { return now }
+			if got := correlator.LocalModel(observation).Verdict; got != test.want {
+				t.Fatalf("verdict = %v, want %v", got, test.want)
+			}
+		})
+	}
+}

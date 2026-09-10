@@ -22,6 +22,8 @@
 package gateway
 
 import (
+	"fmt"
+	"slices"
 	"strings"
 	"testing"
 
@@ -194,5 +196,92 @@ func TestActivityRecordsAreOnePerTacticAndOnlyForAttributedFindings(t *testing.T
 	}
 	if got := distinct(egressOnly); len(got) != 0 {
 		t.Fatalf("emitted %d activity records for a finding with no agent: %v", len(got), got)
+	}
+}
+
+// TestSignalTrailFitsItsByteBudgetAndKeepsTheHeaviestEvidence covers the two
+// ways the evidence trail was lost.
+//
+// The budget applies to the whole array, not one element, and it was 128
+// bytes -- less than a five-signal host-plane chain, which is precisely the
+// trail that explains a critical finding. And the trail was capped after a
+// lexical sort, so truncation kept the alphabetically first signals rather
+// than the ones carrying the score.
+func TestSignalTrailFitsItsByteBudgetAndKeepsTheHeaviestEvidence(t *testing.T) {
+	t.Parallel()
+
+	chain := sensor.Finding{Signals: []scoring.Signal{
+		{ID: "agent_credential_access", Weight: 40},
+		{ID: "agent_identity_creation", Weight: 35},
+		{ID: "agent_public_exfil_surface", Weight: 45},
+		{ID: "agent_encoded_payload", Weight: 30},
+		{ID: "agent_kill_chain", Weight: 25},
+	}}
+	rendered := renderRuntimeSignals(chain)
+	if len(rendered) != len(chain.Signals) {
+		t.Fatalf("rendered %d of %d signals", len(rendered), len(chain.Signals))
+	}
+	// The budget has to hold what the emitter is willing to send. The cap is
+	// 32 entries; the declared budget was 128 bytes, which is about five.
+	// Anything past that lost its whole record -- the trail that explains the
+	// score -- so measure the emitter's own worst case against the budget
+	// rather than one hand-picked fixture.
+	worst := sensor.Finding{}
+	for index := range maxRuntimeSignalsPerRecord {
+		worst.Signals = append(worst.Signals, scoring.Signal{
+			// A real signal id: the longest the host plane emits.
+			ID: fmt.Sprintf("agent_public_exfil_surface_%02d", index), Weight: 100,
+		})
+	}
+	total := 0
+	for _, entry := range renderRuntimeSignals(worst) {
+		total += len(entry)
+	}
+	if total > runtimeSignalsByteBudget {
+		t.Fatalf("a full %d-entry trail is %d bytes, past the %d-byte budget the "+
+			"registry declares; the record is rejected and the evidence is lost",
+			maxRuntimeSignalsPerRecord, total, runtimeSignalsByteBudget)
+	}
+
+	// Truncation must keep the heaviest evidence. Build more signals than the
+	// cap, with the heaviest ones late in the alphabet.
+	crowded := sensor.Finding{}
+	for index := range maxRuntimeSignalsPerRecord + 8 {
+		weight := index
+		crowded.Signals = append(crowded.Signals, scoring.Signal{
+			ID: fmt.Sprintf("signal_%02d", index), Weight: weight,
+		})
+	}
+	kept := renderRuntimeSignals(crowded)
+	if len(kept) != maxRuntimeSignalsPerRecord {
+		t.Fatalf("kept %d signals, want the %d cap", len(kept), maxRuntimeSignalsPerRecord)
+	}
+	if !slices.Contains(kept, fmt.Sprintf("signal_%02d=%d",
+		len(crowded.Signals)-1, len(crowded.Signals)-1)) {
+		t.Error("the heaviest signal was truncated away; selection is still lexical")
+	}
+	if slices.Contains(kept, "signal_00=0") {
+		t.Error("the lightest signal survived while heavier ones were dropped")
+	}
+}
+
+// TestProviderTrailKeepsTheStrongestAttributionPerHost pins the dedup rule.
+// A DNS answer this host resolved (0.95) and a PTR record (0.6) can name the
+// same peer, and nothing orders them, so keeping the first seen reported the
+// weaker confidence for a peer that was directly observed.
+func TestProviderTrailKeepsTheStrongestAttributionPerHost(t *testing.T) {
+	t.Parallel()
+
+	finding := sensor.Finding{Providers: []sensor.ProviderReach{
+		{Hostname: "api.anthropic.com", Category: "frontier", Confidence: 0.6},
+		{Hostname: "api.anthropic.com", Category: "frontier", Confidence: 0.95},
+	}}
+	rendered := renderRuntimeProviders(finding)
+	if len(rendered) != 1 {
+		t.Fatalf("rendered %d entries for one hostname: %v", len(rendered), rendered)
+	}
+	if !strings.Contains(rendered[0], "0.95") {
+		t.Fatalf("kept %q, want the 0.95 direct observation over the 0.60 PTR record",
+			rendered[0])
 	}
 }

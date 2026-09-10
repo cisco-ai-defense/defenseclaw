@@ -461,3 +461,49 @@ func TestSameAgentWalkFollowsTheResponsiblePid(t *testing.T) {
 			"so one agent session splits into one per fork", attribution.RootPID)
 	}
 }
+
+// TestRecordKeepsTheEarliestSightingWhileAdoptingConfidence pins that a
+// stage's time never moves forward.
+//
+// Progressed reads these timestamps to decide whether the session moved
+// through its stages in order. Adopting a later sighting's time along with
+// its higher confidence could reorder a chain that had already formed -- or
+// manufacture one that never happened.
+func TestRecordKeepsTheEarliestSightingWhileAdoptingConfidence(t *testing.T) {
+	base := time.Date(2026, 9, 9, 12, 0, 0, 0, time.UTC)
+	session := NewSession(100, "claude", base)
+
+	early := Observation{
+		SignalID: "agent_credential_access", Tactic: tactics.CredentialAccess,
+		At: base, Confidence: 0.5,
+	}
+	late := early
+	late.At = base.Add(10 * time.Minute)
+	late.Confidence = 0.95
+
+	session.Record(early)
+	session.Record(late)
+
+	if got := session.FirstAt(tactics.CredentialAccess); !got.Equal(base) {
+		t.Fatalf("FirstAt = %s, want the earlier sighting %s", got, base)
+	}
+	observations := session.Observations()
+	if len(observations) != 1 {
+		t.Fatalf("kept %d observations for one key", len(observations))
+	}
+	if observations[0].Confidence != 0.95 {
+		t.Errorf("confidence = %v, want the higher 0.95", observations[0].Confidence)
+	}
+
+	// An earlier sighting at lower confidence still pulls the start back.
+	earlier := early
+	earlier.At = base.Add(-5 * time.Minute)
+	earlier.Confidence = 0.2
+	session.Record(earlier)
+	if got := session.FirstAt(tactics.CredentialAccess); !got.Equal(earlier.At) {
+		t.Fatalf("FirstAt = %s, want the earliest sighting %s", got, earlier.At)
+	}
+	if session.Observations()[0].Confidence != 0.95 {
+		t.Error("an earlier low-confidence sighting downgraded the recorded confidence")
+	}
+}

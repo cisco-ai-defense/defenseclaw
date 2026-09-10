@@ -78,7 +78,14 @@ struct AIRuntimeProvider: Identifiable, Sendable, Hashable {
     var confidence: Double = 0
     var attributionSource: String = ""
 
-    var id: String { hostname + "|" + address }
+    /// The port is part of the identity, not decoration.
+    ///
+    /// `AIRuntimeView` renders providers with an identity-based `ForEach`, so
+    /// two peers that share a hostname and address but differ in port would
+    /// collide and render as one -- which is exactly the shape a local model
+    /// server on two ports, or one host reached over both 443 and a proxy
+    /// port, produces.
+    var id: String { "\(hostname)|\(address)|\(port)" }
 }
 
 /// One scored runtime finding.

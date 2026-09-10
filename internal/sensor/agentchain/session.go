@@ -65,11 +65,30 @@ func NewSession(rootPID int, agentName string, at time.Time) *Session {
 }
 
 // Record adds an observation, keeping the highest-confidence sighting of a
-// repeated key.
+// repeated key and the earliest time it was seen.
+//
+// The two are kept separately on purpose. Adopting the later sighting's
+// timestamp along with its confidence would move a stage forward in time, and
+// Progressed reads exactly those timestamps to decide whether the session
+// moved through its stages in order -- so re-observing an early stage more
+// confidently could reorder a chain that had already formed, or form one that
+// never happened.
 func (s *Session) Record(observation Observation) {
 	existing, ok := s.observations[observation.Key()]
-	if !ok || observation.Confidence > existing.Confidence {
+	switch {
+	case !ok:
 		s.observations[observation.Key()] = observation
+	case observation.Confidence > existing.Confidence:
+		promoted := observation
+		if existing.At.Before(promoted.At) {
+			promoted.At = existing.At
+		}
+		s.observations[observation.Key()] = promoted
+	case observation.At.Before(existing.At):
+		// Same or lower confidence, but an earlier sighting: the stage began
+		// sooner than recorded.
+		existing.At = observation.At
+		s.observations[observation.Key()] = existing
 	}
 	if observation.At.After(s.LastSeen) {
 		s.LastSeen = observation.At

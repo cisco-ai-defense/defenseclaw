@@ -92,6 +92,14 @@ func Snapshot() (connections []Connection, unattributed int, err error) { return
 // LocalModelPorts are the loopback ports reserved to local model runtimes.
 // A process listening here is a local model server whether or not its
 // executable name is recognised, which is what catches a renamed binary.
+//
+// Split by how much a port alone actually tells you. The reserved ones are
+// registered to one runtime and nothing else uses them, so the port is
+// evidence by itself. The ambiguous ones are ordinary development ports --
+// 8080 is every HTTP server ever written -- and on their own they say
+// nothing; a signal weighted 30 clears the default reporting floor, so
+// treating them as evidence turns a local web server into a local model
+// finding on a developer's machine.
 var LocalModelPorts = map[int]string{
 	11434: "ollama",
 	1234:  "lm studio",
@@ -104,8 +112,25 @@ var LocalModelPorts = map[int]string{
 	3928:  "cortex",
 }
 
-// LocalModelRuntimeForPort names the runtime a loopback port is reserved to.
-func LocalModelRuntimeForPort(port int) (string, bool) {
-	name, ok := LocalModelPorts[port]
-	return name, ok
+// ambiguousLocalModelPorts are the entries above that a non-AI service uses
+// just as readily, and which therefore need something else to agree.
+var ambiguousLocalModelPorts = map[int]bool{
+	8080: true, 8000: true, 5000: true, 1234: true, 1337: true,
 }
+
+// LocalModelRuntimeForPort names the runtime a loopback port is reserved to,
+// and reports whether the port alone is enough to say so.
+//
+// A caller that gets corroborated == false must find agreement elsewhere --
+// the process being a known model runtime, say -- before scoring it.
+func LocalModelRuntimeForPort(port int) (name string, corroborated bool) {
+	runtime, ok := LocalModelPorts[port]
+	if !ok {
+		return "", false
+	}
+	return runtime, !ambiguousLocalModelPorts[port]
+}
+
+// LocalModelPortIsAmbiguous reports whether a port in the table is one an
+// ordinary service uses too.
+func LocalModelPortIsAmbiguous(port int) bool { return ambiguousLocalModelPorts[port] }

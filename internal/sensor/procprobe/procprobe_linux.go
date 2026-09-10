@@ -25,6 +25,7 @@ package procprobe
 
 import (
 	"bytes"
+	"io"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -159,7 +160,15 @@ func parseStat(raw []byte, clockTicks, pageSize int64) (Process, bool) {
 
 	cpu := time.Duration(0)
 	if clockTicks > 0 {
-		cpu = time.Duration((utime+stime)*int64(time.Second)) / time.Duration(clockTicks)
+		// Divide before scaling. Multiplying ticks by 1e9 first overflows
+		// int64 at roughly 9.2e9 ticks -- about 2.9 years of CPU time at
+		// USER_HZ 100, which a busy many-core process reaches in weeks, not
+		// years. After the wrap CPUTime is negative or arbitrary, and the
+		// delta plane A compares against the inference threshold is wrong in
+		// whichever direction the wrap landed.
+		ticks := utime + stime
+		cpu = time.Duration(ticks/clockTicks)*time.Second +
+			time.Duration((ticks%clockTicks)*int64(time.Second)/clockTicks)
 	}
 	return Process{
 		PPID: ppid, Name: comm, CPUTime: cpu, RSSBytes: rssPages * pageSize,
@@ -172,9 +181,16 @@ func readCmdline(path string) string {
 		return ""
 	}
 	defer handle.Close()
+	// Read to EOF rather than trusting one call. io.Reader may return fewer
+	// bytes than the buffer holds, and accepting the first result cuts argv
+	// mid-token -- which silently loses the framework identity that lives in
+	// a later argument, the whole reason argv is read at all.
 	buffer := make([]byte, maxCmdlineBytes)
-	read, err := handle.Read(buffer)
-	if err != nil || read <= 0 {
+	read, err := io.ReadFull(handle, buffer)
+	if err != nil && err != io.EOF && err != io.ErrUnexpectedEOF {
+		return ""
+	}
+	if read <= 0 {
 		return ""
 	}
 	// /proc/<pid>/cmdline is NUL-separated with a trailing NUL.

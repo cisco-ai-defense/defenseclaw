@@ -27,6 +27,7 @@ import (
 	"bufio"
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"net"
 	"os"
 	"path/filepath"
@@ -99,10 +100,19 @@ func readConnectionTables() ([]inodeRow, error) {
 				rows = append(rows, row)
 			}
 		}
+		// A scanner stops on the first read error and on any line past its
+		// token limit, and the loop above ends normally either way. Silently
+		// returning a truncated table means fewer connections and a lower
+		// unattributed count than the host actually has -- a partial read
+		// rendered as a quiet host, which is the substitution this whole
+		// subsystem refuses to make.
+		if err := scanner.Err(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("%s: %w", path, err)
+		}
 		handle.Close()
 	}
-	if len(rows) == 0 && firstErr != nil {
-		return nil, firstErr
+	if firstErr != nil {
+		return rows, firstErr
 	}
 	return rows, nil
 }

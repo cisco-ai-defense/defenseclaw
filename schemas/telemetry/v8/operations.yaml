@@ -1004,8 +1004,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: bounded-v1
-    overrides: {max_utf8_bytes: 128}
-    notes: The evidence trail behind the score, rendered as signal_id=weight so the whole trail stays a bounded metadata field rather than free-form content
+    overrides: {max_utf8_bytes: 2048, max_item_utf8_bytes: 64}
+    notes: The evidence trail behind the score, rendered as signal_id=weight so the whole trail stays a bounded metadata field rather than free-form content. The byte budget covers the whole array, not one element -- at 128 a five-signal host-plane chain already overflowed and the record was rejected, which is the trail that explains a critical finding. Sized for the 32-entry cap the emitter applies
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.runtime.providers
   type: string[]
@@ -1019,8 +1019,8 @@ attributes:
   cardinality: bounded
   normalization:
     id: redacted-content-v1
-    overrides: {max_utf8_bytes: 320}
-    notes: Content class because a hostname names who this endpoint talks to, so each destination's redaction profile governs it. Rendered hostname|category|confidence
+    overrides: {max_utf8_bytes: 2048, max_item_utf8_bytes: 320}
+    notes: Content class because a hostname names who this endpoint talks to, so each destination's redaction profile governs it. Rendered hostname|category|confidence. The byte budget covers the whole array; 320 was one entry's worth, so any process talking to more than one provider lost the record
   introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.runtime.correlation_verdict
   type: string

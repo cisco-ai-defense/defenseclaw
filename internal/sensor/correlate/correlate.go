@@ -99,6 +99,10 @@ type Snapshot struct {
 // because it describes a host that may no longer exist.
 const MaxSnapshotAge = 15 * time.Minute
 
+// maxSnapshotSkew is how far ahead of now a scan time may be and still be
+// read as ordinary clock jitter rather than a clock that cannot be trusted.
+const maxSnapshotSkew = 30 * time.Second
+
 // Observation is the runtime side of the join.
 type Observation struct {
 	// PID of the process the runtime planes attributed this to, when known.
@@ -149,7 +153,17 @@ func (c *Correlator) usable() (bool, string) {
 	if c.snapshot.ScanTime.IsZero() {
 		return false, "discovery snapshot carries no scan time"
 	}
-	if age := c.now().Sub(c.snapshot.ScanTime); age > MaxSnapshotAge {
+	age := c.now().Sub(c.snapshot.ScanTime)
+	if age < -maxSnapshotSkew {
+		// A snapshot dated in the future is a clock the join cannot reason
+		// about, and a negative age passes any staleness test written as a
+		// simple comparison. It must not be spent: a complete snapshot that
+		// matches nothing yields unaccounted, which escalates, so the failure
+		// direction here is toward inflated severity.
+		return false, "discovery snapshot is dated in the future (" +
+			(-age).Truncate(time.Second).String() + " ahead); clock skew"
+	}
+	if age > MaxSnapshotAge {
 		return false, "discovery snapshot is stale (" + age.Truncate(time.Second).String() + " old)"
 	}
 	return true, ""

@@ -113,9 +113,7 @@ func parsePSLine(line string) (Process, bool) {
 	if cmdline == "" {
 		return Process{}, false
 	}
-	if len(cmdline) > maxCmdlineBytes {
-		cmdline = cmdline[:maxCmdlineBytes]
-	}
+	cmdline = truncateUTF8(cmdline, maxCmdlineBytes)
 	// The executable is the first argv token. A path with spaces would break
 	// this, but argv[0] for such a binary is quoted by the kernel only in
 	// contrived cases and ps does not preserve the quoting either way; taking

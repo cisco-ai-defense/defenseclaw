@@ -374,7 +374,7 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 
 		var result planeBResult
 		if s.planeBOn {
-			result = planeB(byPID[process.PID], s.options.Providers,
+			result = planeB(byPID[process.PID], process.Name, s.options.Providers,
 				func(connection netprobe.Connection) (string, float64, string) {
 					return s.options.Resolver.Resolve(nameCtx, connection)
 				}, sanctioned)

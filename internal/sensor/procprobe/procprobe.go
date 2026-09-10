@@ -42,7 +42,27 @@
 //     any point, matching the inventory detector's env-var-names-only rule.
 package procprobe
 
-import "time"
+import (
+	"time"
+	"unicode/utf8"
+)
+
+// truncateUTF8 cuts a string to at most limit bytes, on a rune boundary.
+//
+// Slicing at a byte offset can land inside a multi-byte rune and leave
+// invalid UTF-8 behind. Cmdline is emitted as a content-class telemetry
+// field, and protobuf string fields reject invalid UTF-8, so one truncated
+// rune fails the whole OTLP export of that record.
+func truncateUTF8(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
+		cut--
+	}
+	return value[:cut]
+}
 
 // Process is one row of the process table, with the fields the runtime planes
 // need and nothing more.

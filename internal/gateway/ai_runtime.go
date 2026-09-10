@@ -87,7 +87,12 @@ func (s *Sidecar) detachAIRuntime() {
 
 // runAIRuntime starts the AI Discovery runtime planes when enabled.
 func (s *Sidecar) runAIRuntime(ctx context.Context) error {
-	runtimeConfig := s.currentConfig().AIDiscovery.Runtime
+	// One snapshot, read twice. currentConfig() reads atomically each call, so
+	// taking it again below could hand the sensor the home list of one config
+	// and the plane settings of another if a reload lands between the two --
+	// and the health details would describe only the first.
+	activeConfig := s.currentConfig()
+	runtimeConfig := activeConfig.AIDiscovery.Runtime
 	if !runtimeConfig.Enabled {
 		// Detach before parking. On a hot reload from enabled to disabled the
 		// old poll loop stops, but the service pointer would otherwise stay
@@ -108,7 +113,7 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 		// host plane would watch the wrong paths without this; in
 		// managed_enterprise the hook-enumerator already populates it from the
 		// eligible-users enumeration that renders targets.yaml.
-		HomeDirs: s.currentConfig().AIDiscovery.HomeDirs,
+		HomeDirs: activeConfig.AIDiscovery.HomeDirs,
 	})
 	if err != nil {
 		// A platform with no backend is a hard stop rather than a degraded
@@ -241,7 +246,6 @@ func (s *Sidecar) publishAIRuntimeHealth(snapshot sensor.Snapshot) {
 		planes[string(health.Plane)] = entry
 	}
 	details := map[string]interface{}{
-		"last_poll":                snapshot.ScannedAt.Format(time.RFC3339),
 		"findings":                 len(snapshot.Findings),
 		"processes_observed":       snapshot.ProcessesObserved,
 		"processes_skipped":        snapshot.ProcessesSkipped,
@@ -249,6 +253,13 @@ func (s *Sidecar) publishAIRuntimeHealth(snapshot sensor.Snapshot) {
 		"connections_unattributed": snapshot.ConnectionsUnattributed,
 		"planes":                   planes,
 		"degraded":                 snapshot.Degraded,
+	}
+	if !snapshot.ScannedAt.IsZero() {
+		// Omitted before the first poll rather than published as the zero
+		// time. 0001-01-01T00:00:00Z is a valid-looking timestamp for a poll
+		// that never happened, and a dashboard or an alert reading last_poll
+		// has no way to tell the difference.
+		details["last_poll"] = snapshot.ScannedAt.Format(time.RFC3339)
 	}
 	if snapshot.Degraded {
 		details["degraded_reasons"] = sensor.SortedDegradedReasons(snapshot)

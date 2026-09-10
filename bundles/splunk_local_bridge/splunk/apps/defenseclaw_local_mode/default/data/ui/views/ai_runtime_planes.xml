@@ -88,7 +88,7 @@
       <title>Findings by severity</title>
       <chart>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ("$severity$"="*" OR runtime_severity="$severity$") AND ("$agent$"="*" OR runtime_agent="$agent$") | timechart span=10m count by runtime_severity</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ($severity|s$="*" OR runtime_severity=$severity|s$) AND ($agent|s$="*" OR runtime_agent=$agent|s$) | timechart span=10m count by runtime_severity</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -118,7 +118,7 @@
       <title>Runtime findings</title>
       <table>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ("$severity$"="*" OR runtime_severity="$severity$") AND ("$agent$"="*" OR runtime_agent="$agent$") | table _time, runtime_severity, runtime_score, runtime_process, runtime_agent, runtime_verdict, runtime_reason, runtime_finding_id | rename runtime_severity as severity, runtime_score as score, runtime_process as process, runtime_agent as agent, runtime_verdict as inventory, runtime_reason as "inventory reason", runtime_finding_id as finding | sort - score</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ($severity|s$="*" OR runtime_severity=$severity|s$) AND ($agent|s$="*" OR runtime_agent=$agent|s$) | table _time, runtime_severity, runtime_score, runtime_process, runtime_agent, runtime_verdict, runtime_reason, runtime_finding_id | rename runtime_severity as severity, runtime_score as score, runtime_process as process, runtime_agent as agent, runtime_verdict as inventory, runtime_reason as "inventory reason", runtime_finding_id as finding | sort - score</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -136,7 +136,7 @@
       </html>
       <chart>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ("$agent$"="*" OR runtime_agent="$agent$") | timechart span=10m count by runtime_tactic</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | timechart span=10m count by runtime_tactic</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>
@@ -155,7 +155,7 @@
       </html>
       <table>
         <search>
-          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ("$agent$"="*" OR runtime_agent="$agent$") | table _time, runtime_agent, runtime_tactic, runtime_technique, runtime_chain_stage, runtime_process, runtime_finding_id | rename runtime_agent as agent, runtime_tactic as tactic, runtime_technique as "ATT&amp;CK", runtime_chain_stage as stage, runtime_process as process, runtime_finding_id as finding | sort - _time</query>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | table _time, runtime_agent, runtime_tactic, runtime_technique, runtime_chain_stage, runtime_process, runtime_finding_id | rename runtime_agent as agent, runtime_tactic as tactic, runtime_technique as "ATT&amp;CK", runtime_chain_stage as stage, runtime_process as process, runtime_finding_id as finding | sort - _time</query>
           <earliest>$time.earliest$</earliest>
           <latest>$time.latest$</latest>
         </search>

@@ -55,6 +55,9 @@ var localModelRuntimes = map[string]bool{
 	"lemonadeserver.exe": true, "jan": true, "cortex": true,
 }
 
+// isKnownModelRuntime reports whether a process name is itself a model server.
+func isKnownModelRuntime(name string) bool { return localModelRuntimes[strings.ToLower(name)] }
+
 // inferenceCPUFraction is the share of one core a process must sustain across
 // a poll interval to count as an inference heartbeat.
 //
@@ -127,6 +130,7 @@ type planeBResult struct {
 // planeB classifies one process's connections.
 func planeB(
 	connections []netprobe.Connection,
+	processName string,
 	providers *catalog.Catalog,
 	resolve func(netprobe.Connection) (hostname string, confidence float64, source string),
 	sanctioned map[string]bool,
@@ -138,14 +142,25 @@ func planeB(
 
 	for _, connection := range connections {
 		if connection.State == netprobe.StateListen {
-			if runtime, ok := netprobe.LocalModelRuntimeForPort(connection.LocalPort); ok {
-				result.listeningModelPort = runtime
+			// A reserved port names its runtime on its own. An ambiguous one
+			// -- 8080, 8000, 5000, 1234, 1337 -- needs the process to agree,
+			// because otherwise any developer's web server becomes a local
+			// model finding at a weight that clears the reporting floor.
+			if runtime, corroborated := netprobe.LocalModelRuntimeForPort(connection.LocalPort); runtime != "" {
+				if corroborated || isKnownModelRuntime(processName) {
+					result.listeningModelPort = runtime
+				}
 			}
 			continue
 		}
 		if connection.Loopback() {
-			if _, ok := netprobe.LocalModelRuntimeForPort(connection.RemotePort); ok {
-				result.localInferenceClient = true
+			if runtime, corroborated := netprobe.LocalModelRuntimeForPort(connection.RemotePort); runtime != "" {
+				// A client of an ambiguous port needs a scriptable runtime
+				// behind it; a browser talking to localhost:8080 is not
+				// evidence of local inference.
+				if corroborated || isScriptable(processName) {
+					result.localInferenceClient = true
+				}
 			}
 			continue
 		}
