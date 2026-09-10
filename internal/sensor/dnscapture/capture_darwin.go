@@ -257,9 +257,21 @@ func (c *darwinCapturer) read(ctx context.Context, cache *Cache) {
 	}
 }
 
-// bpfHdrLen is sizeof(struct bpf_hdr) on 64-bit Darwin: two 8-byte timeval
-// halves, caplen, datalen, and a 2-byte header length with padding.
-const bpfHdrLen = 20
+// bpfHdrMin is the smallest struct bpf_hdr this decoder can read: the
+// members it actually parses, unpadded.
+//
+// Darwin defines bh_tstamp as struct timeval32 for 64-bit userland, so the
+// layout is 8 bytes of timestamp, 4 of caplen, 4 of datalen and 2 of
+// header length -- 18 bytes. The kernel then reports its own real header
+// size in bh_hdrlen, which is what the walk must advance by, because the
+// value includes whatever alignment padding this kernel chose.
+//
+// This was 20, the padded size, and it was compared against bh_hdrlen as a
+// minimum. macOS reports 18, so every record failed the check and the
+// decoder returned on the first packet of every read: DNS capture ran,
+// reported itself healthy, and observed nothing for the life of the
+// process.
+const bpfHdrMin = 18
 
 // decodeBPFBuffer walks the packet records in one BPF read. A single read
 // returns several packets, each preceded by a header and padded to a
@@ -267,10 +279,10 @@ const bpfHdrLen = 20
 func decodeBPFBuffer(data []byte) []answer {
 	results := make([]answer, 0, 4)
 	offset := 0
-	for offset+bpfHdrLen <= len(data) {
+	for offset+bpfHdrMin <= len(data) {
 		capLen := int(binary.LittleEndian.Uint32(data[offset+8:]))
 		headerLen := int(binary.LittleEndian.Uint16(data[offset+16:]))
-		if headerLen < bpfHdrLen || capLen < 0 {
+		if headerLen < bpfHdrMin || capLen < 0 {
 			return results
 		}
 		start := offset + headerLen

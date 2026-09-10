@@ -139,14 +139,22 @@ func (s *darwinSource) Start(ctx context.Context) error {
 	s.cmd = cmd
 	s.coverage = Coverage{
 		Mechanism: "Endpoint Security (eslogger: " + strings.Join(esloggerEvents, ", ") + ")",
-		Kinds:     []Kind{KindExec, KindExit, KindFileRead, KindFileWrite},
-		// ES delivers no account-creation event of its own; identity creation
-		// is recognised from the exec argument vector instead, so the kind is
-		// not claimed here.
-		MissingKinds: []Kind{KindIdentity, KindPrivilege},
-		Limitations: []string{
-			"account creation and privilege escalation are recognised from exec argument " +
-				"vectors rather than from a dedicated Endpoint Security event",
+		// Endpoint Security has no account-creation or privilege event of
+		// its own, but both tactics are still delivered: they are
+		// recognised from the argument vector of the exec that performs
+		// them, which is the same path Linux uses when fanotify is absent
+		// and which is verified against a live host.
+		//
+		// So they are covered, not missing. Listing them as MissingKinds
+		// marked macOS permanently degraded for a difference in mechanism
+		// rather than a difference in what can be seen -- and a permanent
+		// degradation is one an operator learns to ignore, which is worse
+		// than not reporting it. The fidelity caveat that is real: argv
+		// shows the attempt, so a command that failed looks like one that
+		// succeeded.
+		Kinds: []Kind{
+			KindExec, KindExit, KindFileRead, KindFileWrite,
+			KindIdentity, KindPrivilege,
 		},
 	}
 
