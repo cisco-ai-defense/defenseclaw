@@ -507,7 +507,22 @@ func (a *APIServer) finalizeAgentHook(
 		}
 	})
 
-	if !req.SuppressCorrelationEmit {
+	// SuppressCorrelationEmit is set on a correlation-ledger replay match
+	// (same source-event fingerprint delivered twice) or when the ledger
+	// itself is temporarily unavailable. It exists to dedupe downstream
+	// streaming/OTLP signals — not the durable local audit of an ENFORCED
+	// block. Historically we gated both writes behind it, which caused the
+	// AVC tile Active Alerts count to stay at 0 for real blocks whose
+	// UserPromptSubmit bytes hashed to the same fingerprint as a prior
+	// prompt: scan_results grew, the block enforced, the user saw the
+	// "blocked" message, but no audit row + no enforcement.block.applied
+	// companion landed, so the count SQL had nothing to match.
+	//
+	// For an enforced block we ALWAYS write the audit row + enforcement
+	// companion. For non-enforcing outcomes (allow / would-block / clean
+	// evaluations) we keep the correlation-dedup gate so replay chatter
+	// doesn't inflate hook_decision + audit rows.
+	if env.Enforced || !req.SuppressCorrelationEmit {
 		safeSection("observability_v8", func() {
 			result.EnforcementPersisted = a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 		})
@@ -839,7 +854,11 @@ func (a *APIServer) handleAgentHookSynthetic(ctx context.Context, connectorName 
 	}
 	a.stampHookEnvelopeIdentity(connectorName, &env, req, resp)
 	enrichConnectorHookIdentitySpan(ctx, env.StepIdx, env.Enforced, env.RulePackDir)
-	if !req.SuppressCorrelationEmit {
+	// Same durable-audit invariant as the primary hook path: an enforced
+	// block MUST write the audit row + enforcement companion even when the
+	// correlation ledger flagged this as a replay/unavailable. See the
+	// comment on the parallel branch in finalizeAgentHook.
+	if env.Enforced || !req.SuppressCorrelationEmit {
 		a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
 		if err := a.logConnectorHookAuditEnvelope(ctx, env); err != nil {
 			fmt.Fprintf(os.Stderr, "[gateway] synthetic hook audit persistence failed connector=%s event=%s: %v\n",
