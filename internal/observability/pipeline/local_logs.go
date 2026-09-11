@@ -420,8 +420,26 @@ func (pipeline *LocalLogPipeline) process(
 		return LocalLogOutcome{}, &Error{code: ErrorLocalDelivery}
 	}
 	sinkPolicy := legacyredaction.SinkPolicyFromContext(ctx)
+	// The local durable projection MUST use the plan-configured profile so
+	// the event-history writer's Reproject gate — which pins the profile
+	// fingerprint to writer.localProfiles[bucket] at boot — accepts the
+	// projection. Otherwise, when a managed-enterprise cloud directive
+	// stamps SinkPolicyRedact or SinkPolicyRaw into ctx (any post-AID hook
+	// event in managed_enterprise), the pipeline would override the profile
+	// to ProfileSensitive or ProfileNone, produce a projection whose
+	// fingerprint disagrees with the writer's expected profile, and
+	// Reproject fails with "local log projection does not belong to the
+	// active graph". The tests below used a mock appender that skipped
+	// Reproject, so the override always appeared to work in isolation —
+	// but the production EventHistoryWriter has always been silently
+	// rejecting override projections, and only plan-default projections
+	// have been landing in audit_events. Runtime cloud directives still
+	// govern the OPTIONAL destination projections dispatched below (OTLP,
+	// Kafka mirrors, etc.); durable local audit is intentionally
+	// plan-deterministic to keep the writer's binding-vs-projection gate
+	// operable.
 	localProfile, ok := pipeline.resolveProjectionProfile(
-		v8redaction.ProfileName(local.RedactionProfile), sinkPolicy,
+		v8redaction.ProfileName(local.RedactionProfile), legacyredaction.SinkPolicyDefault,
 	)
 	if !ok {
 		return LocalLogOutcome{}, &Error{code: ErrorLocalProfile}
