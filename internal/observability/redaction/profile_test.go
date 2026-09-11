@@ -29,10 +29,6 @@ func TestBuiltInProfileMatrixIsExact(t *testing.T) {
 			ModePreserve, ModePreserve, ModeRemove, ModeRemove,
 			ModeRemove, ModeRemove, ModeRemove, ModeRemove,
 		},
-		ProfileLegacyV7: {
-			ModePreserve, ModeWhole, ModeWhole, ModeWhole,
-			ModeWhole, ModeWhole, ModeWhole, ModeWhole,
-		},
 	}
 	for name, expected := range want {
 		profile, ok := BuiltInProfile(name)
@@ -46,7 +42,7 @@ func TestBuiltInProfileMatrixIsExact(t *testing.T) {
 			}
 		}
 		wantGroups := []DetectorGroup{}
-		if name != ProfileNone && name != ProfileLegacyV7 {
+		if name != ProfileNone {
 			wantGroups = DetectorGroups()
 		}
 		if !reflect.DeepEqual(profile.DetectorGroups(), wantGroups) {
@@ -96,7 +92,9 @@ func TestCustomProfileCompositionAndValidation(t *testing.T) {
 		{name: ProfileNone, base: ProfileContent, groups: DetectorGroups()},
 		{name: "bad name", base: ProfileContent, groups: DetectorGroups()},
 		{name: "bad-base", base: ProfileNone, groups: DetectorGroups()},
-		{name: "legacy-base", base: ProfileLegacyV7, groups: DetectorGroups()},
+		// "legacy-v7" was a built-in until it was retired. A custom profile must
+		// not be able to resurrect it as a base.
+		{name: "legacy-base", base: "legacy-v7", groups: DetectorGroups()},
 		{name: "unknown-group", base: ProfileContent, groups: []DetectorGroup{"unknown"}},
 		{name: "duplicate-group", base: ProfileContent, groups: []DetectorGroup{DetectorGroupPII, DetectorGroupPII}},
 		{name: "unknown-class", base: ProfileContent, groups: DetectorGroups(), overrides: map[observability.FieldClass]TransformationMode{"unknown": ModeRemove}},

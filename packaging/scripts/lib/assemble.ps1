@@ -174,6 +174,7 @@ $expectedPayload = @(
     'defenseclaw-cmid-broker.exe',
     'defenseclaw-gateway.exe',
     'defenseclaw-hook.exe',
+    'defenseclaw-sensor-helper.exe',
     'defenseclaw.exe',
     'install-enterprise.ps1'
 )

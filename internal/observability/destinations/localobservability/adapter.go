@@ -24,8 +24,6 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
 	"github.com/defenseclaw/defenseclaw/internal/observability/destinations/otlp"
-	v8redaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
-	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"go.opentelemetry.io/otel/trace"
 	collectortracepb "go.opentelemetry.io/proto/otlp/collector/trace/v1"
 	commonpb "go.opentelemetry.io/proto/otlp/common/v1"
@@ -211,7 +209,6 @@ func (wire projectedWire) otlp(destination string) (
 	}
 	resourceAttributes, ok := requiredResourceAttributes(
 		observability.EventName(wire.Family), wire.Body.Resource.Attributes,
-		wire.Projection.RedactionProfile,
 	)
 	if !ok {
 		return nil, nil, nil, "", "", false
@@ -266,12 +263,7 @@ func canonicalEndedIdentity(wire projectedWire) bool {
 	}
 	family := stringMap(wire.Body.Attributes, "defenseclaw.span.family")
 	source := stringMap(wire.Body.Attributes, "defenseclaw.source")
-	if wire.Projection.RedactionProfile == string(v8redaction.ProfileLegacyV7) {
-		if family != legacyredaction.LegacyV7Entity(wire.Family) ||
-			source != legacyredaction.LegacyV7Entity(wire.Source) {
-			return false
-		}
-	} else if family != wire.Family || source != wire.Source {
+	if family != wire.Family || source != wire.Source {
 		return false
 	}
 	familyVersion, ok := unsignedNumber(wire.Body.Attributes["defenseclaw.span.family_schema_version"], 32)
@@ -308,13 +300,6 @@ func generatedCanary(wire projectedWire, destination string) (present, valid boo
 	targetValue, targetOK := target.(string)
 	expectedTarget := destination
 	validDestination := observability.IsStableToken(destination)
-	if wire.Projection.RedactionProfile == string(v8redaction.ProfileLegacyV7) {
-		if legacyV7EntityPlaceholder(destination) {
-			validDestination = true
-		} else {
-			expectedTarget = legacyredaction.LegacyV7Entity(destination)
-		}
-	}
 	return true, markerOK && markerValue && operationOK && operationValue == canaryOperationTag &&
 		targetOK && targetValue == expectedTarget && validDestination &&
 		stringMap(wire.Body.Attributes, "gen_ai.operation.name") == expectedOperation && wire.Bucket == expectedBucket
@@ -323,9 +308,8 @@ func generatedCanary(wire projectedWire, destination string) (present, valid boo
 func requiredResourceAttributes(
 	family observability.EventName,
 	input map[string]any,
-	profile string,
 ) ([]*commonpb.KeyValue, bool) {
-	if !validProjectedResourceAttributes(input, profile) {
+	if observability.ValidateTelemetryResourceAttributes(input) != nil {
 		return nil, false
 	}
 	return keyValues(input, func(key string) (observability.OTLPValueKind, bool) {
@@ -334,49 +318,6 @@ func requiredResourceAttributes(
 		}
 		return observability.OTLPValueString, true
 	})
-}
-
-var legacyV7ResourceIdentifierKeys = [...]string{
-	"service.instance.id",
-	"host.name",
-	"tenant.id",
-	"workspace.id",
-	"defenseclaw.instance.id",
-	"defenseclaw.device.public_key_fingerprint",
-	"defenseclaw.device.id",
-}
-
-// Legacy-v7 intentionally replaces identifier values with bounded placeholders
-// after canonical construction. Validate an equivalent detached view so every
-// non-identifier resource invariant remains enforced, while the OTLP request
-// retains only the exact centrally projected placeholder bytes.
-func validProjectedResourceAttributes(input map[string]any, profile string) bool {
-	if profile != string(v8redaction.ProfileLegacyV7) {
-		return observability.ValidateTelemetryResourceAttributes(input) == nil
-	}
-	validation := make(map[string]any, len(input))
-	for key, value := range input {
-		validation[key] = value
-	}
-	replaced := false
-	for _, key := range legacyV7ResourceIdentifierKeys {
-		value, present := validation[key]
-		if !present {
-			continue
-		}
-		text, ok := value.(string)
-		if !ok || !legacyV7EntityPlaceholder(text) {
-			return false
-		}
-		validation[key] = "redacted"
-		replaced = true
-	}
-	return replaced && observability.ValidateTelemetryResourceAttributes(validation) == nil
-}
-
-func legacyV7EntityPlaceholder(value string) bool {
-	return strings.HasPrefix(value, "<redacted len=") && strings.HasSuffix(value, ">") &&
-		legacyredaction.LegacyV7Entity(value) == value
 }
 
 func requiredScope(family observability.EventName, input projectedScope) (*commonpb.InstrumentationScope, bool) {

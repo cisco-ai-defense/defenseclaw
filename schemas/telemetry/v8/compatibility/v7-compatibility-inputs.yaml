@@ -355,7 +355,7 @@ classes:
     migration_disposition: preserve_compatibility_floor
     schema_version: 1
     source_config_version: 7
-    projection_profile: legacy-v7
+    projection_profile: v7-compatible
     collection:
       always:
         logs: {derive_buckets_from: local_log_producers}

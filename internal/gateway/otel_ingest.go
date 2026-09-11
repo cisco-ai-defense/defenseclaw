@@ -1025,23 +1025,24 @@ func (a *APIServer) emitCodexNotifyTurnCompleteLLMEvents(ctx context.Context, r 
 	if provider == "unknown" {
 		provider = "codex"
 	}
-	userID, userName := userFromHTTPRequest(r, nil)
+	user := resolveHTTPUserIdentity(r, nil)
 	promptID := firstNonEmpty(
 		a.lastHookPromptIDForTurn("codex", sessionID, turnID),
 		a.lastHookPromptID("codex", sessionID),
 		promptIDForTurn("codex", sessionID, turnID),
 	)
 	meta := llmEventMeta{
-		Source:    codexNotifyTurnCompleteSource,
-		Provider:  provider,
-		Model:     model,
-		SessionID: sessionID,
-		TurnID:    turnID,
-		PromptID:  promptID,
-		AgentName: "codex",
-		AgentType: "codex",
-		UserID:    userID,
-		UserName:  userName,
+		Source:     codexNotifyTurnCompleteSource,
+		Provider:   provider,
+		Model:      model,
+		SessionID:  sessionID,
+		TurnID:     turnID,
+		PromptID:   promptID,
+		AgentName:  "codex",
+		AgentType:  "codex",
+		UserID:     user.ID,
+		UserIDKind: user.IDKind,
+		UserName:   user.Name,
 	}
 
 	if prompt := codexNotifyPrompt(payload); prompt != "" {

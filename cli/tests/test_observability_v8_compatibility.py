@@ -62,7 +62,7 @@ def _artifact() -> dict[str, Any]:
         "schema_version": 1,
         "source_config_version": 7,
         "registry_schema_version": 3,
-        "projection_profile": "legacy-v7",
+        "projection_profile": "v7-compatible",
         "collection": {
             "always": {
                 "logs": ["platform.health", "compliance.activity"],
@@ -134,7 +134,7 @@ def test_valid_narrow_artifact_exposes_exact_immutable_queries() -> None:
     assert selection.schema_version == 1
     assert selection.source_config_version == 7
     assert selection.registry_schema_version == 3
-    assert selection.projection_profile == "legacy-v7"
+    assert selection.projection_profile == "v7-compatible"
     assert selection.collection_buckets("always", "logs") == (
         "compliance.activity",
         "platform.health",

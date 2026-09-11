@@ -692,6 +692,8 @@ func TestLogger_LogNetworkEgress_BlockedProjectionHasDefaultsWithoutLegacyFanout
 
 	err := logger.LogNetworkEgress(context.Background(), NetworkEgressEvent{
 		Hostname:      "blocked.example",
+		UserID:        "501",
+		UserIDKind:    "posix_uid",
 		URL:           "https://blocked.example/upload",
 		HTTPMethod:    "POST",
 		Protocol:      "https",
@@ -706,6 +708,7 @@ func TestLogger_LogNetworkEgress_BlockedProjectionHasDefaultsWithoutLegacyFanout
 	events, listErr := store.ListEvents(10)
 	if listErr != nil || len(events) != 1 || events[0].Action != "network-egress-blocked" ||
 		events[0].Structured["defenseclaw.network.target_ref"] != "blocked.example" ||
+		events[0].Structured["defenseclaw.user.id_kind"] != "posix_uid" ||
 		events[0].ID == "" || events[0].RunID == "" || events[0].Actor == "" {
 		t.Fatalf("local canonical projection = %#v error=%v", events, listErr)
 	}

@@ -856,7 +856,7 @@ class CommandRegistrationTests(unittest.TestCase):
 
     def test_discovery_group_exposes_subcommands(self):
         names = set(cmd_agent.discovery.commands.keys())
-        self.assertEqual(names, {"enable", "disable", "status", "setup", "scan"})
+        self.assertEqual(names, {"enable", "disable", "status", "setup", "scan", "runtime"})
 
 
 class DiscoveryHelperTests(unittest.TestCase):

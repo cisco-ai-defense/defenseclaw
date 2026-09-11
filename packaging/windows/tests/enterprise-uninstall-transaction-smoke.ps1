@@ -356,6 +356,11 @@ targets:
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-cmid-broker.exe'
                 )
                 BrokerServiceName = 'DefenseClawCMIDBroker'
+                SensorHelperPath = (
+                    Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-sensor-helper.exe'
+                )
+                SensorHelperServiceName = 'DefenseClawSensorHelper'
+                SensorHelperHomeDirs = ''
                 BrokerPipeName = '\\.\pipe\DefenseClawCMIDBroker'
                 BrokerStateDirectory = $brokerStateDirectory
                 BrokerAuthKeyPath = (
@@ -1082,7 +1087,9 @@ targets:
                 [Parameter(Mandatory)][string]$Name,
                 [Parameter(Mandatory)][string]$ExpectedGatewayPath,
                 [string]$ExpectedManifestPath,
+                [string]$ExpectedSensorHelperImage,
                 [switch]$Guardian,
+                [switch]$SensorHelper,
                 # Spec 005 D1: the uninstall path now also calls this
                 # helper with -Enumerator to verify the third service
                 # before removing it. Accepted for parity with the
@@ -1138,6 +1145,7 @@ targets:
             foreach ($name in @(
                 $GatewayServiceName,
                 $Layout.BrokerServiceName,
+                $Layout.SensorHelperServiceName,
                 $GuardianServiceName
             )) {
                 if ($script:HarnessState.service_start_modes[$name] -notin
@@ -1275,6 +1283,9 @@ targets:
             ] = 4
             $script:HarnessState.service_start_modes[
                 $Layout.BrokerServiceName
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                $Layout.SensorHelperServiceName
             ] = 4
             $script:HarnessState.service_start_modes[
                 $GuardianServiceName
@@ -1652,13 +1663,14 @@ targets:
                         foreach ($serviceName in @(
                             $GatewayServiceName,
                             'DefenseClawCMIDBroker',
+                            'DefenseClawSensorHelper',
                             'DefenseClawHookGuardian',
                             [string]$script:HarnessState.enumerator_service_name
                         )) {
                             if (-not [bool]$script:HarnessState.service_exists[
                                     $serviceName
                                 ]) {
-                                throw 'snapshot capture ran before all four service identities existed'
+                                throw 'snapshot capture ran before all five service identities existed'
                             }
                             if ($script:HarnessState.service_start_modes[
                                     $serviceName
@@ -1879,10 +1891,11 @@ targets:
                         }
                     }
                     # The self-uninstall shortcut mock fakes removal of all
-                    # four services to stay consistent with the full path.
+                    # five services to stay consistent with the full path.
                     foreach ($name in @(
                         'DefenseClawGateway',
                         'DefenseClawCMIDBroker',
+                        'DefenseClawSensorHelper',
                         'DefenseClawHookGuardian',
                         'DefenseClawHookEnumerator'
                     )) {
@@ -1899,7 +1912,7 @@ targets:
                         $script:HarnessState.service_exists[$name] = $false
                         $script:HarnessState.service_start_modes[$name] = 0
                     }
-                    $script:HarnessState.removed_services += 4
+                    $script:HarnessState.removed_services += 5
                     $script:HarnessState.installed = $false
                     $script:HarnessState.services_running = $false
                     $retainedGatewaySID =
@@ -1936,6 +1949,9 @@ targets:
             ] = 4
             $script:HarnessState.service_start_modes[
                 'DefenseClawCMIDBroker'
+            ] = 4
+            $script:HarnessState.service_start_modes[
+                'DefenseClawSensorHelper'
             ] = 4
             $script:HarnessState.service_start_modes[
                 'DefenseClawHookGuardian'
@@ -2158,6 +2174,10 @@ targets:
                 $mode
             $script:HarnessState.service_start_modes[$BrokerServiceName] =
                 $mode
+            $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName `
+                -GatewayServiceName $GatewayServiceName
+            $script:HarnessState.service_start_modes[$sensorHelperServiceName] =
+                $mode
             $script:HarnessState.service_start_modes[$GuardianServiceName] =
                 $mode
             $enumeratorServiceName =
@@ -2170,6 +2190,7 @@ targets:
             if ($script:HarnessState.ContainsKey('service_exists')) {
                 $script:HarnessState.service_exists[$GatewayServiceName] = $true
                 $script:HarnessState.service_exists[$BrokerServiceName] = $true
+                $script:HarnessState.service_exists[$sensorHelperServiceName] = $true
                 $script:HarnessState.service_exists[$GuardianServiceName] = $true
                 $script:HarnessState.service_exists[
                     $enumeratorServiceName
@@ -2313,6 +2334,7 @@ targets:
                 foreach ($serviceName in @(
                     $GatewayServiceName,
                     'DefenseClawCMIDBroker',
+                    'DefenseClawSensorHelper',
                     'DefenseClawHookGuardian',
                     $enumeratorServiceName
                 )) {
@@ -2944,11 +2966,13 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 2
                     DefenseClawCMIDBroker = 2
+                    DefenseClawSensorHelper = 2
                     DefenseClawHookGuardian = 2
                 }
                 service_exists = @{
                     DefenseClawGateway = -not $AlreadyUninstalled
                     DefenseClawCMIDBroker = -not $AlreadyUninstalled
+                    DefenseClawSensorHelper = -not $AlreadyUninstalled
                     DefenseClawHookGuardian = -not $AlreadyUninstalled
                 }
                 ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
@@ -3064,11 +3088,11 @@ targets:
                     ) `
                     -Message "$Name did not verify the full service contract twice"
                 # The full uninstall path removes enumerator, guardian,
-                # gateway, and credential broker. Each mocked removal is
+                # gateway, sensor helper, and credential broker. Each mocked removal is
                 # preceded by its corresponding ownership recheck.
                 Assert-Harness `
-                    -Condition ($script:HarnessState.removed_services -eq 4) `
-                    -Message "$Name did not delete all four exactly rechecked services"
+                    -Condition ($script:HarnessState.removed_services -eq 5) `
+                    -Message "$Name did not delete all five exactly rechecked services"
                 Assert-Harness `
                     -Condition (
                         $script:HarnessState.events.IndexOf(
@@ -3546,6 +3570,7 @@ targets:
                 broker = 'fresh-broker'
                 gateway = 'fresh-gateway'
                 hook = 'fresh-hook'
+                sensor_helper = 'fresh-sensor-helper'
                 installer = 'fresh-installer'
                 module = 'fresh-module'
                 config = 'listen_addr: 127.0.0.1:18970'
@@ -3588,12 +3613,14 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 0
                     DefenseClawCMIDBroker = 0
+                    DefenseClawSensorHelper = 0
                     DefenseClawHookGuardian = 0
                     DefenseClawHookEnumerator = 0
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
                     DefenseClawCMIDBroker = $false
+                    DefenseClawSensorHelper = $false
                     DefenseClawHookGuardian = $false
                     DefenseClawHookEnumerator = $false
                 }
@@ -3777,6 +3804,7 @@ targets:
                     foreach ($serviceName in @(
                         'DefenseClawGateway',
                         'DefenseClawCMIDBroker',
+                        'DefenseClawSensorHelper',
                         'DefenseClawHookGuardian',
                         'DefenseClawHookEnumerator'
                     )) {
@@ -3852,6 +3880,9 @@ targets:
                                 'DefenseClawCMIDBroker'
                             ] -and
                             -not [bool]$script:HarnessState.service_exists[
+                                'DefenseClawSensorHelper'
+                            ] -and
+                            -not [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
                             -not [bool]$script:HarnessState.service_exists[
@@ -3862,6 +3893,9 @@ targets:
                             ] -eq 0 -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawCMIDBroker'
+                            ] -eq 0 -and
+                            $script:HarnessState.service_start_modes[
+                                'DefenseClawSensorHelper'
                             ] -eq 0 -and
                             $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
@@ -3925,6 +3959,9 @@ targets:
                                 'DefenseClawCMIDBroker'
                             ] -and
                             [bool]$script:HarnessState.service_exists[
+                                'DefenseClawSensorHelper'
+                            ] -and
+                            [bool]$script:HarnessState.service_exists[
                                 'DefenseClawHookGuardian'
                             ] -and
                             [bool]$script:HarnessState.service_exists[
@@ -3937,6 +3974,9 @@ targets:
                                 'DefenseClawCMIDBroker'
                             ] -eq 4 -and
                             $script:HarnessState.service_start_modes[
+                                'DefenseClawSensorHelper'
+                            ] -eq 4 -and
+                            $script:HarnessState.service_start_modes[
                                 'DefenseClawHookGuardian'
                             ] -eq 4 -and
                             $script:HarnessState.service_start_modes[
@@ -3946,13 +3986,13 @@ targets:
                         -Message 'fresh Install -NoStart retry did not leave the broker-backed service set disabled'
                 }
             }
-            # Rollback removes all four transaction-created services:
-            # broker, gateway, guardian, and enumerator.
+            # Rollback removes all five transaction-created services:
+            # broker, sensor helper, gateway, guardian, and enumerator.
             Assert-Harness `
                 -Condition (
                     $script:HarnessState.transaction_calls -eq 3 -and
                     $script:HarnessState.restore_calls -eq 2 -and
-                    $script:HarnessState.removed_services -eq 8
+                    $script:HarnessState.removed_services -eq 10
                 ) `
                 -Message 'fresh install fault/retry did not use exact transactional rollback'
             $uninstallResults.Add([pscustomobject]@{
@@ -4051,11 +4091,13 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 2
                     DefenseClawCMIDBroker = 2
+                    DefenseClawSensorHelper = 2
                     DefenseClawHookGuardian = 2
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
                     DefenseClawCMIDBroker = $false
+                    DefenseClawSensorHelper = $false
                     DefenseClawHookGuardian = $false
                 }
                 ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
@@ -4080,6 +4122,7 @@ targets:
                 broker = 'new-broker'
                 gateway = 'new-gateway'
                 hook = 'new-hook'
+                sensor_helper = 'new-sensor-helper'
                 installer = 'new-installer'
                 module = 'new-module'
                 config = 'listen_addr: 127.0.0.1:18970'
@@ -4198,6 +4241,7 @@ targets:
                 broker = 'activation-broker'
                 gateway = 'activation-gateway'
                 hook = 'activation-hook'
+                sensor_helper = 'activation-sensor-helper'
                 installer = 'activation-installer'
                 module = 'activation-module'
                 config = 'listen_addr: 127.0.0.1:18970'
@@ -4266,6 +4310,7 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 4
                     DefenseClawCMIDBroker = 4
+                    DefenseClawSensorHelper = 4
                     DefenseClawHookGuardian = 4
                 }
                 guardian_fresh = $false
@@ -4540,6 +4585,7 @@ targets:
                 broker = 'replacement-broker'
                 gateway = $gatewaySource
                 hook = 'replacement-hook'
+                sensor_helper = 'replacement-sensor-helper'
                 installer = 'replacement-installer'
                 module = 'replacement-module'
                 config = 'listen_addr: 127.0.0.1:18970'
@@ -4581,12 +4627,14 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 4
                     DefenseClawCMIDBroker = 4
+                    DefenseClawSensorHelper = 4
                     DefenseClawHookGuardian = 4
                     DefenseClawHookEnumerator = 4
                 }
                 service_exists = @{
                     DefenseClawGateway = $true
                     DefenseClawCMIDBroker = $true
+                    DefenseClawSensorHelper = $true
                     DefenseClawHookGuardian = $true
                     DefenseClawHookEnumerator = $true
                 }
@@ -4967,12 +5015,14 @@ targets:
                     service_exists = @{
                         DefenseClawGateway = $true
                         DefenseClawCMIDBroker = $true
+                        DefenseClawSensorHelper = $true
                         DefenseClawHookGuardian = $true
                         DefenseClawHookEnumerator = $true
                     }
                     service_start_modes = @{
                         DefenseClawGateway = 4
                         DefenseClawCMIDBroker = 4
+                        DefenseClawSensorHelper = 4
                         DefenseClawHookGuardian = 4
                         DefenseClawHookEnumerator = 4
                     }
@@ -5114,11 +5164,13 @@ targets:
                 service_start_modes = @{
                     DefenseClawGateway = 4
                     DefenseClawCMIDBroker = 4
+                    DefenseClawSensorHelper = 4
                     DefenseClawHookGuardian = 4
                 }
                 service_exists = @{
                     DefenseClawGateway = $false
                     DefenseClawCMIDBroker = $false
+                    DefenseClawSensorHelper = $false
                     DefenseClawHookGuardian = $false
                 }
                 ipc_service_sids = @('S-1-5-80-1-2-3-4-5')
@@ -6115,6 +6167,7 @@ targets:
                         0
                     })
                     DefenseClawCMIDBroker = 0
+                    DefenseClawSensorHelper = 0
                     DefenseClawHookGuardian = $(
                         if ($PriorGuardianExisted) { 4 } else { 0 }
                     )

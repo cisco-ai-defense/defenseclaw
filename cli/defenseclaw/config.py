@@ -2152,6 +2152,36 @@ class PrivacyConfig:
 
 
 @dataclass
+class AIRuntimeConfig:
+    """AI Discovery runtime planes -- what actually ran.
+
+    Mirrors internal/config.AIRuntimeConfig. Disabled by default. The planes
+    read process argv, which the inventory scanner deliberately does not
+    collect; argv is classified as content on the wire and governed by each
+    destination's redaction profile. Environment variable values are never
+    read on any of these paths.
+    """
+
+    enabled: bool = False
+    poll_interval_s: int = 0
+    min_risk_to_report: int = 0
+    planes: list[str] = field(default_factory=list)
+    enable_host_plane: bool = False
+    dns_capture: bool = False
+    chain_window_min: int = 0
+    # Where the privileged reads come from: "" (auto), "direct", or
+    # "helper". Mirrors Go's AIRuntimeConfig.Acquisition.
+    acquisition: str = ""
+    helper_socket: str = ""
+    sanctioned_endpoints: list[str] = field(default_factory=list)
+    # None means "not stated", which resolves to enabled. Distinguishing that
+    # from an explicit false matters: disabling correlation removes the
+    # inventory read, it does not make findings score as though the inventory
+    # disagreed.
+    correlate: bool | None = None
+
+
+@dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
     mode: str = "enhanced"
@@ -2165,6 +2195,10 @@ class AIDiscoveryConfig:
     include_package_manifests: bool = True
     include_env_var_names: bool = True
     include_network_domains: bool = True
+    # Off by default, like the other opt-ins below it: the address identifies a
+    # person rather than an account on one endpoint, and it leaves the endpoint
+    # as plaintext. Mirrors internal/config.AIDiscoveryConfig.IncludeUserEmail.
+    include_user_email: bool = False
     lookup_model_provenance_online: bool = False
     max_files_per_scan: int = 1000
     max_file_bytes: int = 512 * 1024
@@ -2172,6 +2206,7 @@ class AIDiscoveryConfig:
     confidence_policy_path: str = ""
     require_trusted_binary_paths: bool = False
     trusted_binary_prefixes: list[str] = field(default_factory=list)
+    runtime: AIRuntimeConfig = field(default_factory=lambda: AIRuntimeConfig())
 
 
 @dataclass
@@ -3055,6 +3090,7 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
     # kept verbatim.
     for wh in d.get("webhooks") or []:
         _strip_webhook_omitempty(wh)
+    _prune_ai_runtime(d.get("ai_discovery"))
     if d.get("ai_discovery") == _disabled_ai_discovery_dict():
         d.pop("ai_discovery", None)
     if d.get("application_protection") == _default_application_protection_dict():
@@ -3497,10 +3533,77 @@ def _serialize_observability(cfg: Config, observability: Any, d: dict[str, Any])
         d.pop("observability", None)
 
 
+def _prune_ai_runtime_fields(ai_discovery: Any) -> None:
+    """Drop the fields Go omits, without deciding whether the block survives."""
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    for field_name in ("poll_interval_s", "min_risk_to_report", "chain_window_min"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("planes", "sanctioned_endpoints"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    for field_name in ("acquisition", "helper_socket"):
+        if not runtime.get(field_name):
+            runtime.pop(field_name, None)
+    if runtime.get("correlate") is None:
+        runtime.pop("correlate", None)
+
+
+def _prune_ai_runtime(ai_discovery: Any) -> None:
+    """Mirror Go's ``omitempty`` on the runtime block.
+
+    The Go struct omits an unset interval, floor, or window so the effective
+    default applies; the Python dataclass represents "unset" as 0, which the
+    v8 schema rejects because 0 is outside every one of those ranges. Dropping
+    the zeros keeps the two sides byte-identical and keeps a config that never
+    touched the runtime planes from failing validation on save.
+
+    ``correlate`` is dropped only when None. An explicit false must survive:
+    it is the difference between "do not consult the inventory" and "the
+    inventory disagreed".
+    """
+    _prune_ai_runtime_fields(ai_discovery)
+    if not isinstance(ai_discovery, dict):
+        return
+    runtime = ai_discovery.get("runtime")
+    if not isinstance(runtime, dict):
+        return
+    # A runtime block that says nothing beyond "off" is the default state and
+    # does not belong on disk at all.
+    #
+    # The sentinel is derived from a pruned default rather than written out,
+    # for the same reason the pruning above is shared: a literal is a drift
+    # point. Add one more field defaulting to False or 0 and a hardcoded dict
+    # stops matching, so a config that never touched the runtime planes starts
+    # persisting a redundant runtime block.
+    if runtime == _pruned_default_ai_runtime():
+        ai_discovery.pop("runtime", None)
+
+
+def _pruned_default_ai_runtime() -> dict[str, Any]:
+    """The serialized shape of a runtime block an operator never configured."""
+    from dataclasses import asdict
+
+    reference: dict[str, Any] = {"runtime": asdict(AIRuntimeConfig())}
+    # Prune everything except the emptiness check itself, which is what this
+    # result feeds.
+    _prune_ai_runtime_fields(reference)
+    return reference.get("runtime", {})
+
+
 def _disabled_ai_discovery_dict() -> dict[str, Any]:
     from dataclasses import asdict
 
-    return asdict(AIDiscoveryConfig(enabled=False))
+    disabled = asdict(AIDiscoveryConfig(enabled=False))
+    # Prune the reference the same way the serialized block is pruned, so the
+    # "is this just the default?" comparison stays an equality check on one
+    # shape rather than drifting every time a nested block gains a field.
+    _prune_ai_runtime(disabled)
+    return disabled
 
 
 def _default_application_protection_dict() -> dict[str, Any]:
@@ -4885,6 +4988,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_package_manifests=bool(raw.get("include_package_manifests", True)),
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
+        include_user_email=_coerce_bool(raw.get("include_user_email", False)),
         lookup_model_provenance_online=_coerce_bool(
             raw.get("lookup_model_provenance_online", False)
         ),
@@ -4894,6 +4998,31 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         confidence_policy_path=str(raw.get("confidence_policy_path", "") or ""),
         require_trusted_binary_paths=bool(raw.get("require_trusted_binary_paths", False)),
         trusted_binary_prefixes=[str(v) for v in (raw.get("trusted_binary_prefixes", []) or [])],
+        runtime=_merge_ai_runtime(raw.get("runtime")),
+    )
+
+
+def _merge_ai_runtime(raw: dict[str, Any] | None) -> AIRuntimeConfig:
+    if not isinstance(raw, dict):
+        return AIRuntimeConfig()
+    correlate = raw.get("correlate")
+    return AIRuntimeConfig(
+        enabled=bool(raw.get("enabled", False)),
+        poll_interval_s=int(raw.get("poll_interval_s", 0) or 0),
+        min_risk_to_report=int(raw.get("min_risk_to_report", 0) or 0),
+        planes=[str(v) for v in (raw.get("planes", []) or [])],
+        enable_host_plane=bool(raw.get("enable_host_plane", False)),
+        dns_capture=bool(raw.get("dns_capture", False)),
+        chain_window_min=int(raw.get("chain_window_min", 0) or 0),
+        sanctioned_endpoints=[str(v) for v in (raw.get("sanctioned_endpoints", []) or [])],
+        correlate=None if correlate is None else _coerce_bool(correlate),
+        # Reconstructed explicitly, like every other field: this merge
+        # rebuilds the block from a whitelist, so a key absent here is a key
+        # silently erased on the next save. An operator who pinned
+        # acquisition to "direct" while diagnosing would have found it gone
+        # after the next CLI write, with the gateway quietly back on auto.
+        acquisition=str(raw.get("acquisition", "") or ""),
+        helper_socket=str(raw.get("helper_socket", "") or ""),
     )
 
 
@@ -5075,6 +5204,13 @@ def default_config() -> Config:
         ai_discovery=AIDiscoveryConfig(
             enabled=True,
             confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
+            # A fresh install gets the two runtime planes that need no
+            # privilege beyond what the gateway already has, and reports
+            # honestly where they cannot see. Plane C stays off: it reads
+            # kernel process, file, and identity events, and that decision
+            # belongs to the operator rather than to a default. DNS capture is
+            # off for the same reason.
+            runtime=AIRuntimeConfig(enabled=True, planes=["a", "b"]),
         ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),

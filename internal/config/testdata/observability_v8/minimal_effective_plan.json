@@ -245,21 +245,6 @@
         "path": "remove",
         "reason": "remove"
       }
-    },
-    {
-      "name": "legacy-v7",
-      "built_in": true,
-      "detectors": null,
-      "field_classes": {
-        "content": "whole",
-        "credential": "whole",
-        "error": "whole",
-        "evidence": "whole",
-        "identifier": "whole",
-        "metadata": "preserve",
-        "path": "whole",
-        "reason": "whole"
-      }
     }
   ],
   "destinations": [
@@ -829,10 +814,6 @@
     },
     {
       "path": "observability.redaction_profiles.content",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
       "origin": "built-in-profile"
     },
     {
@@ -1856,61 +1837,6 @@
     {
       "path": "observability.redaction_profiles.strict",
       "value_path": "observability.redaction_profiles[3].name",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].built_in",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].detectors",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.content",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.credential",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.error",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.evidence",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.identifier",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.metadata",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.path",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].field_classes.reason",
-      "origin": "built-in-profile"
-    },
-    {
-      "path": "observability.redaction_profiles.legacy-v7",
-      "value_path": "observability.redaction_profiles[4].name",
       "origin": "built-in-profile"
     },
     {

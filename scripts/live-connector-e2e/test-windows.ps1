@@ -2727,9 +2727,16 @@ connection.close()
         $nativeWorkflowText -match '\$nativeTestShardCount = 16' -and
         [regex]::Matches($nativeWorkflowText, 'foreach \(\$shard in 0\.\.\(\$nativeTestShardCount - 1\)\)').Count -eq 2 -and
         [regex]::Matches($nativeWorkflowText, '\(\$index % \$nativeTestShardCount\) -eq \$shard').Count -eq 2 -and
+        [regex]::Matches($nativeWorkflowText, '''-parallel=1''').Count -eq 1 -and
+        $nativeWorkflowText -match '\$connectorIsolatedTests = @\(' -and
+        $nativeWorkflowText -match '\$_ -notin \$connectorIsolatedTests' -and
+        $nativeWorkflowText -match '''TestCodexLifecycle_CrossProcessSetupTeardownTransaction''' -and
+        $nativeWorkflowText -match '''TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout''' -and
+        $nativeWorkflowText -match 'foreach \(\$isolatedTest in \$connectorIsolatedTests\)' -and
+        $nativeWorkflowText -match '''-run'', \(''\^'' \+ \[regex\]::Escape\(\$isolatedTest\) \+ ''\$''\), ''\./internal/gateway/connector''' -and
         $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway'' -and\s+\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector''' -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite bounds gateway and connector selectors across 16 sequential processes and separately selects every remaining package'
+        'full native Go suite bounds gateway and connector selectors across sequential processes, isolates native lifecycle regressions, serializes gateway tests with process-global capture state, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
@@ -4664,7 +4671,7 @@ connection.close()
         'Amp setup validator binds the generated plugin fail mode to the requested setup posture'
     Assert-True ($doctorSetupContract -match "\`$Connector -eq 'devin'" -and
         $doctorSetupContract -match 'Get-DevinWindowsHookCommand \$devinCommand ''setup-created Devin PreToolUse''') `
-        'Devin setup validation decodes and verifies its POSIX-quoted EncodedCommand launcher'
+        'Devin setup validation verifies its POSIX-quoted direct native launcher'
     foreach ($marker in @(
         'const DC_TOKEN_FILE = "',
         '.hook-amp.token',
@@ -4941,7 +4948,7 @@ connection.close()
         $harnessText.Contains('"registered Copilot adapter cannot be resolved: $missingCopilotAdapter"') -and
         $harnessText.Contains("Invoke-Tool 'defenseclaw' @('doctor', '--json-output') @(1)")) `
         'Doctor connector contract rejects connector-specific tampered hook commands with exit 1'
-    Assert-True ($doctorContract -match "(?s)'devin'\s*\{.*?registered hook uses the obsolete gateway launcher.*?registered hook target cannot be resolved with PATHEXT: \`$missingGatewayLauncher") `
+    Assert-True ($doctorContract -match "(?s)'devin'\s*\{.*?\`$parsed\.Target\.Replace\('\\', '/'\).*?registered hook uses the obsolete gateway launcher.*?registered hook target cannot be resolved with PATHEXT: \`$missingGatewayLauncher") `
         'Devin tamper validation accepts only exact fail-closed diagnoses for present or absent obsolete launchers'
     Assert-True ($doctorContract.Contains('"setup $repairSubcommand --mode $($script:CopilotConfiguredMode) --yes --restart"') -and
         $doctorContract.Contains('[regex]::Escape($repairGuidance)')) `

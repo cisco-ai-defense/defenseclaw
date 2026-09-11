@@ -204,7 +204,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
     payload.mkdir()
 
     stdlib = _zip_bytes({"json/__init__.py": b"# stdlib\n"})
-    python_name = "python-3.13.14-embed-amd64.zip"
+    python_name = "python-3.13.15-embed-amd64.zip"
     _write_zip(payload / python_name, {"python.exe": b"python", "python313.zip": stdlib})
     vc_runtime_name = "microsoft-vc-runtime-14.42.34438-x64.zip"
     _write_zip(
@@ -267,7 +267,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         "version": version,
         "source_commit": source_commit,
         "distribution_flavor": "oss",
-        "python_version": "3.13.14",
+        "python_version": "3.13.15",
         "gateway_archive": gateway_name,
         "wheel": wheel_name,
         "python_embed": python_name,
@@ -370,7 +370,7 @@ def _fixture(tmp_path: Path) -> argparse.Namespace:
         version=version,
         source_commit=source_commit,
         source_epoch=1_700_000_000,
-        python_version="3.13.14",
+        python_version="3.13.15",
         cosign_version="2.6.2",
         go_inventory=go_inventory,
         authenticode_inventory=authenticode_inventory,
@@ -454,9 +454,9 @@ def test_builder_binds_authenticode_inventory_to_payload_provenance_and_sbom() -
 
 def test_builder_pins_a_project_supported_embedded_python_and_checks_metadata() -> None:
     build = BUILD_PS1.read_text(encoding="utf-8")
-    assert '$PythonVersion = "3.13.14"' in build
+    assert '$PythonVersion = "3.13.15"' in build
     assert '$PythonTargetVersion = "3.13"' in build
-    assert '$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"' in build
+    assert '$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"' in build
     assert "dist.metadata.get('Requires-Python')" in build
     assert "SpecifierSet(requires_python).contains(platform.python_version(), prereleases=True)" in build
     assert "if not magika_result.ok or not magika_result.output.is_text:" in build

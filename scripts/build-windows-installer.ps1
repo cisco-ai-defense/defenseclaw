@@ -32,11 +32,11 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
-$PythonVersion = "3.13.14"
+$PythonVersion = "3.13.15"
 $PythonTargetVersion = "3.13"
 $PythonEmbedName = "python-$PythonVersion-embed-amd64.zip"
 $PythonEmbedUrl = "https://www.python.org/ftp/python/$PythonVersion/$PythonEmbedName"
-$PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C080AD907"
+$PythonEmbedSha256 = "D1F04D990AEE1253D8569E8E5104E30FA9F5FA830899F14843448872D936A2CF"
 $VCRuntimeVersion = '14.42.34438'
 $VCRuntimeSourceName = 'Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
 $VCRuntimeSourceUrl = 'https://download.visualstudio.microsoft.com/download/pr/53b2bf3d-716a-455a-bcc0-39cfb7447fe0/49d70db282f1c74d456206501120134f021c2bc3aaabb41577fe18dea35d1454/Microsoft.VC.14.42.17.12.CRT.Redist.X64.base.vsix'
@@ -62,7 +62,24 @@ $VCRuntimeTimestampSignerThumbprintSha256 = '8d2e0d6834085b1e2b12b7035ea5d70ac8c
 # Force the runtime owner to review the pinned binary at least quarterly. A
 # release after this deadline must deliberately move the deadline (and normally
 # the version/hash) after checking Python's current security release line.
-$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-09-10T00:00:00Z')
+#
+# The deadline is the pinned release's own date plus three months, so it tracks
+# the pin rather than the date someone happened to look.
+#
+# Review log -- keep the most recent entry, and say what was checked:
+#
+#   2026-09-10, 3.13.14 -> 3.13.15 (released 2026-08-05, current 3.13 security
+#   release; no 3.13.16 exists). Artifact verified beyond its digest: the
+#   sigstore bundle published beside it validates against certificate identity
+#   thomas@python.org (the 3.13 release manager) via accounts.google.com, with
+#   the Rekor inclusion proof checked. 3.13.15 carries ten Security entries,
+#   two of which matter directly to this product because the CLI extracts
+#   archives: gh-151558, a bypass of the tarfile data/tar extraction filters
+#   letting a crafted archive create a symlink outside the destination, and
+#   gh-151987, extract() not applying the filter to a link target. Also
+#   gh-150743 (unbounded http.client trailer/1xx reads), gh-153030 (quadratic
+#   html.parser DoS) and libexpat 2.8.2. Next review 2026-11-05.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-11-05T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'

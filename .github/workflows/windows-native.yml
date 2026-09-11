@@ -135,8 +135,14 @@ jobs:
           # the -run expression while matching parallel tests, so selectors
           # containing hundreds of exact test names can exhaust the hosted
           # runner even after the tests themselves have released resources.
-          # Keep the shards sequential but small enough to bound both retained
-          # test state and selector compilation memory.
+          # Keep the shards sequential. Several gateway tests deliberately
+          # replace process-global capture callbacks; Windows scheduling
+          # otherwise lets unrelated parallel tests close or replace that state
+          # mid-assertion, so only the gateway package is serialized internally.
+          # Connector tests retain their normal parallelism because some of
+          # their lifecycle coverage coordinates parallel test processes.
+          # Small shards still bound retained test state and selector
+          # compilation memory.
           $nativeTestShardCount = 16
           $gatewayList = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-list', '^(Test|Fuzz|Example)', './internal/gateway'
@@ -159,7 +165,7 @@ jobs:
             )
             $gatewayShardPattern = '^(' + ($shardTests -join '|') + ')$'
             Invoke-WindowsNativeProcess $go @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1',
+              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1', '-parallel=1',
               '-skip', $windowsInapplicable, '-run', $gatewayShardPattern, './internal/gateway'
             ) -TimeoutSeconds 1500 `
               -LogPath (Join-Path $env:DC_STATE_ROOT ("go-gateway-shard-{0}.log" -f $shard)) `
@@ -168,9 +174,20 @@ jobs:
           $connectorList = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-list', '^(Test|Fuzz|Example)', './internal/gateway/connector'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-connector-list.log')
+          # These lifecycle regressions intentionally spawn another copy of the
+          # connector test binary and replace process-global native-install
+          # discovery state. Run each in a fresh process so Windows image/file
+          # handles and global overrides cannot leak into the next shard test.
+          $connectorIsolatedTests = @(
+            'TestCodexLifecycle_CrossProcessSetupTeardownTransaction',
+            'TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout'
+          )
           $connectorTests = @(
             [regex]::Split([string]$connectorList.StdOut, '\r?\n') |
-                Where-Object { $_ -match '^(Test|Fuzz|Example)\S*$' } |
+                Where-Object {
+                  $_ -match '^(Test|Fuzz|Example)\S*$' -and
+                  $_ -notin $connectorIsolatedTests
+                } |
                 Sort-Object -Unique
           )
           if ($connectorTests.Count -lt 4) {
@@ -188,6 +205,14 @@ jobs:
               '-skip', $windowsInapplicable, '-run', $connectorShardPattern, './internal/gateway/connector'
             ) -TimeoutSeconds 1500 `
               -LogPath (Join-Path $env:DC_STATE_ROOT ("go-connector-shard-{0}.log" -f $shard)) `
+              -GoTestFailureSummaryPath $goFailureSummary | Out-Null
+          }
+          foreach ($isolatedTest in $connectorIsolatedTests) {
+            Invoke-WindowsNativeProcess $go @(
+              'test', '-vet=off', '-json', '-count=1', '-timeout=4m', '-p=1',
+              '-run', ('^' + [regex]::Escape($isolatedTest) + '$'), './internal/gateway/connector'
+            ) -TimeoutSeconds 300 `
+              -LogPath (Join-Path $env:DC_STATE_ROOT ("go-connector-isolated-{0}.log" -f $isolatedTest)) `
               -GoTestFailureSummaryPath $goFailureSummary | Out-Null
           }
           $packageList = Invoke-WindowsNativeProcess $go @(

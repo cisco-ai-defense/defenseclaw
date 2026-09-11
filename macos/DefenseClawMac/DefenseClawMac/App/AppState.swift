@@ -29,7 +29,7 @@ enum MenuBarState {
 enum PanelID: String, CaseIterable, Identifiable {
     case overview, alerts, logs, audit, activity
     case skills, mcps, plugins, tools
-    case inventory, aiDiscovery, registries
+    case inventory, aiDiscovery, aiRuntime, registries
     case setup
 
     var id: String { rawValue }
@@ -47,6 +47,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .tools: "Tools"
         case .inventory: "Inventory"
         case .aiDiscovery: "AI Discovery"
+        case .aiRuntime: "Runtime"
         case .registries: "Registries"
         case .setup: "Setup"
         }
@@ -65,6 +66,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .tools: "wrench.and.screwdriver"
         case .inventory: "shippingbox"
         case .aiDiscovery: "sparkle.magnifyingglass"
+        case .aiRuntime: "waveform.path.ecg"
         case .registries: "books.vertical"
         case .setup: "gearshape.2"
         }

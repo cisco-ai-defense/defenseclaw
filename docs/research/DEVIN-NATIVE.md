@@ -17,6 +17,10 @@ authenticated live-client certification record.
 - Project hooks: `.devin/hooks.v1.json`, where the hook map is the whole JSONC
   document. DefenseClaw does not claim or modify Devin's Claude-compatibility
   hook locations.
+- On Windows, Devin `3000.4.25` evaluates command hooks through its bundled
+  Bash boundary. DefenseClaw invokes the protected native hook executable
+  directly because the client unwraps PowerShell `-EncodedCommand` payloads
+  before that boundary, leaving Bash to parse invalid PowerShell source.
 - Events: `PreToolUse`, `PostToolUse`, `PermissionRequest`,
   `UserPromptSubmit`, `Stop`, `PostCompaction`, `SessionStart`, `SessionEnd`.
 - Command hooks receive JSON on stdin. Top-level `decision` and `reason` carry

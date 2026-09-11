@@ -3097,7 +3097,17 @@ func (s *ContinuousDiscoveryService) detectShellHistory() ([]AISignal, int, erro
 					PathHash:  hashPath(path),
 					ValueHash: hashValue(sig.ID + ":" + domain),
 				}
-				out = append(out, s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev}))
+				domainSignal := s.signalFromEvidence(sig, SignalProviderDomain, "shell_history", []AIEvidence{ev})
+				// Carry the matched domain, not just the history file it was
+				// found in. Basenames is what a consumer joins on, and
+				// without this it holds ".zsh_history" while Name and
+				// Product hold "Claude Code" -- so nothing on the signal
+				// names api.anthropic.com and a runtime peer observation of
+				// that host cannot be accounted for by the very signal that
+				// detected it.
+				domainSignal.Basenames = appendUnique(domainSignal.Basenames, domain)
+				sort.Strings(domainSignal.Basenames)
+				out = append(out, domainSignal)
 				break
 			}
 		}
