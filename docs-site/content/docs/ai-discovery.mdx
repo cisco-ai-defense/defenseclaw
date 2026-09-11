@@ -789,6 +789,21 @@ start after it so the socket is listening before the planes look for it.
 systemctl enable --now defenseclaw-sensor-helper
 ```
 
+On managed Windows, use the enterprise lifecycle rather than editing SCM or
+the socket DACL manually:
+
+```powershell
+Get-Service DefenseClawSensorHelper, DefenseClawGateway
+defenseclaw enterprise windows status --json
+defenseclaw agent discovery runtime permissions
+defenseclaw agent discovery runtime selftest
+```
+
+If the helper is absent, stopped, or its protected socket cannot be opened,
+runtime coverage reports degraded rather than silently falling back to a
+privileged gateway. Stage the approved helper binary and run enterprise
+`repair`; see [Managed enterprise deployment](/docs/setup/enterprise-deployment).
+
 <Callout type="warn">
 The helper needs `CAP_CHOWN` alongside the capabilities acquisition uses. It
 hands the socket to the gateway's group, and without it the socket stays

@@ -199,6 +199,15 @@ decision rather than letting a profile sever correlation silently. Nothing v7
 redacted as content, reason, evidence, error, path, or credential is revealed
 by upgrading.
 
+<Callout type="warn" title="User identifiers are not redacted">
+This preserved class includes `user.id`, `defenseclaw.user.id_kind`,
+`defenseclaw.user.name`, and `defenseclaw.user.email`. In particular, enabling
+`ai_discovery.include_user_email` can export a sensitive cross-system personal
+identifier as plaintext; no built-in or custom v8 profile can remove it. Keep
+email collection disabled unless every selected destination and your privacy
+policy allow it. See [End-user identity](/docs/observability/end-user-identity).
+</Callout>
+
 ## Resolution order
 
 For each delivered log or trace, the most specific configured profile wins:

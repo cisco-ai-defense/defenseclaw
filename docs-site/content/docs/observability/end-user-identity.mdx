@@ -1,0 +1,94 @@
+---
+title: End-user identity
+description: Understand how DefenseClaw attributes v8 telemetry to endpoint users, which identity sources are trusted, and how to opt in to connector email collection.
+keywords:
+  - DefenseClaw user identity
+  - telemetry attribution
+  - user.id
+  - end-user email
+---
+
+DefenseClaw v8 can attribute hook activity and per-profile AI inventory to the
+endpoint account that produced it. This matters on shared endpoints, where the
+gateway's service account is not the person running the AI agent.
+
+| Attribute | Meaning |
+| --- | --- |
+| `user.id` | POSIX effective uid or Windows token SID. |
+| `defenseclaw.user.id_kind` | `posix_uid` or `windows_sid`, set only when the identifier came from the corresponding trusted OS source. |
+| `defenseclaw.user.name` | OS account name from the same lookup as `user.id`; never mixed with a fallback identity. |
+| `defenseclaw.user.email` | Optional connector-account email. Collection is off by default. |
+
+An absent field means DefenseClaw could not establish it safely. Consumers
+must not infer `id_kind` from an identifier's shape or synthesize an email from
+an account name.
+
+## Attribution, not authorization
+
+Hooks execute in the interactive user's session and obtain uid/name or SID/name
+from the operating system. They carry that identity to the loopback gateway.
+The gateway prefers these hook headers, then uses a connector-native payload
+identity only for a connector that supplies one. An unmanaged gateway may use
+its own OS identity because it runs as the interactive user.
+
+In managed enterprise mode, the gateway runs as a service identity. DefenseClaw
+does not attribute that identity to the endpoint user. Inventory instead derives
+the owner from each configured profile directory using OS file ownership or
+token-bound Windows Known Folders.
+
+<Callout type="warn" title="Do not authorize from telemetry identity">
+The loopback hook identity is an attribution join key, not an authenticated
+principal. A local process with a connector hook token may be able to supply a
+hook request. Never use these fields to grant access or make an authorization
+decision.
+</Callout>
+
+## Join hook activity to inventory
+
+Hook lifecycle records carry identity near real time in the
+`agent.lifecycle`, `tool.activity`, and `guardrail.evaluation` buckets. Managed
+per-profile MCP inventory carries the same identity in `ai.discovery`.
+
+Join records by `user.id` only after checking
+`defenseclaw.user.id_kind`. Do not join a POSIX uid to a Windows SID or assume
+that a numeric value is a trusted POSIX uid when `id_kind` is absent.
+
+## Optional connector email
+
+Email collection is disabled by default. Enable it only after reviewing the
+privacy and destination impact:
+
+```yaml
+config_version: 8
+ai_discovery:
+  include_user_email: true
+```
+
+DefenseClaw reads only explicit connector-account evidence:
+
+| Connector | Source | Emitted on |
+| --- | --- | --- |
+| Claude Code | `oauthAccount.emailAddress` in the profile's `.claude.json` | Per-profile `ai.discovery` inventory |
+| Codex | `email` claim in the profile's `.codex/auth.json` ID token | Per-profile `ai.discovery` inventory |
+| Cursor | `user_email` supplied by Cursor's hook payload | Hook activity |
+
+The Codex token claim is treated as inventory evidence, not as an authenticated
+assertion. DefenseClaw does not synthesize addresses from usernames, Git
+configuration, environment variables, Windows UPNs, or domain names. Missing
+connector evidence leaves the field absent.
+
+<Callout type="warn" title="Email is preserved as plaintext">
+`defenseclaw.user.email` is a sensitive, high-cardinality identifier. When the
+option is enabled, it may be sent as plaintext to configured destinations,
+including the managed AI Defense destination. V8 redaction profiles preserve
+identifier fields and cannot redact this address. Keep the default off unless
+the destination and your privacy policy explicitly allow it.
+</Callout>
+
+For Codex and Claude Code, join a hook event to the latest `ai.discovery` row
+with the same trusted `user.id` to obtain the connector email. The address is
+reported once per discovery cycle rather than copied onto every hook event.
+
+See [AI Discovery](/docs/ai-discovery) for profile inventory and runtime-plane
+coverage, and [Redaction](/docs/reference/redaction) for the identifier
+preservation boundary.

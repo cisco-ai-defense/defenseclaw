@@ -67,14 +67,14 @@ Enterprise hardening separates **policy authority**, **inspection runtime**, and
   <Edge from="ledger" to="readiness" />
 </Flow>
 
-The gateway is intentionally unable to write broadly into user homes. The guardian is the only privileged component that repairs enrolled per-user integrations. Linux and macOS use administrator-authored target manifests. Managed Windows adds a separate LocalSystem enumerator that discovers eligible interactive profiles and maintains the protected manifest as described under [Windows enrollment and discovery](#windows-enrollment-and-discovery); the gateway itself still does not enumerate or write profiles.
+The gateway is intentionally unable to write broadly into user homes. The guardian is the only privileged component that repairs enrolled per-user integrations. Linux and macOS use administrator-authored target manifests. Managed Windows adds a separate LocalSystem enumerator that discovers eligible interactive profiles and maintains the protected manifest as described under [Windows enrollment and discovery](#windows-enrollment-and-discovery). Linux and Windows also use a privileged sensor helper for the fixed AI Discovery acquisition protocol; the gateway itself still does not enumerate or write profiles.
 
 ### Deployment-mode behavior matrix
 
 | Effective mode | Linux | Windows | macOS | Hook repair owner |
 | --- | --- | --- | --- | --- |
 | Empty/default or any non-managed mode, including `unmanaged_byod`, `ci_cd`, `sandboxed`, `server`, and `saas` | Existing user/process deployment behavior | Existing per-user startup/watchdog and hook auto-heal behavior | Existing user/process deployment behavior | The ordinary gateway/application-protection hook guard. No added enterprise service enforcement is activated. |
-| `managed_enterprise` | Administrator-owned systemd gateway plus privileged manifest guardian; event watcher and periodic timer | Four administrator-owned SCM services: gateway, credential broker, manifest guardian, and profile enumerator; guardian watch plus periodic reconciliation | Administrator-owned LaunchDaemons; periodic guardian reconcile | The privileged enterprise guardian repairs only the protected target manifest. The gateway does not write interactive-user homes. |
+| `managed_enterprise` | Administrator-owned systemd gateway, sensor helper, and privileged manifest guardian; event watcher and periodic timer | Five administrator-owned SCM services: gateway, credential broker, sensor helper, manifest guardian, and profile enumerator; guardian watch plus periodic reconciliation | Administrator-owned LaunchDaemons; periodic guardian reconcile | The privileged enterprise guardian repairs only the protected target manifest. The sensor helper answers only fixed acquisition requests. The gateway does not write interactive-user homes. |
 
 The matrix is an ownership switch, not an auto-heal switch. Both rows repair hook drift: normal mode uses the existing per-user repair loop, while managed mode transfers repair to an administrator-owned guardian that a standard user cannot unregister or reconfigure.
 
@@ -86,6 +86,7 @@ The matrix is an ownership switch, not an auto-heal switch. Both rows repair hoo
 | Another unprivileged local user | Access permitted by normal UNIX permissions, macOS ACLs, or Windows DACLs | Cannot read protected runtime state or scoped service credentials; cannot repair or authorize another user's hooks. |
 | Endpoint administrator, root, MDM, or a process with equivalent privilege | Full machine administration | Can install, upgrade, disable, or remove DefenseClaw. DefenseClaw does not attempt to defend the machine from its trusted administrator. |
 | Compromised gateway process | Service identity plus the platform service boundary | Can write only its declared runtime/log paths; cannot write user homes, managed config, binaries, service definitions, or arbitrary host paths. The packaged Linux unit adds a systemd sandbox; Windows uses a dedicated virtual service account and protected DACLs. |
+| Compromised sensor-helper process | Control of a process running as root on Linux or LocalSystem on Windows | Inherits the host authority of that privileged identity. The fixed, fieldless IPC request protocol prevents a compromised gateway from selecting paths, processes, filters, or commands during normal operation; it does not sandbox an attacker who controls the helper process itself. This collapses to the trusted-administrator non-goal above. |
 | Compromised guardian process | Control of a process running as root on Linux/macOS or LocalSystem on Windows | Inherits authority equivalent to the trusted administrator and can bypass the manifest, path, and impersonation safeguards to modify host state allowed by that token. Those safeguards bound normal guardian behavior and malformed-input handling; they do not sandbox an attacker who controls the process. This collapses to the trusted-administrator non-goal above. |
 | Compromised enumerator process | Control of a process running as LocalSystem on Windows | Inherits authority equivalent to the trusted administrator and can bypass the managed-hook filter, manifest publication contract, and fixed-DACL targets to modify host state allowed by that token. Those controls bound normal enumerator behavior; they do not contain an attacker who controls the process. This collapses to the trusted-administrator non-goal above. |
 
@@ -310,13 +311,14 @@ The unit also pins `StateDirectoryMode=0750`, `RuntimeDirectoryMode=0750`, and `
 
 ## Windows system-service layout
 
-Windows managed deployment uses four Service Control Manager (SCM) services and
+Windows managed deployment uses five Service Control Manager (SCM) services and
 three privilege domains:
 
 | Component | Identity | Writable scope | Purpose |
 | --- | --- | --- | --- |
 | `DefenseClawGateway` | `NT SERVICE\DefenseClawGateway` virtual service account | Managed runtime and logs only | Inspection, policy, audit, hook API, health, and least-privilege service-token access. |
 | `DefenseClawCMIDBroker` | LocalSystem with only `SeChangeNotifyPrivilege` | Broker authentication key, named pipe, broker log, and the pinned Cisco provider DLL | Isolate access to the machine credential provider behind an authenticated gateway-only IPC boundary. |
+| `DefenseClawSensorHelper` | LocalSystem with only `SeChangeNotifyPrivilege` | Protected helper socket and runtime-plane acquisition APIs | Broker the process, connection, host-event, and DNS observations required by AI Discovery without granting those privileges to the network-facing gateway. Requests contain no caller-selected path, pid, filter, glob, or command. |
 | `DefenseClawHookGuardian` | LocalSystem | Enrolled user hook footprints plus guardian state | Impersonate each manifest SID, install or repair that user's files with the user's ownership, and return to LocalSystem for protected state. |
 | `DefenseClawHookEnumerator` | LocalSystem | HKLM ProfileList discovery, protected target manifest, and bounded inventory-directory DACL grants | Refresh eligible connector enrollment without granting the gateway access to an entire user profile. |
 | AI agent | Interactive standard user at medium integrity | Its normal profile | Invoke native hooks; cannot stop or reconfigure any managed service or modify administrator assets. |
@@ -325,10 +327,11 @@ The default managed layout is:
 
 | Surface | Default path | Authority |
 | --- | --- | --- |
-| Broker, gateway/guardian/enumerator host, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
+| Broker, gateway/guardian/enumerator host, sensor helper, native hook, and optional CLI binaries | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\bin` | Administrators/LocalSystem own and write; service identities receive only the access they need. |
 | Managed config | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\etc\config.yaml` | Administrators/LocalSystem write; the gateway service can read. |
 | Runtime state and service-side scoped credentials | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\runtime` | Gateway virtual account and LocalSystem; standard users have no read or write grant. |
 | Cisco Secure Client UI IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\defenseclaw_ipc.sock` | Fixed under trusted Program Files on managed Windows. The installer grants the gateway service identity the required directory access; `DEFENSECLAW_IPC_SOCKET` cannot redirect it. |
+| Sensor-helper IPC socket | `C:\Program Files\Cisco\Cisco Secure Client\DefenseClaw\ipc\sensor-helper.sock` | Installer-owned fixed path. The socket DACL admits LocalSystem, Administrators, and the exact gateway service SID; managed mode ignores `DEFENSECLAW_SENSOR_HELPER_SOCKET`. |
 | Logs | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\logs` | Service identities write; grant support-reader access separately if required. |
 | Guardian manifest | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian\targets.yaml` | Administrators/LocalSystem write; guardian reads. |
 | Trusted authorization ledger | `C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw\hook-guardian-state\protected_targets.json` | LocalSystem/Administrators only; gateway receives the narrow read access required for readiness. |
@@ -510,6 +513,7 @@ $Installer = Join-Path $Stage 'install-enterprise.ps1'
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml') `
@@ -527,6 +531,7 @@ $DefenseClaw = Join-Path $Stage 'defenseclaw.exe'
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $DefenseClaw `
   --config (Join-Path $Stage 'config.yaml') `
   --manifest (Join-Path $Stage 'targets.yaml') `
@@ -556,6 +561,7 @@ or a causal client block may the administrator run:
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml') `
@@ -570,6 +576,7 @@ The equivalent post-proof CLI transaction is:
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $DefenseClaw `
   --config (Join-Path $Stage 'config.yaml') `
   --manifest (Join-Path $Stage 'targets.yaml') `
@@ -670,9 +677,9 @@ All managed services use exactly three SCM failure actions: restart after 5 seco
 15 seconds, then 60 seconds, with a one-day failure-count reset period and
 non-crash failure handling enabled. Windows repeats the last configured action
 for subsequent failures, so the 60-second restart is the indefinite backstop;
-there is no terminal `NONE` action. The current broker-focused certification
-force-terminates the exact gateway, broker, and guardian PIDs four times and
-observes all four replacements, then issues a normal administrator `Stop` and
+there is no terminal `NONE` action. The current certification force-terminates
+the exact gateway, broker, sensor-helper, and guardian PIDs four times and
+observes every replacement, then issues a normal administrator `Stop` and
 requires each of those services to remain stopped for longer than 60 seconds.
 Because an already queued SCM restart cannot be canceled,
 servicing first persists its intent, disables all managed services, stops them, and
@@ -808,14 +815,18 @@ Acceptance requires the exact virtual-account/LocalSystem identities, automatic
 start, approved absolute image paths and arguments, the managed-mode
 environment pin, protected DACLs with no standard-user write ACE, and a healthy
 JSON `verify`. Do not stop at the configured SCM `RequiredPrivileges` values:
-the current broker-focused certification opens the gateway, broker, and
+the current certification opens the gateway, broker, sensor helper, and
 guardian live process tokens read-only and records
 `TokenUser`, integrity, privileges, groups, and restricted SIDs. The gateway
 must have the exact `NT SERVICE\<gateway>` TokenUser, high integrity, a
 restricted token containing its service SID, World, service-logon, and
 write-restricted SIDs, and only `SeChangeNotifyPrivilege`. The broker must have
 the LocalSystem TokenUser, system integrity, an unrestricted token with its
-service SID group, and only `SeChangeNotifyPrivilege`. The guardian must
+service SID group, and only `SeChangeNotifyPrivilege`. The sensor helper must
+have the LocalSystem TokenUser, system integrity, an unrestricted token with its
+service SID group, and only `SeChangeNotifyPrivilege`; its fixed request
+protocol, service image, environment, socket DACL, and gateway dependency are
+verified as separate boundaries. The guardian must
 have the LocalSystem TokenUser, system integrity, an unrestricted token with
 its service SID group, and exactly `SeTcbPrivilege`,
 `SeImpersonatePrivilege`, `SeChangeNotifyPrivilege`, `SeBackupPrivilege`, and
@@ -831,8 +842,8 @@ changes, and all-access handles. Dangerous service-token duplicate,
 impersonate, assign-primary, privilege/group/default adjustment, DACL, and
 owner handles must also be denied. Direct `taskkill`, protected-file
 write/DELETE handles, SCM mutation, and service-registry write attempts must
-fail; the original gateway, broker, and guardian PIDs must remain Running and
-installer verification must show those three services responsive. The
+fail; the original gateway, broker, sensor-helper, and guardian PIDs must remain Running and
+installer verification must show those four services responsive. The
 Enumerator is still subject to exact-name collision refusal and uninstall/
 fallback-cleanup absence checks, but its full token and recovery matrix is not
 claimed by this broker-focused run. Query-limited process access may remain
@@ -850,6 +861,7 @@ only on a disposable Windows validation endpoint:
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
   -HookBinary .\defenseclaw-hook.exe `
+  -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
   -NormalModeCLILauncher C:\cert\python-cli\defenseclaw.exe `
   -NormalModeCLIWheel C:\cert\defenseclaw-0.8.0-py3-none-any.whl `
@@ -860,6 +872,7 @@ only on a disposable Windows validation endpoint:
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
+  -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
   -AllowUnsigned `
   -AttestAgentApplicationControl `
@@ -960,6 +973,7 @@ $ProviderLibrary = 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\C
   -ProviderLibrary $ProviderLibrary `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml')
@@ -989,6 +1003,7 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $ReleaseCLI `
   --config (Join-Path $Stage 'config.yaml') `
   --manifest (Join-Path $Stage 'targets.yaml') `
@@ -1493,8 +1508,8 @@ sudo launchctl kickstart -k system/com.cisco.secureclient.defenseclaw.hook-guard
 ```
 
 On Windows, deliver the approved config through the enterprise installer so it
-can replace and re-verify the protected file transaction, then restart both SCM
-services:
+can replace and re-verify the protected file transaction and restart services
+in dependency order:
 
 ```powershell
 # These three variables (also used in the install and verify blocks) MUST be
@@ -1524,12 +1539,12 @@ $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw'
   -Action Repair `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
+  -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
   -Config (Join-Path $Stage 'config.yaml') `
   -Manifest (Join-Path $Stage 'targets.yaml')
 
-Restart-Service DefenseClawGateway
-Restart-Service DefenseClawHookGuardian
+defenseclaw enterprise windows verify --installer $Installer --json
 ```
 
 Do not use the user CLI or HTTP PATCH as an enterprise automation shortcut; managed mode rejects that path by design.
@@ -1587,7 +1602,7 @@ Removing or disabling a manifest target stops future reconciliation; it is not a
 
 ### Upgrade DefenseClaw
 
-Use an atomic administrator-controlled replacement and restart both trust domains. On Windows, use the enterprise installer's `-Action Upgrade` transaction described above; do not replace a running service binary in place.
+Use an atomic administrator-controlled replacement and restart both trust domains. On Windows, use the enterprise installer's `-Action Upgrade` transaction described above, including the approved sensor-helper binary; do not replace a running service binary in place.
 
 ```bash
 sudo install -o root -g root -m 0755 defenseclaw-gateway \
@@ -1613,6 +1628,7 @@ Do not repeatedly chmod or chown a failing target until you understand the trust
 | `hook contract drift` | Agent version differs from the declared/known contract | Pin the real version, update DefenseClaw if support exists, or keep the target out of action mode. |
 | HTTP 401 from one hook | Scoped token missing, malformed, unreadable, or drifted | Inspect service health and scoped-token trust without printing the token; reconcile after restoring trusted mode/owner. |
 | One connector fails while another works | Expected connector credential isolation | Repair only the failing connector; do not replace all credentials with a shared token. |
+| Runtime planes report `sensor helper (not started)` or helper-socket access failure | `DefenseClawSensorHelper` is stopped, missing, has a mismatched image, or the protected socket/DACL is unhealthy | Run enterprise `status` and `verify`, stage the approved helper binary, and use enterprise `repair`. Do not edit SCM, the socket path, or its DACL manually. |
 | Watcher repeatedly reconciles unchanged files | Non-canonical external writer, lock noise, or version mismatch | Inspect journal events and mtimes; confirm the current binary includes idempotent reconciliation fixes. |
 
 ### Incident containment
@@ -1684,7 +1700,7 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 ## Production checklist
 
 - [ ] AI agent users are standard users without passwordless sudo/admin rights.
-- [ ] Broker, gateway/guardian/enumerator host, and native hook binaries come from the approved build and are administrator-owned; the broker is bound to the approved signed Cisco provider library.
+- [ ] Broker, gateway/guardian/enumerator host, sensor helper, and native hook binaries come from the approved build and are administrator-owned; the broker is bound to the approved signed Cisco provider library.
 - [ ] Managed config, policy, units/plists/SCM definitions, manifest, and authorization directory have trusted path chains.
 - [ ] Gateway service runs as the dedicated service identity (or the documented root identity on macOS), not the AI user.
 - [ ] Linux gateway sandbox properties match the packaged unit or a reviewed stricter override.

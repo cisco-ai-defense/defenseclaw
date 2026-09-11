@@ -1,9 +1,11 @@
-# End-user identity in v8 telemetry: branch testing plan
+# End-user identity in v8 telemetry: implementation and validation notes
 
-Branch: `feature/identity-fabric-telemetry` (not for merge)
-Base: `origin/main` at `74fddaee`
+This document preserves the implementation rationale, security boundaries, and
+manual validation procedure for end-user attribution. Operator-facing behavior
+is documented in the public
+[end-user identity guide](../../docs-site/content/docs/observability/end-user-identity.mdx).
 
-## What this branch does
+## What the implementation does
 
 DefenseClaw already reports *what* happened on an endpoint — which agent ran,
 which tool it called, which MCP servers are configured. It does not report *who
@@ -11,7 +13,7 @@ did it*. On a multi-user endpoint every record is attributed to the machine, so
 an operator can see that an agent exfiltrated a file but not whose account was
 driving it.
 
-This branch adds the end user as a first-class attribute on v8 telemetry:
+The implementation adds the end user as a first-class attribute on v8 telemetry:
 
 | Attribute | Meaning |
 | --- | --- |
@@ -20,7 +22,7 @@ This branch adds the end user as a first-class attribute on v8 telemetry:
 | `defenseclaw.user.name` | bare OS account name, never `DOMAIN\user` |
 | `defenseclaw.user.email` | the account the agent is signed into. Opt-in via `ai_discovery.include_user_email`, off by default |
 
-An earlier revision of this branch wrote Astrix-shaped records to a per-user
+An earlier revision wrote Astrix-shaped records to a per-user
 disk spool, because AI Defense had no ingest for them. That is gone. The
 records now travel on the existing v8 contract, which already reaches AI
 Defense through the `managedaid` destination, so there is no new transport to
@@ -32,7 +34,7 @@ The gateway cannot ask the OS who the user is. Under a managed install it runs
 as a service account — LocalSystem on Windows, a daemon account on macOS — so
 `os/user.Current()` returns the service principal, and every event on a
 multi-user endpoint would be attributed to one identity that never touched an
-agent. The prior code did exactly this; fixing it is part of the branch.
+agent. The prior code did exactly this; fixing it is part of the implementation.
 
 Only the hook runs inside the real user's session, so the hook reports the
 identity and the gateway consumes it:
@@ -41,7 +43,7 @@ identity and the gateway consumes it:
 | --- | --- | --- |
 | bundled `.sh` that `curl`s the gateway | all ten `hooks/*-hook.sh` | `defenseclaw_user_identity_args` in `_hardening.sh` emits `X-DefenseClaw-User-Id` / `X-DefenseClaw-User-Name` curl arguments |
 | native `<exe> hook --connector <name>` | Windows, and the `.ps1` hooks | `hookexec.setUserIdentityHeaders` reads the thread/process token SID |
-| in-process plugin POST | `amp-plugin.ts`, `opencode-plugin.js`, `omnigent-policy.py` | each sets the same two headers from its own runtime (`os.userInfo()`, `getpass.getuser()`) |
+| in-process plugin POST | `amp-plugin.ts`, `opencode-plugin.js`, `omnigent-policy.py` | each sets the same two headers from an OS account lookup; OmniGent uses `getuid()` plus the POSIX account database rather than environment-influenced login-name helpers |
 
 Every connector transport reports identity. That is worth stating explicitly
 because the first cut covered only codex, claude-code, and cursor, and the
@@ -154,8 +156,6 @@ the account name alone, with no configuration required to stay that way.
 ## Step 1 — Unit tests
 
 ```bash
-git fetch origin && git checkout feature/identity-fabric-telemetry
-
 go test ./internal/useridentity/...
 go test ./internal/gateway/ -run 'Identity|UserEmail|InventoryHomeOwner|AttributeEachHome|DaemonsOwnProfile'
 go test ./internal/gateway/connector/ -run 'IdentityHeaders|UserIdentityArgs'
@@ -360,23 +360,20 @@ all ten hooks (`TRACE_HEADER_ARGS`). That is pre-existing on `main`, not
 introduced here, and it means `traceparent` / `tracestate` are also not
 propagated from macOS hooks. It is the identical mechanical fix — replace
 `mapfile -t` with the same read loop — but it changes trace behavior rather
-than adding a field, so it is deliberately left out of this branch.
+than adding a field, so it is deliberately left out of this implementation.
 
 ---
 
 # Part 2 — Windows
 
-The Windows SID path is the surface with no runtime coverage. It compiles and
-is vet-clean for `windows/amd64`, but the token lookup in
-`useridentity.currentIdentity` and the ProfileList lookups in
-`identityForHome` / `homeForID` have never executed.
+The Windows SID path is covered by native Windows CI in addition to
+cross-compilation. The procedure below remains the release-validation path for
+proving a real standard-user token, ProfileList round trip, and multi-user
+managed-enterprise attribution on a disposable endpoint.
 
 ## Step 1 — Prove the platform code runs
 
 ```powershell
-git fetch origin
-git checkout feature/identity-fabric-telemetry
-
 go test ./internal/useridentity/... -v
 ```
 
@@ -494,14 +491,14 @@ Cursor's Windows transport uses the generated PowerShell adapter and
   which have no profile they may safely read. Neither is a defect; joining on
   `user.id` recovers the address for any event.
 - **`emitEndpointInventory` is managed-enterprise-only**, so the inventory half
-  of this branch cannot be exercised on an unmanaged macOS install. It is
+  of this feature cannot be exercised on an unmanaged macOS install. It is
   covered by unit tests instead
   (`TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner`).
 - **Windows profile ownership comes from ProfileList**, so
   `TestPerConnectorMCPEntriesAttributeEachHomeToItsOwner` skips there — a temp
   directory has no registry entry. The Windows path needs the step 4 run to be
   considered covered.
-- **Pre-existing, not from this branch:** the `mapfile` guard on trace headers
+- **Pre-existing, not from this implementation:** the `mapfile` guard on trace headers
   (above), and a regex in `schemas/telemetry/v8/registry.yaml` for
   `url_host` under `defenseclaw.inventory.mcp_identifier` whose double-escaped
   backslash rejects bracketed IPv6 hosts that the Go producer accepts.
