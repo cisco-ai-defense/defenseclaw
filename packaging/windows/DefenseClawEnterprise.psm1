@@ -9399,7 +9399,6 @@ function Start-DefenseClawTransactionServices {
     $gateway = $states[$GatewayServiceName]
     $broker = $states[$brokerServiceName]
     $guardian = $states[$GuardianServiceName]
-    $enumeratorState = $states[$enumeratorServiceName]
     # This helper is shared by ordinary rollback, quiescing-intent recovery,
     # and legacy snapshots that synthesize absent Broker/Enumerator preimages.
     # Authenticate every current SCM object independently before its start
@@ -9460,6 +9459,12 @@ function Start-DefenseClawTransactionServices {
         }
     }
     Stop-DefenseClawService -Name $brokerServiceName
+    # Read the Enumerator preimage AFTER the managed-service quiesce loop so
+    # transaction recovery cannot capture a stale enumerator running/start-mode
+    # from a preimage that a concurrent SCM auto-restart or crashed pre-restart
+    # activation had already mutated. Every downstream branch that consults
+    # $enumeratorState is below this point.
+    $enumeratorState = $states[$enumeratorServiceName]
     if (-not $TrustInProcessQuiescence) {
         # Direct/helper reuse and process-recovery paths cannot prove that the
         # supplied wall-clock timestamp predates no interrupted activation.

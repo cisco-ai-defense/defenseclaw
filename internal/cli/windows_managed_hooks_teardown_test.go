@@ -27,6 +27,15 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 	if command.Use != "teardown-managed-hooks" {
 		t.Fatalf("Use = %q", command.Use)
 	}
+	// Flags whose scope is limited to specific teardown actions. If any of
+	// these were exposed on rollback/status by accident, the PowerShell
+	// teardown module could pass a receipt-scoped argument during rollback
+	// and silently apply cleanup semantics against a rolled-back journal.
+	scopedFlags := map[string]map[string]bool{
+		"purge-contract-locks":     {"finalize": true},
+		"contract-cleanup-receipt": {"prepare": true, "finalize": true},
+		"contract-cleanup-scope":   {"prepare": true, "finalize": true},
+	}
 	var actions []string
 	for _, child := range command.Commands() {
 		if !child.Hidden {
@@ -35,12 +44,14 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		if child.Flags().Lookup("json") == nil {
 			t.Fatalf("%s action is missing --json", child.Name())
 		}
-		purgeFlag := child.Flags().Lookup("purge-contract-locks")
-		if child.Name() == "finalize" && purgeFlag == nil {
-			t.Fatal("finalize action is missing --purge-contract-locks")
-		}
-		if child.Name() != "finalize" && purgeFlag != nil {
-			t.Fatalf("%s action unexpectedly accepts --purge-contract-locks", child.Name())
+		for flag, allowed := range scopedFlags {
+			present := child.Flags().Lookup(flag) != nil
+			if allowed[child.Name()] && !present {
+				t.Fatalf("%s action is missing --%s", child.Name(), flag)
+			}
+			if !allowed[child.Name()] && present {
+				t.Fatalf("%s action unexpectedly accepts --%s", child.Name(), flag)
+			}
 		}
 		actions = append(actions, child.Name())
 	}

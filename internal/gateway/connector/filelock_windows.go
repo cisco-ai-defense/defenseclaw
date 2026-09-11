@@ -163,6 +163,16 @@ func openWindowsManagedFileLockForTarget(
 			)
 		}
 	}
+	// Reject caller-supplied broad group and virtual-account SIDs so the
+	// protected lock DACL owner slot always resolves to a specific
+	// interactive user. A group SID here would let any authenticated user
+	// race the managed target-runtime write path.
+	if !windowsManagedHookContractInteractiveUserSID(target) {
+		return nil, nil, fmt.Errorf(
+			"managed lock target %s is not an interactive user",
+			target.String(),
+		)
+	}
 	parent, err := openAtomicTransformBoundDirectoryPlatform(filepath.Dir(path))
 	if err != nil {
 		return nil, nil, fmt.Errorf("open managed lock parent: %w", err)

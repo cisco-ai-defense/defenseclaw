@@ -3499,6 +3499,13 @@ func alertEffectiveSeveritySQL() string {
 // Alerts.
 const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
 
+// HookDecisionMetricsProducer is the authenticated provenance stamped on the
+// durable enforcement companion when a connector hook enforced a block whose
+// origin was not the AID cloud lane (local ordered rules, MCP/asset policy,
+// judge, panic fallback). Kept as a shared constant so the gateway emitters,
+// the audit projection, and downstream consumers agree on the string.
+const HookDecisionMetricsProducer = "gateway.hook.decision.metrics"
+
 // activeAIDHookBlockSQL identifies the durable enforcement companion emitted
 // after a connector hook actually applies an AI Defense block. The actor
 // column is the canonical event-history projection of provenance.producer; it

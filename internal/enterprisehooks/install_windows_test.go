@@ -334,6 +334,10 @@ func newWindowsGenericCodexFixtureBeforeProtection(
 	beforeProtection func(configPath string),
 ) windowsGenericCodexFixture {
 	t.Helper()
+	// The managed hook-contract lock entry binds to the running gateway
+	// service identity. Production installs inherit this env from the
+	// authenticated SCM process; tests must supply it explicitly.
+	t.Setenv(connector.WindowsGatewayServiceNameEnv, "DefenseClawGateway-Test")
 	targetSID := currentWindowsTestSID(t)
 	home := filepath.Join(t.TempDir(), "home")
 	configDir := filepath.Join(home, ".codex")

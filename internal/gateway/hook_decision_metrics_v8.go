@@ -21,7 +21,10 @@ import (
 	"go.opentelemetry.io/otel/trace"
 )
 
-const hookDecisionMetricsV8Producer = "gateway.hook.decision.metrics"
+// hookDecisionMetricsV8Producer aliases the audit-side canonical producer so
+// the decision and enforcement emitters, the SQL projection, and the alert
+// count stay bound to a single string constant.
+const hookDecisionMetricsV8Producer = audit.HookDecisionMetricsProducer
 
 func (a *APIServer) emitHookDecisionObservabilityV8(
 	ctx context.Context,
@@ -76,11 +79,12 @@ func (a *APIServer) emitHookEnforcementLogV8(
 	if logLevel == "" {
 		logLevel = observability.LogLevelWarn
 	}
+	// Both emitters use the same normalized identity so the decision and
+	// enforcement rows correlate under a single connector value. Rewriting
+	// "unknown" → "" here would desync the enforcement row from the paired
+	// decision row (which keeps "unknown"), breaking Active-Alert joins.
 	connectorName = hookDecisionMetricConnector(connectorName)
 	routeConnector := connectorName
-	if routeConnector == "unknown" {
-		routeConnector = ""
-	}
 	observedAt := time.Now().UTC()
 	enforcementID := uuid.NewString()
 	producer := hookDecisionMetricsV8Producer

@@ -6434,6 +6434,40 @@ targets:
                 -Retried:$false
         }
 
+        # Fail-closed guard: a retained-state Install must reject a Sources map
+        # that omits native_cleanup. The harness usually wraps every call with
+        # Invoke-HarnessPurgeRetry (which always supplies native_cleanup), so
+        # this case invokes the recovery directly to keep the module's
+        # "retained-state Install requires the authenticated native cleanup"
+        # branch exercised end-to-end, not only via the contract-test grep.
+        $failClosedLayout = New-HarnessCommittedPurgeCase `
+            -Name 'install-retained-state-requires-native-cleanup'
+        Publish-HarnessPurgeReceipt -Layout $failClosedLayout
+        $failClosedThrew = $false
+        $failClosedMessage = ''
+        try {
+            [void](Invoke-DefenseClawPreLayoutRecovery `
+                -Action 'Install' `
+                -Layout $failClosedLayout `
+                -Sources @{} `
+                -GatewayServiceName 'DefenseClawGateway' `
+                -GuardianServiceName 'DefenseClawHookGuardian')
+        }
+        catch {
+            $failClosedThrew = $true
+            $failClosedMessage = [string]$_.Exception.Message
+        }
+        Assert-Harness `
+            -Condition (
+                $failClosedThrew -and
+                $failClosedMessage -match 'retained-state Install requires the authenticated'
+            ) `
+            -Message 'retained-state Install without native_cleanup did not fail closed'
+        Add-HarnessPurgeResult `
+            -Name 'install-retained-state-requires-native-cleanup' `
+            -FailedClosed:$true `
+            -Retried:$false
+
         $installResumeLayout = New-HarnessCommittedPurgeCase `
             -Name 'install-resume-exact'
         Publish-HarnessPurgeReceipt -Layout $installResumeLayout

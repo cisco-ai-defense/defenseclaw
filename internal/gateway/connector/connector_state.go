@@ -967,6 +967,14 @@ func HookRuntimeRegistrationCurrent(
 		return false, fmt.Errorf("build current Codex hook contract: %w", err)
 	}
 	if opts.ManagedEnterprise && runtime.GOOS == "windows" {
+		// A legacy entry from a pre-binding build carries an empty
+		// ManagedGatewayServiceName. Report "not current" (false, nil) so
+		// the caller's authenticated repair path can rewrite the entry with
+		// the current service identity; a hard error here would skip repair
+		// (healLocked only runs on `return false`), leaving the guard stuck.
+		if strings.TrimSpace(stored.ManagedGatewayServiceName) == "" {
+			return false, nil
+		}
 		if err := ValidateWindowsManagedHookContractGatewayServiceBinding(stored); err != nil {
 			return false, fmt.Errorf("verify Codex hook contract gateway binding: %w", err)
 		}

@@ -94,17 +94,24 @@ func CaptureManagedHookContractCleanupClaimForOwner(
 		if !exists {
 			return nil
 		}
-		if err := ValidateWindowsManagedGatewayServiceName(
-			entry.ManagedGatewayServiceName,
-		); err != nil {
-			return fmt.Errorf(
-				"managed hook contract entry has no valid gateway service binding: %w",
-				err,
-			)
-		}
-		if !strings.EqualFold(entry.ManagedGatewayServiceName, claim.GatewayServiceName) {
-			claim.Superseded = true
-			return nil
+		// Legacy pre-binding entries have an empty ManagedGatewayServiceName.
+		// Teardown must still be able to remove such an entry, so treat empty
+		// as "no binding pin" and capture the SHA256 for CAS-safe removal by
+		// the apply path. A non-empty invalid value is still fail-closed.
+		legacyEntry := strings.TrimSpace(entry.ManagedGatewayServiceName) == ""
+		if !legacyEntry {
+			if err := ValidateWindowsManagedGatewayServiceName(
+				entry.ManagedGatewayServiceName,
+			); err != nil {
+				return fmt.Errorf(
+					"managed hook contract entry has no valid gateway service binding: %w",
+					err,
+				)
+			}
+			if !strings.EqualFold(entry.ManagedGatewayServiceName, claim.GatewayServiceName) {
+				claim.Superseded = true
+				return nil
+			}
 		}
 		digest, digestErr := windowsManagedHookContractEntrySHA256(entry)
 		if digestErr != nil {
@@ -245,6 +252,14 @@ func ApplyManagedHookContractCleanupClaimForOwnerWithBarrier(
 // ClearManagedHookContractLockEntryForOwner removes one connector's stale
 // contract identity during an authenticated machine purge. The shared lock and
 // every peer connector entry remain intact.
+//
+// CROSS-USER PRIVILEGE CONTRACT: Callers running as LocalSystem against a
+// target-owned protected file MUST wrap this call in
+// enterprisehooks.RunWithWindowsAdministratorOwnerRestorePrivilege. Writing a
+// file whose owner differs from the caller's SID requires SeRestorePrivilege
+// (ERROR_ACCESS_DENIED otherwise). The connector package cannot import
+// enterprisehooks; the privilege is only present on threads created by the
+// enterprisehooks helper.
 func ClearManagedHookContractLockEntryForOwner(
 	dataDir, connectorName, expectedOwnerSID, expectedGatewayServiceName string,
 ) error {

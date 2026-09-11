@@ -151,7 +151,15 @@ func runWindowsManagedHookContractCleanup(opts *windowsManagedHookContractCleanu
 		report.RemovedCount, report.AlreadyAbsentCount,
 			report.SupersededCount, err =
 			applyWindowsManagedHookContractCleanupReceipt(receiptPath, receipt)
-		report.Phase = windowsManagedHookContractCleanupFinalized
+		// Phase mirrors the durable on-disk receipt state. Only mark the
+		// report finalized when apply succeeded end-to-end; a partial apply
+		// leaves the receipt in "prepared" and must be reported that way so
+		// operators/reconcile probes do not treat the batch as complete.
+		if err == nil {
+			report.Phase = windowsManagedHookContractCleanupFinalized
+		} else {
+			report.Phase = windowsManagedHookContractCleanupPrepared
+		}
 	}
 	report.OK = err == nil
 	if err != nil {
@@ -346,7 +354,14 @@ func applyWindowsManagedHookContractCleanupReceipt(
 	for index := range receipt.Claims {
 		claim := receipt.Claims[index]
 		if claim.Completed {
-			alreadyAbsent++
+			// Preserve the same disposition split the finalized branch uses,
+			// so a resume after a crash carries the operator-visible counts
+			// forward instead of relabeling every prior claim as alreadyAbsent.
+			if claim.Superseded {
+				superseded++
+			} else {
+				alreadyAbsent++
+			}
 			continue
 		}
 		var result connector.WindowsManagedHookContractCleanupResult

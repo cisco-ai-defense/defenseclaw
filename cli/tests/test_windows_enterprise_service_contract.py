@@ -5546,9 +5546,18 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
 
     assert 'IdentitySHA256' in cleanup
     assert 'windowsManagedHookContractCleanupIdentitySHA256' in cleanup
+    cleanup_identity_start = cleanup.index(
+        "type windowsManagedHookContractCleanupIdentity struct"
+    )
+    cleanup_report_start = cleanup.index(
+        "type windowsManagedHookContractCleanupReport struct"
+    )
+    assert cleanup_identity_start < cleanup_report_start, (
+        "cleanup source reordered: identity struct must precede report struct "
+        "for the negative-slice contract below to remain meaningful"
+    )
     assert 'ApplicationStarted' not in cleanup[
-        cleanup.index("type windowsManagedHookContractCleanupIdentity struct") :
-        cleanup.index("type windowsManagedHookContractCleanupReport struct")
+        cleanup_identity_start : cleanup_report_start
     ]
     assert 'writeEnterpriseHookProtectedFile(path, body)' in cleanup
     assert 'writeWindowsTargetRuntimeProtectedJSON(path, receipt)' not in cleanup
@@ -5580,9 +5589,18 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert 'Remove-DefenseClawManagedHookContractCleanupReceipt' in rollback
     assert '-AllowPrepared' in rollback
     assert 'windowsManagedHookContractEntrySHA256' in connector_cleanup
+    entry_sha_start = connector_cleanup.index(
+        "func windowsManagedHookContractEntrySHA256"
+    )
+    valid_sha_start = connector_cleanup.index(
+        "func validManagedHookContractEntrySHA256"
+    )
+    assert entry_sha_start < valid_sha_start, (
+        "connector cleanup reordered: entry-sha function must precede the "
+        "validator for the negative-slice contract below to remain meaningful"
+    )
     assert 'lock.UpdatedAt' not in connector_cleanup[
-        connector_cleanup.index("func windowsManagedHookContractEntrySHA256") :
-        connector_cleanup.index("func validManagedHookContractEntrySHA256")
+        entry_sha_start : valid_sha_start
     ]
     assert 'ManagedGatewayServiceName string' in connector_state
     assert 'json:"managed_gateway_service_name,omitempty"' in connector_state
