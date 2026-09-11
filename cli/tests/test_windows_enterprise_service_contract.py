@@ -2100,12 +2100,13 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     assert "'S-1-16-12288'" in token_probe
     assert "'S-1-16-16384'" in token_probe
     assert "$broker = $serviceName -eq $script:BrokerServiceName" in token_probe
-    assert "$expectedPrivileges = if ($gateway -or $broker)" in token_probe
+    assert "$sensorHelper = $serviceName -eq $script:SensorHelperServiceName" in token_probe
+    assert "$expectedPrivileges = if ($gateway -or $broker -or $sensorHelper)" in token_probe
     assert "$expectedIntegritySID = if ($gateway)" in token_probe
     assert "integrity $($token.IntegritySid), want $expectedIntegrityName" in token_probe
     assert "expected_integrity_sid = $expectedIntegritySID" in token_probe
     assert "if (-not $gateway -and" in token_probe
-    assert "if (-not $gateway -and -not $broker)" in token_probe
+    assert "if (-not $gateway -and -not $broker -and -not $sensorHelper)" in token_probe
     assert "service_sid_group_required = -not $gateway" in token_probe
     assert "service_sid_group_count = $serviceGroups.Count" in token_probe
     assert "foreach ($requiredSID in @($serviceSID, 'S-1-1-0', 'S-1-5-33'))" in token_probe
@@ -2124,7 +2125,7 @@ def test_certification_inspects_actual_live_service_tokens() -> None:
     ):
         assert privilege in harness
     assert "live-service-token-least-privilege" in harness
-    assert "High gateway/System broker and guardian integrity" in harness
+    assert "High gateway/System service integrity" in harness
     assert "service-SID identity/group semantics" in harness
     assert "service_tokens = @($serviceTokenSnapshot)" in harness
 
@@ -2183,13 +2184,13 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
 
     assert "full execution requires -UpgradeBrokerBinary" in harness
     assert "-UpgradeGatewayBinary" in harness
-    assert "full execution requires all four -Upgrade*Binary inputs" in upgrade
+    assert "full execution requires all five -Upgrade*Binary inputs" in upgrade
     assert "Add-SkippedResult" not in upgrade
     assert "external-release-public-cli-versioned-upgrade" in upgrade
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in upgrade
     assert "-FilePath $script:UpgradeCLISource" in upgrade
     assert "separately version-stamped upgrade $name bytes do not" in upgrade
-    for name in ("broker", "gateway", "hook", "cli"):
+    for name in ("broker", "gateway", "hook", "sensor_helper", "cli"):
         assert f"{name} = [string]$script:SourceDigests['upgrade_{name}']" in upgrade
         assert f"exact_{name}_sha256 = $true" in upgrade
     assert "versioned public Upgrade installed the wrong $name bytes" in upgrade
@@ -2225,6 +2226,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
         "-HookBinary, and -SensorHelperBinary" in module
     )
     assert "@('sensor_helper', $SensorHelperBinary" in module
+    assert "'privs', $sensorHelperServiceName, 'SeChangeNotifyPrivilege'" in module
     assert "@('provider_library', $ProviderLibrary" in module
     assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
         module
@@ -2235,7 +2237,9 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     for parameter in (
         "[string]$BrokerBinary",
         "[string]$ProviderLibrary",
+        "[string]$SensorHelperBinary",
         "[string]$UpgradeBrokerBinary",
+        "[string]$UpgradeSensorHelperBinary",
     ):
         assert parameter in parameter_block
 
@@ -2253,6 +2257,10 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
         "$ProviderLibrary" in source_initialization
     )
     assert "broker = Get-FileDigest $script:OriginalBrokerSource" in source_initialization
+    assert (
+        "sensor_helper = Get-FileDigest $script:OriginalSensorHelperSource"
+        in source_initialization
+    )
     assert (
         "provider_library = Get-FileDigest "
         "$script:OriginalProviderLibrarySource" in source_initialization
@@ -2416,6 +2424,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
         "ProviderLibrarySource",
         "GatewaySource",
         "HookSource",
+        "SensorHelperSource",
         "CLISource",
         "ConfigSource",
         "ManifestSource",
@@ -2447,12 +2456,20 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         '"DefenseClawCertEnumerator_$($script:RunToken)"' in harness
     )
     assert (
+        '$script:SensorHelperServiceName = '
+        '"DefenseClawSensorHelper_$($script:RunToken)"' in harness
+    )
+    assert (
         "'enumerator' { \"DefenseClawCertEnumerator_$($script:RunToken)\" }"
         in service_name_guard
     )
     assert (
         "Assert-CertificationServiceName "
         "$script:EnumeratorServiceName 'enumerator'" in harness
+    )
+    assert (
+        "Assert-CertificationServiceName "
+        "$script:SensorHelperServiceName 'sensor_helper'" in harness
     )
 
     execution_preflight_start = harness.index(
@@ -2464,6 +2481,7 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         )
     ]
     assert "$script:BrokerServiceName" in execution_preflight
+    assert "$script:SensorHelperServiceName" in execution_preflight
     assert "$script:EnumeratorServiceName" in execution_preflight
     assert "refusing pre-existing certification service" in execution_preflight
 
@@ -2473,6 +2491,7 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         )
     ]
     assert bounded_cleanup.count("$script:BrokerServiceName") >= 5
+    assert bounded_cleanup.count("$script:SensorHelperServiceName") >= 5
     assert bounded_cleanup.count("$script:EnumeratorServiceName") >= 5
     assert "'broker'" in bounded_cleanup
     assert "'enumerator'" in bounded_cleanup
@@ -2487,7 +2506,9 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
     for parameter in (
         "-BrokerBinary",
         "-ProviderLibrary",
+        "-SensorHelperBinary",
         "-UpgradeBrokerBinary",
+        "-UpgradeSensorHelperBinary",
     ):
         assert parameter in certification_invocation
     public_upgrade = deployment_doc[
@@ -2495,6 +2516,7 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         deployment_doc.index("Running the installed CLI is still valid")
     ]
     assert "--broker-binary" in public_upgrade
+    assert "--sensor-helper-binary" in public_upgrade
     repair = deployment_doc[
         deployment_doc.index("-Action Repair") : deployment_doc.index(
             "Use `-Action Upgrade`"
@@ -2502,6 +2524,7 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
     ]
     assert "-BrokerBinary" in repair
     assert "-ProviderLibrary" in repair
+    assert "-SensorHelperBinary" in repair
 
 
 def test_certification_treats_broker_as_a_first_class_service_boundary() -> None:
@@ -2514,11 +2537,14 @@ def test_certification_treats_broker_as_a_first_class_service_boundary() -> None
     ]
     for contract in (
         "$broker = Get-CimInstance Win32_Service",
-        "$null -eq $gateway -or $null -eq $broker -or $null -eq $guardian",
+        "$sensorHelper = Get-CimInstance Win32_Service",
+        "$null -eq $sensorHelper -or $null -eq $guardian",
         "$broker.StartName",
+        "$sensorHelper.StartName",
         "want LocalSystem",
-        "foreach ($service in @($gateway, $broker, $guardian))",
+        "foreach ($service in @($gateway, $broker, $sensorHelper, $guardian))",
         "bin\\defenseclaw-cmid-broker.exe",
+        "bin\\defenseclaw-sensor-helper.exe",
         "Assert-InstalledProviderLibraryIdentity 'service contract'",
         "broker=$($broker.State)/$($broker.StartName)",
     ):

@@ -59,6 +59,9 @@ param(
     [string]$HookBinary,
 
     [Parameter(Mandatory)]
+    [string]$SensorHelperBinary,
+
+    [Parameter(Mandatory)]
     [string]$CLIBinary,
 
     [string]$NormalModeCLILauncher = '',
@@ -84,6 +87,8 @@ param(
     [string]$UpgradeGatewayBinary = '',
 
     [string]$UpgradeHookBinary = '',
+
+    [string]$UpgradeSensorHelperBinary = '',
 
     [string]$UpgradeCLIBinary = '',
 
@@ -409,6 +414,7 @@ function Assert-CertificationServiceName([string]$Name, [string]$Role) {
         'gateway' { "DefenseClawCertGateway_$($script:RunToken)" }
         'guardian' { "DefenseClawCertGuardian_$($script:RunToken)" }
         'broker' { "DefenseClawCMIDBroker_$($script:RunToken)" }
+        'sensor_helper' { "DefenseClawSensorHelper_$($script:RunToken)" }
         'enumerator' { "DefenseClawCertEnumerator_$($script:RunToken)" }
         default { throw "unknown certification service role: $Role" }
     }
@@ -427,6 +433,7 @@ function Assert-CertificationScope {
     Assert-CertificationServiceName $script:GatewayServiceName 'gateway'
     Assert-CertificationServiceName $script:GuardianServiceName 'guardian'
     Assert-CertificationServiceName $script:BrokerServiceName 'broker'
+    Assert-CertificationServiceName $script:SensorHelperServiceName 'sensor_helper'
     Assert-CertificationServiceName $script:EnumeratorServiceName 'enumerator'
     $expectedInstall = ConvertTo-CanonicalPath (
         Join-Path $script:ProgramFilesCertificationRoot $script:RunToken
@@ -4750,6 +4757,10 @@ function Initialize-ProtectedCertificationSources {
         $script:OriginalHookSource `
         'sources\defenseclaw-hook.exe' `
         'stage-hook'
+    $script:SensorHelperSource = Copy-CertificationSourceToProtectedStaging `
+        $script:OriginalSensorHelperSource `
+        'sources\defenseclaw-sensor-helper.exe' `
+        'stage-sensor-helper'
     $script:CLISource = Copy-CertificationSourceToProtectedStaging `
         $script:OriginalCLISource `
         'sources\defenseclaw.exe' `
@@ -4786,6 +4797,7 @@ function Initialize-ProtectedCertificationSources {
         },
         [pscustomobject]@{ name = 'gateway'; path = $script:GatewaySource },
         [pscustomobject]@{ name = 'hook'; path = $script:HookSource },
+        [pscustomobject]@{ name = 'sensor_helper'; path = $script:SensorHelperSource },
         [pscustomobject]@{ name = 'cli'; path = $script:CLISource },
         [pscustomobject]@{
             name = 'normal_mode_cli_launcher'
@@ -4809,16 +4821,19 @@ function Initialize-ProtectedCertificationSources {
     $script:UpgradeBrokerSource = ''
     $script:UpgradeGatewaySource = ''
     $script:UpgradeHookSource = ''
+    $script:UpgradeSensorHelperSource = ''
     $script:UpgradeCLISource = ''
     if (-not [string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
+        -not [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
         if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
+            [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
-            throw 'upgrade certification requires all four upgrade binaries'
+            throw 'upgrade certification requires all five upgrade binaries'
         }
         $script:UpgradeBrokerSource = Copy-CertificationSourceToProtectedStaging `
             $UpgradeBrokerBinary `
@@ -4832,6 +4847,10 @@ function Initialize-ProtectedCertificationSources {
             $UpgradeHookBinary `
             'upgrade-sources\defenseclaw-hook.exe' `
             'stage-upgrade-hook'
+        $script:UpgradeSensorHelperSource = Copy-CertificationSourceToProtectedStaging `
+            $UpgradeSensorHelperBinary `
+            'upgrade-sources\defenseclaw-sensor-helper.exe' `
+            'stage-upgrade-sensor-helper'
         $script:UpgradeCLISource = Copy-CertificationSourceToProtectedStaging `
             $UpgradeCLIBinary `
             'upgrade-sources\defenseclaw.exe' `
@@ -4840,6 +4859,7 @@ function Initialize-ProtectedCertificationSources {
             [pscustomobject]@{ name = 'upgrade_broker'; path = $script:UpgradeBrokerSource },
             [pscustomobject]@{ name = 'upgrade_gateway'; path = $script:UpgradeGatewaySource },
             [pscustomobject]@{ name = 'upgrade_hook'; path = $script:UpgradeHookSource },
+            [pscustomobject]@{ name = 'upgrade_sensor_helper'; path = $script:UpgradeSensorHelperSource },
             [pscustomobject]@{ name = 'upgrade_cli'; path = $script:UpgradeCLISource }
         )) {
             if ((Get-FileDigest $entry.path) -ne [string]$script:SourceDigests[$entry.name]) {
@@ -4847,7 +4867,7 @@ function Initialize-ProtectedCertificationSources {
             }
         }
     }
-    return 'installer, module, broker, gateway, hook, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging; the signed vendor provider library remains pinned to its authenticated Secure Client path'
+    return 'installer, module, broker, gateway, hook, sensor helper, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging; the signed vendor provider library remains pinned to its authenticated Secure Client path'
 }
 
 function Get-AgentBinaryTrustIdentity(
@@ -6304,6 +6324,7 @@ function Get-DeploymentDigests {
         broker = Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
         gateway = Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
         hook = Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'
+        sensor_helper = Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'
         cli = Join-Path $script:InstallRoot 'bin\defenseclaw.exe'
         config = Join-Path $script:StateRoot 'etc\config.yaml'
         manifest = Join-Path $script:StateRoot 'hook-guardian\targets.yaml'
@@ -6499,6 +6520,7 @@ function Get-NormalModeEnterpriseMachineSnapshot {
         (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw.exe'),
         (Join-Path $script:StateRoot 'etc\config.yaml'),
         (Join-Path $script:StateRoot 'hook-guardian\targets.yaml'),
@@ -6547,6 +6569,7 @@ function Get-NormalModeEnterpriseAttributionSnapshot([object]$Snapshot) {
         (Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'),
+        (Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'),
         (Join-Path $script:InstallRoot 'bin\defenseclaw.exe'),
         (Join-Path $script:StateRoot 'etc\config.yaml'),
         (Join-Path $script:StateRoot 'install\deployment.json')
@@ -10162,6 +10185,7 @@ function Test-CodexSharedDirectoryCreationRollback {
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
         -HookSource $script:HookSource `
+        -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
         -ConfigSource $badConfig `
         -ManifestSource $script:ManifestSource `
@@ -10253,6 +10277,7 @@ function Test-CodexSharedDirectoriesSurviveFailedInstall {
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
         -HookSource $script:HookSource `
+        -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
         -ConfigSource $badConfig `
         -ManifestSource $script:ManifestSource `
@@ -10301,6 +10326,7 @@ function Test-UnsafeCodexSharedDirectoryFailsClosed {
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
+            -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
             -ConfigSource $script:ConfigSource `
             -ManifestSource $script:ManifestSource `
@@ -10369,6 +10395,7 @@ function Test-ReparseCodexSharedDirectoryFailsClosed {
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
+            -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
             -ConfigSource $script:ConfigSource `
             -ManifestSource $script:ManifestSource `
@@ -11101,6 +11128,7 @@ function Test-CodexSharedDirectoriesPersistThroughPurge {
         foreach ($serviceName in @(
             $script:GatewayServiceName,
             $script:BrokerServiceName,
+            $script:SensorHelperServiceName,
             $script:GuardianServiceName,
             $script:EnumeratorServiceName
         )) {
@@ -11550,6 +11578,7 @@ function Get-InstallerArguments(
     [string]$ProviderLibrarySource,
     [string]$GatewaySource,
     [string]$HookSource,
+    [string]$SensorHelperSource,
     [string]$CLISource,
     [string]$ConfigSource,
     [string]$ManifestSource,
@@ -11576,7 +11605,8 @@ function Get-InstallerArguments(
             @('BrokerBinary', $BrokerSource),
             @('ProviderLibrary', $ProviderLibrarySource),
             @('GatewayBinary', $GatewaySource),
-            @('HookBinary', $HookSource)
+            @('HookBinary', $HookSource),
+            @('SensorHelperBinary', $SensorHelperSource)
         )) {
             if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
                 throw "$Action requires -$($required[0])"
@@ -11602,6 +11632,10 @@ function Get-InstallerArguments(
     if (-not [string]::IsNullOrWhiteSpace($HookSource)) {
         $arguments.Add('-HookBinary')
         $arguments.Add((ConvertTo-CanonicalPath $HookSource))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($SensorHelperSource)) {
+        $arguments.Add('-SensorHelperBinary')
+        $arguments.Add((ConvertTo-CanonicalPath $SensorHelperSource))
     }
     if (-not [string]::IsNullOrWhiteSpace($CLISource)) {
         $arguments.Add('-CLIBinary')
@@ -11666,6 +11700,7 @@ function Get-EnterpriseLifecycleCLIArguments(
     [string]$BrokerSource = '',
     [string]$GatewaySource = '',
     [string]$HookSource = '',
+    [string]$SensorHelperSource = '',
     [string]$CLISource = '',
     [string]$ConfigSource = '',
     [string]$ManifestSource = '',
@@ -11694,7 +11729,8 @@ function Get-EnterpriseLifecycleCLIArguments(
         foreach ($required in @(
             @('--broker-binary', $BrokerSource),
             @('--gateway-binary', $GatewaySource),
-            @('--hook-binary', $HookSource)
+            @('--hook-binary', $HookSource),
+            @('--sensor-helper-binary', $SensorHelperSource)
         )) {
             if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
                 throw "public $Action requires $($required[0])"
@@ -11705,6 +11741,7 @@ function Get-EnterpriseLifecycleCLIArguments(
         @('--broker-binary', $BrokerSource),
         @('--gateway-binary', $GatewaySource),
         @('--hook-binary', $HookSource),
+        @('--sensor-helper-binary', $SensorHelperSource),
         @('--cli-binary', $CLISource)
     )) {
         if (-not [string]::IsNullOrWhiteSpace([string]$source[1])) {
@@ -11793,6 +11830,7 @@ function Test-AllowUnsignedHarnessContract {
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
+            -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
             -ConfigSource $script:ConfigSource `
             -ManifestSource $script:ManifestSource
@@ -11804,6 +11842,7 @@ function Test-AllowUnsignedHarnessContract {
             -ProviderLibrarySource '' `
             -GatewaySource '' `
             -HookSource '' `
+            -SensorHelperSource '' `
             -CLISource '' `
             -ConfigSource '' `
             -ManifestSource ''
@@ -12113,6 +12152,7 @@ function Invoke-EnterpriseInstaller {
         [string]$ProviderLibrarySource = '',
         [string]$GatewaySource = '',
         [string]$HookSource = '',
+        [string]$SensorHelperSource = '',
         [string]$CLISource = '',
         [string]$ConfigSource = '',
         [string]$ManifestSource = '',
@@ -12134,6 +12174,7 @@ function Invoke-EnterpriseInstaller {
         -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
+        -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
         -ConfigSource $ConfigSource `
         -ManifestSource $ManifestSource `
@@ -12162,6 +12203,7 @@ function Invoke-EnterpriseInstallerJSON {
         [string]$ProviderLibrarySource = '',
         [string]$GatewaySource = '',
         [string]$HookSource = '',
+        [string]$SensorHelperSource = '',
         [string]$CLISource = '',
         [string]$ConfigSource = '',
         [string]$ManifestSource = '',
@@ -12182,6 +12224,7 @@ function Invoke-EnterpriseInstallerJSON {
         -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
+        -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
         -ConfigSource $ConfigSource `
         -ManifestSource $ManifestSource `
@@ -13326,8 +13369,10 @@ foreach ($path in @($userSettings, $projectSettings, $localSettings)) {
 function Assert-ServiceContract {
     $gateway = Get-CimInstance Win32_Service -Filter "Name='$($script:GatewayServiceName)'" -ErrorAction Stop
     $broker = Get-CimInstance Win32_Service -Filter "Name='$($script:BrokerServiceName)'" -ErrorAction Stop
+    $sensorHelper = Get-CimInstance Win32_Service -Filter "Name='$($script:SensorHelperServiceName)'" -ErrorAction Stop
     $guardian = Get-CimInstance Win32_Service -Filter "Name='$($script:GuardianServiceName)'" -ErrorAction Stop
-    if ($null -eq $gateway -or $null -eq $broker -or $null -eq $guardian) {
+    if ($null -eq $gateway -or $null -eq $broker -or
+        $null -eq $sensorHelper -or $null -eq $guardian) {
         throw 'one or more certification services are missing'
     }
     if ([string]$gateway.StartName -ne "NT SERVICE\$($script:GatewayServiceName)") {
@@ -13339,7 +13384,10 @@ function Assert-ServiceContract {
     if ([string]$broker.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
         throw "broker identity is $($broker.StartName), want LocalSystem"
     }
-    foreach ($service in @($gateway, $broker, $guardian)) {
+    if ([string]$sensorHelper.StartName -notin @('LocalSystem', 'NT AUTHORITY\SYSTEM')) {
+        throw "sensor helper identity is $($sensorHelper.StartName), want LocalSystem"
+    }
+    foreach ($service in @($gateway, $broker, $sensorHelper, $guardian)) {
         if ([string]$service.StartMode -ne 'Auto') {
             throw "$($service.Name) start mode is $($service.StartMode), want Auto"
         }
@@ -13372,9 +13420,22 @@ function Assert-ServiceContract {
         ) -lt 0) {
         throw "broker service does not host the exact credential broker image: $($broker.PathName)"
     }
+    $expectedSensorHelperBinary = ConvertTo-CanonicalPath (
+        Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'
+    )
+    if (([string]$sensorHelper.PathName).IndexOf(
+            '"' + $expectedSensorHelperBinary + '"',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -lt 0 -or
+        ([string]$sensorHelper.PathName).IndexOf(
+            ' --managed-enterprise',
+            [StringComparison]::Ordinal
+        ) -lt 0) {
+        throw "sensor helper service does not host the exact managed helper image: $($sensorHelper.PathName)"
+    }
     $null = Assert-InstalledProviderLibraryIdentity 'service contract'
     $null = Assert-CertificationServiceCodexHomeAbsent
-    return "gateway=$($gateway.State)/$($gateway.StartName); broker=$($broker.State)/$($broker.StartName); guardian=$($guardian.State)/$($guardian.StartName)"
+    return "gateway=$($gateway.State)/$($gateway.StartName); broker=$($broker.State)/$($broker.StartName); sensor_helper=$($sensorHelper.State)/$($sensorHelper.StartName); guardian=$($guardian.State)/$($guardian.StartName)"
 }
 
 function Assert-CertificationServiceCodexHomeAbsent {
@@ -13387,6 +13448,10 @@ function Assert-CertificationServiceCodexHomeAbsent {
         [pscustomobject]@{
             name = $script:BrokerServiceName
             role = 'broker'
+        },
+        [pscustomobject]@{
+            name = $script:SensorHelperServiceName
+            role = 'sensor_helper'
         },
         [pscustomobject]@{
             name = $script:GuardianServiceName
@@ -13444,6 +13509,7 @@ function Assert-CertificationServicesStoppedAndIndependent {
     foreach ($serviceName in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance `
@@ -13578,6 +13644,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
     [string]$BrokerSource = '',
     [string]$GatewaySource = '',
     [string]$HookSource = '',
+    [string]$SensorHelperSource = '',
     [string]$CLISource = '',
     [string]$ConfigSource = '',
     [string]$ManifestSource = '',
@@ -13592,6 +13659,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
         -BrokerSource $BrokerSource `
         -GatewaySource $GatewaySource `
         -HookSource $HookSource `
+        -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
         -ConfigSource $ConfigSource `
         -ManifestSource $ManifestSource `
@@ -13792,6 +13860,7 @@ function Get-ServiceControlSnapshot([string]$Label) {
     foreach ($serviceName in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance Win32_Service `
@@ -13835,6 +13904,7 @@ function Get-CertificationServiceProcessSnapshot {
     foreach ($name in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance `
@@ -14323,6 +14393,7 @@ function Get-CertificationServiceTokenSnapshot {
         $serviceName = [string]$process.name
         $gateway = $serviceName -eq $script:GatewayServiceName
         $broker = $serviceName -eq $script:BrokerServiceName
+        $sensorHelper = $serviceName -eq $script:SensorHelperServiceName
         $expectedUserSID = if ($gateway) {
             [Security.Principal.NTAccount]::new(
                 "NT SERVICE\$serviceName"
@@ -14330,7 +14401,7 @@ function Get-CertificationServiceTokenSnapshot {
         } else {
             'S-1-5-18'
         }
-        $expectedPrivileges = if ($gateway -or $broker) {
+        $expectedPrivileges = if ($gateway -or $broker -or $sensorHelper) {
             @('SeChangeNotifyPrivilege')
         } else {
             @(
@@ -14381,7 +14452,7 @@ function Get-CertificationServiceTokenSnapshot {
                 "[$($wantedPrivileges -join ',')]"
             )
         }
-        if (-not $gateway -and -not $broker) {
+        if (-not $gateway -and -not $broker -and -not $sensorHelper) {
             foreach ($boundedPrivilege in @(
                 'SeBackupPrivilege',
                 'SeRestorePrivilege'
@@ -14511,6 +14582,7 @@ function Get-CertificationFailureActionContract {
     foreach ($serviceName in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
@@ -14749,6 +14821,7 @@ function Test-ServiceFailureRecovery {
     foreach ($serviceName in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $failures = [Collections.Generic.List[object]]::new()
@@ -14762,10 +14835,13 @@ function Test-ServiceFailureRecovery {
             )
         }
         $dependentGatewayStopped = $false
-        if ($serviceName -ceq $script:BrokerServiceName) {
-            # SCM correctly refuses a normal Stop of the broker while its
-            # gateway dependent is running. Quiesce only that exact dependent
-            # first, then prove an explicit broker Stop does not trigger the
+        if ($serviceName -in @(
+                $script:BrokerServiceName,
+                $script:SensorHelperServiceName
+            )) {
+            # SCM correctly refuses a normal Stop of a gateway dependency while
+            # that gateway is running. Quiesce only the exact dependent first,
+            # then prove an explicit dependency Stop does not trigger the
             # unexpected-failure restart policy.
             Stop-Service `
                 -Name $script:GatewayServiceName `
@@ -14875,6 +14951,7 @@ function Test-QueuedFailureRestartDuringServicing {
             foreach ($name in @(
                 $script:GatewayServiceName,
                 $script:BrokerServiceName,
+                $script:SensorHelperServiceName,
                 $script:GuardianServiceName
             )) {
                 $service = Get-CimInstance `
@@ -14955,6 +15032,7 @@ function Test-QueuedFailureRestartDuringServicing {
     foreach ($name in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName
     )) {
         $service = Get-CimInstance `
@@ -15042,16 +15120,19 @@ function Assert-SameServiceControlSnapshot(
 }
 
 function Wait-ForServicesRunning {
-    Wait-Until -Description 'all three certification services to be running' -Condition {
+    Wait-Until -Description 'all four live certification services to be running' -Condition {
         $gateway = Get-Service -Name $script:GatewayServiceName -ErrorAction SilentlyContinue
         $broker = Get-Service -Name $script:BrokerServiceName -ErrorAction SilentlyContinue
+        $sensorHelper = Get-Service -Name $script:SensorHelperServiceName -ErrorAction SilentlyContinue
         $guardian = Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue
         return (
             $null -ne $gateway -and
             $null -ne $broker -and
+            $null -ne $sensorHelper -and
             $null -ne $guardian -and
             $gateway.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and
             $broker.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and
+            $sensorHelper.Status -eq [ServiceProcess.ServiceControllerStatus]::Running -and
             $guardian.Status -eq [ServiceProcess.ServiceControllerStatus]::Running
         )
     } | Out-Null
@@ -15116,21 +15197,28 @@ function Invoke-StandardUserControlProbe {
         $processes |
             Where-Object { [string]$_.name -ceq $script:BrokerServiceName }
     )
+    $sensorHelperProcess = @(
+        $processes |
+            Where-Object { [string]$_.name -ceq $script:SensorHelperServiceName }
+    )
     $guardianProcess = @(
         $processes |
             Where-Object { [string]$_.name -ceq $script:GuardianServiceName }
     )
     if ($gatewayProcess.Count -ne 1 -or
         $brokerProcess.Count -ne 1 -or
+        $sensorHelperProcess.Count -ne 1 -or
         $guardianProcess.Count -ne 1) {
         throw 'standard-user control probe requires one exact process for each certification service'
     }
     $inputObject = [ordered]@{
         gateway_service = $script:GatewayServiceName
         broker_service = $script:BrokerServiceName
+        sensor_helper_service = $script:SensorHelperServiceName
         guardian_service = $script:GuardianServiceName
         gateway_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
         broker_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
+        sensor_helper_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'
         hook_binary = Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'
         config = Join-Path $script:StateRoot 'etc\config.yaml'
         manifest = Join-Path $script:StateRoot 'hook-guardian\targets.yaml'
@@ -15191,6 +15279,7 @@ function Invoke-StandardUserControlProbe {
         target_sid = $script:PrimarySID
         gateway_pid = [uint32]$gatewayProcess[0].process_id
         broker_pid = [uint32]$brokerProcess[0].process_id
+        sensor_helper_pid = [uint32]$sensorHelperProcess[0].process_id
         guardian_pid = [uint32]$guardianProcess[0].process_id
     }
     $inputBase64 = [Convert]::ToBase64String(
@@ -15424,6 +15513,7 @@ if ([bool]$input.codex_target_enabled) {
 foreach ($entry in @(
     @('write_gateway_binary', [string]$input.gateway_binary),
     @('write_broker_binary', [string]$input.broker_binary),
+    @('write_sensor_helper_binary', [string]$input.sensor_helper_binary),
     @('write_hook_binary', [string]$input.hook_binary),
     @('write_managed_config', [string]$input.config),
     @('write_guardian_manifest', [string]$input.manifest),
@@ -15494,6 +15584,10 @@ foreach ($process in @(
     [pscustomobject]@{
         service = [string]$input.broker_service
         pid = [uint32]$input.broker_pid
+    },
+    [pscustomobject]@{
+        service = [string]$input.sensor_helper_service
+        pid = [uint32]$input.sensor_helper_pid
     },
     [pscustomobject]@{
         service = [string]$input.guardian_service
@@ -15624,6 +15718,7 @@ foreach ($process in @(
 foreach ($service in @(
     [string]$input.gateway_service,
     [string]$input.broker_service,
+    [string]$input.sensor_helper_service,
     [string]$input.guardian_service
 )) {
     $sc = Join-Path $system32 'sc.exe'
@@ -17050,6 +17145,7 @@ function Test-FailedUpgradePreservesTransaction {
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
         -HookSource $missing `
+        -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
         -ConfigSource $script:ConfigSource `
         -ManifestSource $script:ManifestSource `
@@ -17088,6 +17184,7 @@ function Test-PostSnapshotActivationFailureRollsBack {
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
         -HookSource $script:HookSource `
+        -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
         -ConfigSource $badConfig `
         -ManifestSource $script:ManifestSource `
@@ -17175,9 +17272,10 @@ function Test-UpgradeTransaction {
     if ([string]::IsNullOrWhiteSpace($script:UpgradeBrokerSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeGatewaySource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeHookSource) -or
+        [string]::IsNullOrWhiteSpace($script:UpgradeSensorHelperSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeCLISource)) {
         throw (
-            'full execution requires all four -Upgrade*Binary inputs from ' +
+            'full execution requires all five -Upgrade*Binary inputs from ' +
             'a separately version-stamped build'
         )
     }
@@ -17186,11 +17284,12 @@ function Test-UpgradeTransaction {
         broker = [string]$script:SourceDigests['upgrade_broker']
         gateway = [string]$script:SourceDigests['upgrade_gateway']
         hook = [string]$script:SourceDigests['upgrade_hook']
+        sensor_helper = [string]$script:SourceDigests['upgrade_sensor_helper']
         cli = [string]$script:SourceDigests['upgrade_cli']
     }
     $expectedConfigSHA256 = Get-FileDigest $script:ConfigSource
     $expectedManifestSHA256 = Get-FileDigest $script:ManifestSource
-    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'sensor_helper', 'cli')) {
         if ([string]::Equals(
             [string]$before.$name,
             [string]$expected[$name],
@@ -17212,6 +17311,7 @@ function Test-UpgradeTransaction {
         -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
         -HookSource $script:UpgradeHookSource `
+        -SensorHelperSource $script:UpgradeSensorHelperSource `
         -CLISource $script:UpgradeCLISource `
         -ConfigSource $script:ConfigSource `
         -ManifestSource $script:ManifestSource `
@@ -17272,7 +17372,7 @@ function Test-UpgradeTransaction {
     }
     $serviceContract = Assert-ServiceContract
     $after = Get-DeploymentDigests
-    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'sensor_helper', 'cli')) {
         if (-not [string]::Equals(
             [string]$after.$name,
             [string]$expected[$name],
@@ -17323,6 +17423,7 @@ function Test-UpgradeTransaction {
             exact_gateway_sha256 = $true
             exact_broker_sha256 = $true
             exact_hook_sha256 = $true
+            exact_sensor_helper_sha256 = $true
             exact_cli_sha256 = $true
             exact_config_source_sha256 = $true
             exact_manifest_source_sha256 = $true
@@ -17336,6 +17437,7 @@ function Stop-CertificationServicesForDefaultUninstallSnapshot {
         $script:EnumeratorServiceName,
         $script:GuardianServiceName,
         $script:GatewayServiceName,
+        $script:SensorHelperServiceName,
         $script:BrokerServiceName
     )) {
         $service = Get-Service -Name $name -ErrorAction Stop
@@ -17353,6 +17455,7 @@ function Stop-CertificationServicesForDefaultUninstallSnapshot {
                 foreach ($name in @(
                     $script:GatewayServiceName,
                     $script:BrokerServiceName,
+                    $script:SensorHelperServiceName,
                     $script:GuardianServiceName,
                     $script:EnumeratorServiceName
                 )) {
@@ -17362,7 +17465,7 @@ function Stop-CertificationServicesForDefaultUninstallSnapshot {
                         -ErrorAction Stop
                 }
             )
-            if ($rows.Count -ne 4 -or
+            if ($rows.Count -ne 5 -or
                 @($rows | Where-Object {
                     [string]$_.State -ne 'Stopped' -or
                     [uint32]$_.ProcessId -ne 0
@@ -17673,6 +17776,7 @@ function Test-DefaultUninstallRetainedStateMediumUserDenial(
         expected_sid = $script:PrimarySID
         gateway_service = $script:GatewayServiceName
         broker_service = $script:BrokerServiceName
+        sensor_helper_service = $script:SensorHelperServiceName
         guardian_service = $script:GuardianServiceName
         enumerator_service = $script:EnumeratorServiceName
         whoami = Join-Path $script:System32 'whoami.exe'
@@ -17733,6 +17837,9 @@ $gateway = Get-Service `
     -ErrorAction SilentlyContinue
 $broker = Get-Service `
     -Name ([string]$inputObject.broker_service) `
+    -ErrorAction SilentlyContinue
+$sensorHelper = Get-Service `
+    -Name ([string]$inputObject.sensor_helper_service) `
     -ErrorAction SilentlyContinue
 $guardian = Get-Service `
     -Name ([string]$inputObject.guardian_service) `
@@ -17849,6 +17956,7 @@ $failed = @($checks | Where-Object {
         $mediumIntegrity -and
         $null -eq $gateway -and
         $null -eq $broker -and
+        $null -eq $sensorHelper -and
         $null -eq $guardian -and
         $null -eq $enumerator -and
         $failed.Count -eq 0
@@ -17859,6 +17967,7 @@ $failed = @($checks | Where-Object {
     services_absent = (
         $null -eq $gateway -and
         $null -eq $broker -and
+        $null -eq $sensorHelper -and
         $null -eq $guardian -and
         $null -eq $enumerator
     )
@@ -17996,6 +18105,7 @@ function Test-PublicDefaultUninstallAndReinstall {
     foreach ($name in @(
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:GuardianServiceName,
         $script:EnumeratorServiceName
     )) {
@@ -18056,6 +18166,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
         -HookSource $script:UpgradeHookSource `
+        -SensorHelperSource $script:UpgradeSensorHelperSource `
         -CLISource $script:UpgradeCLISource `
         -ConfigSource $script:ConfigSource `
         -ManifestSource $script:ManifestSource `
@@ -18083,7 +18194,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         ([string]$script:SourceDigests['upgrade_broker'])
     $script:Installed = $true
     $after = Get-DeploymentDigests
-    foreach ($name in @('broker', 'gateway', 'hook', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'hook', 'sensor_helper', 'cli')) {
         $expected = [string]$script:SourceDigests["upgrade_$name"]
         if (-not [string]::Equals(
             [string]$after.$name,
@@ -20040,6 +20151,7 @@ function Invoke-BoundedCleanup {
         $null -ne (Get-Service -Name $script:GatewayServiceName -ErrorAction SilentlyContinue) -or
         $null -ne (Get-Service -Name $script:GuardianServiceName -ErrorAction SilentlyContinue) -or
         $null -ne (Get-Service -Name $script:BrokerServiceName -ErrorAction SilentlyContinue) -or
+        $null -ne (Get-Service -Name $script:SensorHelperServiceName -ErrorAction SilentlyContinue) -or
         $null -ne (Get-Service -Name $script:EnumeratorServiceName -ErrorAction SilentlyContinue)) {
         try {
             $null = Invoke-EnterpriseInstaller `
@@ -20058,6 +20170,7 @@ function Invoke-BoundedCleanup {
         $script:GuardianServiceName,
         $script:GatewayServiceName,
         $script:BrokerServiceName,
+        $script:SensorHelperServiceName,
         $script:EnumeratorServiceName
     )) {
         if ($null -ne (Get-Service -Name $serviceName -ErrorAction SilentlyContinue)) {
@@ -20068,6 +20181,8 @@ function Invoke-BoundedCleanup {
                     'gateway'
                 } elseif ($serviceName -ceq $script:BrokerServiceName) {
                     'broker'
+                } elseif ($serviceName -ceq $script:SensorHelperServiceName) {
+                    'sensor_helper'
                 } elseif ($serviceName -ceq $script:EnumeratorServiceName) {
                     'enumerator'
                 } else {
@@ -20105,6 +20220,7 @@ function Invoke-BoundedCleanup {
             $script:GuardianServiceName,
             $script:GatewayServiceName,
             $script:BrokerServiceName,
+            $script:SensorHelperServiceName,
             $script:EnumeratorServiceName
         )) {
             if ($null -ne (
@@ -20126,6 +20242,7 @@ function Invoke-BoundedCleanup {
             $script:GuardianServiceName,
             $script:GatewayServiceName,
             $script:BrokerServiceName,
+            $script:SensorHelperServiceName,
             $script:EnumeratorServiceName
         )) {
             if ($null -ne (
@@ -20287,6 +20404,7 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
                 [string]$script:SourceDigests['provider_library']
             gateway_sha256 = [string]$script:SourceDigests['gateway']
             hook_sha256 = [string]$script:SourceDigests['hook']
+            sensor_helper_sha256 = [string]$script:SourceDigests['sensor_helper']
             cli_sha256 = [string]$script:SourceDigests['cli']
             normal_mode_cli_launcher_sha256 =
                 [string]$script:SourceDigests['normal_mode_cli_launcher']
@@ -20301,12 +20419,15 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             upgrade_broker_sha256 = [string]$script:SourceDigests['upgrade_broker']
             upgrade_gateway_sha256 = [string]$script:SourceDigests['upgrade_gateway']
             upgrade_hook_sha256 = [string]$script:SourceDigests['upgrade_hook']
+            upgrade_sensor_helper_sha256 =
+                [string]$script:SourceDigests['upgrade_sensor_helper']
             upgrade_cli_sha256 = [string]$script:SourceDigests['upgrade_cli']
         }
         fixture = [ordered]@{
             gateway_service = $script:GatewayServiceName
             guardian_service = $script:GuardianServiceName
             broker_service = $script:BrokerServiceName
+            sensor_helper_service = $script:SensorHelperServiceName
             enumerator_service = $script:EnumeratorServiceName
             protected_active_user = $script:PrimaryUserName
             protected_active_sid = $script:PrimarySID
@@ -20416,6 +20537,7 @@ $script:OriginalBrokerSource = ConvertTo-CanonicalPath $BrokerBinary
 $script:OriginalProviderLibrarySource = ConvertTo-CanonicalPath $ProviderLibrary
 $script:OriginalGatewaySource = ConvertTo-CanonicalPath $GatewayBinary
 $script:OriginalHookSource = ConvertTo-CanonicalPath $HookBinary
+$script:OriginalSensorHelperSource = ConvertTo-CanonicalPath $SensorHelperBinary
 $script:OriginalCLISource = ConvertTo-CanonicalPath $CLIBinary
 $script:OriginalNormalModeCLILauncher = if (
     [string]::IsNullOrWhiteSpace($NormalModeCLILauncher)
@@ -20457,6 +20579,7 @@ $script:BrokerSource = $script:OriginalBrokerSource
 $script:ProviderLibrarySource = $script:OriginalProviderLibrarySource
 $script:GatewaySource = $script:OriginalGatewaySource
 $script:HookSource = $script:OriginalHookSource
+$script:SensorHelperSource = $script:OriginalSensorHelperSource
 $script:CLISource = $script:OriginalCLISource
 $script:NormalModeCLILauncherSource =
     $script:OriginalNormalModeCLILauncher
@@ -20464,6 +20587,7 @@ $script:NormalModeCLIWheelSource = $script:OriginalNormalModeCLIWheel
 $script:UpgradeBrokerSource = ''
 $script:UpgradeGatewaySource = ''
 $script:UpgradeHookSource = ''
+$script:UpgradeSensorHelperSource = ''
 $script:UpgradeCLISource = ''
 $script:PowerShellExecutable = Get-PowerShellExecutable
 foreach ($required in @(
@@ -20473,6 +20597,7 @@ foreach ($required in @(
     [pscustomobject]@{ Path = $script:OriginalProviderLibrarySource; Label = 'managed credential provider library' },
     [pscustomobject]@{ Path = $script:GatewaySource; Label = 'gateway binary' },
     [pscustomobject]@{ Path = $script:HookSource; Label = 'hook binary' },
+    [pscustomobject]@{ Path = $script:SensorHelperSource; Label = 'sensor helper binary' },
     [pscustomobject]@{ Path = $script:CLISource; Label = 'CLI binary' },
     [pscustomobject]@{ Path = $script:OriginalCodexSource; Label = 'approved Codex binary' },
     [pscustomobject]@{ Path = $script:OriginalClaudeSource; Label = 'approved Claude binary' },
@@ -20503,6 +20628,7 @@ $script:SourceDigests = [ordered]@{
     provider_library = Get-FileDigest $script:OriginalProviderLibrarySource
     gateway = Get-FileDigest $script:OriginalGatewaySource
     hook = Get-FileDigest $script:OriginalHookSource
+    sensor_helper = Get-FileDigest $script:OriginalSensorHelperSource
     cli = Get-FileDigest $script:OriginalCLISource
     normal_mode_cli_launcher = if (
         [string]::IsNullOrWhiteSpace(
@@ -20541,6 +20667,11 @@ $script:SourceDigests = [ordered]@{
     } else {
         Get-FileDigest (ConvertTo-CanonicalPath $UpgradeHookBinary)
     }
+    upgrade_sensor_helper = if ([string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary)) {
+        ''
+    } else {
+        Get-FileDigest (ConvertTo-CanonicalPath $UpgradeSensorHelperBinary)
+    }
     upgrade_cli = if ([string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
         ''
     } else {
@@ -20552,12 +20683,14 @@ $script:RunToken = ([Guid]::NewGuid().ToString('N')).Substring(0, 10)
 $script:GatewayServiceName = "DefenseClawCertGateway_$($script:RunToken)"
 $script:GuardianServiceName = "DefenseClawCertGuardian_$($script:RunToken)"
 $script:BrokerServiceName = "DefenseClawCMIDBroker_$($script:RunToken)"
+$script:SensorHelperServiceName = "DefenseClawSensorHelper_$($script:RunToken)"
 $script:EnumeratorServiceName = "DefenseClawCertEnumerator_$($script:RunToken)"
 $script:PrimaryUserName = '<active-wts-user>'
 $script:HostileUserName = 'DCEH' + $script:RunToken.Substring(0, 8)
 Assert-CertificationServiceName $script:GatewayServiceName 'gateway'
 Assert-CertificationServiceName $script:GuardianServiceName 'guardian'
 Assert-CertificationServiceName $script:BrokerServiceName 'broker'
+Assert-CertificationServiceName $script:SensorHelperServiceName 'sensor_helper'
 Assert-CertificationServiceName $script:EnumeratorServiceName 'enumerator'
 Assert-CertificationUserName $script:HostileUserName 'hostile'
 
@@ -20706,6 +20839,7 @@ $plan = [ordered]@{
     provider_library_source = $script:ProviderLibrarySource
     gateway_source = $script:GatewaySource
     hook_source = $script:HookSource
+    sensor_helper_source = $script:SensorHelperSource
     cli_source = $script:CLISource
     normal_mode_cli_launcher_source = $script:NormalModeCLILauncherSource
     normal_mode_cli_wheel_source = $script:NormalModeCLIWheelSource
@@ -20716,6 +20850,7 @@ $plan = [ordered]@{
     gateway_service = $script:GatewayServiceName
     guardian_service = $script:GuardianServiceName
     broker_service = $script:BrokerServiceName
+    sensor_helper_service = $script:SensorHelperServiceName
     enumerator_service = $script:EnumeratorServiceName
     protected_active_user = $script:PrimaryUserName
     protected_active_sid_filter = $ProtectedUserSID
@@ -20798,10 +20933,12 @@ if (-not $DisposableHost) {
 if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
+    [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
     throw (
         'full execution requires -UpgradeBrokerBinary, -UpgradeGatewayBinary, ' +
-        '-UpgradeHookBinary, and -UpgradeCLIBinary from a separately ' +
+        '-UpgradeHookBinary, -UpgradeSensorHelperBinary, and ' +
+        '-UpgradeCLIBinary from a separately ' +
         'version-stamped build'
     )
 }
@@ -20812,6 +20949,7 @@ foreach ($name in @(
     $script:GatewayServiceName,
     $script:GuardianServiceName,
     $script:BrokerServiceName,
+    $script:SensorHelperServiceName,
     $script:EnumeratorServiceName
 )) {
     if ($null -ne (Get-Service -Name $name -ErrorAction SilentlyContinue)) {
@@ -21070,6 +21208,7 @@ targets:
             -BrokerSource $script:BrokerSource `
             -GatewaySource $script:GatewaySource `
             -HookSource $script:HookSource `
+            -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
             -ConfigSource $script:ConfigSource `
             -ManifestSource $script:ManifestSource `
@@ -21113,7 +21252,7 @@ targets:
         $activation =
             Invoke-CertificationActivationRepairAfterIsolationProof
         return (
-            'the staged base public CLI Install -NoStart left gateway, broker, and guardian ' +
+            'the staged base public CLI Install -NoStart left gateway, broker, sensor helper, and guardian ' +
             'disabled with PID zero and ' +
             'core_hardening_complete=false; direct gateway start failed, then ' +
             'the protected installed public Repair supplied no replacement ' +
@@ -21136,7 +21275,7 @@ targets:
         Add-Result `
             'live-service-token-least-privilege' `
             'passed' `
-            'live gateway/broker/guardian TokenUser, High gateway/System broker and guardian integrity, role-specific privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
+            'live gateway/broker/sensor-helper/guardian TokenUser, High gateway/System service integrity, role-specific privileges, service-SID identity/group semantics, and restricted-token semantics match the hardened contract' `
             @{ service_tokens = @($serviceTokenSnapshot) }
     } catch {
         Add-Result `
@@ -21457,8 +21596,8 @@ targets:
             $afterServiceControl `
             'hostile SCM probe'
         $afterServiceProcesses = Get-CertificationServiceProcessSnapshot
-        if (@($afterServiceProcesses).Count -ne 3) {
-            throw 'gateway, broker, and guardian are not all running after authorized lifecycle transitions'
+        if (@($afterServiceProcesses).Count -ne 4) {
+            throw 'gateway, broker, sensor helper, and guardian are not all running after authorized lifecycle transitions'
         }
         $responsive = Invoke-EnterpriseInstallerJSON `
             -Action Verify `
@@ -21587,7 +21726,7 @@ targets:
         Add-Result `
             'scm-repeated-restart-and-explicit-stop' `
             'passed' `
-            'gateway, broker, and guardian restarted after controlled failures 1-4 using 5s/15s/60s/final-repeat recovery, while dependency-aware explicit administrator Stop remained stopped beyond the final delay' `
+            'gateway, broker, sensor helper, and guardian restarted after controlled failures 1-4 using 5s/15s/60s/final-repeat recovery, while dependency-aware explicit administrator Stop remained stopped beyond the final delay' `
             @{
                 failure_action_contract = @($recoveryEvidence.contract)
                 recovery_observations = @($recoveryEvidence.observations)
@@ -21604,7 +21743,7 @@ targets:
         Add-Result `
             'queued-scm-restart-during-servicing' `
             'passed' `
-            'after the repeated 60-second SCM recovery action was armed by a real gateway crash, Repair -NoStart continuously held gateway, broker, and guardian disabled/stopped through a fresh 65-second drain; the queued restart never obtained a PID, and a second public Repair restored guardian-first readiness' `
+            'after the repeated 60-second SCM recovery action was armed by a real gateway crash, Repair -NoStart continuously held gateway, broker, sensor helper, and guardian disabled/stopped through a fresh 65-second drain; the queued restart never obtained a PID, and a second public Repair restored guardian-first readiness' `
             @{ evidence = $queuedRestart }
     } catch {
         Add-Result `
@@ -21649,7 +21788,7 @@ targets:
         Add-Result `
             'public-windows-default-uninstall-and-install' `
             'passed' `
-            'the protected external release CLI executed default Uninstall without --purge, preserved exact real audit/log/guardian evidence plus its sentinel, converted every retained StateRoot DACL to administrator-only, denied medium-user write/delete access while gateway, broker, and guardian were absent, removed machine wiring before fresh clients, then restored the exact upgraded binaries, service contract, and guardian readiness' `
+            'the protected external release CLI executed default Uninstall without --purge, preserved exact real audit/log/guardian evidence plus its sentinel, converted every retained StateRoot DACL to administrator-only, denied medium-user write/delete access while gateway, broker, sensor helper, and guardian were absent, removed machine wiring before fresh clients, then restored the exact upgraded binaries, service contract, and guardian readiness' `
             @{ lifecycle = $publicReinstall }
     } catch {
         Add-Result `

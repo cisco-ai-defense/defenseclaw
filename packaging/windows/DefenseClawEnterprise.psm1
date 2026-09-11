@@ -4715,6 +4715,11 @@ function Set-DefenseClawManagedServices {
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $BrokerServiceName, 'SeChangeNotifyPrivilege'
     ))
+    if ($sensorHelperRegistered) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+            'privs', $sensorHelperServiceName, 'SeChangeNotifyPrivilege'
+        ))
+    }
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GuardianServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
@@ -14779,7 +14784,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedAccount 'LocalSystem' `
         -ExpectedDisplayName 'DefenseClaw Sensor Helper' `
         -ExpectedSidType 1 `
-        -ExpectedPrivileges @() `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $sensorHelperEnvironment `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
@@ -15477,7 +15482,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedAccount 'LocalSystem' `
         -ExpectedDisplayName 'DefenseClaw Sensor Helper' `
         -ExpectedSidType 1 `
-        -ExpectedPrivileges @() `
+        -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $sensorHelperEnvironment `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
