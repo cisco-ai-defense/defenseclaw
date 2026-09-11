@@ -547,7 +547,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		if !selected[string(plane)] {
 			entry.Running = false
 			if entry.Reason == "" {
-				entry.Reason = "not selected in ai_discovery.runtime.planes"
+				entry.Reason = s.deselectedReason(plane)
 			}
 			health = append(health, entry)
 			continue
@@ -629,6 +629,23 @@ func (s *Service) dnsCaptureStatus() string {
 	return ""
 }
 
+// deselectedReason names the setting an operator has to change to turn a
+// plane on.
+//
+// Plane C has two gates -- the planes list and the enable_host_plane opt-in --
+// and EffectivePlanes drops it when either is unset. Reporting both as "not
+// selected in ai_discovery.runtime.planes" sends someone who listed "c" to a
+// list that already contains it. Naming the gate that is actually shut is the
+// difference between a reason and a redirection.
+func (s *Service) deselectedReason(plane platform.Plane) string {
+	if plane == platform.PlaneC && s.options.Config.HostPlaneRequestedWithoutOptIn() {
+		return "plane c is listed in ai_discovery.runtime.planes but " +
+			"ai_discovery.runtime.enable_host_plane is false; the opt-in is where " +
+			"the privilege and privacy decision is recorded"
+	}
+	return "not selected in ai_discovery.runtime.planes"
+}
+
 // hostPlaneHealth reports Plane C from the running source rather than from the
 // platform capability alone.
 //
@@ -637,7 +654,7 @@ func (s *Service) dnsCaptureStatus() string {
 // that failed to start, or one running with only part of its coverage.
 func (s *Service) hostPlaneHealth(capability platform.Capability) (running bool, mechanism, reason string) {
 	if s.hostPlane == nil {
-		return false, capability.Mechanism, "plane c is not selected in ai_discovery.runtime.planes"
+		return false, capability.Mechanism, s.deselectedReason(platform.PlaneC)
 	}
 	s.mu.RLock()
 	startErr := s.hostPlaneStartErr

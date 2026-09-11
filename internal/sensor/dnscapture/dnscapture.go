@@ -228,6 +228,26 @@ func decodeAnswers(payload []byte) []answer {
 // itself, and an uncapped decoder would spin forever on one hostile datagram.
 const maxPointerDepth = 16
 
+// maxNameTextBytes is the decoded-text limit implied by the 255-byte wire
+// limit on a domain name (RFC 1035 s2.3.4). A non-root wire name uses one
+// length octet per label plus a terminal root octet; the decoded form replaces
+// the inter-label length octets with dots, leaving at most 253 text bytes.
+//
+// The depth cap alone does not bound the decoded name: sixteen levels of pointer,
+// each contributing labels, can assemble a name of many kilobytes out of one
+// 64KB frame. That string is cached per address and travels into telemetry
+// fields the redaction profiles class as content, so an unbounded name is an
+// amplification vector rather than merely a malformed one. A name over the
+// limit cannot be legitimate, so it is refused rather than truncated.
+const maxNameTextBytes = 253
+
+// maxLabelBytes is the wire limit on a single label (RFC 1035 s2.3.4). The
+// two high bits of a length byte are the label type: 00 is a literal label
+// and 11 is a compression pointer. 01 and 10 are reserved and have never been
+// assigned, so a decoder that treats them as literal lengths is accepting a
+// packet no resolver would emit.
+const maxLabelBytes = 63
+
 func readName(payload []byte, offset, depth int) (string, int, bool) {
 	if depth > maxPointerDepth {
 		return "", 0, false
@@ -257,6 +277,13 @@ func readName(payload []byte, offset, depth int) (string, int, bool) {
 				return "", 0, false
 			}
 			if suffix != "" {
+				separatorBytes := 0
+				if builder.Len() > 0 {
+					separatorBytes = 1
+				}
+				if builder.Len()+separatorBytes+len(suffix) > maxNameTextBytes {
+					return "", 0, false
+				}
 				if builder.Len() > 0 {
 					builder.WriteByte('.')
 				}
@@ -265,7 +292,14 @@ func readName(payload []byte, offset, depth int) (string, int, bool) {
 			cursor = afterPointer
 			return strings.ToLower(builder.String()), cursor, true
 		}
+		if length > maxLabelBytes {
+			// A reserved label type (01 or 10). Not a length.
+			return "", 0, false
+		}
 		if cursor+1+length > len(payload) {
+			return "", 0, false
+		}
+		if builder.Len()+1+length > maxNameTextBytes {
 			return "", 0, false
 		}
 		if builder.Len() > 0 {
@@ -291,7 +325,17 @@ func skipName(payload []byte, offset int) (int, bool) {
 			return cursor + 1, true
 		}
 		if length&0xC0 == 0xC0 {
+			// The pointer is two bytes; the second must be present, or the
+			// returned offset would name a position past the payload.
+			if cursor+1 >= len(payload) {
+				return 0, false
+			}
 			return cursor + 2, true
+		}
+		if length > maxLabelBytes {
+			// A reserved label type (01 or 10). Skipping it as a length
+			// would desynchronise the walk against the record that follows.
+			return 0, false
 		}
 		cursor += 1 + length
 	}
