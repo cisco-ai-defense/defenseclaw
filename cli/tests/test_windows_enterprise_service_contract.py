@@ -2221,9 +2221,10 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     assert "@('BrokerBinary', $BrokerBinary)" in module
     assert "@('ProviderLibrary', $ProviderLibrary)" in module
     assert (
-        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and "
-        "-HookBinary" in module
+        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, "
+        "-HookBinary, and -SensorHelperBinary" in module
     )
+    assert "@('sensor_helper', $SensorHelperBinary" in module
     assert "@('provider_library', $ProviderLibrary" in module
     assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
         module

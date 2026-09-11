@@ -335,7 +335,7 @@ KIT_DIR="${DIST_ABS}/${KIT_NAME}"
 rm -rf "${KIT_DIR}"
 mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/lib"
 
-# ---- kit/payload: the six files AVC signs (or leaves unsigned in
+# ---- kit/payload: the seven files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
 echo "==> staging kit payload"
 # Single-source the expected filename list: EXPECTED_PAYLOAD_NAMES is
@@ -351,6 +351,7 @@ EXPECTED_PAYLOAD_NAMES=(
     defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
+    defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
 )
@@ -365,6 +366,7 @@ cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/def
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
 cp "${BROKER_EXE}"                                       "${KIT_DIR}/payload/defenseclaw-cmid-broker.exe"
+cp "${SENSOR_HELPER_EXE}"                                "${KIT_DIR}/payload/defenseclaw-sensor-helper.exe"
 cp "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" \
                                                          "${KIT_DIR}/payload/DefenseClawEnterprise.psm1"
 cp "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" \
