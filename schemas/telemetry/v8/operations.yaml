@@ -845,6 +845,315 @@ attributes:
       max_items: 8
     notes: Log-only lineage content; at most eight 512-byte items and 4096 canonical JSON bytes, never a metric label, and subject to destination redaction
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.finding_id
+  type: string
+  brief: Stable identifier for one runtime-plane finding episode
+  examples:
+  - run-9f2a1c04b7e35d18
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Stable for the life of a process episode so repeated emissions update rather than accumulate
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane
+  type: string
+  brief: Which detection plane produced or is described by this record
+  examples:
+  - a
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [a, b, c]
+    notes: a is the inference heartbeat, b is per-process egress, c is agent actions
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane_available
+  type: boolean
+  brief: Whether this host can observe the plane at all
+  examples: [true]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Distinct from plane_running; a plane the platform supports can still be stopped
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane_running
+  type: boolean
+  brief: Whether the plane produced observations during this cycle
+  examples: [false]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: identity-v1
+    notes: Emitted on every cycle including false, so a dead subscription leaves a trace rather than silence
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.plane_reason
+  type: string
+  brief: Why a plane is unavailable or not running
+  examples:
+  - eslogger not found; needs macOS 13+ and Full Disk Access
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 512}
+    notes: Operator-facing remediation text; absent when the plane is running
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.score
+  type: int64
+  brief: Additive runtime finding score, capped at 100
+  examples: [65]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 100}
+    notes: Signals are evidence rather than a budget, so the sum is capped
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.severity
+  type: string
+  brief: Severity band the runtime finding score falls into
+  examples:
+  - high
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [critical, high, medium, low, info]
+    notes: Banded from the score; thresholds are a reviewed calibration
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.process
+  type: string
+  brief: Executable basename of the process a runtime finding is about
+  examples:
+  - python3
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Basename only; the full path is never emitted
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.agent
+  type: string
+  brief: Agent the process lineage attributes this finding to
+  examples:
+  - claude
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 128}
+    notes: Absent when no agent was found above the process, which is itself the reason no host-plane signal fires
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.cmdline
+  type: string
+  brief: Argument vector of the process a runtime finding is about
+  examples:
+  - python3 -m langgraph.cli serve
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 4096}
+    notes: Content class on purpose. The inventory scanner deliberately discards argv; the runtime planes read it because an agent framework inside a bare python3 is invisible without it, so each destination's redaction profile governs whether it leaves the host
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.signals
+  type: string[]
+  brief: Ordered weighted signals that produced one runtime finding
+  examples:
+  - [inference_heartbeat=25, shadow_ai_egress=50]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 2048, max_item_utf8_bytes: 64}
+    notes: The evidence trail behind the score, rendered as signal_id=weight so the whole trail stays a bounded metadata field rather than free-form content. The byte budget covers the whole array, not one element -- at 128 a five-signal host-plane chain already overflowed and the record was rejected, which is the trail that explains a critical finding. Sized for the 32-entry cap the emitter applies
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.providers
+  type: string[]
+  brief: Egress peers attributed to the process in one runtime finding
+  examples:
+  - [api.anthropic.com|frontier|0.95]
+  stability: stable
+  owner: defenseclaw
+  field_class: content
+  sensitivity: sensitive
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 2048, max_item_utf8_bytes: 320}
+    notes: Content class because a hostname names who this endpoint talks to, so each destination's redaction profile governs it. Rendered hostname|category|confidence. The byte budget covers the whole array; 320 was one entry's worth, so any process talking to more than one provider lost the record
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.correlation_verdict
+  type: string
+  brief: What the discovery inventory had to say about this runtime observation
+  examples:
+  - unobserved
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [accounted, unaccounted, unobserved]
+    notes: unobserved is never spent as evidence or as exoneration; it is recorded so the blindness is visible
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.correlation_reason
+  type: string
+  brief: Why the inventory reached its correlation verdict
+  examples:
+  - discovery snapshot is stale
+  stability: stable
+  owner: defenseclaw
+  field_class: reason
+  sensitivity: internal
+  cardinality: bounded
+  normalization:
+    id: redacted-content-v1
+    overrides: {max_utf8_bytes: 512}
+    notes: Always populated, including for unobserved
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.tactic
+  type: string
+  brief: Classified agent behaviour for one host-plane observation
+  examples:
+  - credential_access
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum: [local_inference, credential_access, identity_creation, privilege_escalation, persistence, exfiltration]
+    notes: Ordered as the kill chain expects them
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.technique
+  type: string
+  brief: MITRE ATT&CK technique for the classified tactic
+  examples:
+  - T1552
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: bounded-v1
+    overrides: {max_utf8_bytes: 16}
+    notes: Carried so a SOC can pivot on a vocabulary it already uses
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.chain_stage
+  type: int64
+  brief: Position of the tactic in the kill chain
+  examples: [1]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 5}
+    notes: Progression through stages is worth more than the sum of the individual observations
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.processes_observed
+  type: int64
+  brief: Processes the runtime planes could read in this cycle
+  examples: [412]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Coverage travels with the findings so a quiet host is distinguishable from a blind sensor
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.processes_skipped
+  type: int64
+  brief: Processes this run could not fully read
+  examples: [9]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Non-zero on an unprivileged run, which is a coverage statement rather than an error
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.connections_observed
+  type: int64
+  brief: Outbound connections seen in this cycle
+  examples: [60]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Paired with connections_unattributed to describe egress coverage
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.connections_unattributed
+  type: int64
+  brief: Connections seen with no attributable owning process
+  examples: [55]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: On an unprivileged POSIX host this is how much of the machine's egress cannot be named, which is the difference between a quiet host and a blind sensor
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.model.provenance.quantized
   type: boolean
   brief: Whether the discovered local model is positively identified as quantized
@@ -2313,7 +2622,7 @@ attributes:
 - id: defenseclaw.admin.before_summary
   type: string
   brief: Sanitized bounded summary of pre-change state
-  examples: [profile=legacy-v7; destinations=1]
+  examples: [profile=v7-compatible; destinations=1]
   stability: stable
   owner: defenseclaw
   field_class: metadata
@@ -2341,7 +2650,7 @@ attributes:
 - id: defenseclaw.admin.before_state
   type: string
   brief: Canonical JSON source state observed before an administrative mutation
-  examples: ['{"observability":{"profile":"legacy-v7"}}']
+  examples: ['{"observability":{"profile":"v7-compatible"}}']
   stability: stable
   owner: defenseclaw
   field_class: content
@@ -2369,7 +2678,7 @@ attributes:
 - id: defenseclaw.admin.diff
   type: string
   brief: Canonical JSON mutation delta supplied by the administrative source
-  examples: ['[{"path":"observability.profile","op":"replace","before":"legacy-v7","after":"none"}]']
+  examples: ['[{"path":"observability.profile","op":"replace","before":"v7-compatible","after":"none"}]']
   stability: stable
   owner: defenseclaw
   field_class: content
@@ -4134,6 +4443,88 @@ groups:
     requirement_level: recommended
   - ref: defenseclaw.agent.discovery.scanned_at
     requirement_level: recommended
+- id: body.ai.runtime.coverage
+  type: body_group
+  brief: How much of the host the runtime planes could observe in one cycle.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.processes_observed
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.processes_skipped
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.connections_observed
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.connections_unattributed
+    requirement_level: required
+- id: body.ai.runtime.finding
+  type: body_group
+  brief: One scored AI discovery runtime finding.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.ai.runtime.coverage
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.finding_id
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.score
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.severity
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.process
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.correlation_verdict
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.correlation_reason
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.agent
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.cmdline
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.signals
+    requirement_level: recommended
+  - ref: defenseclaw.ai.runtime.providers
+    requirement_level: recommended
+- id: body.ai.runtime.activity
+  type: body_group
+  brief: One observed host-plane tactic, attributed to an agent.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends: []
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.finding_id
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.tactic
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.technique
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.chain_stage
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.agent
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.process
+    requirement_level: recommended
+- id: body.ai.runtime.plane_health
+  type: body_group
+  brief: One detection plane's state, emitted every cycle including when it is down.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.ai.runtime.coverage
+  attributes: []
+  body_fields:
+  - ref: defenseclaw.ai.runtime.plane
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.plane_available
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.plane_running
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.plane_reason
+    requirement_level: recommended
 - id: body.ai.discovery.run
   type: body_group
   brief: Sanitized continuous AI discovery scan summary body.
@@ -5148,6 +5539,71 @@ groups:
       disposition: preserved
       details:
         missing_data: never fabricate absent values
+- id: log.ai.runtime.finding
+  type: log
+  brief: Canonical scored AI discovery runtime finding.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.ai.runtime.finding
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.finding
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - partial
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ai.runtime.activity
+  type: log
+  brief: One observed host-plane tactic attributed to an AI agent.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.ai.runtime.activity
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.activity
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
+- id: log.ai.runtime.plane_health
+  type: log
+  brief: One detection plane's state, emitted on every cycle including zero.
+  stability: stable
+  introduced_in: telemetry-registry-v1
+  extends:
+  - body.ai.runtime.plane_health
+  attributes: []
+  body_fields: []
+  log:
+    event_name: ai.runtime.plane_health
+  x-defenseclaw:
+    bucket: ai.discovery
+    family_schema_version: 1
+    outcome_requirement: required
+    allowed_outcomes:
+    - completed
+    - partial
+    route_selector: true
+    mandatory_floor: []
+    compatibility_profiles:
+    - local-observability-v1
 - id: log.ai.discovery.completed
   type: log
   brief: Canonical completed continuous AI discovery scan summary.
@@ -9117,6 +9573,15 @@ producer_identity_sets:
   - event_name: ai.discovery.completed
     bucket: ai.discovery
     family: log.ai.discovery.completed
+  - event_name: ai.runtime.activity
+    bucket: ai.discovery
+    family: log.ai.runtime.activity
+  - event_name: ai.runtime.finding
+    bucket: ai.discovery
+    family: log.ai.runtime.finding
+  - event_name: ai.runtime.plane_health
+    bucket: ai.discovery
+    family: log.ai.runtime.plane_health
   - event_name: ai_component.changed
     bucket: ai.discovery
     family: log.ai_component.changed

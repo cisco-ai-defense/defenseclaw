@@ -304,6 +304,9 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		req.toolChain = &toolChainHookCapture{}
 		ctx = withToolChainHookCapture(ctx, req.toolChain)
 		ctx = enrichAgentHookContext(ctx, req)
+		if a.hookJudge != nil && shouldResetToolJudgeSession(req) {
+			a.hookJudge.ResetToolJudgeSession(req.SessionID)
+		}
 		t0 := time.Now()
 		// attemptedWrite covers BOTH "writeJSON returned successfully"
 		// AND "writeJSON started writing and panicked partway". Once
@@ -1841,6 +1844,15 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			isGenericToolInspectionEvent(req.HookEventName))
 	switch {
 	case isPromptLikeEvent(req.HookEventName):
+		// Keep only the connector's turn-start/user-intent boundary as
+		// context for later tool-call judging. Other prompt-shaped surfaces
+		// (for example BeforeModel, transformed prompts, and subagent
+		// lifecycle events) can repeat or contain model-generated material;
+		// letting them replace the user's task would make the judge trust the
+		// very content it is meant to evaluate.
+		if a.hookJudge != nil && isToolJudgeIntentEvent(req.HookEventName) {
+			a.hookJudge.ObserveSessionPrompt(ctx, req.Content)
+		}
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Content, Direction: "prompt", Connector: req.ConnectorName})
 	case isResultLikeEvent(req.HookEventName):
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: req.ToolName, Content: req.Content, Direction: "tool_result", Connector: req.ConnectorName})
@@ -2539,6 +2551,43 @@ func isPromptLikeEvent(event string) bool {
 	default:
 		return false
 	}
+}
+
+// isToolJudgeIntentEvent identifies the prompt-bearing turn-start event in
+// each supported connector contract. The spellings intentionally mirror the
+// contract-owned correlation lifecycle bindings. Connectors without prompt
+// text on a trusted turn boundary (currently OpenCode and Antigravity) receive
+// tool-call context only; DefenseClaw must not invent user intent from model or
+// tool output.
+func isToolJudgeIntentEvent(event string) bool {
+	switch canonicalEvent(event) {
+	case "userpromptsubmit", "userpromptsubmitted", "beforesubmitprompt",
+		"beforeagent", "preuserprompt", "prellmcall", "agentstart":
+		return true
+	default:
+		return false
+	}
+}
+
+func isToolJudgeSessionBoundaryEvent(event string) bool {
+	switch canonicalEvent(event) {
+	case "sessionstart", "sessionend", "sessioncreated", "sessiondeleted",
+		"onsessionstart", "onsessionend", "onsessionfinalize", "onsessionreset":
+		return true
+	default:
+		return false
+	}
+}
+
+// shouldResetToolJudgeSession distinguishes a genuine lifecycle boundary from
+// Claude Code's SessionStart(source=compact), which continues the same turn and
+// may not be followed by another UserPromptSubmit event.
+func shouldResetToolJudgeSession(req agentHookRequest) bool {
+	if !isToolJudgeSessionBoundaryEvent(req.HookEventName) {
+		return false
+	}
+	return canonicalEvent(req.HookEventName) != "sessionstart" ||
+		canonicalEvent(firstString(req.Payload, "source")) != "compact"
 }
 
 func isResultLikeEvent(event string) bool {

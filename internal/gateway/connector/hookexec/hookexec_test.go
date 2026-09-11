@@ -647,6 +647,33 @@ func TestDecisionGolden(t *testing.T) {
 	}
 }
 
+func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
+	for _, connector := range []string{
+		"amp",
+		"antigravity",
+		"claudecode",
+		"codex",
+		"copilot",
+		"cursor",
+		"devin",
+		"geminicli",
+		"openhands",
+		"windsurf",
+	} {
+		t.Run(connector, func(t *testing.T) {
+			result := run(t, connector, ok(`{"action":"alert","reason":"advisory finding"}`), func(opts *Options) {
+				opts.FailMode = "closed"
+			})
+			if result.code != 0 {
+				t.Fatalf("alert exit code = %d, want advisory success 0; stderr=%q", result.code, result.stderr)
+			}
+			if result.stderr != "" {
+				t.Fatalf("alert stderr = %q, want empty", result.stderr)
+			}
+		})
+	}
+}
+
 func TestHermesJSONStdinAndValidOutputShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name       string

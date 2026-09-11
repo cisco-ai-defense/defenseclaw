@@ -23,6 +23,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"net/netip"
 	"sort"
 	"strconv"
 	"strings"
@@ -30,11 +31,12 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v2"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v6"
 
 type toolChainHookCaptureContextKey struct{}
 
@@ -286,6 +288,7 @@ func (a *APIServer) applyAgentHookToolChains(
 	}
 
 	invocationDigest := exactToolChainInvocationDigest(lifecycle, req)
+	var result audit.ToolChainObserveResult
 	resolvedSuccess := false
 	resolvedInvocation := false
 	if invocationDigest != "" &&
@@ -313,6 +316,12 @@ func (a *APIServer) applyAgentHookToolChains(
 		resolvedInvocation = resolved.Status == audit.ToolChainPendingResolved
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
 			resolvedInvocation
+		if resolvedSuccess {
+			// Terminal-success-only chains are deliberately absent from the
+			// synchronous pre-tool observation. Their exact pending projection is
+			// matched only after this authenticated success result promotes it.
+			result = resolved.Observation
+		}
 		if outcome != connector.ToolLifecycleOutcomeSuccess {
 			// A failed, denied, cancelled, or ambiguous result must not
 			// replay command-derived step evidence from its proposal. Retain
@@ -331,18 +340,28 @@ func (a *APIServer) applyAgentHookToolChains(
 	}
 
 	caps := profile.Capabilities
-	chainRuntimeIntent := guardrailRuntimeActionForConnector(
+	denyEligible := toolChainProjectionHasBlockIntent(
 		a.scannerCfg,
 		req.ConnectorName,
-		"HIGH",
-		true,
-	)
-	denyEligible := chainRuntimeIntent == guardrailActionBlock &&
+		observationProjection,
+	) &&
 		resp.Mode == "action" &&
 		structuredAction &&
 		caps.CanBlock &&
 		eventIn(req.HookEventName, caps.BlockEvents)
-	var result audit.ToolChainObserveResult
+	if denyEligible {
+		// The durable repository accepts one deny-eligibility bit for the
+		// complete observation. Keep detection evidence for every candidate,
+		// but expose enforcement evidence only for chains whose own catalog
+		// severity reaches this connector's existing profile threshold. This
+		// prevents a CRITICAL candidate on the same sink from promoting an
+		// unrelated HIGH match to a block.
+		observationProjection = toolChainBlockEligibleProjection(
+			a.scannerCfg,
+			req.ConnectorName,
+			observationProjection,
+		)
+	}
 	if !resolvedSuccess && toolChainProjectionHasSteps(observationProjection) {
 		result, err = repository.Observe(ctx, audit.ToolChainObserveInput{
 			SemanticEventID:     audit.SemanticEventID(req.SemanticEventID),
@@ -380,7 +399,12 @@ func (a *APIServer) applyAgentHookToolChains(
 		len(result.DetectedChainIDs) != 0 {
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			chainRuntimeIntent,
+			guardrailRuntimeActionForConnector(
+				a.scannerCfg,
+				req.ConnectorName,
+				HighestSeverity(chainFindings),
+				true,
+			),
 			denyEligible,
 			result,
 		)
@@ -416,7 +440,12 @@ func (a *APIServer) applyAgentHookToolChains(
 		// create duplicate finding telemetry.
 		chainFindings := toolChainRuleFindings(result)
 		intent := toolChainHookIntent(
-			chainRuntimeIntent,
+			guardrailRuntimeActionForConnector(
+				a.scannerCfg,
+				req.ConnectorName,
+				HighestSeverity(chainFindings),
+				true,
+			),
 			denyEligible,
 			result,
 		)
@@ -467,16 +496,93 @@ func splitToolChainProjection(
 ) (predecessor guardrail.ToolChainProjection, terminal guardrail.ToolChainProjection) {
 	predecessor.ParseStatus = projection.ParseStatus
 	terminal.ParseStatus = projection.ParseStatus
-	var predecessorMask, terminalMask uint16
-	for _, definition := range guardrail.ToolChainDefinitions() {
-		predecessorMask |= definition.Step1Bit
-		terminalMask |= definition.Step2Bit
+	predecessorMask := guardrail.ToolChainArtifactMutationBarrier
+	var terminalMask uint64
+	for index, definition := range guardrail.ToolChainDefinitions() {
+		pendingMask := definition.Step1Bit
+		if definition.RequiresTerminalSuccess {
+			pendingMask |= definition.Step2Bit | definition.Step3Bit |
+				definition.MutationBit
+		} else {
+			terminalMask |= definition.Step2Bit
+		}
+		predecessorMask |= pendingMask
+		if projection.DetectionStepMask&pendingMask != 0 {
+			predecessor.EnforcementJoinDigests[index] =
+				projection.EnforcementJoinDigests[index]
+		}
+		if !definition.RequiresTerminalSuccess &&
+			projection.DetectionStepMask&definition.Step2Bit != 0 {
+			terminal.EnforcementJoinDigests[index] =
+				projection.EnforcementJoinDigests[index]
+		}
+		if definition.Step3Bit != 0 {
+			predecessorMask |= definition.Step2Bit
+			if !definition.RequiresTerminalSuccess {
+				terminalMask |= definition.Step3Bit
+			}
+			if definition.OutputJoinFromFirst &&
+				projection.DetectionStepMask&definition.Step1Bit != 0 {
+				predecessor.EnforcementOutputJoinDigests[index] =
+					projection.EnforcementOutputJoinDigests[index]
+			}
+			if projection.DetectionStepMask&definition.Step2Bit != 0 {
+				predecessor.EnforcementJoinDigests[index] =
+					projection.EnforcementJoinDigests[index]
+				predecessor.EnforcementOutputJoinDigests[index] =
+					projection.EnforcementOutputJoinDigests[index]
+			}
+			if projection.DetectionStepMask&definition.Step3Bit != 0 {
+				if definition.RequiresTerminalSuccess {
+					predecessor.EnforcementOutputJoinDigests[index] =
+						projection.EnforcementOutputJoinDigests[index]
+				} else {
+					terminal.EnforcementOutputJoinDigests[index] =
+						projection.EnforcementOutputJoinDigests[index]
+				}
+			}
+		}
 	}
 	predecessor.DetectionStepMask = projection.DetectionStepMask & predecessorMask
 	predecessor.EnforcementStepMask = projection.EnforcementStepMask & predecessorMask
 	terminal.DetectionStepMask = projection.DetectionStepMask & terminalMask
 	terminal.EnforcementStepMask = projection.EnforcementStepMask & terminalMask
 	return predecessor, terminal
+}
+
+func mergeToolChainJoinDigests(
+	destination *guardrail.ToolChainProjection,
+	source guardrail.ToolChainProjection,
+) {
+	if destination == nil {
+		return
+	}
+	for index, digest := range source.EnforcementJoinDigests {
+		if digest == "" {
+			continue
+		}
+		if destination.EnforcementJoinDigests[index] == "" {
+			destination.EnforcementJoinDigests[index] = digest
+			continue
+		}
+		if destination.EnforcementJoinDigests[index] != digest {
+			// More than one identity in a single action is useful detection
+			// evidence, but it is not a unique enforcement join.
+			destination.EnforcementJoinDigests[index] = ""
+		}
+	}
+	for index, digest := range source.EnforcementOutputJoinDigests {
+		if digest == "" {
+			continue
+		}
+		if destination.EnforcementOutputJoinDigests[index] == "" {
+			destination.EnforcementOutputJoinDigests[index] = digest
+			continue
+		}
+		if destination.EnforcementOutputJoinDigests[index] != digest {
+			destination.EnforcementOutputJoinDigests[index] = ""
+		}
+	}
 }
 
 func toolChainProjectionHasSteps(projection guardrail.ToolChainProjection) bool {
@@ -538,6 +644,65 @@ func toolChainHookIntent(
 	return runtimeIntent
 }
 
+func toolChainProjectionHasBlockIntent(
+	cfg *config.Config,
+	connectorName string,
+	projection guardrail.ToolChainProjection,
+) bool {
+	for _, definition := range guardrail.ToolChainDefinitions() {
+		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit
+		if projection.EnforcementStepMask&steps != 0 &&
+			guardrailRuntimeActionForConnector(
+				cfg,
+				connectorName,
+				definition.Severity,
+				true,
+			) == guardrailActionBlock {
+			return true
+		}
+	}
+	return false
+}
+
+func toolChainBlockEligibleProjection(
+	cfg *config.Config,
+	connectorName string,
+	projection guardrail.ToolChainProjection,
+) guardrail.ToolChainProjection {
+	for index, definition := range guardrail.ToolChainDefinitions() {
+		if guardrailRuntimeActionForConnector(
+			cfg,
+			connectorName,
+			definition.Severity,
+			true,
+		) == guardrailActionBlock {
+			continue
+		}
+		projection.EnforcementStepMask &^=
+			definition.Step1Bit | definition.Step2Bit | definition.Step3Bit
+		if !definition.RequiresExactJoin {
+			projection.EnforcementJoinDigests[index] = ""
+			projection.EnforcementOutputJoinDigests[index] = ""
+		}
+	}
+	return projection
+}
+
+// DeterministicToolChainSeverity resolves the strongest immutable catalog
+// severity for a set of matched chain IDs. The benchmark calls this same
+// helper so production and offline scoring cannot drift on chain severity.
+func DeterministicToolChainSeverity(ids []string) string {
+	findings := make([]RuleFinding, 0, len(ids))
+	for _, id := range ids {
+		definition, ok := guardrail.ToolChainDefinitionByID(id)
+		if !ok {
+			continue
+		}
+		findings = append(findings, RuleFinding{Severity: definition.Severity})
+	}
+	return HighestSeverity(findings)
+}
+
 func (a *APIServer) safeApplyAgentHookToolChains(
 	ctx context.Context,
 	profile connector.HookProfile,
@@ -593,6 +758,7 @@ func projectAgentHookToolChains(
 		for _, artifact := range capture.artifactProjections {
 			projection.DetectionStepMask |= artifact.DetectionStepMask
 			projection.EnforcementStepMask |= artifact.EnforcementStepMask
+			mergeToolChainJoinDigests(&projection, artifact)
 		}
 	}
 
@@ -643,17 +809,15 @@ func projectTrustedActionChainSteps(
 		"PATH-DOCKER", "PATH-NPMRC", "PATH-PYPIRC",
 		"PATH-GIT-CREDS", "PATH-NETRC",
 		"PATH-WIN-GIT-CREDS", "PATH-WIN-NETRC",
-		"PATH-PROC-ENVIRON",
+		"PATH-PROC-ENVIRON", "PATH-ETC-SHADOW",
 		"secrets.cloud_credential_read",
 		"secrets.browser_session_store_read",
 		"secrets.workload_identity_token_read",
 	}
 	secretRead := hasAnyFinding(secretReadIDs...)
-	// A sensitive read and a later upload in the same session prove temporal
-	// proximity, not that the uploaded bytes came from the read. Retain the
-	// detection until an exact artifact or payload join key is available, but
-	// never authorize a deny from coincidence alone.
-	secretReadExact := false
+	secretReadDigest, secretReadIdentityExact := exactSingleReadPathDigest(facts)
+	secretReadExact := secretRead && secretReadIdentityExact &&
+		facts.Authoritative() && facts.EnforcementEligible()
 	addToolChainStep(
 		projection,
 		guardrail.ToolChainSecretReadThenEgress,
@@ -661,8 +825,20 @@ func projectTrustedActionChainSteps(
 		secretRead,
 		secretReadExact,
 	)
+	if secretReadExact {
+		setToolChainEnforcementJoinDigest(
+			projection,
+			guardrail.ToolChainSecretReadThenEgress,
+			secretReadDigest,
+		)
+	}
 
-	secretManager := hasAnyFinding("secrets.cloud_secret_manager_read")
+	// Chain state is derived from trusted ActionFacts, not from the active
+	// profile's atomic alert catalog.  Default and permissive intentionally keep
+	// dual-use reads quiet, but those reads must still be available to complete
+	// a later bounded proof.
+	secretManager := hasAnyFinding("secrets.cloud_secret_manager_read") ||
+		cloudSecretManagerPrerequisite(facts)
 	secretManagerExact := false
 	addToolChainStep(
 		projection,
@@ -672,7 +848,10 @@ func projectTrustedActionChainSteps(
 		secretManagerExact,
 	)
 
-	workloadIdentity := hasAnyFinding("secrets.workload_identity_token_read")
+	workloadIdentity := hasAnyFinding("secrets.workload_identity_token_read") ||
+		pathOwnerPrerequisite(
+			pathValueMatcher(matchesWorkloadIdentityToken),
+		)(facts)
 	workloadIdentityExact := false
 	addToolChainStep(
 		projection,
@@ -728,8 +907,7 @@ func projectTrustedActionChainSteps(
 		privilegeElevationExact,
 	)
 
-	lateral := hasAnyFinding("lateral.workload_exec") &&
-		workloadExecFallbackProof(facts)
+	lateral := workloadExecFallbackProof(facts)
 	addToolChainStep(
 		projection,
 		guardrail.ToolChainWorkloadIdentityThenLateralExec,
@@ -739,6 +917,7 @@ func projectTrustedActionChainSteps(
 	)
 
 	externalEgress := externalDataBearingUpload(facts)
+	uploadDigest, uploadIdentityExact := exactExternalUploadPathDigest(facts)
 	egressDetection := externalEgress || hasAnyFinding(
 		"CMD-WGET-POST",
 		"CMD-CURL-UPLOAD",
@@ -750,13 +929,397 @@ func projectTrustedActionChainSteps(
 		guardrail.ToolChainSecretManagerReadThenEgress,
 		guardrail.ToolChainSecretReadThenEgress,
 	} {
+		chainEnforcement := egressEnforcement
+		if chainID == guardrail.ToolChainSecretReadThenEgress {
+			chainEnforcement = chainEnforcement && uploadIdentityExact
+		}
 		addToolChainStep(
 			projection,
 			chainID,
 			2,
 			egressDetection,
-			egressEnforcement,
+			chainEnforcement,
 		)
+		if chainEnforcement && chainID == guardrail.ToolChainSecretReadThenEgress {
+			setToolChainEnforcementJoinDigest(projection, chainID, uploadDigest)
+		}
+	}
+
+	projectFirewallTrustExpansionChainSteps(projection, facts)
+	projectSQLServerCommandExecutionChainSteps(projection, facts)
+	projectPrivilegedKubernetesChainSteps(projection, facts)
+	projectWirelessCaptureDeauthChainSteps(projection, facts)
+	projectCredentialRemoteExecutionChainSteps(projection, facts)
+	projectCloudIAMPrincipalAdminChainSteps(projection, facts)
+	projectKubernetesPrivilegedCronJobChainSteps(projection, facts)
+	projectSQLCommandUDFChainSteps(projection, facts)
+	projectStagedReverseShellPersistenceChainSteps(projection, facts)
+	projectRemoteArtifactChainSteps(projection, facts)
+	if factsMayMutateArtifact(facts) {
+		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
+	}
+}
+
+func projectStagedReverseShellPersistenceChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainStagedReverseShellPersistence
+	operation, digest, ok := actionfacts.ExactStagedPayloadPersistenceOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.StagedPayloadWrite:
+		addToolChainStep(projection, chainID, 1, true, true)
+	case actionfacts.StagedPersistenceInstall:
+		addToolChainStep(projection, chainID, 2, true, true)
+	case actionfacts.StagedPayloadMutation:
+		definition, found := guardrail.ToolChainDefinitionByID(chainID)
+		if !found || definition.MutationBit == 0 {
+			return
+		}
+		projection.DetectionStepMask |= definition.MutationBit
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func projectSQLCommandUDFChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainSQLCommandUDF
+	operation, digest, ok := actionfacts.ExactSQLCommandUDFLineageOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.SQLCommandUDFCreate:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.SQLCommandUDFInvoke:
+		addToolChainStep(projection, chainID, 2, true, false)
+	case actionfacts.SQLCommandUDFBarrier:
+		definition, found := guardrail.ToolChainDefinitionByID(chainID)
+		if !found || definition.MutationBit == 0 {
+			return
+		}
+		projection.DetectionStepMask |= definition.MutationBit
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func projectKubernetesPrivilegedCronJobChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainKubernetesPrivilegedCronJob
+	fact, ok := actionfacts.ExactKubernetesCronJobOperation(facts)
+	if !ok || fact.CronJobIdentityDigest == "" {
+		return
+	}
+	switch fact.Operation {
+	case actionfacts.KubernetesCronJobPrivilegedPatch:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.KubernetesCronJobCreateFrom:
+		addToolChainStep(projection, chainID, 2, true, false)
+	case actionfacts.KubernetesCronJobPatchBarrier:
+		definition, found := guardrail.ToolChainDefinitionByID(chainID)
+		if !found || definition.MutationBit == 0 {
+			return
+		}
+		projection.DetectionStepMask |= definition.MutationBit
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(
+		projection, chainID, fact.CronJobIdentityDigest,
+	)
+}
+
+func projectCloudIAMPrincipalAdminChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainCloudIAMPrincipalAdmin
+	operation, digest, ok := actionfacts.ExactCloudIAMPrincipalOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.CloudIAMUserCreate, actionfacts.CloudIAMRoleCreate:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.CloudIAMUserAdminAttach, actionfacts.CloudIAMRoleAdminAttach:
+		addToolChainStep(projection, chainID, 2, true, false)
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func projectCredentialRemoteExecutionChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainSecretsdumpThenPsExecSameIdentity
+	operation, digest, ok := actionfacts.ExactCredentialRemoteExecutionOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.CredentialExtractionSecretsdump:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.CredentialRemoteExecutionPsExec:
+		addToolChainStep(projection, chainID, 2, true, false)
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func projectWirelessCaptureDeauthChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainWirelessCaptureThenDeauthSameBSSID
+	operation, digest, ok := actionfacts.ExactWirelessCaptureDeauthOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.WirelessTargetedPacketCapture:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.WirelessDeauthentication:
+		addToolChainStep(projection, chainID, 2, true, false)
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func projectPrivilegedKubernetesChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainPrivilegedKubernetesHostRootExec
+	fact, ok := actionfacts.ExactPrivilegedKubernetesOperation(facts)
+	if ok {
+		switch fact.Operation {
+		case actionfacts.KubernetesPrivilegedManifestWrite:
+			addToolChainStep(projection, chainID, 1, true, true)
+			setToolChainEnforcementJoinDigest(
+				projection, chainID, fact.ArtifactIdentityDigest,
+			)
+			setToolChainEnforcementOutputJoinDigest(
+				projection, chainID, fact.PodIdentityDigest,
+			)
+		case actionfacts.KubernetesManifestApply:
+			addToolChainStep(projection, chainID, 2, true, true)
+			setToolChainEnforcementJoinDigest(
+				projection, chainID, fact.ArtifactIdentityDigest,
+			)
+		case actionfacts.KubernetesPodHostPathExec:
+			addToolChainStep(projection, chainID, 3, true, true)
+			setToolChainEnforcementOutputJoinDigest(
+				projection, chainID, fact.PodIdentityDigest,
+			)
+		}
+	}
+	if digest, exact := actionfacts.ExactSingleArtifactMutationDigest(facts); exact {
+		definition, found := guardrail.ToolChainDefinitionByID(chainID)
+		if found && definition.MutationBit != 0 {
+			projection.DetectionStepMask |= definition.MutationBit
+			projection.EnforcementStepMask |= definition.MutationBit
+			setToolChainEnforcementJoinDigest(projection, chainID, digest)
+		}
+	}
+}
+
+func projectSQLServerCommandExecutionChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainSQLServerXPCommandShellExecution
+	operation, digest, ok := actionfacts.ExactSQLServerCommandExecution(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.SQLServerXPCommandShellEnable:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.SQLServerXPCommandShellInvoke:
+		addToolChainStep(projection, chainID, 2, true, false)
+	case actionfacts.SQLServerXPCommandShellDisable:
+		definition, found := guardrail.ToolChainDefinitionByID(chainID)
+		if !found || definition.MutationBit == 0 {
+			return
+		}
+		projection.DetectionStepMask |= definition.MutationBit
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
+}
+
+func factsMayMutateArtifact(facts actionfacts.Facts) bool {
+	if len(facts.SensitiveEgressArtifactWrites) != 0 ||
+		actionfacts.HasStructuredTextReplacement(facts) {
+		return true
+	}
+	for _, candidate := range facts.Paths {
+		// Writes to sinks such as /dev/null cannot replace a regular-file
+		// artifact. Treating stderr suppression as a mutation barrier breaks
+		// otherwise exact lineage across ordinary diagnostic commands.
+		if candidate.Flavor == actionfacts.PathFlavorDevice {
+			continue
+		}
+		switch candidate.Access {
+		case actionfacts.PathAccessWrite, actionfacts.PathAccessAppend,
+			actionfacts.PathAccessDelete:
+			return true
+		}
+	}
+	return false
+}
+
+func projectFirewallTrustExpansionChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainFirewallExpansionThenDestination
+	if address, ok := actionfacts.ExactFirewallTrustExpansionIPv4(facts); ok {
+		digest := exactIPv4ToolChainDigest(address)
+		addToolChainStep(projection, chainID, 1, digest != "", false)
+		setToolChainEnforcementJoinDigest(projection, chainID, digest)
+	}
+	if address, ok := exactSingleDirectIPv4Destination(facts); ok {
+		digest := exactIPv4ToolChainDigest(address)
+		addToolChainStep(projection, chainID, 2, digest != "", false)
+		setToolChainEnforcementJoinDigest(projection, chainID, digest)
+	}
+}
+
+func exactSingleDirectIPv4Destination(facts actionfacts.Facts) (string, bool) {
+	selected := ""
+	for _, network := range facts.Network {
+		switch network.Action {
+		case actionfacts.NetworkConnect, actionfacts.NetworkDownload,
+			actionfacts.NetworkUpload:
+		default:
+			continue
+		}
+		if network.TargetKind != actionfacts.NetworkTargetSingleHost ||
+			!directExecutingNetworkCommand(facts, network.CommandID) {
+			continue
+		}
+		host := strings.TrimSpace(network.NormalizedHost)
+		if host == "" {
+			host = strings.TrimSpace(network.Host)
+		}
+		address, err := netip.ParseAddr(host)
+		if err != nil || !address.Is4() {
+			continue
+		}
+		canonical := address.String()
+		if selected != "" && selected != canonical {
+			return "", false
+		}
+		selected = canonical
+	}
+	return selected, selected != ""
+}
+
+func directExecutingNetworkCommand(facts actionfacts.Facts, commandID int64) bool {
+	for _, command := range facts.Commands {
+		if command.ID != commandID {
+			continue
+		}
+		return command.Effect == actionfacts.EffectExecute &&
+			!command.ControlFlowUncertain && command.ParentCommandID == 0 &&
+			command.PipelineID == 0 && command.ArgvComplete
+	}
+	return false
+}
+
+func exactIPv4ToolChainDigest(value string) string {
+	address, err := netip.ParseAddr(value)
+	if err != nil || !address.Is4() {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(
+		"defenseclaw/tool-chain/ipv4-identity/v1\x00" + address.String(),
+	))
+	return hex.EncodeToString(digest[:])
+}
+
+func projectRemoteArtifactChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const derivedChainID = guardrail.ToolChainDownloadDecodeExecuteSameArtifact
+	const directChainID = guardrail.ToolChainDownloadThenExecuteSameArtifact
+	const sensitiveEgressChainID = guardrail.ToolChainSensitiveEgressArtifactThenExec
+	if downloaded, ok := actionfacts.ExactRemoteArtifactDownload(facts); ok {
+		digest, exact := exactPathDigest(downloaded)
+		addToolChainStep(projection, derivedChainID, 1, exact, exact)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, derivedChainID, digest)
+		}
+	}
+	if downloaded, ok := actionfacts.ExactRemoteArtifactDownloadIntent(facts); ok {
+		digest, exact := exactPathDigest(downloaded)
+		addToolChainStep(projection, directChainID, 1, exact, false)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
+		}
+	} else if downloaded, ok := actionfacts.BoundedRemoteArtifactDownloadIntent(facts); ok {
+		digest, exact := exactPathDigest(downloaded)
+		addToolChainStep(projection, directChainID, 1, exact, false)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
+		}
+	}
+	if written, ok := actionfacts.ExactSensitiveEgressArtifactWrite(facts); ok {
+		digest, exact := exactPathDigest(written)
+		addToolChainStep(projection, sensitiveEgressChainID, 1, exact, false)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, sensitiveEgressChainID, digest)
+		}
+	}
+	if input, output, ok := actionfacts.ExactArtifactDecodeTransition(facts); ok {
+		inputDigest, inputExact := exactPathDigest(input)
+		outputDigest, outputExact := exactPathDigest(output)
+		exact := inputExact && outputExact
+		addToolChainStep(projection, derivedChainID, 2, exact, exact)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, derivedChainID, inputDigest)
+			setToolChainEnforcementOutputJoinDigest(projection, derivedChainID, outputDigest)
+		}
+	}
+	if executed, ok := actionfacts.ExactArtifactExecution(facts); ok {
+		digest, exact := exactPathDigest(executed)
+		addToolChainStep(projection, derivedChainID, 3, exact, exact)
+		if exact {
+			setToolChainEnforcementOutputJoinDigest(projection, derivedChainID, digest)
+		}
+	}
+	if executed, ok := actionfacts.ExactArtifactExecutionIntent(facts); ok {
+		digest, exact := exactPathDigest(executed)
+		addToolChainStep(projection, directChainID, 2, exact, false)
+		addToolChainStep(projection, sensitiveEgressChainID, 2, exact, false)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
+			setToolChainEnforcementJoinDigest(projection, sensitiveEgressChainID, digest)
+		}
+	} else if executed, ok := actionfacts.BoundedArtifactExecutionIntent(facts); ok {
+		digest, exact := exactPathDigest(executed)
+		addToolChainStep(projection, directChainID, 2, exact, false)
+		if exact {
+			setToolChainEnforcementJoinDigest(projection, directChainID, digest)
+		}
 	}
 }
 
@@ -777,6 +1340,117 @@ func addToolChainStep(
 	projection.DetectionStepMask |= bit
 	if enforcement {
 		projection.EnforcementStepMask |= bit
+	}
+}
+
+func setToolChainEnforcementJoinDigest(
+	projection *guardrail.ToolChainProjection,
+	chainID string,
+	digest string,
+) {
+	if projection == nil || digest == "" {
+		return
+	}
+	index, ok := guardrail.ToolChainIndexByID(chainID)
+	if !ok {
+		return
+	}
+	projection.EnforcementJoinDigests[index] = digest
+}
+
+func setToolChainEnforcementOutputJoinDigest(
+	projection *guardrail.ToolChainProjection,
+	chainID string,
+	digest string,
+) {
+	if projection == nil || digest == "" {
+		return
+	}
+	index, ok := guardrail.ToolChainIndexByID(chainID)
+	if !ok {
+		return
+	}
+	projection.EnforcementOutputJoinDigests[index] = digest
+}
+
+func exactPathDigest(candidate actionfacts.PathFact) (string, bool) {
+	identity, ok := exactPathIdentity(candidate)
+	if !ok {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + identity))
+	return hex.EncodeToString(digest[:]), true
+}
+
+func exactSingleReadPathDigest(facts actionfacts.Facts) (string, bool) {
+	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
+		return candidate.Access == actionfacts.PathAccessRead &&
+			matchesAnySensitivePathCandidate(semanticPathValue(candidate))
+	})
+}
+
+func exactExternalUploadPathDigest(facts actionfacts.Facts) (string, bool) {
+	externalUploadCommands := make(map[int64]struct{})
+	for _, command := range facts.Commands {
+		if command.Effect == actionfacts.EffectExecute &&
+			hasOperation(command, actionfacts.OperationUpload) &&
+			hasExternalUpload(facts, command.ID) {
+			externalUploadCommands[command.ID] = struct{}{}
+		}
+	}
+	if len(externalUploadCommands) == 0 {
+		return "", false
+	}
+	return exactSinglePathDigest(facts, func(candidate actionfacts.PathFact) bool {
+		_, uploadCommand := externalUploadCommands[candidate.CommandID]
+		return uploadCommand && candidate.Access == actionfacts.PathAccessRead
+	})
+}
+
+func exactSinglePathDigest(
+	facts actionfacts.Facts,
+	selectPath func(actionfacts.PathFact) bool,
+) (string, bool) {
+	var selected string
+	for _, candidate := range facts.Paths {
+		if !selectPath(candidate) {
+			continue
+		}
+		identity, ok := exactPathIdentity(candidate)
+		if !ok {
+			return "", false
+		}
+		if selected != "" && selected != identity {
+			return "", false
+		}
+		selected = identity
+	}
+	if selected == "" {
+		return "", false
+	}
+	digest := sha256.Sum256([]byte("defenseclaw/tool-chain/path-identity/v1\x00" + selected))
+	return hex.EncodeToString(digest[:]), true
+}
+
+func exactPathIdentity(candidate actionfacts.PathFact) (string, bool) {
+	resolved := strings.TrimSpace(candidate.Resolved)
+	if resolved == "" || strings.ContainsRune(resolved, '\x00') {
+		return "", false
+	}
+	switch candidate.Flavor {
+	case actionfacts.PathFlavorPOSIX:
+		if !strings.HasPrefix(resolved, "/") {
+			return "", false
+		}
+		return "posix\x00" + resolved, true
+	case actionfacts.PathFlavorWindows:
+		resolved = strings.ToLower(strings.ReplaceAll(resolved, `\`, "/"))
+		if len(resolved) < 3 || resolved[1] != ':' || resolved[2] != '/' {
+			return "", false
+		}
+		return "windows\x00" + resolved, true
+	default:
+		return "", false
 	}
 }
 
@@ -1051,7 +1725,7 @@ func toolChainRuleFindings(
 		}
 		finding := RuleFinding{
 			RuleID: id, Title: definition.Title,
-			Severity: "HIGH", Confidence: 0.98,
+			Severity: definition.Severity, Confidence: 0.98,
 			Tags:        []string{"tool-call-chain", "multi-step"},
 			enforcement: findingEnforcementDetectionOnly,
 		}

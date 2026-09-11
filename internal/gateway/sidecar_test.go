@@ -12,8 +12,12 @@ package gateway
 
 import (
 	"context"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -295,5 +299,65 @@ func TestResolveActiveConnector_SurfaceTagInError(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "watcher") {
 		t.Errorf("error should be tagged with surface 'watcher', got: %v", err)
+	}
+}
+
+// TestSidecarWorkerCountCoversEverySenderIntoErrCh keeps the errCh buffer in
+// step with the number of goroutines that can send into it.
+//
+// Nothing drains errCh until after wg.Wait(). If more workers report an error
+// than the buffer holds, the last send blocks, that goroutine never reaches
+// its deferred wg.Done(), and the gateway hangs on shutdown rather than
+// exiting. The buffer was a literal 7 while eight workers sent into it, so
+// count the sends from the source instead of trusting the constant.
+func TestSidecarWorkerCountCoversEverySenderIntoErrCh(t *testing.T) {
+	t.Parallel()
+
+	_, thisFile, _, ok := runtime.Caller(0)
+	if !ok {
+		t.Fatal("cannot locate the test file")
+	}
+	source, err := os.ReadFile(filepath.Join(filepath.Dir(thisFile), "sidecar.go"))
+	if err != nil {
+		t.Fatalf("read sidecar.go: %v", err)
+	}
+
+	fileSet := token.NewFileSet()
+	parsed, err := parser.ParseFile(fileSet, "sidecar.go", source, 0)
+	if err != nil {
+		t.Fatalf("parse sidecar.go: %v", err)
+	}
+
+	var run *ast.FuncDecl
+	for _, decl := range parsed.Decls {
+		function, isFunc := decl.(*ast.FuncDecl)
+		if !isFunc || function.Name.Name != "Run" || function.Recv == nil {
+			continue
+		}
+		run = function
+	}
+	if run == nil {
+		t.Fatal("Sidecar.Run not found: this test no longer measures what it claims to")
+	}
+
+	senders := 0
+	ast.Inspect(run, func(node ast.Node) bool {
+		send, isSend := node.(*ast.SendStmt)
+		if !isSend {
+			return true
+		}
+		if channel, isIdent := send.Chan.(*ast.Ident); isIdent && channel.Name == "errCh" {
+			senders++
+		}
+		return true
+	})
+
+	if senders == 0 {
+		t.Fatal("found no errCh sends in Sidecar.Run: the scan is broken, not the code")
+	}
+	if senders != sidecarWorkerCount {
+		t.Fatalf("Sidecar.Run has %d goroutines sending into errCh but the buffer is "+
+			"sized for %d; the surplus senders block forever and wg.Wait never returns",
+			senders, sidecarWorkerCount)
 	}
 }

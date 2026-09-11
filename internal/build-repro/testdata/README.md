@@ -8,15 +8,21 @@ independent runners must produce byte-identical outer
 
 ## What's in `signed-payload-fixture.tar.zst`
 
-Five placeholder inner files with fixed contents:
+Seven placeholder inner files with fixed contents:
 
-| Name                          | Purpose in the real build |
-|-------------------------------|---------------------------|
-| `DefenseClawEnterprise.psm1`  | PowerShell module the outer Setup embeds. |
-| `defenseclaw-gateway.exe`     | Gateway binary. |
-| `defenseclaw-hook.exe`        | Hook binary. |
-| `defenseclaw.exe`             | Main CLI. |
-| `install-enterprise.ps1`      | Installer script the outer Setup drives. |
+| Name                              | Purpose in the real build |
+|-----------------------------------|---------------------------|
+| `DefenseClawEnterprise.psm1`      | PowerShell module the outer Setup embeds. |
+| `defenseclaw-cmid-broker.exe`     | Isolated cloud credential broker service. |
+| `defenseclaw-gateway.exe`         | Gateway binary. |
+| `defenseclaw-hook.exe`            | Hook binary. |
+| `defenseclaw-sensor-helper.exe`   | Privileged AI runtime acquisition service. |
+| `defenseclaw.exe`                 | Main CLI. |
+| `install-enterprise.ps1`          | Installer script the outer Setup drives. |
+
+The list must match `EXPECTED_PAYLOAD_FILENAMES` in
+`.github/workflows/windows-deterministic-build.yml`, which is the gate that
+actually enforces it.
 
 Each file is a **short deterministic byte sequence**, not a real
 Authenticode-signed PE or PS1. The reproducibility gate exercises the

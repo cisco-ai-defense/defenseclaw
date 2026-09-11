@@ -53,6 +53,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
 	"github.com/defenseclaw/defenseclaw/internal/scanoutput"
+	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -75,6 +76,8 @@ type APIServer struct {
 	notifier          *notifier.Dispatcher
 	aiDiscoveryMu     sync.RWMutex
 	aiDiscovery       *inventory.ContinuousDiscoveryService
+	aiRuntimeMu       sync.RWMutex
+	aiRuntime         *sensor.Service
 	// scanOutputRedactor is initialized only if the code-scan response path is
 	// used. Failed loads are deliberately not cached: repairing key-store
 	// permissions must restore useful protected output without a restart.
@@ -603,6 +606,26 @@ func (a *APIServer) SetAIDiscoveryService(svc *inventory.ContinuousDiscoveryServ
 // handler. Config reload publishes the replacement with the write lock, so it
 // waits for handlers using the old service/store before canceling that service
 // and allowing its Run defer to close inventory.db.
+// SetAIRuntimeService wires the runtime planes into the API. Safe to call
+// with nil: the planes are opt-in, and a nil service is the disabled state the
+// handler reports rather than an error.
+func (a *APIServer) SetAIRuntimeService(svc *sensor.Service) {
+	if a == nil {
+		return
+	}
+	a.aiRuntimeMu.Lock()
+	a.aiRuntime = svc
+	a.aiRuntimeMu.Unlock()
+}
+
+func (a *APIServer) leaseAIRuntime() (*sensor.Service, func()) {
+	if a == nil {
+		return nil, func() {}
+	}
+	a.aiRuntimeMu.RLock()
+	return a.aiRuntime, a.aiRuntimeMu.RUnlock
+}
+
 func (a *APIServer) leaseAIDiscovery() (*inventory.ContinuousDiscoveryService, func()) {
 	if a == nil {
 		return nil, func() {}
@@ -899,6 +922,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/v1/ai-usage/scan", a.handleAIUsageScan)
 	mux.HandleFunc("/api/v1/ai-usage/discovery", a.handleAIUsageDiscovery)
 	mux.HandleFunc("/api/v1/ai-usage/components", a.handleAIUsageComponents)
+	// Runtime planes. Registered under the ai-usage prefix so the whole of AI
+	// discovery -- presence and behaviour -- reads as one surface.
+	mux.HandleFunc("/api/v1/ai-usage/runtime", a.handleAIRuntime)
+	mux.HandleFunc("/api/v1/ai-usage/runtime/scan", a.handleAIRuntimeScan)
 	// Correlation graph endpoints expose the durable, evidence-backed identity
 	// ledger. They remain behind the same bearer-token and CSRF middleware as
 	// every other API route; handlers are read-only and accept exactly one

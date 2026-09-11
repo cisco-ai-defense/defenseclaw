@@ -1,0 +1,34 @@
+version: 1
+category: database-destruction-protection
+rules:
+  - id: impact.sql_unbounded_delete
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'] &&
+      (('-c' in c.argv) || ('-e' in c.argv) || ('-q' in c.argv) ||
+      ('-Q' in c.argv) || ('--command' in c.argv) ||
+      ('--execute' in c.argv) || ('--query' in c.argv) ||
+      c.argv.exists(a, a.startsWith('--command=') ||
+      a.startsWith('--execute=') || a.startsWith('--query='))))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "SQL DELETE without a WHERE clause"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, database, production-safety]
+
+  - id: impact.sql_schema_destroy
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'] &&
+      (('-c' in c.argv) || ('-e' in c.argv) || ('-q' in c.argv) ||
+      ('-Q' in c.argv) || ('--command' in c.argv) ||
+      ('--execute' in c.argv) || ('--query' in c.argv) ||
+      c.argv.exists(a, a.startsWith('--command=') ||
+      a.startsWith('--execute=') || a.startsWith('--query='))))
+    pattern: 'a^'
+    tool_call_only: true
+    title: "SQL schema or table-wide destructive operation"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, database, production-safety]

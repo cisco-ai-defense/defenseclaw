@@ -1,0 +1,166 @@
+<form version="1.1">
+  <label>AI Discovery Runtime Planes</label>
+  <description>What actually ran, beside AI Discovery's inventory of what is present. Coverage is the first row on purpose: findings from a blinded host must not be read as a clean result.</description>
+  <fieldset submitButton="false" autoRun="true">
+    <input type="time" token="time">
+      <label>Time range</label>
+      <default>
+        <earliest>-24h</earliest>
+        <latest>now</latest>
+      </default>
+    </input>
+    <input type="text" token="severity" searchWhenChanged="true">
+      <label>Severity</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+    <input type="text" token="agent" searchWhenChanged="true">
+      <label>Agent</label>
+      <default>*</default>
+      <initialValue>*</initialValue>
+    </input>
+  </fieldset>
+
+  <row>
+    <panel>
+      <title>Planes not running</title>
+      <html>
+        <p>Any non-zero value means findings from this host are incomplete. A detector reporting clean because it was never able to look is indistinguishable, on a dashboard, from a host that is genuinely clean.</p>
+      </html>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" AND runtime_plane_running IN ("false","False",0) | stats dc(runtime_plane) as planes_down</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="rangeColors">["0x53a051","0xf8be34","0xdc4e41"]</option>
+        <option name="rangeValues">[0,1]</option>
+        <option name="useColors">1</option>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Connections with no owning process</title>
+      <html>
+        <p>On an unprivileged POSIX host this is how much of the machine's egress cannot be named — the difference between a quiet host and a blind sensor. Windows reports the owning pid in every row, so a non-zero value there means something else.</p>
+      </html>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" | stats max(runtime_connections_unattributed) as unattributed</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+    <panel>
+      <title>Partial poll cycles</title>
+      <html>
+        <p>A degraded poll is never reported as a complete one, so this counts exactly the cycles whose findings must be read as incomplete.</p>
+      </html>
+      <single>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" AND outcome="partial" | stats count as partial_cycles</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </single>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Plane health — every plane, every cycle</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.plane_health" | stats latest(runtime_plane_available) as available, latest(runtime_plane_running) as running, latest(runtime_plane_reason) as reason, latest(_time) as last_seen by runtime_plane | eval last_seen=strftime(last_seen, "%Y-%m-%d %H:%M:%S") | rename runtime_plane as plane | sort plane</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="drilldown">none</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Findings by severity</title>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ($severity|s$="*" OR runtime_severity=$severity|s$) AND ($agent|s$="*" OR runtime_agent=$agent|s$) | timechart span=10m count by runtime_severity</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+    <panel>
+      <title>Inventory agreement</title>
+      <html>
+        <p><b>unaccounted</b> is the interesting reading: a complete discovery scan that explains none of what the runtime planes are watching. <b>unobserved</b> means there was no usable inventory, and the score was left untouched in both directions.</p>
+      </html>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" | stats count by runtime_verdict</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">pie</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Runtime findings</title>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.finding" AND ($severity|s$="*" OR runtime_severity=$severity|s$) AND ($agent|s$="*" OR runtime_agent=$agent|s$) | table _time, runtime_severity, runtime_score, runtime_process, runtime_agent, runtime_verdict, runtime_reason, runtime_finding_id | rename runtime_severity as severity, runtime_score as score, runtime_process as process, runtime_agent as agent, runtime_verdict as inventory, runtime_reason as "inventory reason", runtime_finding_id as finding | sort - score</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">25</option>
+        <option name="drilldown">cell</option>
+      </table>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Host-plane tactics by kill-chain stage</title>
+      <html>
+        <p>Every tactic here is gated on an AI agent appearing in the process lineage: a developer running sudo produces nothing, the same sudo under an agent produces a signal. This row renders empty unless the host plane is enabled, which is worth knowing before reading an empty row as a clean host.</p>
+      </html>
+      <chart>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | timechart span=10m count by runtime_tactic</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="charting.chart">column</option>
+        <option name="charting.chart.stackMode">stacked</option>
+        <option name="charting.legend.placement">bottom</option>
+      </chart>
+    </panel>
+  </row>
+
+  <row>
+    <panel>
+      <title>Agent activity — one record per tactic</title>
+      <html>
+        <p>The sequence is the finding: reading a credential is a lead, and reading a credential <i>then</i> minting an identity <i>then</i> uploading to a paste site is an incident.</p>
+      </html>
+      <table>
+        <search>
+          <query>`defenseclaw_demo_ai_runtime_events` | where event_name="ai.runtime.activity" AND ($agent|s$="*" OR runtime_agent=$agent|s$) | table _time, runtime_agent, runtime_tactic, runtime_technique, runtime_chain_stage, runtime_process, runtime_finding_id | rename runtime_agent as agent, runtime_tactic as tactic, runtime_technique as "ATT&amp;CK", runtime_chain_stage as stage, runtime_process as process, runtime_finding_id as finding | sort - _time</query>
+          <earliest>$time.earliest$</earliest>
+          <latest>$time.latest$</latest>
+        </search>
+        <option name="count">25</option>
+      </table>
+    </panel>
+  </row>
+</form>

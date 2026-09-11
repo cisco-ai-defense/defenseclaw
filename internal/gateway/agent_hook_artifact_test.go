@@ -799,12 +799,15 @@ func TestPromotedWindowsArtifactFactsParticipateInToolChains(t *testing.T) {
 		req,
 		connector.ToolCallLifecycleContract{},
 	)
+	// The only outer uncertainty is the statically named script body. Artifact
+	// promotion resolves those bytes, and the exact credential path is therefore
+	// eligible to join a later same-path external egress proof.
 	assertToolChainStep(
 		t,
 		projection,
 		guardrail.ToolChainSecretReadThenEgress,
 		1,
-		false,
+		true,
 	)
 }
 

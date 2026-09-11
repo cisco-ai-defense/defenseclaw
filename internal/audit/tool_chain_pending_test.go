@@ -324,7 +324,7 @@ func TestToolChainPendingAcceptsMarkerAndRejectsTerminalProjection(t *testing.T)
 		TerminalInputFingerprint: markerTerminal.InputFingerprint,
 	})
 	if err != nil || markerResult.Status != ToolChainPendingResolved ||
-		markerResult.Observation.Status != "" {
+		markerResult.Observation.Status != ToolChainObserveFresh {
 		t.Fatalf("marker resolve=%#v err=%v", markerResult, err)
 	}
 	prepare.ToolInvocationDigest = correlationDigest("identity-terminal")

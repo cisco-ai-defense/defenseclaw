@@ -8,6 +8,8 @@
     "setup",
     "connectors",
     "capability-matrix",
+    "benchmarks",
+    "llm-judge-benchmark",
     "ai-discovery",
     "hitl",
     "---Policies & Defaults---",

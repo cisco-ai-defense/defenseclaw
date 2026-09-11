@@ -46,6 +46,7 @@ func TestEnterpriseAssemblerProducesOnlyTheMachineWideBootstrap(t *testing.T) {
 		"defenseclaw-cmid-broker.exe",
 		"defenseclaw-gateway.exe",
 		"defenseclaw-hook.exe",
+		"defenseclaw-sensor-helper.exe",
 		"install-enterprise.ps1",
 		"DefenseClawEnterprise.psm1",
 	} {

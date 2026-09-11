@@ -261,12 +261,16 @@ trap 'restore_overlay; rm -rf "${STAGE_DIR}"' EXIT
 GATEWAY_EXE="${STAGE_DIR}/defenseclaw.exe"
 HOOK_EXE="${STAGE_DIR}/defenseclaw-hook.exe"
 BROKER_EXE="${STAGE_DIR}/defenseclaw-cmid-broker.exe"
+SENSOR_HELPER_EXE="${STAGE_DIR}/defenseclaw-sensor-helper.exe"
 # main.commit defaults to "unknown", which the enterprise Setup builder's
 # Assert-DefenseClawBinaryIdentity rejects. Stamp the exact HEAD sha we
 # derived above so identity verification passes.
 LDFLAGS_GATEWAY="-s -w -buildid=defenseclaw-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 LDFLAGS_HOOK="-s -w -buildid=defenseclaw-hook-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+# -H=windowsgui for the same reason the broker uses it: this runs under the
+# SCM with no console, and a console subsystem binary flashes a window.
+LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw.exe (windows/amd64 tags=cmid)"
@@ -299,6 +303,16 @@ echo "==> stamping defenseclaw-cmid-broker.exe VERSIONINFO / icon"
     -target windows_amd64 -executable "${BROKER_EXE}" \
     -component cmid-broker -version "${VERSION}" -icon "${ICON_PATH}" )
 
+echo "==> building defenseclaw-sensor-helper.exe (windows/amd64)"
+( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false \
+    -ldflags "${LDFLAGS_SENSOR_HELPER}" -o "${SENSOR_HELPER_EXE}" ./cmd/defenseclaw-sensor-helper )
+
+echo "==> stamping defenseclaw-sensor-helper.exe VERSIONINFO / icon"
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
+    -target windows_amd64 -executable "${SENSOR_HELPER_EXE}" \
+    -component sensor-helper -version "${VERSION}" -icon "${ICON_PATH}" )
+
 # ---- assemble the AVC-facing build kit (spec 002 §2.3.A1) -------------
 #
 # See docs/WINDOWS-AVC-PACKAGING-HANDOFF.md for the AVC-side contract
@@ -321,7 +335,7 @@ KIT_DIR="${DIST_ABS}/${KIT_NAME}"
 rm -rf "${KIT_DIR}"
 mkdir -p "${KIT_DIR}/payload" "${KIT_DIR}/source" "${KIT_DIR}/packaging/scripts/lib"
 
-# ---- kit/payload: the six files AVC signs (or leaves unsigned in
+# ---- kit/payload: the seven files AVC signs (or leaves unsigned in
 #                   --allow-unsigned mode) ------------------------------
 echo "==> staging kit payload"
 # Single-source the expected filename list: EXPECTED_PAYLOAD_NAMES is
@@ -337,6 +351,7 @@ EXPECTED_PAYLOAD_NAMES=(
     defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
+    defenseclaw-sensor-helper.exe
     defenseclaw.exe
     install-enterprise.ps1
 )
@@ -351,6 +366,7 @@ cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/def
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
 cp "${BROKER_EXE}"                                       "${KIT_DIR}/payload/defenseclaw-cmid-broker.exe"
+cp "${SENSOR_HELPER_EXE}"                                "${KIT_DIR}/payload/defenseclaw-sensor-helper.exe"
 cp "${REPO_ROOT}/packaging/windows/DefenseClawEnterprise.psm1" \
                                                          "${KIT_DIR}/payload/DefenseClawEnterprise.psm1"
 cp "${REPO_ROOT}/packaging/windows/install-enterprise.ps1" \

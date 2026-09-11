@@ -22,6 +22,7 @@ import Charts
 
 struct OverviewView: View {
     @Environment(AppState.self) private var appState
+    @Environment(\.openSettings) private var openSettings
     @State private var summary: (blockedSkills: Int, allowedSkills: Int, blockedMCPs: Int, allowedMCPs: Int, totalScans: Int, activeAlerts: Int) = (0, 0, 0, 0, 0, 0)
     @State private var hourly: [HourlyPoint] = []
     @State private var doctorRunning = false
@@ -75,18 +76,23 @@ struct OverviewView: View {
         .toolbar {
             ToolbarItemGroup {
                 connectorScopeChip
-                StaleBadge(date: appState.health.fetchedAt)
+            }
+            ToolbarItem {
                 Button {
                     runDoctor()
                 } label: {
                     Label("Run Health Check", systemImage: "stethoscope")
                 }
                 .disabled(doctorRunning || !appState.installationMutationsAllowed)
+                .dcQuickHelp("Run DefenseClaw Doctor")
+            }
+            ToolbarItem {
                 Button {
                     refresh()
                 } label: {
                     Label("Refresh", systemImage: "arrow.clockwise")
                 }
+                .dcQuickHelp("Refresh overview")
             }
         }
         .task { refresh() }
@@ -174,64 +180,88 @@ struct OverviewView: View {
 
     private var quickActionsCard: some View {
         DCCard("Quick Actions", systemImage: "bolt") {
-            HStack(spacing: 8) {
-                Button {
-                    runOverviewCommand(
-                        title: "Scan all skills",
-                        arguments: ["skill", "scan", "--all"],
-                        category: "scan",
-                        effects: ["Skill scan results refreshed"]
-                    )
-                } label: {
-                    Label("Scan Skills", systemImage: "wand.and.rays")
-                }
-                .disabled(!appState.installationMutationsAllowed)
-                Button {
-                    appState.selectedPanel = .inventory
-                } label: {
-                    Label("Open Inventory", systemImage: "shippingbox")
-                }
-                Button {
-                    let action = appState.gatewayReachable ? "restart" : "start"
-                    runOverviewCommand(
-                        title: "\(action.capitalized) gateway",
-                        binary: "defenseclaw-gateway",
-                        arguments: [action],
-                        category: "daemon",
-                        effects: [appState.gatewayReachable ? "Gateway restarted" : "Gateway started"]
-                    )
-                } label: {
-                    Label(appState.gatewayReachable ? "Restart Gateway" : "Start Gateway",
-                          systemImage: appState.gatewayReachable ? "arrow.clockwise.circle" : "play.circle")
-                }
-                .disabled(!appState.installationMutationsAllowed)
-                Button {
-                    runDoctor()
-                } label: {
-                    Label("Run Doctor", systemImage: "stethoscope")
-                }
-                .disabled(doctorRunning || !appState.installationMutationsAllowed)
-                Menu {
-                    Button("Validate Configuration") {
-                        runOverviewCommand(title: "Validate configuration", arguments: ["config", "validate"], category: "info")
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 8) {
+                    Button {
+                        runOverviewCommand(
+                            title: "Scan all skills",
+                            arguments: ["skill", "scan", "--all"],
+                            category: "scan",
+                            effects: ["Skill scan results refreshed"]
+                        )
+                    } label: {
+                        Label("Scan Skills", systemImage: "wand.and.rays")
                     }
-                    Button("Check Credentials") {
-                        runOverviewCommand(title: "Check credentials", arguments: ["keys", "check"], category: "info")
+                    .disabled(!appState.installationMutationsAllowed)
+                    Button {
+                        appState.selectedPanel = .inventory
+                    } label: {
+                        Label("Open Inventory", systemImage: "shippingbox")
                     }
-                    Button("Gateway Status") {
-                        runOverviewCommand(title: "Gateway status", binary: "defenseclaw-gateway", arguments: ["status"], category: "info")
+                    Button {
+                        let action = appState.gatewayReachable ? "restart" : "start"
+                        runOverviewCommand(
+                            title: "\(action.capitalized) gateway",
+                            binary: "defenseclaw-gateway",
+                            arguments: [action],
+                            category: "daemon",
+                            effects: [appState.gatewayReachable ? "Gateway restarted" : "Gateway started"]
+                        )
+                    } label: {
+                        Label(appState.gatewayReachable ? "Restart Gateway" : "Start Gateway",
+                              systemImage: appState.gatewayReachable ? "arrow.clockwise.circle" : "play.circle")
                     }
-                    Button("Show Provenance") {
-                        runOverviewCommand(title: "Show gateway provenance", binary: "defenseclaw-gateway", arguments: ["provenance", "show"], category: "info")
+                    .disabled(!appState.installationMutationsAllowed)
+                    Button {
+                        runDoctor()
+                    } label: {
+                        Label("Run Doctor", systemImage: "stethoscope")
                     }
+                    .disabled(doctorRunning || !appState.installationMutationsAllowed)
+                    Menu {
+                        Button("Validate Configuration") {
+                            runOverviewCommand(title: "Validate configuration", arguments: ["config", "validate"], category: "info")
+                        }
+                        Button("Check Credentials") {
+                            runOverviewCommand(title: "Check credentials", arguments: ["keys", "check"], category: "info")
+                        }
+                        Button("Gateway Status") {
+                            runOverviewCommand(title: "Gateway status", binary: "defenseclaw-gateway", arguments: ["status"], category: "info")
+                        }
+                        Button("Show Provenance") {
+                            runOverviewCommand(title: "Show gateway provenance", binary: "defenseclaw-gateway", arguments: ["provenance", "show"], category: "info")
+                        }
+                        Divider()
+                        Button("Open Command Palette") { appState.commandPalettePresented = true }
+                    } label: {
+                        Label("Diagnostics", systemImage: "ellipsis.circle")
+                    }
+                    Spacer()
+                }
+                .controlSize(.small)
+
+                if let reason = appState.installationReadOnlyReason {
                     Divider()
-                    Button("Open Command Palette") { appState.commandPalettePresented = true }
-                } label: {
-                    Label("Diagnostics", systemImage: "ellipsis.circle")
+                    HStack(spacing: 12) {
+                        Label("State-changing actions disabled: \(reason)", systemImage: "lock.shield")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                            .layoutPriority(1)
+                        Spacer(minLength: 8)
+                        Button("Review Installation") {
+                            appState.selectedSettingsTab = .connection
+                            openSettings()
+                        }
+                        .controlSize(.small)
+                        .fixedSize()
+                    }
+                    .padding(8)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Cisco.orange.opacity(0.1), in: RoundedRectangle(cornerRadius: 8))
                 }
-                Spacer()
             }
-            .controlSize(.small)
         }
     }
 

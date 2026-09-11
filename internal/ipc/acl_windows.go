@@ -113,6 +113,64 @@ func applyBaselineIPCACL(path string, class aclObjectClass) error {
 	return nil
 }
 
+// applyGatewayOnlyIPCACL applies the privileged-helper socket DACL. Unlike the
+// UI socket baseline, it intentionally omits Authenticated Users: the sensor
+// helper returns host-wide process argv, connections, DNS, and kernel events,
+// so the exact gateway service identity is the only non-admin client. The
+// shared parent directory retains applyBaselineIPCACL's traverse/list-only
+// grant; it never receives this narrower socket ACL.
+func applyGatewayOnlyIPCACL(path string, _ aclObjectClass) error {
+	if strings.TrimSpace(path) == "" {
+		return fmt.Errorf("ipc: applyGatewayOnlyIPCACL: empty path")
+	}
+	gatewaySID, err := resolveGatewayServiceSID()
+	if err != nil {
+		return err
+	}
+	entries, err := gatewayOnlyIPCACEsForGatewaySID(gatewaySID)
+	if err != nil {
+		return err
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return fmt.Errorf("ipc: build gateway-only ACL: %w", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	); err != nil {
+		return fmt.Errorf("ipc: SetNamedSecurityInfo %s: %w", path, err)
+	}
+	return nil
+}
+
+// gatewayOnlyIPCACEsForGatewaySID returns the closed principal set for a
+// privileged local service. Keep the exact NT SERVICE validation here so a
+// future caller cannot bypass the identity check by supplying another SID.
+func gatewayOnlyIPCACEsForGatewaySID(gatewaySID *windows.SID) ([]windows.EXPLICIT_ACCESS, error) {
+	if !sidIsNTService(gatewaySID) {
+		return nil, fmt.Errorf("ipc: gateway service SID does not live under NT SERVICE authority")
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: resolve SYSTEM SID: %w", err)
+	}
+	admins, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return nil, fmt.Errorf("ipc: resolve Administrators SID: %w", err)
+	}
+	return []windows.EXPLICIT_ACCESS{
+		explicitAllow(system, windows.GENERIC_ALL),
+		explicitAllow(admins, windows.GENERIC_ALL),
+		explicitAllow(gatewaySID, windows.GENERIC_ALL),
+	}, nil
+}
+
 // baselineIPCACEs builds the four EXPLICIT_ACCESS entries the spec
 // requires. Broken out from applyBaselineIPCACL so unit tests can
 // assert the entry set independently of the SetNamedSecurityInfo

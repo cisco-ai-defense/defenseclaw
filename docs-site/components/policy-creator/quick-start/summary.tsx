@@ -26,9 +26,9 @@ export function PolicySummaryCard({
   // Active rule count + how it compares to the preset baseline.
   // The previous implementation compared against "preset full pack",
   // but every shipped preset disables some rules out of the box —
-  // the bundled `default` preset, for example, ships with 122 of 128
-  // rules active. That caused the summary to display
-  //   "6 rules disabled vs. preset full pack"
+  // each bundled preset intentionally disables a small number of
+  // rules. Comparing with the total pack previously caused the summary
+  // to report operator changes even when the preset was untouched.
   // even when the operator hadn't touched anything, which read as
   // "I disabled those" rather than "the preset shipped that way."
   // The correct comparison is against the preset's own baseline.

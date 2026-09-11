@@ -23,6 +23,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -914,6 +915,8 @@ _AI_DISCOVERY_MODES: tuple[str, ...] = ("passive", "enhanced")
 _SCAN_INTERVAL_MIN_RANGE = (1, 24 * 60)        # 1 minute … 24 hours
 _PROCESS_INTERVAL_S_RANGE = (5, 60 * 60)        # 5 seconds … 1 hour
 _MAX_FILES_PER_SCAN_RANGE = (10, 100_000)
+_RUNTIME_POLL_INTERVAL_S_RANGE = (5, 60 * 60)   # 5 seconds … 1 hour
+_RUNTIME_MIN_RISK_RANGE = (1, 100)              # the score band findings are cut at
 # 4 KiB up to 16 MiB — anything beyond that almost certainly means
 # the operator has a runaway log file in scan_roots and would
 # benefit from rejecting the value.
@@ -1786,6 +1789,1099 @@ def discovery_scan(
         "'agent discovery status' to confirm config drift.",
         indent="  ",
     )
+
+
+# ---------------------------------------------------------------------------
+# ``agent discovery runtime`` -- the runtime planes.
+#
+# Nested under ``discovery`` rather than hung off ``agent`` directly because
+# presence and behaviour are two halves of one question. An operator who has
+# just run ``agent discovery status`` should find "and what actually ran" one
+# level down, not in a sibling namespace.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def _runtime_severity_rank(value: object) -> int:
+    """Rank a severity from the gateway, treating anything unknown as lowest.
+
+    ``findings`` is a network payload produced by the Go sensor, so the two
+    vocabularies can drift -- a new band, a different casing. ``tuple.index``
+    raises on a value it does not hold, which would end ``--severity`` in a
+    traceback rather than a result. Ranking an unrecognised band last is the
+    safe direction: it is excluded from every narrowing filter instead of
+    being silently promoted into one.
+    """
+    text = str(value or "").strip().lower()
+    if text in _RUNTIME_SEVERITY_ORDER:
+        return _RUNTIME_SEVERITY_ORDER.index(text)
+    return len(_RUNTIME_SEVERITY_ORDER)
+
+_RUNTIME_GATEWAY_OPTIONS = (
+    click.option("--gateway-host", default=None, help="Sidecar API host override."),
+    click.option("--gateway-port", type=int, default=None, help="Sidecar API port override."),
+    click.option(
+        "--gateway-token-env",
+        default=None,
+        help="Environment variable containing the sidecar API token override.",
+    ),
+)
+
+
+def _runtime_gateway_options(command):
+    for option in reversed(_RUNTIME_GATEWAY_OPTIONS):
+        command = option(command)
+    return command
+
+
+def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a table, falling back to a pipe-delimited form without Rich.
+
+    Mirrors _render_signatures_table: the fallback exists because the CLI runs
+    in packaging and CI contexts where Rich is not importable, and a traceback
+    there would be a worse outcome than an unaligned table.
+    """
+    try:
+        from io import StringIO
+
+        from rich.console import Console
+        from rich.table import Table
+    except Exception:
+        lines = [" | ".join(headers)]
+        lines.extend(" | ".join(row) for row in rows)
+        return "\n".join(lines) + "\n"
+
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    table = Table()
+    for header in headers:
+        table.add_column(header)
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+    return stream.getvalue()
+
+
+@discovery.group("runtime")
+def discovery_runtime() -> None:
+    """Inspect the AI discovery runtime planes.
+
+    Where the surrounding ``discovery`` commands inventory what is present,
+    these report what actually ran: sustained inference compute, per-process
+    egress to a provider, and -- when the host plane is enabled -- the sequence
+    of actions an agent took.
+    """
+
+
+def _runtime_snapshot(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+    refresh: bool = False,
+) -> dict:
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        return client.scan_ai_runtime() if refresh else client.ai_runtime()
+    except requests.ConnectionError as exc:
+        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 503:
+            raise click.ClickException(
+                "the runtime planes are disabled in config. Run "
+                "'defenseclaw agent discovery runtime enable' first."
+            ) from exc
+        raise click.ClickException(f"sidecar rejected the request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+
+def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
+    """Render the plane strip.
+
+    Always printed, healthy or not. A detector reporting clean because it was
+    never able to look is indistinguishable, on a dashboard, from a host that
+    is genuinely clean -- so the coverage line is not optional output.
+    """
+    from defenseclaw import ux
+
+    for plane in payload.get("planes") or []:
+        name = str(plane.get("name") or plane.get("plane") or "plane")
+        if plane.get("running"):
+            ux.ok(f"{name}: running via {plane.get('mechanism') or 'unknown mechanism'}", indent=indent)
+        elif plane.get("available"):
+            ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
+        else:
+            ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
+
+
+def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
+    from defenseclaw import ux
+
+    observed = int(payload.get("processes_observed") or 0)
+    skipped = int(payload.get("processes_skipped") or 0)
+    connections = int(payload.get("connections_observed") or 0)
+    unattributed = int(payload.get("connections_unattributed") or 0)
+    ux.subhead(
+        f"processes: {observed} read, {skipped} not fully readable | "
+        f"connections: {connections} seen, {unattributed} with no owner",
+        indent=indent,
+    )
+    if unattributed and connections:
+        share = round(100 * unattributed / connections)
+        if share >= 50:
+            ux.warn(
+                f"{share}% of connections could not be attributed to a process. "
+                "Run the gateway with elevated privilege for machine-wide egress attribution.",
+                indent=indent,
+            )
+
+
+@discovery_runtime.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output status as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_status(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Show what the runtime planes can and cannot see right now."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime planes")
+    if not payload.get("enabled"):
+        ux.warn("disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    scanned = payload.get("scanned_at") or "never"
+    ux.ok(f"last poll: {scanned}", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    findings = payload.get("findings") or []
+    ux.subhead(f"{len(findings)} finding(s) at or above the reporting floor", indent="  ")
+
+
+@discovery_runtime.command("findings")
+@click.option("--json", "as_json", is_flag=True, help="Output findings as JSON.")
+@click.option("--refresh", is_flag=True, help="Poll immediately instead of reading the last snapshot.")
+@click.option(
+    "--severity",
+    type=click.Choice(_RUNTIME_SEVERITY_ORDER),
+    default=None,
+    help="Only show findings at or above this severity.",
+)
+@click.option("--limit", type=int, default=50, help="Maximum rows to render.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_findings(
+    app: AppContext,
+    as_json: bool,
+    refresh: bool,
+    severity: str | None,
+    limit: int,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List scored runtime findings."""
+    from defenseclaw import ux
+
+    if limit < 0:
+        raise click.BadParameter("--limit must not be negative")
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=refresh,
+    )
+    if as_json:
+        # The JSON is the complete snapshot on purpose. Filtering is a
+        # rendering concern; a caller piping to jq wants the raw view, and
+        # silently dropping rows from a machine-readable export is how
+        # coverage gaps get hidden.
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime findings")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        return
+
+    findings = list(payload.get("findings") or [])
+    if severity:
+        cutoff = _RUNTIME_SEVERITY_ORDER.index(severity)
+        findings = [
+            finding for finding in findings
+            if _runtime_severity_rank(finding.get("severity")) <= cutoff
+        ]
+    if not findings:
+        ux.ok("no findings at or above the reporting floor", indent="  ")
+        # Coverage is printed even with nothing to show, because "nothing
+        # found" and "nothing could be looked at" are different results.
+        _render_plane_health(payload)
+        _render_coverage(payload)
+        return
+
+    rows = []
+    for finding in findings[:limit]:
+        providers = ", ".join(
+            str(provider.get("hostname") or "") for provider in (finding.get("providers") or [])
+        )
+        rows.append([
+            str(finding.get("severity") or ""),
+            str(finding.get("score") or 0),
+            str(finding.get("process") or ""),
+            str(finding.get("pid") or ""),
+            str(finding.get("agent_name") or "-"),
+            providers or "-",
+            str((finding.get("correlation") or {}).get("verdict") or ""),
+        ])
+    click.echo(_render_runtime_table(
+        ["Severity", "Score", "Process", "PID", "Agent", "Providers", "Inventory"], rows,
+    ), nl=False)
+    if len(findings) > limit:
+        ux.subhead(f"{len(findings) - limit} more not shown; raise --limit", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("selftest")
+@click.option("--json", "as_json", is_flag=True, help="Output the capability report as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_selftest(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Report what this host's planes can and cannot see, and why.
+
+    Exists because an unprivileged or blinded plane reporting clean is
+    indistinguishable, on a dashboard, from a host that is genuinely clean.
+    This states the difference out loud before anyone relies on the result.
+    """
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(
+            {
+                "enabled": bool(payload.get("enabled")),
+                "planes": payload.get("planes") or [],
+                "degraded": bool(payload.get("degraded")),
+                "degraded_reasons": payload.get("degraded_reasons") or [],
+                "processes_observed": payload.get("processes_observed") or 0,
+                "processes_skipped": payload.get("processes_skipped") or 0,
+                "connections_observed": payload.get("connections_observed") or 0,
+                "connections_unattributed": payload.get("connections_unattributed") or 0,
+            },
+            indent=2,
+            sort_keys=True,
+        ))
+        return
+
+    ux.section("AI discovery runtime self-test")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    reasons = payload.get("degraded_reasons") or []
+    if reasons:
+        ux.warn("coverage is partial:", indent="  ")
+        for reason in reasons:
+            ux.subhead(f"- {reason}", indent="    ")
+    else:
+        ux.ok("every selected plane is running", indent="  ")
+
+
+def _probe_root() -> bool | None:
+    """Whether this process is running with full privilege."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:  # noqa: BLE001 - an unanswerable probe reports unknown
+            return None
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return None
+
+
+def _probe_full_disk_access() -> bool | None:
+    """Whether this process holds macOS Full Disk Access.
+
+    TCC.db is readable only with the grant, which makes opening it the
+    cheapest honest probe available. It answers for *this* process, which is
+    the right question: the grant attaches to the responsible process, so
+    asking about anything else would report someone else's permission.
+    """
+    if sys.platform != "darwin":
+        return None
+    candidate = Path.home() / "Library/Application Support/com.apple.TCC/TCC.db"
+    try:
+        with candidate.open("rb") as handle:
+            handle.read(1)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        # Missing or unreadable for some other reason: unknown, not denied.
+        return None
+
+
+def _probe_linux_capability(name: str) -> bool | None:
+    """Whether this process holds a capability, read from /proc/self/status."""
+    if not sys.platform.startswith("linux"):
+        return None
+    if _probe_root():
+        return True
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if not line.startswith("CapEff:"):
+            continue
+        try:
+            effective = int(line.split()[1], 16)
+        except (IndexError, ValueError):
+            return None
+        bit = _LINUX_CAPABILITY_BITS.get(name)
+        if bit is None:
+            return None
+        return bool(effective & (1 << bit))
+    return None
+
+
+# Capability bit numbers from linux/capability.h. Only the ones the planes
+# ask for, because an incomplete map is better than a stale copy of a header.
+_LINUX_CAPABILITY_BITS = {
+    "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_RAW": 13,
+    "CAP_SYS_ADMIN": 21,
+}
+
+
+def _probe_windows_audit(subcategory: str) -> bool | None:
+    """Whether an audit subcategory is enabled, via auditpol."""
+    if sys.platform != "win32":
+        return None
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    try:
+        completed = subprocess.run(
+            ["auditpol", "/get", f"/subcategory:{subcategory}"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in completed.stdout.splitlines():
+        if subcategory.lower() in line.lower():
+            return "success" in line.lower()
+    return None
+
+
+def _probe_windows_cmdline_audit() -> bool | None:
+    """Whether process-creation events carry command lines."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # noqa: PLC0415 - Windows only
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ProcessCreationIncludeCmdLine_Enabled")
+            return bool(value)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
+# _RUNTIME_GRANTS is what each plane needs, per OS, stated as something an
+# operator can actually do.
+#
+# It is static on purpose. The point of this command is to be answerable
+# *before* anything is running -- at install time, or on a host where the
+# planes came up blind and the operator needs to know what to change. A
+# reason derived from a live snapshot cannot answer "what should I grant
+# before I start", which is the question people actually ask.
+#
+# `check` is a callable returning None when this process cannot tell. It is
+# deliberately allowed to be uncertain: claiming a grant is missing when it
+# is merely unverifiable would send an operator to change something that was
+# already correct.
+_RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
+    "darwin": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads the process table through ps(1), which any user may do",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root, for machine-wide attribution",
+            "probe": "root",
+            "why": (
+                "unprivileged lsof returns only this user's sockets, so other users' "
+                "egress is invisible rather than merely unattributed"
+            ),
+            "how": "run the gateway as root (the packaged LaunchDaemon already does)",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "root, for /dev/bpf",
+            "probe": "root",
+            "why": (
+                "naming a peer from the answer this host resolved is a direct "
+                "observation; without it peers are named by reverse DNS, less "
+                "confidently"
+            ),
+            "how": "run the gateway as root, or set dns_capture: false to stop asking",
+        },
+        {
+            "plane": "agent actions (C)",
+            "needs": "root AND Full Disk Access",
+            "probe": "darwin_fda",
+            "why": (
+                "Endpoint Security refuses a client without the TCC grant, and "
+                "refuses it for the *responsible* process -- the terminal or "
+                "daemon that launched the gateway, not the gateway binary"
+            ),
+            "how": (
+                "System Settings > Privacy & Security > Full Disk Access, add the "
+                "process that launches the gateway. Managed installs ship this as "
+                "an MDM PPPC profile"
+            ),
+        },
+    ],
+    "linux": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads /proc, which is world-readable for process stat",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root or CAP_DAC_READ_SEARCH, for machine-wide attribution",
+            "probe": "cap_dac",
+            "why": (
+                "/proc/net/tcp lists every connection to anyone, but the "
+                "/proc/<pid>/fd links that attribute a socket to a process are "
+                "readable only by the owner or root"
+            ),
+            "how": "run the gateway as root, or grant CAP_DAC_READ_SEARCH",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "CAP_NET_RAW",
+            "probe": "cap_net_raw",
+            "why": "AF_PACKET capture needs it; without it peers fall back to reverse DNS",
+            "how": "setcap cap_net_raw+ep on the gateway, or run it as root",
+        },
+        {
+            "plane": "agent actions (C), process events",
+            "needs": "nothing",
+            "why": (
+                "the cn_proc netlink connector is readable unprivileged on most "
+                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+            ),
+            "how": None,
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "CAP_SYS_ADMIN",
+            "probe": "cap_sys_admin",
+            "why": (
+                "fanotify needs it. Without it credential reads are inferred from "
+                "argv instead of observed, which sees the command but not the read"
+            ),
+            "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+    ],
+    "windows": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing for this user's processes; elevation for all",
+            "probe": "root",
+            "why": "OpenProcess on another user's process needs an elevated token",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "elevated token",
+            "probe": "root",
+            "why": "GetExtendedTcpTable returns owning pids machine-wide only when elevated",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "agent actions (C), process and identity events",
+            "needs": "elevated token AND Advanced Audit Policy",
+            "probe": "win_audit_proc",
+            "why": "the Security channel carries nothing until the subcategories are on",
+            "how": (
+                'auditpol /set /subcategory:"Process Creation" /success:enable '
+                "/failure:enable   (also User Account Management, Sensitive "
+                "Privilege Use)"
+            ),
+        },
+        {
+            "plane": "agent actions (C), command lines",
+            "needs": "the separate command-line audit policy",
+            "probe": "win_cmdline",
+            "why": (
+                "without it lineage still works and every argument-vector tactic "
+                "goes undetected, which is most of them"
+            ),
+            "how": (
+                "reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+                "\\Policies\\System\\Audit /v "
+                "ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f"
+            ),
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "a SACL on each audited object",
+            "why": (
+                "event 4663 is only emitted for objects with an audit ACE, so "
+                "credential reads and persistence writes are not observable without one"
+            ),
+            "how": "set an audit ACE on the credential paths you care about",
+        },
+    ],
+}
+
+
+def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
+    """Resolve a grant's current state, or None when it cannot be known.
+
+    Unknown is a real answer and is reported as such. Telling an operator a
+    grant is missing when it is merely unverifiable sends them to change
+    something that was already correct, which is worse than saying so.
+    """
+    if not probe or not for_this_host:
+        return None
+    if probe == "root":
+        return _probe_root()
+    if probe == "darwin_fda":
+        granted = _probe_full_disk_access()
+        if granted is None:
+            return None
+        return bool(granted and _probe_root())
+    if probe == "cap_dac":
+        return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_raw":
+        return _probe_linux_capability("CAP_NET_RAW")
+    if probe == "cap_sys_admin":
+        return _probe_linux_capability("CAP_SYS_ADMIN")
+    if probe == "win_audit_proc":
+        return _probe_windows_audit("Process Creation")
+    if probe == "win_cmdline":
+        return _probe_windows_cmdline_audit()
+    return None
+
+
+# _GRANT_PLANS are the commands that close a gap, per OS.
+#
+# Every one is idempotent, scoped to exactly what a plane needs, and printed
+# before it runs. None of them widens anything beyond the requirement it
+# names -- notably there is no blanket SACL on Windows, because auditing
+# every object on a filesystem to catch credential reads would generate far
+# more exposure than the detection is worth.
+#
+# macOS is absent on purpose. Its remaining grant is Full Disk Access, which
+# TCC does not let any process grant to itself or to another, at any
+# privilege level. The command opens the exact settings pane instead and
+# waits for the operator, which is the whole of what is achievable.
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+
+_WINDOWS_AUDIT_SUBCATEGORIES = (
+    "Process Creation",
+    "User Account Management",
+    "Sensitive Privilege Use",
+)
+
+_WINDOWS_AUDIT_REG_KEY = (
+    r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+)
+
+
+def _linux_grant_commands(binary: str, revert: bool) -> list[list[str]]:
+    if revert:
+        return [["setcap", "-r", binary]]
+    return [["setcap", _LINUX_GRANT_CAPS, binary]]
+
+
+def _windows_grant_commands(revert: bool) -> list[list[str]]:
+    setting = "disable" if revert else "enable"
+    commands = [
+        ["auditpol", "/set", f"/subcategory:{name}",
+         f"/success:{setting}", f"/failure:{setting}"]
+        for name in _WINDOWS_AUDIT_SUBCATEGORIES
+    ]
+    commands.append([
+        "reg", "add", _WINDOWS_AUDIT_REG_KEY,
+        "/v", "ProcessCreationIncludeCmdLine_Enabled",
+        "/t", "REG_DWORD", "/d", "0" if revert else "1", "/f",
+    ])
+    return commands
+
+
+def _render_command(command: list[str]) -> str:
+    return " ".join(part if " " not in part else f'"{part}"' for part in command)
+
+
+def _run_grant_commands(commands: list[list[str]], *, elevate: bool) -> int:
+    """Run the grant commands, returning how many failed."""
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
+
+    failed = 0
+    for command in commands:
+        runnable = command
+        if elevate and sys.platform != "win32":
+            # -n so a host with no cached credential fails loudly instead of
+            # blocking on a prompt nobody is watching.
+            runnable = ["sudo", "-n", *command]
+        try:
+            completed = subprocess.run(
+                runnable, capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+            ux.warn(f"{_render_command(command)}: {exc}", indent="    ")
+            failed += 1
+            continue
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            reason = detail[0] if detail else f"exit {completed.returncode}"
+            ux.warn(f"{_render_command(command)}: {reason}", indent="    ")
+            failed += 1
+            continue
+        ux.ok(_render_command(command), indent="    ")
+    return failed
+
+
+def _open_full_disk_access_pane() -> None:
+    """Open the Full Disk Access pane, which is as far as automation goes."""
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
+
+    target = (
+        "x-apple.systempreferences:com.apple.preference.security"
+        "?Privacy_AllFiles"
+    )
+    try:
+        subprocess.run(["open", target], capture_output=True, timeout=15, check=False)
+        ux.ok("opened Privacy & Security > Full Disk Access", indent="    ")
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        ux.warn(f"could not open System Settings: {exc}", indent="    ")
+    ux.subhead(
+        "Add the process that launches the gateway -- the terminal or the "
+        "daemon, not the gateway binary. TCC grants to the responsible "
+        "process, and no privilege level can set this for you.",
+        indent="    ",
+    )
+
+
+@discovery_runtime.command("permissions")
+@click.option("--json", "as_json", is_flag=True, help="Output the grants as JSON.")
+@click.option("--os", "target_os",
+              type=click.Choice(["darwin", "linux", "windows"]),
+              default=None, help="Report for another OS instead of this one.")
+@click.option("--grant", is_flag=True,
+              help="Apply the grants this host is missing. Shows every command first.")
+@click.option("--revert", is_flag=True,
+              help="Undo what --grant applied.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_permissions(
+    app: AppContext,
+    as_json: bool,
+    target_os: str | None,
+    grant: bool,
+    revert: bool,
+    yes: bool,
+) -> None:
+    """What each runtime plane needs, and how to grant it.
+
+    Answerable before anything is running, which is the point: an operator
+    installing DefenseClaw needs to know what to grant up front, and
+    'runtime selftest' can only explain a gateway that is already up.
+    """
+    from defenseclaw import ux
+
+    resolved = target_os or sys.platform
+    if resolved.startswith("linux"):
+        resolved = "linux"
+    elif resolved == "win32":
+        resolved = "windows"
+    grants = _RUNTIME_GRANTS.get(resolved)
+    if grants is None:
+        raise SystemExit(f"no permission guidance for {resolved}")
+
+    for_this_host = target_os is None
+    evaluated = []
+    for entry in grants:
+        if entry["needs"] == "nothing":
+            # Nothing to grant is not an unknown. Rendering it as one would
+            # bury the entries that do need action among ones that never will.
+            state: bool | None = True
+        else:
+            state = _evaluate_grant(entry.get("probe"), for_this_host)  # type: ignore[arg-type]
+        evaluated.append({**entry, "granted": state})
+
+    if as_json:
+        click.echo(json.dumps(
+            {"os": resolved, "checked_this_host": for_this_host, "grants": evaluated},
+            indent=2, sort_keys=True,
+        ))
+        return
+
+    ux.section(f"AI discovery runtime permissions ({resolved})")
+    ux.subhead(
+        "Every plane runs without these and reports what it cannot see. "
+        "Granting them is how the coverage gets complete, not how it starts.",
+        indent="  ",
+    )
+    missing = 0
+    for entry in evaluated:
+        # Deliberately not named `grant`: that is the flag parameter, and
+        # shadowing it left the loop's last dict bound to the name, so the
+        # command believed --grant had been passed on every invocation.
+        state = entry["granted"]
+        if state is True:
+            mark = "[granted]"
+        elif state is False:
+            mark = "[MISSING]"
+            missing += 1
+        else:
+            mark = "[unknown]"
+        ux.subhead(f"{mark} {entry['plane']}", indent="  ")
+        ux.subhead(f"needs: {entry['needs']}", indent="    ")
+        ux.subhead(f"why:   {entry['why']}", indent="    ")
+        if entry["how"] and state is not True:
+            ux.subhead(f"grant: {entry['how']}", indent="    ")
+    if for_this_host:
+        if missing:
+            ux.warn(f"{missing} grant(s) missing on this host", indent="  ")
+        else:
+            ux.ok("nothing this check can see is missing", indent="  ")
+        ux.subhead(
+            "An [unknown] is not a failure: it is a grant this process cannot "
+            "verify from where it is running, and reporting it as missing "
+            "would send you to change something already correct.",
+            indent="  ",
+        )
+    ux.subhead(
+        "In a managed enterprise install the gateway is deliberately "
+        "de-privileged and a separate sensor helper holds these instead; see "
+        "the AI Discovery docs.",
+        indent="  ",
+    )
+
+    if not (grant or revert):
+        return
+    if not for_this_host:
+        raise SystemExit("--grant and --revert only apply to the host you are on")
+    _apply_grants(resolved, revert=revert, assume_yes=yes)
+
+
+def _apply_grants(resolved: str, *, revert: bool, assume_yes: bool) -> None:
+    """Apply, or undo, the grants that can be automated on this host.
+
+    Everything here changes privileged machine state, so it prints the exact
+    commands first and asks. An operator who cannot see what is about to run
+    cannot consent to it, and these are not changes to discover afterwards.
+    """
+    from defenseclaw import ux
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    verb = "revert" if revert else "grant"
+    ux.section(f"AI discovery runtime permissions: {verb}")
+
+    commands: list[list[str]] = []
+    elevate = False
+    manual: list[str] = []
+
+    if resolved == "linux":
+        binary = resolve_gateway_binary()
+        if not binary:
+            raise SystemExit(
+                "cannot find defenseclaw-gateway on PATH; capabilities attach to "
+                "the binary, so there is nothing to grant them to")
+        commands = _linux_grant_commands(binary, revert)
+        # _probe_root rather than os.geteuid: that name does not exist on
+        # Windows, and this function is reachable there -- both from the
+        # tests that assert the Linux plan and from anyone diagnosing a
+        # cross-platform deployment. Unknown privilege elevates, because
+        # attempting sudo and being refused is recoverable while silently
+        # skipping it produces a grant that did not happen.
+        elevate = _probe_root() is not True
+    elif resolved == "windows":
+        commands = _windows_grant_commands(revert)
+        if _probe_root() is False:
+            raise SystemExit(
+                "machine-wide audit policy needs an elevated token; re-run this "
+                "from an elevated prompt")
+    elif resolved == "darwin":
+        # Root is a matter of how the gateway is launched, not something to
+        # set here, and Full Disk Access cannot be granted by any process.
+        manual.append(
+            "run the gateway as root -- the packaged LaunchDaemon already does")
+        if not revert:
+            manual.append("grant Full Disk Access, opened below")
+
+    if not commands and not manual:
+        ux.ok("nothing to do on this platform", indent="  ")
+        return
+
+    if commands:
+        ux.subhead("These commands will run:", indent="  ")
+        for command in commands:
+            prefix = "sudo " if elevate and sys.platform != "win32" else ""
+            ux.subhead(f"{prefix}{_render_command(command)}", indent="    ")
+    for note in manual:
+        ux.subhead(f"manual: {note}", indent="    ")
+
+    if commands and not assume_yes and not click.confirm(
+        f"Apply {len(commands)} change(s) to this machine?", default=False,
+    ):
+        raise SystemExit(1)
+
+    failed = _run_grant_commands(commands, elevate=elevate) if commands else 0
+
+    if resolved == "darwin" and not revert:
+        _open_full_disk_access_pane()
+
+    if failed:
+        raise SystemExit(
+            f"{failed} of {len(commands)} change(s) failed; nothing was retried "
+            "and the rest were applied. Re-run to see the current state")
+    if commands:
+        ux.ok(f"{len(commands)} change(s) applied", indent="  ")
+    ux.subhead(
+        "Re-run 'defenseclaw agent discovery runtime permissions' to confirm, "
+        "and restart the gateway so the planes pick the new privilege up.",
+        indent="  ",
+    )
+
+
+@discovery_runtime.command("scan")
+@click.option("--json", "as_json", is_flag=True, help="Output the poll result as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_scan(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Poll the runtime planes immediately."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=True,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    ux.section("AI discovery runtime scan")
+    ux.ok(f"poll complete: {len(payload.get('findings') or [])} finding(s)", indent="  ")
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("enable")
+@click.option("--enable-host-plane/--no-enable-host-plane", default=None,
+              help="Kernel process, file, and identity events. Needs elevated privilege.")
+@click.option("--dns-capture/--no-dns-capture", default=None,
+              help="Passive DNS observation so peers are named rather than inferred.")
+@click.option("--poll-interval-s", type=click.IntRange(*_RUNTIME_POLL_INTERVAL_S_RANGE),
+              default=None, help="Seconds between polls.")
+@click.option("--min-risk-to-report", type=click.IntRange(*_RUNTIME_MIN_RISK_RANGE),
+              default=None, help="Reporting floor: the score a finding must reach to be reported.")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_enable(
+    app: AppContext,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Turn on the runtime planes."""
+    _apply_runtime_settings(
+        app,
+        enabled=True,
+        enable_host_plane=enable_host_plane,
+        dns_capture=dns_capture,
+        poll_interval_s=poll_interval_s,
+        min_risk_to_report=min_risk_to_report,
+        restart=restart,
+        yes=yes,
+        action="enable",
+    )
+
+
+@discovery_runtime.command("disable")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_disable(app: AppContext, restart: bool, yes: bool) -> None:
+    """Turn off the runtime planes. Recorded findings are preserved."""
+    _apply_runtime_settings(
+        app, enabled=False, enable_host_plane=None, dns_capture=None,
+        poll_interval_s=None, min_risk_to_report=None,
+        restart=restart, yes=yes, action="disable",
+    )
+
+
+def _apply_runtime_settings(
+    app: AppContext,
+    *,
+    enabled: bool,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+    action: str,
+) -> None:
+    """Preview, confirm, persist, restart -- the same shape as ``discovery enable``."""
+    from defenseclaw import ux
+
+    cfg = _require_loaded_config(app)
+    runtime = cfg.ai_discovery.runtime
+
+    changes: list[tuple[str, object, object]] = []
+
+    def stage(field: str, value: object) -> None:
+        if value is None:
+            return
+        current = getattr(runtime, field)
+        if current != value:
+            changes.append((field, current, value))
+            setattr(runtime, field, value)
+
+    stage("enabled", enabled)
+    stage("enable_host_plane", enable_host_plane)
+    stage("dns_capture", dns_capture)
+    stage("poll_interval_s", poll_interval_s)
+    stage("min_risk_to_report", min_risk_to_report)
+
+    ux.section(f"AI discovery runtime {action}")
+    if not changes:
+        ux.ok("no configuration changes needed", indent="  ")
+    else:
+        for field, before, after in changes:
+            ux.subhead(f"{field}: {before!r} -> {after!r}", indent="  ")
+        if runtime.enable_host_plane:
+            ux.warn(
+                "the host plane reads kernel process, file, and identity events. Every "
+                "signal it raises is gated on an AI agent in the process lineage.",
+                indent="  ",
+            )
+        if not yes and not click.confirm("Apply these changes?", default=True):
+            raise SystemExit(1)
+        try:
+            cfg.save()
+        except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
+            raise SystemExit(f"failed to save config: {exc}") from exc
+        ux.ok("configuration saved", indent="  ")
+
+    if not changes:
+        return
+
+    if not restart:
+        ux.subhead(
+            "--no-restart specified: the setting is saved but the running gateway keeps "
+            "its current planes until you restart it "
+            "('defenseclaw setup restart').",
+            indent="  ",
+        )
+        return
+
+    # Same restart path the sibling `agent discovery enable/disable` commands
+    # use. Printing instructions instead would make --restart, which is on by
+    # default, silently mean --no-restart: enabling would not start collecting
+    # and, worse, disabling would leave the planes reading argv and sockets.
+    from defenseclaw.commands import cmd_setup
+
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
+    try:
+        cmd_setup._restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=connector,
+            connectors=connectors,
+        )
+    except Exception as exc:  # noqa: BLE001 - the config is already saved
+        ux.err(f"Gateway restart failed: {exc}", indent="  ")
+        ux.subhead(
+            "The configuration is saved. Restart the gateway to apply it: "
+            "'defenseclaw setup restart'.",
+            indent="    ",
+        )
+        raise SystemExit(1) from exc
+    if runtime.enabled:
+        ux.ok("Sidecar restarted; the runtime planes are live.", indent="  ")
+    else:
+        ux.ok("Sidecar restarted; the runtime planes are stopped.", indent="  ")
 
 
 def _normalize_scan_roots(raw: str) -> list[str]:

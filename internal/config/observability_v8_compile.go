@@ -72,6 +72,11 @@ var (
 // CompileObservabilityV8 validates and expands a typed source block into one
 // deterministic, immutable effective plan. It performs no I/O, secret
 // resolution, DNS lookup, exporter construction, or runtime mutation.
+// retiredLegacyV7ProfileName is the built-in that was removed in the v7 cut.
+// internal/audit rejects the name when it appears in a stored record, so
+// nothing may reintroduce it as a custom profile.
+const retiredLegacyV7ProfileName = "legacy-v7"
+
 func CompileObservabilityV8(source *ObservabilityV8Source) (*ObservabilityV8Plan, error) {
 	semanticProfileLock, err := resolveObservabilityV8SemanticLock()
 	if err != nil {
@@ -1907,10 +1912,21 @@ func compileObservabilityV8Profiles(source map[string]ObservabilityV8RedactionPr
 		if _, reserved := builtIns[name]; reserved {
 			return nil, nil, fmt.Errorf("observability.redaction_profiles.%s: built-in profile name is reserved", name)
 		}
+		if name == retiredLegacyV7ProfileName {
+			// The name is retired, not free. A custom profile could otherwise
+			// claim it, bucket policies could select it, and the audit writer
+			// would store it -- but the lifecycle decoder rejects that stored
+			// name, so the projection is silently dropped instead of the
+			// configuration being refused. Refuse it here, where an operator
+			// sees the error.
+			return nil, nil, fmt.Errorf(
+				"observability.redaction_profiles.%s: this profile name is retired; "+
+					"upgrades emit %q instead", name, "v7-compatible")
+		}
 		known[name] = struct{}{}
 	}
 	result := make([]ObservabilityV8EffectiveProfile, 0, len(builtIns)+len(source))
-	for _, name := range []string{"none", "sensitive", "content", "strict", "legacy-v7"} {
+	for _, name := range []string{"none", "sensitive", "content", "strict"} {
 		result = append(result, cloneObservabilityV8Profile(builtIns[name]))
 	}
 	names := make([]string, 0, len(source))
@@ -1921,7 +1937,7 @@ func compileObservabilityV8Profiles(source map[string]ObservabilityV8RedactionPr
 	for _, name := range names {
 		profileSource := source[name]
 		base, ok := builtIns[profileSource.Extends]
-		if !ok || profileSource.Extends == "none" || profileSource.Extends == "legacy-v7" {
+		if !ok || profileSource.Extends == "none" {
 			return nil, nil, fmt.Errorf("observability.redaction_profiles.%s.extends: expected sensitive, content, or strict", name)
 		}
 		if profileSource.Detectors != nil && len(profileSource.Detectors) == 0 {
@@ -1981,18 +1997,11 @@ func observabilityV8BuiltInProfiles() map[string]ObservabilityV8EffectiveProfile
 		ObservabilityV8FieldEvidence: ObservabilityV8ModeRemove, ObservabilityV8FieldError: ObservabilityV8ModeRemove,
 		ObservabilityV8FieldPath: ObservabilityV8ModeRemove, ObservabilityV8FieldCredential: ObservabilityV8ModeRemove,
 	}
-	legacyV7 := map[ObservabilityV8FieldClass]ObservabilityV8FieldMode{
-		ObservabilityV8FieldMetadata: ObservabilityV8ModePreserve, ObservabilityV8FieldIdentifier: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldContent: ObservabilityV8ModeWhole, ObservabilityV8FieldReason: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldEvidence: ObservabilityV8ModeWhole, ObservabilityV8FieldError: ObservabilityV8ModeWhole,
-		ObservabilityV8FieldPath: ObservabilityV8ModeWhole, ObservabilityV8FieldCredential: ObservabilityV8ModeWhole,
-	}
 	return map[string]ObservabilityV8EffectiveProfile{
 		"none":      {Name: "none", BuiltIn: true, Detectors: []ObservabilityV8DetectorGroup{}, FieldClasses: preserveAll},
 		"sensitive": {Name: "sensitive", BuiltIn: true, Detectors: allDetectors, FieldClasses: sensitive},
 		"content":   {Name: "content", BuiltIn: true, Detectors: allDetectors, FieldClasses: content},
 		"strict":    {Name: "strict", BuiltIn: true, Detectors: allDetectors, FieldClasses: strict},
-		"legacy-v7": {Name: "legacy-v7", BuiltIn: true, Detectors: []ObservabilityV8DetectorGroup{}, FieldClasses: legacyV7},
 	}
 }
 

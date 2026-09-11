@@ -24,6 +24,9 @@
 //                                           Rego domain so the Live Test
 //                                           pane has something to render
 //                                           the moment it loads.
+//   docs-site/data/policy-use-case-packs.json — opt-in high-assurance
+//                                           rule files operators can layer
+//                                           onto a custom policy.
 //   docs-site/public/opa/<domain>.wasm    — compiled WASM modules for
 //                                           every Rego domain reachable
 //                                           via opa-wasm in the browser.
@@ -50,6 +53,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DOCS_SITE = resolve(HERE, '..');
 const REPO_ROOT = resolve(DOCS_SITE, '..');
 const POLICIES = resolve(REPO_ROOT, 'policies');
+const USE_CASE_PACKS = resolve(POLICIES, 'guardrail-use-cases');
 const DATA_OUT = resolve(DOCS_SITE, 'data');
 const WASM_OUT = resolve(DOCS_SITE, 'public', 'opa');
 
@@ -211,14 +215,13 @@ interface Recipe {
   id: string;
   title: string;
   kind:
-    | 'rule:secrets'
+    | 'rule:secret'
     | 'rule:injection'
-    | 'rule:exfiltration'
     | 'rule:command'
-    | 'rule:path'
+    | 'rule:sensitive-path'
     | 'rule:enterprise-data'
     | 'rule:trust-exploit'
-    | 'rule:cognitive'
+    | 'rule:cognitive-file'
     | 'rule:c2'
     | 'pre_judge_strip'
     | 'finding_suppression'
@@ -233,6 +236,60 @@ interface Recipe {
   tool_capability_class?: Array<
     'read_fs' | 'write_fs' | 'exec_shell' | 'network_fetch' | 'send_message'
   >;
+}
+
+interface UseCasePack {
+  id: string;
+  title: string;
+  status: 'selectable' | 'staged';
+  summary: string;
+  files: Array<{
+    filename: string;
+    category: string;
+    rules: Array<Record<string, unknown>>;
+  }>;
+}
+
+function buildUseCasePacks(): UseCasePack[] {
+  const packs: UseCasePack[] = [];
+  for (const id of readDirSafely(USE_CASE_PACKS).sort()) {
+    const packDir = join(USE_CASE_PACKS, id);
+    if (!statSync(packDir).isDirectory()) continue;
+
+    const readme = existsSync(join(packDir, 'README.md'))
+      ? readFileSync(join(packDir, 'README.md'), 'utf-8')
+      : '';
+    const title = readme.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? id;
+    const summary = readme
+      .replace(/^#\s+.+$/m, '')
+      .trim()
+      .split(/\n\s*\n/, 1)[0]
+      ?.replace(/\s+/g, ' ')
+      .trim() ?? '';
+    const files: UseCasePack['files'] = [];
+    const rulesDir = join(packDir, 'rules');
+    for (const entry of readDirSafely(rulesDir).sort()) {
+      if (!entry.endsWith('.yaml')) continue;
+      const parsed = readYaml(join(rulesDir, entry));
+      if (!parsed) continue;
+      const rules = Array.isArray(parsed.rules)
+        ? (parsed.rules as Array<Record<string, unknown>>)
+        : [];
+      files.push({
+        filename: entry.replace(/\.yaml$/, ''),
+        category: String(parsed.category ?? entry.replace(/\.yaml$/, '')),
+        rules,
+      });
+    }
+    packs.push({
+      id,
+      title,
+      status: files.some((file) => file.rules.length > 0) ? 'selectable' : 'staged',
+      summary,
+      files,
+    });
+  }
+  return packs;
 }
 
 // Rule-axes mapping is sourced from the Go authority at
@@ -679,6 +736,7 @@ interface BuildResult {
   presets: Array<{ name: string; description: string; bundle: PresetBundle }>;
   recipes: Recipe[];
   scenarios: Scenario[];
+  useCasePacks: UseCasePack[];
 }
 
 function buildAll(): BuildResult {
@@ -695,8 +753,9 @@ function buildAll(): BuildResult {
   }
   const recipes = buildRecipes(strict);
   const scenarios = buildScenarios();
+  const useCasePacks = buildUseCasePacks();
 
-  return { presets, recipes, scenarios };
+  return { presets, recipes, scenarios, useCasePacks };
 }
 
 function ensureDir(path: string) {
@@ -817,7 +876,7 @@ function main() {
   ensureDir(DATA_OUT);
 
   console.log('[policy-assets] building presets, recipes, scenarios…');
-  const { presets, recipes, scenarios } = buildAll();
+  const { presets, recipes, scenarios, useCasePacks } = buildAll();
   // Note: no `generated_at` timestamps in any of these JSON files.
   // Dropping the timestamps means a clean PR diff only shows real
   // schema/content changes, which is the whole point of bundling
@@ -825,7 +884,8 @@ function main() {
   writeJson(join(DATA_OUT, 'policy-presets.json'), { presets });
   writeJson(join(DATA_OUT, 'policy-recipes.json'), { recipes });
   writeJson(join(DATA_OUT, 'policy-scenarios.json'), { scenarios });
-  console.log(`[policy-assets]   presets=${presets.length}  recipes=${recipes.length}  scenarios=${scenarios.length}`);
+  writeJson(join(DATA_OUT, 'policy-use-case-packs.json'), { packs: useCasePacks });
+  console.log(`[policy-assets]   presets=${presets.length}  recipes=${recipes.length}  scenarios=${scenarios.length}  use-case-packs=${useCasePacks.length}`);
 
   console.log('[policy-assets] compiling Rego → WASM…');
   const { compiled, skipped } = compileWasm({ skipMissingOpa });

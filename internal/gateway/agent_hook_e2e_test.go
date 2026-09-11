@@ -478,7 +478,7 @@ func TestHandleAgentHook_AntigravityRequiresRegisteredEvent(t *testing.T) {
 	}
 }
 
-func TestHandleAgentHook_AntigravityReportsForcedSingleFileDeletionAsAdvisory(t *testing.T) {
+func TestHandleAgentHook_AntigravityAllowsForcedSingleFileDeletionWithoutFinding(t *testing.T) {
 	cfg := &config.Config{}
 	cfg.Guardrail.Mode = "action"
 	cfg.Guardrail.Connector = "antigravity"
@@ -521,10 +521,10 @@ func TestHandleAgentHook_AntigravityReportsForcedSingleFileDeletionAsAdvisory(t 
 		t.Fatalf("response not valid JSON: %v body=%s", err, w.Body.String())
 	}
 	if parsed.Action != "allow" || parsed.RawAction != "allow" || parsed.HookOutput.Decision != "allow" {
-		t.Fatalf("forced single-file deletion was not advisory-only: %+v body=%s", parsed, w.Body.String())
+		t.Fatalf("forced single-file deletion was not allowed: %+v body=%s", parsed, w.Body.String())
 	}
-	if !containsString(parsed.Findings, "CMD-WIN-RM-FORCE:PowerShell forced deletion") {
-		t.Fatalf("forced single-file deletion finding missing: %+v body=%s", parsed, w.Body.String())
+	if len(parsed.Findings) != 0 {
+		t.Fatalf("forced single-file deletion produced a noisy finding: %+v body=%s", parsed, w.Body.String())
 	}
 }
 

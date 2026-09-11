@@ -22,6 +22,7 @@ param(
     [string]$ProviderLibrary,
     [string]$GatewayBinary,
     [string]$HookBinary,
+    [string]$SensorHelperBinary,
     [string]$CLIBinary,
     [string]$NativeCleanupBinary,
     [string]$Config,
@@ -3071,6 +3072,7 @@ try {
         ProviderLibrary = $ProviderLibrary
         GatewayBinary = $GatewayBinary
         HookBinary = $HookBinary
+        SensorHelperBinary = $SensorHelperBinary
         CLIBinary = $CLIBinary
         NativeCleanupBinary = $NativeCleanupBinary
         Config = $Config

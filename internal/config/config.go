@@ -27,6 +27,7 @@ import (
 	"runtime"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/spf13/viper"
 	"gopkg.in/yaml.v3"
@@ -361,6 +362,177 @@ type AIDiscoveryConfig struct {
 	ConfidencePolicyPath        string   `mapstructure:"confidence_policy_path"    yaml:"confidence_policy_path,omitempty"`
 	RequireTrustedBinaryPaths   bool     `mapstructure:"require_trusted_binary_paths" yaml:"require_trusted_binary_paths"`
 	TrustedBinaryPrefixes       []string `mapstructure:"trusted_binary_prefixes" yaml:"trusted_binary_prefixes,omitempty"`
+
+	// Runtime controls the runtime planes -- the half of AI discovery that
+	// observes what actually ran, next to this block's inventory of what is
+	// present. Disabled by default; see AIRuntimeConfig.
+	Runtime AIRuntimeConfig `mapstructure:"runtime" yaml:"runtime,omitempty"`
+}
+
+// AIRuntimeConfig controls the AI Discovery runtime planes.
+//
+// Where the surrounding AIDiscoveryConfig inventories what is installed, these
+// planes observe behaviour: sustained inference compute, per-process egress to
+// a provider, and -- where the platform and privilege allow it -- the sequence
+// of host actions an agent takes. The two are joined in process, so a signal
+// can report whether an inventoried component was ever actually used and
+// whether observed behaviour has any inventoried explanation.
+//
+// This surface reads more than the inventory scanner does, and the extra reads
+// are individually gated:
+//
+//   - Process argv is read, which the inventory detector deliberately does not
+//     collect. It is what makes an agent framework inside a bare python3
+//     visible. Argv is classified as content and passes through the same v8
+//     field-class projection as everything else, so each destination's
+//     redaction profile governs whether it leaves the host.
+//   - DNSCapture opens a packet capture to name egress peers exactly rather
+//     than inferring them from an address. It needs elevated privilege and is
+//     off by default.
+//   - EnableHostPlane turns on kernel process, file, and identity events. Every
+//     host-plane signal is gated on an AI agent appearing in the process
+//     lineage, which is the primary false-positive control: a developer running
+//     sudo produces nothing, the same sudo under an agent produces a signal.
+//
+// Environment variable values are never read on any of these paths, matching
+// the inventory detector's names-only rule.
+type AIRuntimeConfig struct {
+	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
+
+	// PollIntervalSec is how often the planes are sampled. Plane A works on
+	// the CPU delta between two polls, so this also sets the window that
+	// distinguishes sustained inference from a momentary spike.
+	PollIntervalSec int `mapstructure:"poll_interval_s" yaml:"poll_interval_s,omitempty"`
+
+	// MinRiskToReport is the score a finding must reach to be emitted.
+	// Defaults to the medium band.
+	MinRiskToReport int `mapstructure:"min_risk_to_report" yaml:"min_risk_to_report,omitempty"`
+
+	// Planes selects which of "a", "b", "c" run. Empty means A and B, which
+	// need no privilege beyond what the gateway already has.
+	Planes []string `mapstructure:"planes" yaml:"planes,omitempty"`
+
+	// EnableHostPlane is the explicit opt-in for Plane C.
+	EnableHostPlane bool `mapstructure:"enable_host_plane" yaml:"enable_host_plane"`
+
+	// DNSCapture enables passive DNS observation so an egress peer is named
+	// from the answer the process actually received rather than inferred.
+	DNSCapture bool `mapstructure:"dns_capture" yaml:"dns_capture"`
+
+	// ChainWindowMin bounds how long a kill chain may take. A chain is a chain
+	// within a window rather than over the lifetime of a long-running agent.
+	ChainWindowMin int `mapstructure:"chain_window_min" yaml:"chain_window_min,omitempty"`
+
+	// SanctionedEndpoints are gateway hostnames through which AI use is
+	// approved. Reaching one is recorded as inventory rather than alarm; going
+	// around one that exists is scored as a bypass.
+	SanctionedEndpoints []string `mapstructure:"sanctioned_endpoints" yaml:"sanctioned_endpoints,omitempty"`
+
+	// Correlate joins runtime observations against the inventory snapshot.
+	// Defaults on. Disabling it removes the read entirely; it does not make
+	// findings score as though the inventory disagreed.
+	Correlate *bool `mapstructure:"correlate" yaml:"correlate,omitempty"`
+
+	// Acquisition selects where the privileged reads come from:
+	//
+	//   auto     read directly when this process can, ask the helper when a
+	//            managed deployment has de-privileged the gateway
+	//   direct   always read directly
+	//   helper   always ask the helper, and report blindness if it is absent
+	//
+	// Empty means auto. The distinction matters because the two failure
+	// modes read differently to an operator: "direct" on a sandboxed gateway
+	// is a plane that sees nothing, and "helper" with no helper running is a
+	// plane that says so.
+	Acquisition string `mapstructure:"acquisition" yaml:"acquisition,omitempty"`
+
+	// HelperSocket overrides where the helper listens. Empty means the
+	// deployment default.
+	HelperSocket string `mapstructure:"helper_socket" yaml:"helper_socket,omitempty"`
+}
+
+// Acquisition modes.
+const (
+	AcquisitionAuto   = "auto"
+	AcquisitionDirect = "direct"
+	AcquisitionHelper = "helper"
+)
+
+// EffectiveAcquisition resolves the acquisition mode, applying the default.
+func (c AIRuntimeConfig) EffectiveAcquisition() string {
+	switch c.Acquisition {
+	case AcquisitionDirect, AcquisitionHelper:
+		return c.Acquisition
+	default:
+		return AcquisitionAuto
+	}
+}
+
+// Defaults for the runtime planes, applied when a field is left at zero.
+const (
+	DefaultRuntimePollIntervalSec = 30
+	DefaultRuntimeMinRiskToReport = 30
+	DefaultRuntimeChainWindowMin  = 60
+)
+
+// EffectivePollInterval resolves the poll interval, applying the default.
+func (c AIRuntimeConfig) EffectivePollInterval() time.Duration {
+	if c.PollIntervalSec <= 0 {
+		return DefaultRuntimePollIntervalSec * time.Second
+	}
+	return time.Duration(c.PollIntervalSec) * time.Second
+}
+
+// EffectiveMinRisk resolves the reporting floor, applying the default.
+func (c AIRuntimeConfig) EffectiveMinRisk() int {
+	if c.MinRiskToReport <= 0 {
+		return DefaultRuntimeMinRiskToReport
+	}
+	return c.MinRiskToReport
+}
+
+// EffectiveChainWindow resolves the chain window, applying the default.
+func (c AIRuntimeConfig) EffectiveChainWindow() time.Duration {
+	if c.ChainWindowMin <= 0 {
+		return DefaultRuntimeChainWindowMin * time.Minute
+	}
+	return time.Duration(c.ChainWindowMin) * time.Minute
+}
+
+// CorrelationEnabled resolves the correlate opt-out, which defaults on.
+func (c AIRuntimeConfig) CorrelationEnabled() bool {
+	return c.Correlate == nil || *c.Correlate
+}
+
+// EffectivePlanes resolves which planes run.
+//
+// An empty selection means A and B. Plane C is never implied: it reads kernel
+// process, file, and identity events and must be asked for explicitly, both
+// here and through EnableHostPlane.
+func (c AIRuntimeConfig) EffectivePlanes() []string {
+	if len(c.Planes) == 0 {
+		if c.EnableHostPlane {
+			return []string{"a", "b", "c"}
+		}
+		return []string{"a", "b"}
+	}
+	selected := make([]string, 0, 3)
+	for _, plane := range []string{"a", "b", "c"} {
+		for _, candidate := range c.Planes {
+			if strings.EqualFold(strings.TrimSpace(candidate), plane) {
+				if plane == "c" && !c.EnableHostPlane {
+					// Selecting plane c without the host-plane opt-in is a
+					// configuration mistake worth ignoring loudly rather than
+					// silently honouring: the opt-in is where the privilege
+					// and privacy decision is recorded.
+					break
+				}
+				selected = append(selected, plane)
+				break
+			}
+		}
+	}
+	return selected
 }
 
 // LLMConfig is the unified LLM configuration block used at the top level

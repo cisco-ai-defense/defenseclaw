@@ -146,6 +146,7 @@ type HealthSnapshot struct {
 	Routing               SubsystemHealth  `json:"routing"`
 	Telemetry             SubsystemHealth  `json:"telemetry"`
 	AIDiscovery           SubsystemHealth  `json:"ai_discovery"`
+	AIRuntime             SubsystemHealth  `json:"ai_runtime"`
 	ApplicationProtection SubsystemHealth  `json:"application_protection"`
 	Sandbox               *SubsystemHealth `json:"sandbox,omitempty"`
 	// Configuration is the overall daemon+guardian readiness state,
@@ -174,6 +175,23 @@ type HealthSnapshot struct {
 	// connector with its own live counters (multi-connector view).
 	Connector  *ConnectorHealth  `json:"connector,omitempty"`
 	Connectors []ConnectorHealth `json:"connectors,omitempty"`
+	// Interception is the plugin self-test / last agent-proxy hop
+	// signal for OpenClaw. Omitted until the interceptor reports a
+	// result or the proxy sees an authenticated X-DC-Target-URL hop.
+	Interception *InterceptionHealth `json:"interception,omitempty"`
+}
+
+// InterceptionSelfTestFreshness is three plugin self-test cadences.
+// A stopped interceptor must not keep /health.interception.verified true.
+const InterceptionSelfTestFreshness = 3 * time.Minute
+
+// InterceptionHealth is the additive doctor signal that a live
+// :4000 listener is actually receiving interceptor-rewritten LLM
+// traffic, not just answering /health/liveliness.
+type InterceptionHealth struct {
+	Verified           bool   `json:"verified"`
+	LastVerifiedAt     string `json:"last_verified_at,omitempty"`
+	LastAgentTrafficAt string `json:"last_agent_traffic_at,omitempty"`
 }
 
 type SidecarHealth struct {
@@ -186,6 +204,7 @@ type SidecarHealth struct {
 	routing                               SubsystemHealth
 	telemetry                             SubsystemHealth
 	aiDiscovery                           SubsystemHealth
+	aiRuntime                             SubsystemHealth
 	applicationProtection                 SubsystemHealth
 	sandbox                               *SubsystemHealth
 	startedAt                             time.Time
@@ -233,6 +252,11 @@ type SidecarHealth struct {
 	// snapshot from clobbering a fresh StateReady sample the
 	// installer already applied (CR spec-003:PRRT_kwDORuAK-s6al7aV).
 	guardianStateReaderEpoch uint64
+
+	interceptionReported    bool
+	interceptionVerified    bool
+	interceptionVerifiedAt  time.Time
+	lastAgentProxyTrafficAt time.Time
 
 	// subscribers receive a non-blocking notification after every Set*
 	// call, so long-lived consumers (like the IPC GetHealth stream)
@@ -704,6 +728,34 @@ func (h *SidecarHealth) SetGuardrail(state SubsystemState, lastErr string, detai
 	h.notifySubscribers()
 }
 
+// RecordInterceptionResult stores the plugin's sentinel self-test.
+// A true result means a classified LLM URL was rewritten to the
+// local guardrail proxy before any upstream hop.
+func (h *SidecarHealth) RecordInterceptionResult(ok bool) {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.interceptionReported = true
+	h.interceptionVerified = ok
+	h.interceptionVerifiedAt = time.Now().UTC()
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// RecordAgentProxyTraffic records that an authenticated proxy
+// request arrived with X-DC-Target-URL, which is the interceptor's
+// rewrite marker for real agent LLM traffic.
+func (h *SidecarHealth) RecordAgentProxyTraffic() {
+	if h == nil {
+		return
+	}
+	h.mu.Lock()
+	h.lastAgentProxyTrafficAt = time.Now().UTC()
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
 func (h *SidecarHealth) SetRouting(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.routing = SubsystemHealth{
@@ -945,6 +997,24 @@ const configObservabilityV8MaxHealthDestinations = 65
 func (h *SidecarHealth) SetAIDiscovery(state SubsystemState, lastErr string, details map[string]interface{}) {
 	h.mu.Lock()
 	h.aiDiscovery = SubsystemHealth{
+		State:     state,
+		Since:     time.Now(),
+		LastError: lastErr,
+		Details:   details,
+	}
+	h.mu.Unlock()
+	h.notifySubscribers()
+}
+
+// SetAIRuntime records the runtime planes' state.
+//
+// Reported separately from AIDiscovery because the two answer different
+// questions and fail independently: the inventory scanner can be healthy while
+// every runtime plane is blind, and an operator reading one as the other would
+// draw exactly the wrong conclusion about coverage.
+func (h *SidecarHealth) SetAIRuntime(state SubsystemState, lastErr string, details map[string]interface{}) {
+	h.mu.Lock()
+	h.aiRuntime = SubsystemHealth{
 		State:     state,
 		Since:     time.Now(),
 		LastError: lastErr,
@@ -1359,6 +1429,7 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 		Routing:               h.routing,
 		Telemetry:             h.telemetry,
 		AIDiscovery:           h.aiDiscovery,
+		AIRuntime:             h.aiRuntime,
 		ApplicationProtection: h.applicationProtection,
 		Sandbox:               h.sandbox,
 		Managed:               h.managed,
@@ -1416,6 +1487,20 @@ func (h *SidecarHealth) Snapshot() HealthSnapshot {
 			ch := s.snapshot()
 			snap.Connector = &ch
 		}
+	}
+	if h.interceptionReported || !h.lastAgentProxyTrafficAt.IsZero() {
+		verified := h.interceptionVerified
+		if verified && (h.interceptionVerifiedAt.IsZero() || time.Since(h.interceptionVerifiedAt) > InterceptionSelfTestFreshness) {
+			verified = false
+		}
+		info := &InterceptionHealth{Verified: verified}
+		if !h.interceptionVerifiedAt.IsZero() {
+			info.LastVerifiedAt = h.interceptionVerifiedAt.UTC().Format(time.RFC3339)
+		}
+		if !h.lastAgentProxyTrafficAt.IsZero() {
+			info.LastAgentTrafficAt = h.lastAgentProxyTrafficAt.UTC().Format(time.RFC3339)
+		}
+		snap.Interception = info
 	}
 	h.mu.RUnlock()
 

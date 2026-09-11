@@ -60,11 +60,11 @@ env:
   # Expected fixture SHA-256. Regenerate via
   # scripts/generate-repro-fixture.sh; update this constant in the same
   # PR that regenerates.
-  FIXTURE_EXPECTED_SHA256: 7dfdcb2342ed995dd8b001c856cc7fb934f1518307c33ad7f493938e278b5397
-  # Single source of truth for the six payload filenames the fixture and
+  FIXTURE_EXPECTED_SHA256: 7db7ccea0d2f910679ec783aab1c7a52ebf5da8e8ec1c9c68fa2d5f13c29c4fd
+  # Single source of truth for the seven payload filenames the fixture and
   # the emit-payload-metadata gate agree on. Referenced by both emit-linux
   # and emit-macos so a future edit stays in one place.
-  EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw.exe,install-enterprise.ps1"
+  EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw-sensor-helper.exe,defenseclaw.exe,install-enterprise.ps1"
 
 jobs:
   # Fast lint job that runs both reproducibility lints on every PR to
@@ -274,8 +274,8 @@ jobs:
           mkdir -p "$workdir"
           zstd -q --long=27 -d -c internal/build-repro/testdata/signed-payload-fixture.tar.zst \
             | tar -x -C "$workdir"
-          # The fixture ships 6 tiny placeholder files under payload/.
-          # assemble.sh checks for exactly these six names.
+          # The fixture ships 7 tiny placeholder files under payload/.
+          # assemble.sh checks for exactly these seven names.
           ls "$workdir/payload"
           # go build -mod=vendor (from repro-flags.sh) requires a vendor/
           # tree. The outer Setup EXE has no external deps (stdlib only

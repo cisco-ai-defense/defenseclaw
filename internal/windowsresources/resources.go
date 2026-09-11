@@ -46,10 +46,14 @@ type Component string
 const (
 	ComponentGateway    Component = "gateway"
 	ComponentCMIDBroker Component = "cmid-broker"
-	ComponentHook       Component = "hook"
-	ComponentLauncher   Component = "launcher"
-	ComponentStartup    Component = "startup"
-	ComponentSetup      Component = "setup"
+	// ComponentSensorHelper is the privileged AI runtime acquisition
+	// service. It exists so the gateway does not have to hold the
+	// privilege the runtime planes need; see internal/sensor/acquire.
+	ComponentSensorHelper Component = "sensor-helper"
+	ComponentHook         Component = "hook"
+	ComponentLauncher     Component = "launcher"
+	ComponentStartup      Component = "startup"
+	ComponentSetup        Component = "setup"
 	// ComponentEnterpriseSetup is deliberately distinct from ComponentSetup.
 	// The ordinary Setup is a per-user, asInvoker application; the enterprise
 	// bootstrap owns machine-wide services and ACLs and must therefore run only
@@ -64,6 +68,7 @@ const (
 var AllComponents = []Component{
 	ComponentGateway,
 	ComponentCMIDBroker,
+	ComponentSensorHelper,
 	ComponentHook,
 	ComponentLauncher,
 	ComponentStartup,
@@ -135,6 +140,13 @@ var componentMetadataByName = map[Component]componentMetadata{
 		FileDescription:  "DefenseClaw Credential Broker",
 		InternalName:     "defenseclaw-cmid-broker",
 		OriginalFilename: "defenseclaw-cmid-broker.exe",
+	},
+	ComponentSensorHelper: {
+		AssemblyName:     "Cisco.DefenseClaw.SensorHelper",
+		Description:      "DefenseClaw privileged AI runtime acquisition helper",
+		FileDescription:  "DefenseClaw Sensor Helper",
+		InternalName:     "defenseclaw-sensor-helper",
+		OriginalFilename: "defenseclaw-sensor-helper.exe",
 	},
 	ComponentHook: {
 		AssemblyName:     "Cisco.DefenseClaw.Hook",

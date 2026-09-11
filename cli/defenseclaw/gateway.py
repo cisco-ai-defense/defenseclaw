@@ -354,6 +354,33 @@ class OrchestratorClient:
         resp.raise_for_status()
         return resp.json()
 
+    def ai_runtime(self) -> dict[str, Any]:
+        """Fetch the most recent runtime-plane snapshot.
+
+        The response carries coverage -- how much of the process and
+        connection table this run could see -- alongside the findings, so a
+        caller cannot render one without the other. A quiet host and a blind
+        sensor look identical if you only read the findings.
+        """
+        resp = self._session.get(
+            f"{self.base_url}/api/v1/ai-usage/runtime",
+            timeout=self.timeout,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def scan_ai_runtime(self) -> dict[str, Any]:
+        """Trigger one immediate runtime-plane poll and return its result."""
+        resp = self._session.post(
+            f"{self.base_url}/api/v1/ai-usage/runtime/scan",
+            json={},
+            timeout=120,
+            allow_redirects=False,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
     def ai_usage_components(self) -> dict[str, Any]:
         """Fetch the deduped components rollup (one row per
         (ecosystem, name, version)).

@@ -57,6 +57,7 @@ EXPECTED_DASHBOARD_UIDS = {
     "defenseclaw-agent-360",
     "defenseclaw-agent-identity",
     "defenseclaw-ai-discovery",
+    "defenseclaw-ai-runtime",
     "defenseclaw-connector-detail",
     "defenseclaw-connectors",
     "defenseclaw-findings",

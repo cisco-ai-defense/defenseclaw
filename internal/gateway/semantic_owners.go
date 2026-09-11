@@ -35,6 +35,8 @@ type semanticOwner struct {
 	unmatchedClaims        []string
 	prerequisite           semanticOwnerPrerequisite
 	suppressFallback       semanticOwnerPrerequisite
+	detectionOnly          bool
+	alertOnly              bool
 }
 
 func (o semanticOwner) eligible(facts actionfacts.Facts) bool {
@@ -116,9 +118,13 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		suppressFallback: fileUploadSafeNegative,
 	},
 	"CMD-PIPE-CURL": {
-		equivalentAliases: []string{"CMD-WIN-IWR-IEX"},
-		prerequisite:      curlDownloadExecPrerequisite,
-		suppressFallback:  authoritativeSemanticSafeNegative,
+		prerequisite:     curlDownloadExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Download-and-execute is a strong risk signal, but a known installer
+		// has the same observable shape. Keep the generic POSIX compatibility
+		// rule detection-only. Native PowerShell download-and-execute retains
+		// its distinct CMD-WIN-IWR-IEX proof and enforcement contract.
+		detectionOnly: true,
 	},
 	"CMD-PIPE-WGET": {
 		prerequisite:     wgetDownloadExecPrerequisite,
@@ -127,6 +133,14 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"CMD-PIPE-BASE64": {
 		prerequisite:     base64DecodeExecPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"exec.remote_ip_download_execute_same_artifact": {
+		prerequisite:     remoteIPStagedExecPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The exact source and executed path are static, but shell control flow
+		// may still be conditional at pre-execution time. Preserve the finding
+		// for policy/correlation without authorizing a synchronous deny.
+		detectionOnly: true,
 	},
 	"CMD-REVSHELL-BASH": {
 		equivalentAliases: []string{"CMD-REVSHELL-NC", "CMD-SOCAT-EXEC"},
@@ -157,6 +171,9 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 	"secrets.cloud_secret_manager_read": {
 		prerequisite:     cloudSecretManagerPrerequisite,
 		suppressFallback: cloudSecretManagerPreviewSafeNegative,
+		// A value read can be ordinary deployment or debugging work. Keep the
+		// signal for correlation; do not infer exfiltration from the read alone.
+		detectionOnly: true,
 	},
 	"exfil.secret_read_and_egress_oneliner": {
 		prerequisite:     sensitiveReadAndEgressPrerequisite,
@@ -166,7 +183,11 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 
 func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwner {
 	registerSemanticOwners(owners, semanticReconImpactOwners)
+	registerSemanticOwners(owners, semanticCloudIAMOwners)
 	registerSemanticOwners(owners, semanticIntegrityPersistenceOwners)
+	registerSemanticOwners(owners, semanticProtectiveProfileOwners)
+	registerSemanticOwners(owners, semanticDatabaseOwners)
+	registerSemanticOwners(owners, semanticKubernetesOwners)
 	for ownerID, aliases := range semanticIntegrityPersistenceFallbackAliasesOnMatch {
 		owner, ok := owners[ownerID]
 		if !ok {
@@ -360,8 +381,14 @@ func reverseTunnelNonExternalPrerequisite(facts actionfacts.Facts) bool {
 
 func agentRuntimeBypassPrerequisite(facts actionfacts.Facts) bool {
 	for _, command := range facts.Commands {
-		if command.Effect == actionfacts.EffectExecute &&
-			hasOperation(command, actionfacts.OperationPolicyBypass) {
+		if command.Effect != actionfacts.EffectExecute ||
+			!hasOperation(command, actionfacts.OperationPolicyBypass) {
+			continue
+		}
+		switch command.Program {
+		case "codex", "codex.exe", "claude", "claude.exe",
+			"gemini", "gemini.exe", "opencode", "opencode.exe",
+			"npx", "pnpm", "bunx":
 			return true
 		}
 	}
@@ -907,7 +934,8 @@ func isDefinitelyNonSensitivePath(
 }
 
 func matchesAnySensitivePathCandidate(value string) bool {
-	return matchesEnvironmentFile(value) ||
+	return canonicalSemanticPath(value) == "/etc/shadow" ||
+		matchesEnvironmentFile(value) ||
 		matchesSSHPrivateKey(value) ||
 		matchesAWSCredentials(value) ||
 		matchesKubeConfig(value) ||

@@ -21,6 +21,11 @@ The guided trace normalizes a connector event, matches a deterministic rule, che
 
 <Cards>
   <Card
+    title="Deterministic detection reference"
+    href="/docs/policies/deterministic-detection"
+    description="Inventory every shipped deterministic layer: ActionFacts, CEL, regex, exact semantic proofs, YARA, bounded chains, profiles, and protection packs."
+  />
+  <Card
     title="CEL tool-call policies"
     href="/docs/policies/cel"
     description="Author bounded CEL rules against trusted ActionFacts, understand the engine and regex fallback, and review connector lifecycle guarantees."
@@ -162,6 +167,14 @@ The guardrail rule pack is the *content* the gateway evaluates against — the
 [tool-call CEL expressions](/docs/policies/cel/authoring) and bounded regex fallbacks,
 judge prompts, and category taxonomies. Three packs ship out of the box:
 
+The balanced/default enabled catalog currently contains 184 local rules across
+seven families, including 81 CEL declarations and 61 tool-call-only rules.
+Exact ActionFacts validators, 18 bounded tool-call chains, five YARA
+description signatures, two post-event correlator patterns, and high-assurance
+policy packs extend that base. See the
+[deterministic detection reference](/docs/policies/deterministic-detection) for
+the complete inventory, proof boundaries, and source-of-truth paths.
+
 <Cards>
   <Card title="permissive" href="/docs/defaults" description="Permissive runtime posture: CRITICAL blocks, HIGH alerts, and lower severities allow. Pair with observe mode for a non-enforcing pilot." />
   <Card title="default" href="/docs/defaults" description="Balanced runtime posture: CRITICAL blocks, HIGH/MEDIUM alert, and LOW allows; HITL can turn eligible HIGH findings into confirm." />
@@ -212,8 +225,9 @@ injection:
   - "ignore all instructions"
   - "jailbreak"
 
-# Regex matches. Compiled at load time; bad regexes are logged and
-# dropped (the rest of the file still applies).
+# Regex matches. Compiled during candidate validation; any invalid
+# expression rejects the complete candidate. See
+# docs/policies/rulepack-validation.
 injection_regexes:
   - 'ignore\s+(?:all\s+)?(?:previous|prior|above|your)\s+(?:instructions|rules|directives|guidelines)'
 
@@ -237,6 +251,8 @@ exfiltration:
   - "/etc/passwd"
   - "exfiltrate"
 ```
+
+Regexes compile during [rule-pack validation](/docs/policies/rulepack-validation). Any invalid expression rejects the complete candidate; DefenseClaw does not log-and-drop a bad pattern while applying the rest of the file.
 
 Three-state semantics for each top-level key:
 
@@ -277,7 +293,13 @@ For each category a judge flags, it also emits a `signal_strength` label derived
 | ✗ | ✓ | `needs_review` |
 | ✗ | ✗ | `weak_signal` |
 
-The Go-side verdict aggregation uses these labels to keep weakly-corroborated flags from stacking to CRITICAL. A `weak_signal` on a single category downgrades to MEDIUM/alert; `strong_signal` on a structural category (destructive command, exfil channel) escalates to CRITICAL. The calibration metrics for this path are reproducible via `go test -run TestEval` — see the [evaluation corpus README](https://github.com/cisco-ai-defense/defenseclaw/blob/main/internal/gateway/testdata/security_suite/eval_corpus/README.md) for the scorecard.
+The Go-side tool-judge aggregation ignores `weak_signal`. A `needs_review`
+finding can alert but cannot block by itself. Blocking requires an actionable
+corroborated category or strong structural exfiltration/destruction evidence;
+ordinary authorized coding context therefore does not become a block merely
+because one ambiguous category fired. Read the
+[contextual judge benchmark](/docs/llm-judge-benchmark) for the production-path
+F1, false-positive, benign-block, latency, token, and cost results.
 
 Judge configuration is split by detector under `judge/`. For example, the
 injection judge declares its categories and severity mapping in

@@ -96,7 +96,7 @@ endef
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
-        security-suite-test security-suite-eval \
+        security-suite-test security-suite-eval contextual-judge-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
@@ -901,6 +901,8 @@ macos-app-test:
 	macos/DefenseClawMac/script/test_connector_onboarding.sh
 	macos/DefenseClawMac/script/test_first_run_connector_selection.sh
 	macos/DefenseClawMac/script/test_ai_discovery_models.sh
+	macos/DefenseClawMac/script/test_ai_runtime_models.sh
+	macos/DefenseClawMac/script/test_panel_registry.sh
 	macos/DefenseClawMac/script/test_numeric_safety.sh
 	macos/DefenseClawMac/script/test_output_safety.sh
 	macos/DefenseClawMac/script/test_secret_file_safety.sh
@@ -930,6 +932,14 @@ security-suite-test:
 # the full eval corpus. Requires DEFENSECLAW_LLM_KEY. Not run in CI.
 security-suite-eval:
 	GUARDRAIL_BENCHMARK_LLM=1 go test ./internal/gateway/ -run '^(TestSecuritySuiteJudge|TestEvalInjectionJudge|TestEvalPIIJudge|TestEvalExfilJudge|TestEvalToolInjectionJudge)$$' -count=1 -timeout 120m -v
+
+# contextual-judge-test validates sampling and value-free combined scoring.
+# Live production-path model runs remain opt-in; see benchmarks/llm_judge/.
+contextual-judge-test:
+	python3 -m unittest \
+		benchmarks.scripts.test_benchmark_prepare_contextual_judge \
+		benchmarks.scripts.test_benchmark_add_terminalbench_context \
+		benchmarks.scripts.test_benchmark_score_contextual_judge
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...

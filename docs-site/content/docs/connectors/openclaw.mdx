@@ -207,6 +207,11 @@ points are outside this inspection boundary. An egress event proves that the
 plugin observed a transport branch; it does not mean the request or response
 was proxied and inspected.
 
+OpenClaw ≥2026.6.8 is the release range that first required the undici
+dispatcher layer. `defenseclaw doctor` now fails the **OpenClaw
+interception** row when the plugin self-test cannot prove a rewrite onto
+`:4000`, even if `/health/liveliness` returns 200.
+
 ## What the plugin does
 
 <Sequence

@@ -233,14 +233,17 @@ func preflightInlineCommit(out *parseOutput, ir inlineIR, children []parseOutput
 	paths := len(out.paths) + len(ir.paths)
 	network := len(out.network) + len(ir.network)
 	flows := len(out.dataFlows) + len(ir.flows)
+	artifacts := len(out.artifacts)
 	for _, child := range children {
 		commands += len(child.commands)
 		paths += len(child.paths)
 		network += len(child.network)
 		flows += len(child.dataFlows)
+		artifacts += len(child.artifacts)
 	}
 	return commands <= maxCommands && paths <= maxPathFacts &&
-		network <= maxNetworkFacts && flows <= maxDataFlowFacts
+		network <= maxNetworkFacts && flows <= maxDataFlowFacts &&
+		artifacts <= maxArtifactFacts
 }
 
 func commitInlineIR(

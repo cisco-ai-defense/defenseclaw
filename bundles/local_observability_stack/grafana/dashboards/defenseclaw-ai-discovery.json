@@ -11,7 +11,7 @@
         "iconColor": "red",
         "name": "AI discovery alerts",
         "tagKeys": "alertname,severity",
-        "titleFormat": "{{alertname}} — {{severity}}",
+        "titleFormat": "{{alertname}} \u2014 {{severity}}",
         "useValueForTime": false
       }
     ]
@@ -20,6 +20,13 @@
   "fiscalYearStartMonth": 0,
   "graphTooltip": 1,
   "links": [
+    {
+      "title": "Runtime planes",
+      "type": "link",
+      "url": "/d/defenseclaw-ai-runtime?${__url_time_range}",
+      "icon": "external link",
+      "targetBlank": false
+    },
     {
       "title": "Agent Activity (Live)",
       "type": "link",
@@ -111,7 +118,7 @@
       {
         "name": "vendor",
         "label": "AI vendor",
-        "description": "Filter signal panels by ai.vendor (anthropic, openai, microsoft, ...). Safe on empty ingest — defaults to All so panels render 'no data' rather than silently matching empty strings.",
+        "description": "Filter signal panels by ai.vendor (anthropic, openai, microsoft, ...). Safe on empty ingest \u2014 defaults to All so panels render 'no data' rather than silently matching empty strings.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -149,7 +156,7 @@
       {
         "name": "category",
         "label": "Signal category",
-        "description": "Filter by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Bounded enum — cardinality is safe to multi-select.",
+        "description": "Filter by signal.category (cli, ide_extension, sdk, mcp_server, runtime, browser_extension, shell_history). Bounded enum \u2014 cardinality is safe to multi-select.",
         "type": "query",
         "datasource": {
           "type": "prometheus",
@@ -326,7 +333,7 @@
     {
       "type": "stat",
       "title": "Scans / min",
-      "description": "Continuous AI discovery scan completions per minute (counter `defenseclaw.ai.discovery.runs`). On a healthy sidecar this should match `60 / ai_discovery.scan_interval_min` (default scan_interval_min=5 → ~0.2/min). 0 here while AI discovery is enabled is a **stalled** loop.",
+      "description": "Continuous AI discovery scan completions per minute (counter `defenseclaw.ai.discovery.runs`). On a healthy sidecar this should match `60 / ai_discovery.scan_interval_min` (default scan_interval_min=5 \u2192 ~0.2/min). 0 here while AI discovery is enabled is a **stalled** loop.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -451,7 +458,7 @@
     {
       "type": "stat",
       "title": "Detector errors / min",
-      "description": "Continuous AI discovery detector errors per minute (counter `defenseclaw.ai.discovery.errors`, labelled by detector + reason). Any sustained non-zero rate indicates a detector that is failing — open the 'Detector errors by reason' panel below to isolate.",
+      "description": "Continuous AI discovery detector errors per minute (counter `defenseclaw.ai.discovery.errors`, labelled by detector + reason). Any sustained non-zero rate indicates a detector that is failing \u2014 open the 'Detector errors by reason' panel below to isolate.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -503,7 +510,7 @@
     {
       "type": "stat",
       "title": "Files scanned / min",
-      "description": "Package manifests + shell history files inspected by the discovery loop per minute (counter `defenseclaw.ai.discovery.files_scanned`). Sudden drops below the steady-state imply the file walker is being blocked (permissions, full disk) — cross-reference with detector errors.",
+      "description": "Package manifests + shell history files inspected by the discovery loop per minute (counter `defenseclaw.ai.discovery.files_scanned`). Sudden drops below the steady-state imply the file walker is being blocked (permissions, full disk) \u2014 cross-reference with detector errors.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -551,7 +558,7 @@
     {
       "type": "timeseries",
       "title": "Scan completions by result",
-      "description": "Stacked rate of scan completions, broken down by `result` ∈ {ok, partial, failed}. A growing 'partial' wedge means at least one detector errored on each run. Source is `defenseclaw.ai.discovery.runs` (Counter).",
+      "description": "Stacked rate of scan completions, broken down by `result` \u2208 {ok, partial, failed}. A growing 'partial' wedge means at least one detector errored on each run. Source is `defenseclaw.ai.discovery.runs` (Counter).",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -584,7 +591,7 @@
     {
       "type": "timeseries",
       "title": "Scan duration (p50 / p95 / p99, ms)",
-      "description": "Wall-clock time of each continuous discovery scan (histogram `defenseclaw.ai.discovery.duration` in ms). p99 climbing past a few seconds usually means a detector is walking too many files — tune `ai_discovery.max_files_per_scan` or narrow `ai_discovery.scan_roots`.",
+      "description": "Wall-clock time of each continuous discovery scan (histogram `defenseclaw.ai.discovery.duration` in ms). p99 climbing past a few seconds usually means a detector is walking too many files \u2014 tune `ai_discovery.max_files_per_scan` or narrow `ai_discovery.scan_roots`.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -846,7 +853,7 @@
     {
       "type": "timeseries",
       "title": "Identity score quantiles (cumulative across scans)",
-      "description": "Two-axis Bayesian engine identity score (probability that a fingerprint is *the* named SDK) histogram-quantiled across every scan in Prometheus retention. p50 ≈ 0.6 + p95 ≈ 0.9 is healthy. A drop in p95 means recent scans had ambiguous fingerprints — usually a corrupt manifest or a detector regression. Histogram `defenseclaw.ai.confidence.identity_score` is bucketed for the [0,1] range. We deliberately quantile over the *cumulative* `_bucket` series rather than `rate(...)` because confidence is emitted once-per-scan: at idle a rate-based quantile collapses to NaN, while the cumulative form preserves the lifetime distribution and reacts immediately when a new scan moves a bucket.",
+      "description": "Two-axis Bayesian engine identity score (probability that a fingerprint is *the* named SDK) histogram-quantiled across every scan in Prometheus retention. p50 \u2248 0.6 + p95 \u2248 0.9 is healthy. A drop in p95 means recent scans had ambiguous fingerprints \u2014 usually a corrupt manifest or a detector regression. Histogram `defenseclaw.ai.confidence.identity_score` is bucketed for the [0,1] range. We deliberately quantile over the *cumulative* `_bucket` series rather than `rate(...)` because confidence is emitted once-per-scan: at idle a rate-based quantile collapses to NaN, while the cumulative form preserves the lifetime distribution and reacts immediately when a new scan moves a bucket.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -882,7 +889,7 @@
     {
       "type": "timeseries",
       "title": "Presence score quantiles (cumulative across scans)",
-      "description": "Two-axis Bayesian engine presence score (probability the SDK is *currently* deployed) histogram-quantiled across every scan in Prometheus retention. p50 collapsing to ~0 with identity_score still high is the canonical signal for 'SDK was uninstalled but the manifest is still on disk'. Histogram `defenseclaw.ai.confidence.presence_score` is bucketed for the [0,1] range. Quantile is computed against the cumulative `_bucket` counts (no `rate(...)`) so the panel renders at idle and updates the moment a new scan moves a bucket — see the Identity panel description for the why.",
+      "description": "Two-axis Bayesian engine presence score (probability the SDK is *currently* deployed) histogram-quantiled across every scan in Prometheus retention. p50 collapsing to ~0 with identity_score still high is the canonical signal for 'SDK was uninstalled but the manifest is still on disk'. Histogram `defenseclaw.ai.confidence.presence_score` is bucketed for the [0,1] range. Quantile is computed against the cumulative `_bucket` counts (no `rate(...)`) so the panel renders at idle and updates the moment a new scan moves a bucket \u2014 see the Identity panel description for the why.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1056,7 +1063,7 @@
     {
       "type": "timeseries",
       "title": "Component observations by identity band",
-      "description": "Bayesian-bucketed component observation rate (`defenseclaw.ai.components.observations`). 'very_low' / 'low' identity_band climbing relative to 'high' / 'very_high' usually means the catalog needs a refresh — fingerprints are matching, but the engine isn't confident enough to name them.",
+      "description": "Bayesian-bucketed component observation rate (`defenseclaw.ai.components.observations`). 'very_low' / 'low' identity_band climbing relative to 'high' / 'very_high' usually means the catalog needs a refresh \u2014 fingerprints are matching, but the engine isn't confident enough to name them.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1090,7 +1097,7 @@
     {
       "type": "timeseries",
       "title": "Component observations by presence band",
-      "description": "Same observation counter sliced by `presence_band`. A wedge of 'very_low' presence with stable identity is the 'manifest left over from an old install' shape — components are still cataloged but not actually deployed.",
+      "description": "Same observation counter sliced by `presence_band`. A wedge of 'very_low' presence with stable identity is the 'manifest left over from an old install' shape \u2014 components are still cataloged but not actually deployed.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -1182,7 +1189,7 @@
       "targets": [
         {
           "expr": "sum by (detector, reason) (increase(defenseclaw_ai_discovery_errors_total[1h])) or on() vector(0)",
-          "legendFormat": "{{detector}} · {{reason}}",
+          "legendFormat": "{{detector}} \u00b7 {{reason}}",
           "refId": "A"
         }
       ],
@@ -1489,7 +1496,7 @@
   },
   "timepicker": {},
   "timezone": "",
-  "title": "DefenseClaw — AI Agent Usage & Detection",
+  "title": "DefenseClaw \u2014 AI Agent Usage & Detection",
   "description": "Continuous AI inventory and discovery health: active signals, vendor/product attribution, confidence, detector throughput, errors, logs, and Tempo scan traces. No series means discovery is disabled or has not reported a scan; it is distinct from a measured zero.",
   "uid": "defenseclaw-ai-discovery",
   "version": 3,

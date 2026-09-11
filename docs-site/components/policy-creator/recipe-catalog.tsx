@@ -23,14 +23,13 @@ const AXIS_LABELS: Array<{ value: DataAxis | 'all'; label: string }> = [
 
 const KIND_LABELS: Array<{ value: Recipe['kind'] | 'all'; label: string }> = [
   { value: 'all', label: 'all' },
-  { value: 'rule:secrets', label: 'rule: secrets' },
+  { value: 'rule:secret', label: 'rule: secrets' },
   { value: 'rule:injection', label: 'rule: injection' },
-  { value: 'rule:exfiltration', label: 'rule: exfiltration' },
   { value: 'rule:command', label: 'rule: command' },
-  { value: 'rule:path', label: 'rule: path' },
+  { value: 'rule:sensitive-path', label: 'rule: sensitive paths' },
   { value: 'rule:enterprise-data', label: 'rule: enterprise-data' },
   { value: 'rule:trust-exploit', label: 'rule: trust-exploit' },
-  { value: 'rule:cognitive', label: 'rule: cognitive' },
+  { value: 'rule:cognitive-file', label: 'rule: cognitive files' },
   { value: 'rule:c2', label: 'rule: c2' },
   { value: 'pre_judge_strip', label: 'pre-judge strip' },
   { value: 'finding_suppression', label: 'finding suppression' },

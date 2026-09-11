@@ -121,36 +121,70 @@ func TestGatewayEventEnvelopeInternalCopyMatchesCanonical(t *testing.T) {
 	}
 }
 
-func TestGatewayEventEnvelopeDocumentsModelProvenanceAuthority(t *testing.T) {
+// TestTelemetryV8DocumentsModelProvenanceAuthority pins the tri-state contract
+// for the local-model derivation flags. It used to assert against the v7
+// gateway-event envelope's AIDiscoveryPayload; that payload is gone, but the
+// contract it protected is real and now lives in the v8 registry: a consumer
+// that reads absent as false would report an unquantized model for one whose
+// quantization was simply never observed.
+func TestTelemetryV8DocumentsModelProvenanceAuthority(t *testing.T) {
 	t.Parallel()
-	var root map[string]any
-	if err := json.Unmarshal(GatewayEventEnvelopeSchema(), &root); err != nil {
-		t.Fatalf("decode gateway envelope schema: %v", err)
+	raw, err := os.ReadFile("telemetry/v8/operations.yaml")
+	if err != nil {
+		t.Fatalf("read operations.yaml: %v", err)
 	}
-	definitions := schemaMap(t, root, "$defs")
-	discovery := schemaMap(t, definitions, "AIDiscoveryPayload")
-	discoveryProperties := schemaMap(t, discovery, "properties")
-	model := schemaMap(t, discoveryProperties, "model")
-	modelProperties := schemaMap(t, model, "properties")
-	provenance := schemaMap(t, modelProperties, "provenance")
-	provenanceProperties := schemaMap(t, provenance, "properties")
+	var doc struct {
+		Attributes []struct {
+			ID            string `yaml:"id"`
+			Normalization struct {
+				Notes     string `yaml:"notes"`
+				Overrides struct {
+					Enum []string `yaml:"enum"`
+				} `yaml:"overrides"`
+			} `yaml:"normalization"`
+		} `yaml:"attributes"`
+	}
+	if err := yaml.Unmarshal(raw, &doc); err != nil {
+		t.Fatalf("decode operations.yaml: %v", err)
+	}
+	notes := map[string]string{}
+	enums := map[string][]string{}
+	for _, attr := range doc.Attributes {
+		notes[attr.ID] = attr.Normalization.Notes
+		enums[attr.ID] = attr.Normalization.Overrides.Enum
+	}
 
-	for _, name := range []string{"quantized", "distilled"} {
-		description, _ := schemaMap(t, provenanceProperties, name)["description"].(string)
-		if !strings.Contains(description, "Authoritative when non-null") ||
-			!strings.Contains(description, "null means unknown") {
-			t.Errorf("%s authority/null contract is not explicit: %q", name, description)
+	for _, id := range []string{
+		"defenseclaw.ai.model.provenance.quantized",
+		"defenseclaw.ai.model.provenance.distilled",
+	} {
+		note, ok := notes[id]
+		if !ok {
+			t.Fatalf("%s is absent from the v8 registry", id)
+		}
+		for _, phrase := range []string{"tri-state", "absent means unknown"} {
+			if !strings.Contains(note, phrase) {
+				t.Errorf("%s authority/absence contract is missing %q: %q", id, phrase, note)
+			}
 		}
 	}
-	derivationDescription, _ := schemaMap(t, provenanceProperties, "derivation")["description"].(string)
-	for _, phrase := range []string{
-		"Normalized summary of the authoritative flags",
-		"distilled+quantized means both are true",
-		"null means neither flag is true",
-		"must not infer false from null",
-	} {
-		if !strings.Contains(derivationDescription, phrase) {
-			t.Errorf("derivation contract is missing %q: %q", phrase, derivationDescription)
+
+	const derivation = "defenseclaw.ai.model.provenance.derivation"
+	note, ok := notes[derivation]
+	if !ok {
+		t.Fatalf("%s is absent from the v8 registry", derivation)
+	}
+	if !strings.Contains(note, "at least one authoritative derivation flag is true") {
+		t.Errorf("derivation presence contract is not explicit: %q", note)
+	}
+	want := []string{"distilled", "quantized", "distilled+quantized"}
+	got := enums[derivation]
+	if len(got) != len(want) {
+		t.Fatalf("derivation enum = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("derivation enum = %v, want %v", got, want)
 		}
 	}
 }

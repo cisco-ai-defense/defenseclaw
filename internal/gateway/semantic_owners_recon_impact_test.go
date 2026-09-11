@@ -37,6 +37,9 @@ var reconImpactExpressionsForTest = map[string]string{
 	"impact.cryptomining_launch":            semanticCryptominingExpression,
 	"impact.mass_process_termination":       semanticMassProcessTerminationExpression,
 	"persistence.privileged_account_change": semanticPrivilegedAccountExpression,
+	"persistence.windows_accessibility_feature_hijack": semanticWindowsAccessibilityHijackExpression,
+	"privilege.windows_uac_autoelevation_hijack":       semanticWindowsUACAutoElevationExpression,
+	"tamper.windows_defender_component_disable":        semanticWindowsDefenderComponentDisableExpression,
 }
 
 func TestSemanticReconImpactExpressionsCompile(t *testing.T) {
@@ -88,6 +91,13 @@ func TestGeneratedDefaultSemanticRulesUseRegisteredOwners(t *testing.T) {
 		for ruleID := range owners {
 			candidate, ok := compiled[ruleID]
 			if !ok {
+				// CMD-SYSTEMCTL is intentionally fallback-only: its previous broad
+				// semantic expression treated routine service management as a
+				// security finding. Windows registry persistence now has its own
+				// exact semantic owner.
+				if ruleID == "CMD-SYSTEMCTL" {
+					continue
+				}
 				t.Fatalf("default semantic rule %q is missing", ruleID)
 			}
 			if candidate.owner.prerequisite == nil {
@@ -729,7 +739,9 @@ func TestExplicitFormatCOMDispatchesDeviceWipeFinding(t *testing.T) {
 
 func TestSudoFallbackDispositionRouting(t *testing.T) {
 	const connector = "sudo-fallback-disposition-test"
-	installDefaultProfileConnector(t, connector)
+	// Sudo discovery/elevation is intentionally a strict-profile signal. This
+	// test exercises its semantic/fallback routing, not balanced posture.
+	installToolCallCorpusProfileConnector(t, connector, "strict")
 
 	tests := []struct {
 		name, command  string

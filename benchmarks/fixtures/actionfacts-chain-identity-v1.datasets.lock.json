@@ -1,0 +1,28 @@
+{
+  "schema_version": "1",
+  "frozen_at": "2026-09-06",
+  "datasets": [
+    {
+      "id": "defenseclaw-actionfacts-chain-identity-v1",
+      "purpose": ["stateful", "actionfacts", "identity-continuity", "hard-negative"],
+      "source_url": "benchmarks/fixtures/actionfacts-chain-identity-v1.jsonl",
+      "revision": "1",
+      "fetch": "vendored",
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    },
+    {
+      "id": "eval-aware/linuxarena-trajectories",
+      "purpose": ["stateful", "public-trace-derived-counterfactual"],
+      "source_url": "https://huggingface.co/datasets/eval-aware/linuxarena-trajectories",
+      "revision": "45641faf10b7cc1645036c2cddfb9a77323494e1",
+      "fetch": "manual",
+      "license": "MIT",
+      "license_status": "approved",
+      "redistribution": "vendored",
+      "enabled": true
+    }
+  ]
+}

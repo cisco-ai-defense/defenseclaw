@@ -297,3 +297,80 @@ func TestAtomicFileAlreadyMatchesRejectsHugeSparseFileWithoutSizingAllocationFro
 		t.Fatal("huge sparse target-owned file matched a short canonical payload")
 	}
 }
+
+func TestRenameAtomicTransformBoundFileRetriesBusyWindowsErrors(t *testing.T) {
+	for _, transient := range []error{
+		windows.ERROR_ACCESS_DENIED,
+		windows.ERROR_SHARING_VIOLATION,
+		windows.ERROR_LOCK_VIOLATION,
+		windows.STATUS_ACCESS_DENIED,
+		windows.STATUS_SHARING_VIOLATION,
+	} {
+		transient := transient
+		t.Run(transient.Error(), func(t *testing.T) {
+			calls := 0
+			var sleeps []time.Duration
+			err := renameAtomicTransformBoundFileWithBusyRetryUsing(
+				nil, nil, "hooks.json", true,
+				func(*os.File, *os.File, string, bool) error {
+					calls++
+					if calls == 1 {
+						return transient
+					}
+					return nil
+				},
+				func(delay time.Duration) {
+					sleeps = append(sleeps, delay)
+				},
+			)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("rename calls=%d, want 2", calls)
+			}
+			if len(sleeps) != 1 || sleeps[0] != atomicFileRenameRetryDelay {
+				t.Fatalf("sleeps=%v, want [%s]", sleeps, atomicFileRenameRetryDelay)
+			}
+		})
+	}
+}
+
+func TestRenameAtomicTransformBoundFileDoesNotRetryPermanentErrors(t *testing.T) {
+	permanent := windows.ERROR_FILE_NOT_FOUND
+	calls := 0
+	sleeps := 0
+	got := renameAtomicTransformBoundFileWithBusyRetryUsing(
+		nil, nil, "hooks.json", true,
+		func(*os.File, *os.File, string, bool) error {
+			calls++
+			return permanent
+		},
+		func(time.Duration) { sleeps++ },
+	)
+	if !errors.Is(got, permanent) {
+		t.Fatalf("error=%v, want %v", got, permanent)
+	}
+	if calls != 1 || sleeps != 0 {
+		t.Fatalf("calls=%d sleeps=%d, want 1, 0", calls, sleeps)
+	}
+}
+
+func TestRenameAtomicTransformBoundFileStopsAtRetryBound(t *testing.T) {
+	wantErr := windows.ERROR_ACCESS_DENIED
+	calls := 0
+	got := renameAtomicTransformBoundFileWithBusyRetryUsing(
+		nil, nil, "hooks.json", true,
+		func(*os.File, *os.File, string, bool) error {
+			calls++
+			return wantErr
+		},
+		func(time.Duration) {},
+	)
+	if !errors.Is(got, wantErr) {
+		t.Fatalf("error=%v, want %v", got, wantErr)
+	}
+	if calls != atomicFileRenameMaxAttempts {
+		t.Fatalf("calls=%d, want %d", calls, atomicFileRenameMaxAttempts)
+	}
+}

@@ -2444,8 +2444,23 @@ if (config.get("ai_discovery") or {}).get("emit_otel") is not None:
     raise SystemExit("legacy ai_discovery.emit_otel remains in v8 config")
 
 observability = config.get("observability") or {}
-if (observability.get("defaults") or {}).get("redaction_profile") != "legacy-v7":
-    raise SystemExit("legacy-v7 compatibility redaction was not materialized")
+# The compatibility profile is now an explicit custom profile named
+# v7-compatible: the legacy-v7 built-in was removed, and the compiler refuses
+# a custom profile that tries to reclaim the retired name.
+if (observability.get("defaults") or {}).get("redaction_profile") != "v7-compatible":
+    raise SystemExit("v7-compatible redaction was not materialized")
+profiles = observability.get("redaction_profiles") or {}
+if "v7-compatible" not in profiles:
+    raise SystemExit("the v7-compatible profile was not written into redaction_profiles")
+classes = (profiles["v7-compatible"] or {}).get("field_classes") or {}
+# Every class v7 redacted must still be redacted. Identifiers are the one
+# departure and are preserved by design: no v8 profile redacts the class
+# records join on.
+for field_class in ("content", "reason", "evidence", "error", "path", "credential"):
+    if classes.get(field_class) != "whole":
+        raise SystemExit(
+            f"v7-compatible no longer redacts {field_class}; the upgrade would reveal it"
+        )
 if (observability.get("trace_policy") or {}).get("sampler") != "always_on":
     raise SystemExit("trace sampler was not preserved")
 if observability.get("metric_policy") != {
@@ -2547,7 +2562,7 @@ for destination_name in required_destinations:
         if not isinstance(route, dict) or route.get("action", "send") != "send":
             continue
         signals = set(route.get("signals", []))
-        if signals.intersection({"logs", "traces"}) and route.get("redaction_profile") != "legacy-v7":
+        if signals.intersection({"logs", "traces"}) and route.get("redaction_profile") != "v7-compatible":
             raise SystemExit(f"compatibility redaction missing from {destination_name}")
 
 if destinations["splunk-protected"].get("kind") != "splunk_hec":

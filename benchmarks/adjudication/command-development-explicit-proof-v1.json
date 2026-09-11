@@ -1,0 +1,22 @@
+{
+  "accepted": [
+    {"category": "broad_destructive_wipe", "id": "atomic-red-team/93564483feac24bdb2f33e27"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/1a253fdf0bc8ef32289be7a1"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/1ad7a50fe306f695940692e5"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/8642f4dde8ef01794aa442ce"},
+    {"category": "remote_payload_execute_cleanup", "id": "shell-attack-evolution/cad7305ad2ba8585a0616d32"}
+  ],
+  "candidate_labels_sha256": "db5e6c919036e80ec3122b686864d18a6f68e39787eb5e168c431d022932e6c8",
+  "default_decision": "contextual_or_dual_use",
+  "notes": [
+    "Candidate generation used only GPT-OSS 20B labels; later GPT-OSS review passes were advisory triage.",
+    "Acceptance never uses source provenance as proof: the atomic case literally wipes the filesystem root; the remaining cases contain the complete remote-download, executable-permission, execution, and broad-cleanup chain.",
+    "Public benign-source commands remain negatives even when they perform risky administration or bulk deletion.",
+    "Unknown payloads and generic download-and-execute remain contextual unless the same literal command also grants execution, runs the exact artifact, and performs broad wildcard cleanup or history clearing.",
+    "No reverse-shell, bind-shell, exfiltration, or defense-disable candidate in this split met the literal-proof rubric without relying on an unknown placeholder or payload."
+  ],
+  "protocol": "explicit-command-proof-review-v1",
+  "reviewed_candidate_count": 1894,
+  "schema_version": "1",
+  "unresolved": []
+}

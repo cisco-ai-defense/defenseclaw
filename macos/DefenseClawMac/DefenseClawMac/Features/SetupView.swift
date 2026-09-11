@@ -229,15 +229,11 @@ struct WizardSheet: View {
 
     private var validationMessage: String? {
         if let message = wizard.validation?(values) { return message }
-        if wizard.commandBuilder == nil,
-           wizard.secretEnvironment == nil,
-           let field = visibleFields.first(where: { field in
-               guard case .secure = field.kind else { return false }
-               return !(values[field.key] ?? "").isEmpty && wizard.secretInputField != field.key
-           }) {
-            return "\(field.label) has no secure CLI transport configured."
-        }
-        return nil
+        return SetupSecretTransportPolicy.validationMessage(
+            wizard: wizard,
+            values: values,
+            visibleFields: visibleFields
+        )
     }
 
     private var replacesConnectorRoster: Bool {
@@ -249,9 +245,11 @@ struct WizardSheet: View {
     private var displayCommand: String {
         let commands = buildCommands(maskSecrets: true)
         guard !commands.isEmpty else { return "(no changes selected — nothing to apply)" }
-        return commands
-            .map { command in
-                let environment = commandEnvironment.keys.sorted().map { "\($0)=••••••" }
+        return commands.enumerated()
+            .map { index, command in
+                let environment = index == 0
+                    ? commandEnvironment.keys.sorted().map { "\($0)=••••••" }
+                    : []
                 return (environment + ["defenseclaw"] + command).joined(separator: " ")
             }
             .joined(separator: "\n")
@@ -468,6 +466,12 @@ struct WizardSheet: View {
     private func apply() {
         phase = .running
         output = ""
+        if let validationMessage {
+            output = "Setup blocked: \(validationMessage)"
+            exitCode = 1
+            phase = .done
+            return
+        }
         Task {
             let commands = cliCommands
             guard !commands.isEmpty else {

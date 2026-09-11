@@ -182,10 +182,22 @@ writes emit their result only after verification and include `backup_path`,
 | `sensitive` | Detects PII, credentials, and secrets inside content-like fields while retaining useful surrounding structure. | Internal operations and SOC investigation. |
 | `content` | Redacts whole prompt, response, tool, document, evidence, and other content bodies while preserving safe metadata/correlation. | Shared production observability. |
 | `strict` | Removes or transforms content, credentials, paths, reasons, evidence, and error detail aggressively. | Least-data external export. |
-| `legacy-v7` | Immutable migration profile that reproduces the effective v7 persistent-sink projection. | Automatic upgrade only. |
 
-`legacy-v7` cannot be extended or redefined. It exists so automatic migration can
-preserve an existing installation's behavior even though fresh-v8 defaults differ.
+There is no v7 compatibility built-in. Upgrading a redacting v7 installation
+writes an ordinary custom profile named `v7-compatible` into
+`observability.redaction_profiles`, carrying the v7 field-class mode vector:
+content, reason, evidence, error, path, and credential all whole-replaced,
+metadata preserved. Because it is a normal custom profile rather than an
+immutable built-in, you can read it, edit it, or point destinations somewhere
+else.
+
+One class differs from v7, and it is a property of the v8 model rather than of
+the migration: **identifiers are preserved**. v7 whole-replaced them; no v8
+profile redacts them, and a custom profile that tries is rejected at load.
+Identifiers are what joins one record to another, so the model reserves that
+decision rather than letting a profile sever correlation silently. Nothing v7
+redacted as content, reason, evidence, error, path, or credential is revealed
+by upgrading.
 
 ## Resolution order
 
@@ -374,8 +386,8 @@ normal log collection cannot disable this SQLite-only compliance floor.
 The v7 `privacy` block's `disable_redaction` field and
 `DEFENSECLAW_DISABLE_REDACTION` are v7 controls.
 They are not v8 runtime policy knobs. During `defenseclaw upgrade`, the converter
-materializes their effective behavior into `none` or `legacy-v7` profiles before
-retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
+materializes their effective behavior into the `none` built-in or a generated
+`v7-compatible` custom profile before retiring those inputs. A v8 gateway rejects legacy observability/redaction blocks
 with an actionable upgrade message.
 
 `DEFENSECLAW_REVEAL_PII` remains an operator-display concern where supported; it
