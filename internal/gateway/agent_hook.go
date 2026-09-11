@@ -523,13 +523,35 @@ func (a *APIServer) finalizeAgentHook(
 	// evaluations) we keep the correlation-dedup gate so replay chatter
 	// doesn't inflate hook_decision + audit rows.
 	if env.Enforced || !req.SuppressCorrelationEmit {
+		// Diagnostic: prove the enforced-block audit bypass is taking effect.
+		// Remove once the AVC alert count is confirmed to increment.
+		if env.Enforced && req.SuppressCorrelationEmit {
+			fmt.Fprintf(os.Stderr,
+				"[gateway] enforced-block audit bypass ACTIVE connector=%s event=%s suppress=%t enforced=%t\n",
+				connectorName, req.HookEventName, req.SuppressCorrelationEmit, env.Enforced)
+		}
 		safeSection("observability_v8", func() {
 			result.EnforcementPersisted = a.emitHookDecisionObservabilityV8(ctx, req, resp, env, panicked)
+			if env.Enforced {
+				fmt.Fprintf(os.Stderr,
+					"[gateway] enforced-block observability_v8 emit connector=%s event=%s persisted=%t\n",
+					connectorName, req.HookEventName, result.EnforcementPersisted)
+			}
 		})
 
 		safeSection("audit", func() {
-			result.AuditPersisted = a.logConnectorHookAuditEnvelope(ctx, env) == nil
+			auditErr := a.logConnectorHookAuditEnvelope(ctx, env)
+			result.AuditPersisted = auditErr == nil
+			if env.Enforced {
+				fmt.Fprintf(os.Stderr,
+					"[gateway] enforced-block audit envelope connector=%s event=%s persisted=%t err=%v\n",
+					connectorName, req.HookEventName, result.AuditPersisted, auditErr)
+			}
 		})
+	} else if env.Enforced {
+		fmt.Fprintf(os.Stderr,
+			"[gateway] enforced-block finalize SKIPPED (both gates false) connector=%s event=%s suppress=%t enforced=%t\n",
+			connectorName, req.HookEventName, req.SuppressCorrelationEmit, env.Enforced)
 	}
 	return result
 }
