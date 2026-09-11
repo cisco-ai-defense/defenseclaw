@@ -97,8 +97,10 @@ func HomeForID(id string) string {
 	return homeForID(id)
 }
 
-// KindForID classifies an identifier collected somewhere else — a hook's
-// identity header, or an agent-supplied hook payload field.
+// KindForID classifies an OS identifier after its caller has established
+// trusted provenance, such as a hook's DefenseClaw identity header or an OS
+// profile lookup. Shape is validation, not provenance: callers must not use
+// this to classify an agent-supplied body or generic user header.
 //
 // It returns empty for anything it cannot place. That matters: a payload may
 // carry an arbitrary string such as a login name, and labelling that

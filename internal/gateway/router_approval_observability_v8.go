@@ -48,6 +48,7 @@ type eventRouterApprovalObservation struct {
 	sequence          int64
 	sequenceSet       bool
 	userID            string
+	userIDKind        string
 	userName          string
 	policyID          string
 	policyVersion     string
@@ -150,7 +151,8 @@ func (r *EventRouter) emitApprovalResolutionV8(
 		DefenseClawRequestID:              hookModelV8OptionalID(observation.requestID),
 		DefenseClawTurnID:                 hookModelV8OptionalID(observation.turnID),
 		UserID:                            hookModelV8OptionalID(observation.userID),
-		DefenseClawUserName:               hookModelV8OptionalID(observation.userName),
+		DefenseClawUserIDKind:             v8UserIDKind(observation.userIDKind),
+		DefenseClawUserName:               hookModelV8OptionalText(observation.userName),
 		GenAIConversationID:               hookModelV8OptionalID(observation.sessionID),
 		GenAIAgentID:                      hookModelV8OptionalID(observation.agentID),
 		GenAIAgentName:                    hookModelV8OptionalID(observation.agentName),
@@ -339,7 +341,8 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 				DefenseClawTurnID:      hookModelV8OptionalID(observation.turnID),
 				DefenseClawOperationID: hookModelV8OptionalID(observation.operationID),
 				DefenseClawRunID:       hookModelV8OptionalID(observation.runID),
-				UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserName: hookModelV8OptionalID(observation.userName),
+				UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserIDKind: v8UserIDKind(observation.userIDKind),
+				DefenseClawUserName: hookModelV8OptionalText(observation.userName),
 				GenAIConversationID: hookModelV8OptionalID(observation.sessionID),
 				GenAIAgentID:        hookModelV8OptionalID(observation.agentID), GenAIAgentName: hookModelV8OptionalID(observation.agentName),
 				DefenseClawAgentType:              hookModelV8OptionalID(observation.agentType),
@@ -377,7 +380,8 @@ func (r *EventRouter) emitEventRouterApprovalLogV8(
 			DefenseClawTurnID:      hookModelV8OptionalID(observation.turnID),
 			DefenseClawOperationID: hookModelV8OptionalID(observation.operationID),
 			DefenseClawRunID:       hookModelV8OptionalID(observation.runID),
-			UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserName: hookModelV8OptionalID(observation.userName),
+			UserID:                 hookModelV8OptionalID(observation.userID), DefenseClawUserIDKind: v8UserIDKind(observation.userIDKind),
+			DefenseClawUserName: hookModelV8OptionalText(observation.userName),
 			GenAIConversationID: hookModelV8OptionalID(observation.sessionID),
 			GenAIAgentID:        hookModelV8OptionalID(observation.agentID), GenAIAgentName: hookModelV8OptionalID(observation.agentName),
 			DefenseClawAgentType:              hookModelV8OptionalID(observation.agentType),

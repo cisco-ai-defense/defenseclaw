@@ -59,6 +59,11 @@ func emitGatewayEgressV8(
 	}
 	correlationEvent := gatewaylog.Event{}
 	stampEventCorrelation(&correlationEvent, ctx)
+	identity := AgentIdentityFromContext(ctx)
+	userIDKind := ""
+	if correlationEvent.UserID == identity.UserID {
+		userIDKind = identity.UserIDKind
+	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent, observability.ProducerKey(gatewaylog.EventEgress),
 		classification, observability.SourceGateway, correlationEvent.Connector,
@@ -86,6 +91,7 @@ func emitGatewayEgressV8(
 					DefenseClawAgentLifecycleID:    optionalGatewayEgressText(correlationEvent.AgentLifecycleID),
 					DefenseClawAgentExecutionID:    optionalGatewayEgressText(correlationEvent.AgentExecutionID),
 					UserID:                         optionalGatewayEgressText(correlationEvent.UserID),
+					DefenseClawUserIDKind:          v8UserIDKind(userIDKind),
 					GenAIToolCallID:                optionalGatewayEgressText(correlationEvent.ToolID),
 					DefenseClawNetworkTargetRef:    p.TargetHost,
 					DefenseClawNetworkTargetPath:   optionalGatewayEgressText(p.TargetPath),
@@ -110,6 +116,7 @@ func emitGatewayEgressV8(
 				DefenseClawAgentLifecycleID:    optionalGatewayEgressText(correlationEvent.AgentLifecycleID),
 				DefenseClawAgentExecutionID:    optionalGatewayEgressText(correlationEvent.AgentExecutionID),
 				UserID:                         optionalGatewayEgressText(correlationEvent.UserID),
+				DefenseClawUserIDKind:          v8UserIDKind(userIDKind),
 				GenAIToolCallID:                optionalGatewayEgressText(correlationEvent.ToolID),
 				DefenseClawNetworkTargetRef:    p.TargetHost,
 				DefenseClawNetworkTargetPath:   optionalGatewayEgressText(p.TargetPath),

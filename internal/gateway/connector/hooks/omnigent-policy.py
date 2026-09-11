@@ -11,7 +11,6 @@ DefenseClaw connector.
 from __future__ import annotations
 
 import base64
-import getpass
 import json
 import math
 import os
@@ -19,6 +18,11 @@ import re
 import urllib.error
 import urllib.request
 from typing import Any
+
+try:
+    import pwd
+except ImportError:  # pragma: no cover - absent on Windows
+    pwd = None  # type: ignore[assignment]
 
 _SAFE_ACCOUNT_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
@@ -360,8 +364,8 @@ def _identity_headers() -> dict[str, str]:
     if uid >= 0:
         headers["X-DefenseClaw-User-Id"] = str(uid)
     try:
-        name = getpass.getuser()
-    except Exception:
+        name = pwd.getpwuid(uid).pw_name if pwd is not None and uid >= 0 else ""
+    except (KeyError, OSError):
         # No identity is a supported outcome: the record is emitted
         # unattributed rather than wrongly attributed.
         return headers

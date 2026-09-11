@@ -73,10 +73,10 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 	// with a name the agent supplied — a record naming one account and
 	// identifying another.
 	if fromHeaders.UserID != "" || fromHeaders.UserName != "" {
-		return newLLMEventUser(fromHeaders.UserID, fromHeaders.UserName)
+		return newLLMEventUser(fromHeaders.UserID, fromHeaders.UserName, fromHeaders.UserIDKind != "")
 	}
 	payloadID, payloadName := userFieldsFromHookPayload(payload)
-	return newLLMEventUser(payloadID, payloadName)
+	return newUntrustedLLMEventUser(payloadID, payloadName)
 }
 
 // resolveHTTPUserIdentity determines the end user behind a proxied or ingested
@@ -84,17 +84,27 @@ func resolveHookUser(ctx context.Context, payload map[string]interface{}) llmEve
 // OTLP ingest traffic, where the caller is a library rather than a connector
 // with a local credential file to read.
 func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
+	trustedID := r.Header.Get(llmEventUserIDHeader)
+	trustedName := r.Header.Get(llmEventUserNameHeader)
+	if trustedID != "" || trustedName != "" {
+		return newTrustedLLMEventUser(trustedID, trustedName)
+	}
+
 	userID := firstNonEmpty(
-		r.Header.Get(llmEventUserIDHeader),
 		r.Header.Get("X-User-Id"),
 		r.Header.Get("X-User-ID"),
 		r.Header.Get("X-User"),
 	)
 	userName := firstNonEmpty(
-		r.Header.Get(llmEventUserNameHeader),
 		r.Header.Get("X-User-Name"),
 		r.Header.Get("X-Username"),
 	)
+	// Keep each identity pair from one source. A partial header identity must
+	// not be completed with an agent-controlled body field that can name a
+	// different account.
+	if userID != "" || userName != "" {
+		return newUntrustedLLMEventUser(userID, userName)
+	}
 	if len(rawBody) > 0 {
 		var body struct {
 			User     string `json:"user"`
@@ -103,28 +113,38 @@ func resolveHTTPUserIdentity(r *http.Request, rawBody []byte) llmEventUser {
 			Username string `json:"username"`
 		}
 		if json.Unmarshal(rawBody, &body) == nil {
-			userID = firstNonEmpty(userID, body.UserID, body.User)
-			userName = firstNonEmpty(userName, body.UserName, body.Username)
+			userID = firstNonEmpty(body.UserID, body.User)
+			userName = firstNonEmpty(body.UserName, body.Username)
 		}
 	}
-	return newLLMEventUser(userID, userName)
+	return newUntrustedLLMEventUser(userID, userName)
 }
 
-// newLLMEventUser sanitizes a resolved pair, classifies the identifier, and
-// applies the local fallback.
-func newLLMEventUser(userID, userName string) llmEventUser {
+func newTrustedLLMEventUser(userID, userName string) llmEventUser {
+	return newLLMEventUser(userID, userName, true)
+}
+
+func newUntrustedLLMEventUser(userID, userName string) llmEventUser {
+	return newLLMEventUser(userID, userName, false)
+}
+
+// newLLMEventUser sanitizes a resolved pair and applies the local fallback.
+// Identifier namespaces are emitted only for OS-derived transport identity;
+// a numeric application-level user value is not proof of a POSIX uid.
+func newLLMEventUser(userID, userName string, trustedID bool) llmEventUser {
 	userID = sanitizeLLMEventUser(userID)
 	userName = sanitizeLLMEventUser(userName)
 	if userID == "" && userName == "" {
 		userID, userName = localProcessUser()
+		trustedID = userID != ""
+	}
+	idKind := ""
+	if trustedID {
+		idKind = useridentity.KindForID(userID)
 	}
 	return llmEventUser{
-		ID: userID,
-		// Classified rather than asserted. A payload can carry an arbitrary
-		// string here — a login name, an opaque token — and labelling that
-		// posix_uid would put a value into the v8 enum that consumers then
-		// join on as a uid.
-		IDKind: useridentity.KindForID(userID),
+		ID:     userID,
+		IDKind: idKind,
 		Name:   userName,
 	}
 }
@@ -195,6 +215,12 @@ func userFieldsFromHookPayload(payload map[string]interface{}) (string, string) 
 func hookUserEmail(connector string, payload map[string]interface{}) string {
 	connector = strings.TrimSpace(connector)
 	if connector == "" || !UserEmailCollectionEnabled() {
+		return ""
+	}
+	// Cursor is currently the only connector that reports an address in its
+	// hook payload. Avoid repeatedly marshalling large tool-result payloads for
+	// every other connector only to receive ErrNoEmail.
+	if !strings.EqualFold(connector, "cursor") {
 		return ""
 	}
 	raw, err := json.Marshal(payload)

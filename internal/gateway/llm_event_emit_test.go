@@ -6,6 +6,8 @@ package gateway
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	osuser "os/user"
 	"strconv"
 	"strings"
@@ -776,7 +778,9 @@ func TestResolveHookUserIdentityPrefersHookReportedIdentity(t *testing.T) {
 	t.Cleanup(func() { SetManagedEnterpriseActive(restore) })
 	SetManagedEnterpriseActive(true)
 
-	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{UserID: "501", UserName: "real"})
+	ctx := ContextWithAgentIdentity(t.Context(), AgentIdentity{
+		UserID: "501", UserIDKind: useridentity.KindPOSIXUID, UserName: "real",
+	})
 	user := resolveHookUser(ctx, map[string]interface{}{"user_id": "S-1-5-21-1-2-3-1001", "user_name": "claimed"})
 	if user.ID != "501" || user.Name != "real" {
 		t.Fatalf("payload overrode the hook-reported identity: %+v", user)
@@ -790,6 +794,30 @@ func TestResolveHookUserIdentityPrefersHookReportedIdentity(t *testing.T) {
 	opaque := resolveHookUser(t.Context(), map[string]interface{}{"user_id": "alice"})
 	if opaque.IDKind != "" {
 		t.Fatalf("opaque identifier was labelled %q", opaque.IDKind)
+	}
+
+	// Numeric application identifiers remain unclassified: shape alone cannot
+	// distinguish tenant "1001" from endpoint uid 1001.
+	untrustedNumeric := resolveHookUser(t.Context(), map[string]interface{}{"user_id": "1001"})
+	if untrustedNumeric.IDKind != "" {
+		t.Fatalf("untrusted numeric identifier was labelled %q", untrustedNumeric.IDKind)
+	}
+}
+
+func TestResolveHTTPUserIdentityKeepsSourcesPairedAndClassifiesOnlyTransportIdentity(t *testing.T) {
+	req := httptest.NewRequest(http.MethodPost, "http://localhost/v1/chat/completions", nil)
+	req.Header.Set("X-User-Id", "1001")
+	user := resolveHTTPUserIdentity(req, []byte(`{"user_name":"body-user"}`))
+	if user.ID != "1001" || user.Name != "" || user.IDKind != "" {
+		t.Fatalf("generic header identity was mixed or classified: %+v", user)
+	}
+
+	req = httptest.NewRequest(http.MethodPost, "http://localhost/api/v1/codex/notify", nil)
+	req.Header.Set(llmEventUserIDHeader, "501")
+	req.Header.Set(llmEventUserNameHeader, "operator")
+	user = resolveHTTPUserIdentity(req, nil)
+	if user.ID != "501" || user.Name != "operator" || user.IDKind != useridentity.KindPOSIXUID {
+		t.Fatalf("trusted transport identity was not preserved: %+v", user)
 	}
 }
 

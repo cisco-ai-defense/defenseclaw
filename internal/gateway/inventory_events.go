@@ -386,9 +386,10 @@ func perConnectorMCPEntriesForOS(cfg *config.Config, reg *connector.Registry, go
 // account, so "the current user" is either the wrong user or no user at all.
 func inventoryHomeOwner(connectorName, home string) llmEventUser {
 	identity := useridentity.ForHome(home)
+	ownerID := sanitizeLLMEventUser(identity.ID)
 	owner := llmEventUser{
-		ID:     sanitizeLLMEventUser(identity.ID),
-		IDKind: identity.IDKind,
+		ID:     ownerID,
+		IDKind: useridentity.KindForID(ownerID),
 		Name:   sanitizeLLMEventUser(identity.Name),
 	}
 	if owner.ID == "" {

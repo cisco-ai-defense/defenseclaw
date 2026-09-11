@@ -4664,7 +4664,7 @@ connection.close()
         'Amp setup validator binds the generated plugin fail mode to the requested setup posture'
     Assert-True ($doctorSetupContract -match "\`$Connector -eq 'devin'" -and
         $doctorSetupContract -match 'Get-DevinWindowsHookCommand \$devinCommand ''setup-created Devin PreToolUse''') `
-        'Devin setup validation decodes and verifies its POSIX-quoted EncodedCommand launcher'
+        'Devin setup validation verifies its POSIX-quoted direct native launcher'
     foreach ($marker in @(
         'const DC_TOKEN_FILE = "',
         '.hook-amp.token',

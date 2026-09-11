@@ -24,12 +24,14 @@ func currentIdentity() Identity {
 		ID:     strconv.Itoa(os.Geteuid()),
 		IDKind: KindPOSIXUID,
 	}
-	if current, err := user.Current(); err == nil && current != nil {
-		out.Name = strings.TrimSpace(current.Username)
+	if resolved, err := user.LookupId(out.ID); err == nil && resolved != nil {
+		out.Name = strings.TrimSpace(resolved.Username)
 	}
 	if out.Name == "" {
-		if resolved, err := user.LookupId(out.ID); err == nil && resolved != nil {
-			out.Name = strings.TrimSpace(resolved.Username)
+		// user.Current can describe the real uid in a setuid process. Use it
+		// only when its uid agrees with the effective uid reported above.
+		if current, err := user.Current(); err == nil && current != nil && current.Uid == out.ID {
+			out.Name = strings.TrimSpace(current.Username)
 		}
 	}
 	return out
