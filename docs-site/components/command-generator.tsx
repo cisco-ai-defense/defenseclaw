@@ -218,23 +218,24 @@ function appendEnvironmentPlaceholder(
   name: string,
   placeholder: string,
   shell: ShellFlavor,
-): void {
+): boolean {
   if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) {
     warnings.push(
-      `Environment variable name ${JSON.stringify(name)} is not portable. Use letters, digits, and underscores, starting with a letter or underscore. The placeholder assignment was omitted.`,
+      `Environment variable name ${JSON.stringify(name)} is not portable. Use letters, digits, and underscores, starting with a letter or underscore. The placeholder assignment and matching environment-name flag were omitted.`,
     );
-    return;
+    return false;
   }
   const controlsCommandLookup = shell === 'powershell'
     ? /^(?:path|pathext)$/i.test(name)
     : name === 'PATH' || name === 'path';
   if (controlsCommandLookup) {
     warnings.push(
-      `Environment variable name ${JSON.stringify(name)} controls executable lookup in ${shell === 'powershell' ? 'PowerShell' : 'Bash/zsh'}. The placeholder assignment was omitted so the defenseclaw command remains resolvable.`,
+      `Environment variable name ${JSON.stringify(name)} controls executable lookup in ${shell === 'powershell' ? 'PowerShell' : 'Bash/zsh'}. The placeholder assignment and matching environment-name flag were omitted so the defenseclaw command remains resolvable.`,
     );
-    return;
+    return false;
   }
   preExports.push(environmentAssignment(name, placeholder, shell));
+  return true;
 }
 
 // Emit the advanced judge-provider + provider-typed auth flags. Only the
@@ -286,16 +287,22 @@ function appendJudgeProviderFlags(
       lines.push(`--judge-bedrock-auth-mode ${s.judgeBedrockAuthMode}`);
     }
     if (s.judgeBedrockAccessKeyEnv.trim()) {
-      lines.push(`--judge-bedrock-access-key-env ${quote(s.judgeBedrockAccessKeyEnv.trim())}`);
-      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockAccessKeyEnv.trim(), '<aws-access-key-id>', shell);
+      const name = s.judgeBedrockAccessKeyEnv.trim();
+      if (appendEnvironmentPlaceholder(preExports, warnings, name, '<aws-access-key-id>', shell)) {
+        lines.push(`--judge-bedrock-access-key-env ${quote(name)}`);
+      }
     }
     if (s.judgeBedrockSecretKeyEnv.trim()) {
-      lines.push(`--judge-bedrock-secret-key-env ${quote(s.judgeBedrockSecretKeyEnv.trim())}`);
-      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockSecretKeyEnv.trim(), '<aws-secret-access-key>', shell);
+      const name = s.judgeBedrockSecretKeyEnv.trim();
+      if (appendEnvironmentPlaceholder(preExports, warnings, name, '<aws-secret-access-key>', shell)) {
+        lines.push(`--judge-bedrock-secret-key-env ${quote(name)}`);
+      }
     }
     if (s.judgeBedrockSessionTokenEnv.trim()) {
-      lines.push(`--judge-bedrock-session-token-env ${quote(s.judgeBedrockSessionTokenEnv.trim())}`);
-      appendEnvironmentPlaceholder(preExports, warnings, s.judgeBedrockSessionTokenEnv.trim(), '<aws-session-token>', shell);
+      const name = s.judgeBedrockSessionTokenEnv.trim();
+      if (appendEnvironmentPlaceholder(preExports, warnings, name, '<aws-session-token>', shell)) {
+        lines.push(`--judge-bedrock-session-token-env ${quote(name)}`);
+      }
     }
     if (s.judgeBedrockProfileName.trim()) {
       lines.push(`--judge-bedrock-profile-name ${quote(s.judgeBedrockProfileName.trim())}`);
@@ -317,16 +324,16 @@ function appendJudgeProviderFlags(
       lines.push(`--judge-vertex-auth-mode ${s.judgeVertexAuthMode}`);
     }
     if (s.judgeVertexServiceAccountJsonEnv.trim()) {
-      lines.push(
-        `--judge-vertex-service-account-json-env ${quote(s.judgeVertexServiceAccountJsonEnv.trim())}`,
-      );
-      appendEnvironmentPlaceholder(
+      const name = s.judgeVertexServiceAccountJsonEnv.trim();
+      if (appendEnvironmentPlaceholder(
         preExports,
         warnings,
-        s.judgeVertexServiceAccountJsonEnv.trim(),
+        name,
         '<path-to-service-account-json>',
         shell,
-      );
+      )) {
+        lines.push(`--judge-vertex-service-account-json-env ${quote(name)}`);
+      }
     }
   } else if (azure) {
     if (s.judgeAzureEndpoint.trim()) {
@@ -419,17 +426,28 @@ export function buildCommand(
           : 'Remote scanner is enabled but no Cisco endpoint is set. The CLI will reject the run unless an endpoint is already in ~/.defenseclaw/config.yaml.',
       );
     }
-    if (s.ciscoApiKeyEnv.trim() && s.ciscoApiKeyEnv !== 'CISCO_AI_DEFENSE_API_KEY') {
-      lines.push(`--cisco-api-key-env ${quote(s.ciscoApiKeyEnv.trim())}`);
-    }
     if (s.ciscoTimeoutMs.trim()) {
       const n = Number(s.ciscoTimeoutMs.trim());
       if (Number.isFinite(n) && n > 0) {
         lines.push(`--cisco-timeout-ms ${n}`);
       }
     }
-    const apiKeyEnv = s.ciscoApiKeyEnv.trim() || 'CISCO_AI_DEFENSE_API_KEY';
-    appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-cisco-ai-defense-api-key>', shell);
+    const requestedApiKeyEnv = s.ciscoApiKeyEnv.trim();
+    const apiKeyEnv = requestedApiKeyEnv || 'CISCO_AI_DEFENSE_API_KEY';
+    if (appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-cisco-ai-defense-api-key>', shell)) {
+      if (requestedApiKeyEnv && requestedApiKeyEnv !== 'CISCO_AI_DEFENSE_API_KEY') {
+        lines.push(`--cisco-api-key-env ${quote(requestedApiKeyEnv)}`);
+      }
+    } else if (apiKeyEnv !== 'CISCO_AI_DEFENSE_API_KEY') {
+      appendEnvironmentPlaceholder(
+        preExports,
+        warnings,
+        'CISCO_AI_DEFENSE_API_KEY',
+        '<your-cisco-ai-defense-api-key>',
+        shell,
+      );
+      warnings.push('Falling back to the default CISCO_AI_DEFENSE_API_KEY credential variable.');
+    }
   }
 
   // Action-mode-only enforcement knobs.
@@ -472,11 +490,22 @@ export function buildCommand(
     if (s.judgeApiBase.trim()) {
       lines.push(`--judge-api-base ${quote(s.judgeApiBase.trim())}`);
     }
-    if (s.judgeApiKeyEnv.trim()) {
-      lines.push(`--judge-api-key-env ${quote(s.judgeApiKeyEnv.trim())}`);
+    const requestedApiKeyEnv = s.judgeApiKeyEnv.trim();
+    const apiKeyEnv = requestedApiKeyEnv || 'DEFENSECLAW_LLM_KEY';
+    if (appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-llm-api-key>', shell)) {
+      if (requestedApiKeyEnv) {
+        lines.push(`--judge-api-key-env ${quote(requestedApiKeyEnv)}`);
+      }
+    } else if (apiKeyEnv !== 'DEFENSECLAW_LLM_KEY') {
+      appendEnvironmentPlaceholder(
+        preExports,
+        warnings,
+        'DEFENSECLAW_LLM_KEY',
+        '<your-llm-api-key>',
+        shell,
+      );
+      warnings.push('Falling back to the default DEFENSECLAW_LLM_KEY credential variable.');
     }
-    const apiKeyEnv = s.judgeApiKeyEnv.trim() || 'DEFENSECLAW_LLM_KEY';
-    appendEnvironmentPlaceholder(preExports, warnings, apiKeyEnv, '<your-llm-api-key>', shell);
 
     // Advanced judge provider + provider-typed auth.
     appendJudgeProviderFlags(s, shell, lines, preExports, warnings);

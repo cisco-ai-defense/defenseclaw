@@ -1704,7 +1704,7 @@ Treat this evidence as a release gate for the managed endpoint image. Run destru
 - [ ] Managed config, policy, units/plists/SCM definitions, manifest, and authorization directory have trusted path chains.
 - [ ] Gateway service runs as the dedicated service identity (or the documented root identity on macOS), not the AI user.
 - [ ] Linux gateway sandbox properties match the packaged unit or a reviewed stricter override.
-- [ ] Guardian targets are current and authorized: Linux/macOS manifests contain only explicit approved pairs; Windows enumerator output contains only expected interactive SIDs, configured connector families that pass the Windows managed-hook filter, and discovered supported versions.
+- [ ] Guardian targets are current and authorized: Linux/macOS manifests contain only explicit approved pairs; Windows enumerator output contains only expected interactive SIDs, connector families explicitly qualified by the managed-enterprise acceptance guidance that pass the Windows managed-hook filter, and discovered supported versions.
 - [ ] First reconcile succeeds for every enabled target before action mode is enabled.
 - [ ] Watcher and periodic backstop are enabled according to OS capabilities.
 - [ ] Scoped token files are connector-specific; no automation copies a shared gateway token into user hooks.
