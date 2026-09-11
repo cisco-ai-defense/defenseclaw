@@ -4562,7 +4562,11 @@ function Set-DefenseClawManagedServices {
     if (-not [string]::IsNullOrWhiteSpace([string]$Layout.SensorHelperPath) -and
         (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.SensorHelperPath)) {
         $sensorHelperImage = Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName
-        Assert-DefenseClawOwnedServiceOrAbsent -Name $sensorHelperServiceName
+        Assert-DefenseClawOwnedServiceOrAbsent `
+            -Name $sensorHelperServiceName `
+            -ExpectedGatewayPath $Layout.SensorHelperPath `
+            -ExpectedSensorHelperImage $sensorHelperImage `
+            -SensorHelper
         if (Test-DefenseClawServiceExists -Name $sensorHelperServiceName) {
             [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
                 'config', $sensorHelperServiceName,
@@ -7206,7 +7210,12 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         [Parameter(Mandatory)][string]$Name,
         [Parameter(Mandatory)][string]$ExpectedGatewayPath,
         [string]$ExpectedManifestPath,
+        [string]$ExpectedSensorHelperImage,
         [switch]$Guardian,
+        # The helper has a plain executable ImagePath like the gateway but
+        # intentionally runs as LocalSystem so it can hold the sensor plane's
+        # narrowly scoped host privileges.
+        [switch]$SensorHelper,
         # Spec 005 D1: mirrors -Guardian for the third SCM service.
         # Its ImagePath is the gateway binary invoked with
         # `enterprise windows enumerate --manifest X --interval 5m`;
@@ -7214,15 +7223,22 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         # the account-model choice recorded in the Stage 1 commit).
         [switch]$Enumerator
     )
-    if ($Guardian -and $Enumerator) {
-        throw '-Guardian and -Enumerator are mutually exclusive'
+    if (($Guardian -and ($SensorHelper -or $Enumerator)) -or
+        ($SensorHelper -and $Enumerator)) {
+        throw '-Guardian, -SensorHelper, and -Enumerator are mutually exclusive'
     }
     if (-not (Test-DefenseClawServiceExists -Name $Name)) {
         return
     }
     $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
     $image = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ImagePath)
-    $expectedImage = if ($Guardian) {
+    $expectedImage = if ($SensorHelper) {
+        if ([string]::IsNullOrWhiteSpace($ExpectedSensorHelperImage)) {
+            throw 'sensor helper service ownership validation requires its exact image'
+        }
+        $ExpectedSensorHelperImage
+    }
+    elseif ($Guardian) {
         if ([string]::IsNullOrWhiteSpace($ExpectedManifestPath)) {
             throw 'guardian service ownership validation requires its exact manifest path'
         }
@@ -7242,7 +7258,7 @@ function Assert-DefenseClawOwnedServiceOrAbsent {
         throw "refusing to replace foreign Windows service $Name with ImagePath $image"
     }
     $objectName = [string](Microsoft.PowerShell.Management\Get-ItemPropertyValue -LiteralPath $key -Name ObjectName)
-    $expectedAccount = if ($Guardian -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
+    $expectedAccount = if ($Guardian -or $SensorHelper -or $Enumerator) { 'LocalSystem' } else { "NT SERVICE\$Name" }
     if (-not [string]::Equals($objectName, $expectedAccount, [StringComparison]::OrdinalIgnoreCase)) {
         throw "refusing to replace service $Name owned by unexpected account $objectName"
     }
@@ -18709,12 +18725,13 @@ function Assert-DefenseClawExactScopeService {
         [Parameter(Mandatory)][string]$GatewayServiceName,
         [Parameter(Mandatory)][string]$GuardianServiceName,
         [Parameter(Mandatory)]
-        [ValidateSet('Gateway', 'Broker', 'Guardian', 'Enumerator')]
+        [ValidateSet('Gateway', 'Broker', 'SensorHelper', 'Guardian', 'Enumerator')]
         [string]$Role
     )
     $name = switch ($Role) {
         'Gateway' { $GatewayServiceName }
         'Broker' { [string]$Layout.BrokerServiceName }
+        'SensorHelper' { [string]$Layout.SensorHelperServiceName }
         'Guardian' { $GuardianServiceName }
         'Enumerator' {
             Get-DefenseClawEnumeratorServiceName `
@@ -18729,6 +18746,15 @@ function Assert-DefenseClawExactScopeService {
             Assert-DefenseClawOwnedServiceOrAbsent `
                 -Name $name `
                 -ExpectedGatewayPath $Layout.GatewayPath
+        }
+        'SensorHelper' {
+            Assert-DefenseClawOwnedServiceOrAbsent `
+                -Name $name `
+                -ExpectedGatewayPath $Layout.SensorHelperPath `
+                -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
+                    -Layout $Layout `
+                    -GatewayServiceName $GatewayServiceName) `
+                -SensorHelper
         }
         'Guardian' {
             Assert-DefenseClawOwnedServiceOrAbsent `
@@ -18987,14 +19013,15 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     $expectedServiceNames = @(
         $GatewayServiceName,
         [string]$Layout.BrokerServiceName,
+        [string]$Layout.SensorHelperServiceName,
         $GuardianServiceName,
         (Get-DefenseClawEnumeratorServiceName `
             -GuardianServiceName $GuardianServiceName)
     )
-    if ($managedServiceNames.Count -ne 4 -or
+    if ($managedServiceNames.Count -ne 5 -or
         ($managedServiceNames -join "`n") -cne
             ($expectedServiceNames -join "`n")) {
-        throw 'exact-scope purge did not resolve exactly four managed services'
+        throw 'exact-scope purge did not resolve exactly five managed services'
     }
     # Keep the primary service identity checks visibly inside this destructive
     # boundary; the role helper repeats them immediately before each delete.
@@ -19006,7 +19033,7 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
         -ExpectedGatewayPath $Layout.GatewayPath `
         -ExpectedManifestPath $Layout.ManifestPath `
         -Guardian
-    foreach ($role in @('Gateway', 'Broker', 'Guardian', 'Enumerator')) {
+    foreach ($role in @('Gateway', 'Broker', 'SensorHelper', 'Guardian', 'Enumerator')) {
         Assert-DefenseClawExactScopeService `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
@@ -19051,11 +19078,12 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     # SCM row as recovery authority. Quiescence releases mapped binaries so
     # the native helper can prove exclusive destructive access to every inode;
     # no IPC grant, service row, registry key, or file is removed yet.
-    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'Broker')) {
+    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')) {
         $name = switch ($role) {
-            'Enumerator' { [string]$expectedServiceNames[3] }
-            'Guardian' { [string]$expectedServiceNames[2] }
+            'Enumerator' { [string]$expectedServiceNames[4] }
+            'Guardian' { [string]$expectedServiceNames[3] }
             'Gateway' { [string]$expectedServiceNames[0] }
+            'SensorHelper' { [string]$expectedServiceNames[2] }
             'Broker' { [string]$expectedServiceNames[1] }
         }
         if (-not (Test-DefenseClawServiceExists -Name $name)) {
@@ -19125,16 +19153,17 @@ function Invoke-DefenseClawExactScopeRecoveryPurge {
     # Root retirement succeeded. Reauthenticate each remaining exact SCM row
     # immediately before deleting it; similarly named or drifted rows remain
     # untouched and fail the recovery closed.
-    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'Broker')) {
+    foreach ($role in @('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')) {
         Assert-DefenseClawExactScopeService `
             -Layout $Layout `
             -GatewayServiceName $GatewayServiceName `
             -GuardianServiceName $GuardianServiceName `
             -Role $role
         $name = switch ($role) {
-            'Enumerator' { [string]$expectedServiceNames[3] }
-            'Guardian' { [string]$expectedServiceNames[2] }
+            'Enumerator' { [string]$expectedServiceNames[4] }
+            'Guardian' { [string]$expectedServiceNames[3] }
             'Gateway' { [string]$expectedServiceNames[0] }
+            'SensorHelper' { [string]$expectedServiceNames[2] }
             'Broker' { [string]$expectedServiceNames[1] }
         }
         Remove-DefenseClawService -Name $name
@@ -20411,6 +20440,14 @@ function Invoke-DefenseClawUninstallLifecycle {
             -Name $GatewayServiceName `
             -ExpectedGatewayPath $Layout.GatewayPath
         Remove-DefenseClawService -Name $GatewayServiceName
+        Assert-DefenseClawOwnedServiceOrAbsent `
+            -Name $Layout.SensorHelperServiceName `
+            -ExpectedGatewayPath $Layout.SensorHelperPath `
+            -ExpectedSensorHelperImage (Get-DefenseClawSensorHelperImage `
+                -Layout $Layout `
+                -GatewayServiceName $GatewayServiceName) `
+            -SensorHelper
+        Remove-DefenseClawService -Name $Layout.SensorHelperServiceName
         Assert-DefenseClawCMIDBrokerServiceOrAbsent `
             -Name $Layout.BrokerServiceName `
             -ExpectedImage (Get-DefenseClawCMIDBrokerImage `

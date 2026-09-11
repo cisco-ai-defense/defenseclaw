@@ -535,6 +535,27 @@ func (c AIRuntimeConfig) EffectivePlanes() []string {
 	return selected
 }
 
+// HostPlaneRequestedWithoutOptIn reports the one configuration where plane c
+// is asked for in two places and granted in neither: listed in Planes, with
+// EnableHostPlane left false.
+//
+// It exists so the health surface can name the setting the operator actually
+// has to change. Collapsing this into "not selected in
+// ai_discovery.runtime.planes" sends someone to a list that already contains
+// "c", which is the same failure the permissions command's [unknown] state is
+// written to avoid.
+func (c AIRuntimeConfig) HostPlaneRequestedWithoutOptIn() bool {
+	if c.EnableHostPlane {
+		return false
+	}
+	for _, candidate := range c.Planes {
+		if strings.EqualFold(strings.TrimSpace(candidate), "c") {
+			return true
+		}
+	}
+	return false
+}
+
 // LLMConfig is the unified LLM configuration block used at the top level
 // and as a per-component override under "scanners.*", "guardrail", and
 // "guardrail.judge". A LoadedConfig.ResolveLLM(path) call merges the

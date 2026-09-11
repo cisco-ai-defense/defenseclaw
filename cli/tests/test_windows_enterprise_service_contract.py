@@ -4010,7 +4010,7 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "legacy MAX_PATH boundary" in smoke
     assert smoke.count("New-HarnessCaseRoot") == 14
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke
-    assert "snapshot capture ran before all four service identities existed" in smoke
+    assert "snapshot capture ran before all five service identities existed" in smoke
     assert "repeated-first-activation-failure-exact-rollback" in smoke
     assert "-IsDirectory $true `" in smoke
     bare_directory_argument = re.compile(
@@ -4463,8 +4463,9 @@ def test_fresh_install_binds_service_identity_before_managed_config_loads() -> N
         "injected fresh-install enumeration failure",
         "enumerator-refresh-enter",
         "DefenseClawGateway",
-        "DefenseClawCMIDBroker",
-        "DefenseClawHookGuardian",
+            "DefenseClawCMIDBroker",
+            "DefenseClawSensorHelper",
+            "DefenseClawHookGuardian",
         "DefenseClawHookEnumerator",
         "preserved-state-acls:S-1-5-80-1-2-3-4-5",
     ):
@@ -4475,7 +4476,7 @@ def test_fresh_install_binds_service_identity_before_managed_config_loads() -> N
     assert "$transactionComplete -gt $preservedStateAcls" in smoke
     assert "$script:HarnessState.transaction_calls -eq 3" in smoke
     assert "$script:HarnessState.restore_calls -eq 2" in smoke
-    assert "$script:HarnessState.removed_services -eq 8" in smoke
+    assert "$script:HarnessState.removed_services -eq 10" in smoke
 
 
 def test_install_like_replacement_manifest_is_hardened_before_target_runtime() -> None:
@@ -5249,6 +5250,9 @@ def test_state_absent_purge_uses_only_exact_pinned_scope() -> None:
     assert "allowed_file_descriptors" not in fallback
     assert "quarantine_descriptor" not in fallback
     assert "Get-DefenseClawManagedServiceNames" in fallback
+    assert "$managedServiceNames.Count -ne 5" in fallback
+    assert "'SensorHelper' { [string]$expectedServiceNames[2] }" in fallback
+    assert "@('Enumerator', 'Guardian', 'Gateway', 'SensorHelper', 'Broker')" in fallback
     assert "Assert-DefenseClawOwnedServiceOrAbsent" in fallback
     assert "Revoke-DefenseClawManagedIPCServiceAccess" in fallback
     assert "exact_scope_recovery = $true" in fallback
