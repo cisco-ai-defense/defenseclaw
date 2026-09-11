@@ -40,6 +40,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 )
 
 // blockExit is the failure/block exit used by connectors whose upstream hook
@@ -501,9 +503,62 @@ func sendHookRequest(
 	if v := strings.TrimSpace(opts.TraceState); v != "" && validTracestate(v) {
 		req.Header.Set("tracestate", v)
 	}
+	setUserIdentityHeaders(req)
 
 	return opts.HTTPClient.Do(req)
 }
+
+// setUserIdentityHeaders reports which end user this hook is running as.
+//
+// The gateway cannot work this out for itself. Under a managed install it runs
+// as a service account with its own token and profile, so resolving "the
+// current user" there would attribute every event on a multi-user endpoint to
+// that one service identity. This process does run as the real user.
+//
+// The gateway accepts these headers from loopback only, and treats them as
+// attribution evidence rather than an authenticated assertion: any local
+// process can reach the loopback listener and claim any value. They must never
+// carry an authorization decision.
+//
+// A value that is not a safe header field is dropped rather than sanitized,
+// so a hostile account name cannot smuggle a second header into every hook
+// call the endpoint makes.
+func setUserIdentityHeaders(req *http.Request) {
+	identity := useridentity.Current()
+	if v := identity.ID; safeIdentityHeaderValue(v) {
+		req.Header.Set("X-DefenseClaw-User-Id", v)
+	}
+	if v := identity.Name; safeIdentityHeaderValue(v) {
+		req.Header.Set("X-DefenseClaw-User-Name", v)
+	}
+}
+
+// safeIdentityHeaderValue accepts only printable US-ASCII without the
+// delimiters a downstream log or header parser would treat as structure. This
+// is stricter than RFC 7230 field-value on purpose: these two values are an
+// OS identifier and an account name, and nothing legitimate in either needs a
+// quote, a comma, or a byte outside that range.
+func safeIdentityHeaderValue(v string) bool {
+	if v == "" || len(v) > maxIdentityHeaderLength {
+		return false
+	}
+	for _, r := range v {
+		if r < 0x21 || r > 0x7e {
+			return false
+		}
+		switch r {
+		case '"', ',', ';', '\\':
+			return false
+		}
+	}
+	return true
+}
+
+// maxIdentityHeaderLength bounds the reported values. A SID and an account
+// name are both far shorter; a longer value is not an identity we can vouch
+// for and is dropped rather than truncated, since a truncated identifier
+// would silently join to the wrong user.
+const maxIdentityHeaderLength = 256
 
 func validAntigravityEvent(event string) bool {
 	switch strings.TrimSpace(event) {

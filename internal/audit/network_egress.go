@@ -66,6 +66,7 @@ type NetworkEgressEvent struct {
 	AgentLifecycleID string `json:"agent_lifecycle_id,omitempty"`
 	AgentExecutionID string `json:"agent_execution_id,omitempty"`
 	UserID           string `json:"user_id,omitempty"`
+	UserIDKind       string `json:"user_id_kind,omitempty"`
 	ToolID           string `json:"tool_id,omitempty"`
 
 	// Hostname is the destination host (no port). Required.

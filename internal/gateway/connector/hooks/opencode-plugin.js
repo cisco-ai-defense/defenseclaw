@@ -19,6 +19,7 @@
 // reason}; decision "deny"/"block" aborts the tool.
 
 import { open } from "node:fs/promises";
+import { userInfo } from "node:os";
 
 // DC_-prefixed constants are non-secret values baked in at setup time, not
 // env-var reads — the envvars registry gate scans for DEFENSECLAW_* tokens.
@@ -39,6 +40,40 @@ let DC_ARGUMENTS_AUTHORITATIVE = false;
 let DC_LATER_PLUGIN_COUNT = 0;
 let DC_MCP_SERVERS = [];
 let DC_MCP_IDENTITY_STATUS = "unverified";
+
+// defenseclawIdentityHeaders reports which end user this plugin runs as.
+//
+// Under a managed install the gateway runs as a service account, so it cannot
+// see whose session a request belongs to; the plugin is in-session and can.
+// A value that is not a safe header field is dropped rather than sanitized, so
+// a hostile account name cannot smuggle a second header into every hook call.
+function defenseclawIdentityHeaders() {
+  const headers = {};
+  let info;
+  try {
+    info = userInfo();
+  } catch (_) {
+    // No identity is a supported outcome: the record is emitted unattributed
+    // rather than wrongly attributed.
+    return headers;
+  }
+  // uid is -1 on Windows, where no POSIX uid exists. Reporting it would put a
+  // value in user.id that belongs to neither identifier namespace.
+  if (typeof info.uid === "number" && info.uid >= 0) {
+    headers["X-DefenseClaw-User-Id"] = String(info.uid);
+  }
+  if (defenseclawSafeIdentityValue(info.username)) {
+    headers["X-DefenseClaw-User-Name"] = info.username;
+  }
+  return headers;
+}
+
+// defenseclawSafeIdentityValue mirrors the account-name allowlist the POSIX
+// hooks apply in their shared hardening helper.
+function defenseclawSafeIdentityValue(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 256 &&
+    /^[A-Za-z0-9._-]+$/.test(value);
+}
 
 function defenseclawPluginSpecifier(origin) {
   const spec = origin && origin.spec;
@@ -132,7 +167,7 @@ async function defenseclawPost(event, toolName, toolInput, cwd, context, toolRes
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
   headers["Authorization"] = "Bearer " + token;
   try {
     const payload = {
@@ -196,7 +231,7 @@ async function defenseclawPostLoadHeartbeat(cwd) {
   }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
   headers["Authorization"] = "Bearer " + token;
   try {
     await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {
@@ -233,7 +268,7 @@ async function defenseclawPostLifecycle(event, cwd) {
   const info = properties.info || {};
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), DC_TIMEOUT_MS);
-  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0" };
+  const headers = { "Content-Type": "application/json", "X-DefenseClaw-Client": "opencode-plugin/1.0", ...defenseclawIdentityHeaders() };
   headers["Authorization"] = "Bearer " + token;
   try {
     await fetch("http://" + DC_API_ADDR + "/api/v1/opencode/hook", {

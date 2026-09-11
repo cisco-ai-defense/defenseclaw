@@ -522,6 +522,42 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 	}
 }
 
+func TestOmnigentIdentityIgnoresAgentControlledUserEnvironment(t *testing.T) {
+	requireOmnigentHost(t)
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "omnigent-policy.py")
+	if err := os.WriteFile(path, templateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("raw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module._identity_headers()))
+`
+	cmd := exec.Command(python, "-c", script, path)
+	cmd.Env = append(os.Environ(), "USER=forged-admin", "LOGNAME=forged-admin")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve OmniGent identity: %v\n%s", err, output)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(output, &headers); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := headers["X-DefenseClaw-User-Id"], fmt.Sprintf("%d", os.Geteuid()); got != want {
+		t.Fatalf("OmniGent uid = %q, want %q", got, want)
+	}
+	if got := headers["X-DefenseClaw-User-Name"]; got == "forged-admin" {
+		t.Fatal("OmniGent trusted agent-controlled USER/LOGNAME")
+	}
+}
+
 func TestOmnigentPolicyPayloadRejectsNonFiniteNumbers(t *testing.T) {
 	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")

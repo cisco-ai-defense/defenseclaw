@@ -2334,7 +2334,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"set -u\n" +
 		// Unset first so an inherited exported variable cannot retain its export
 		// attribute when the bridge assigns the private payload below.
-		"unset JSON API_TOKEN CURL_CONFIG_TOKEN DEFENSECLAW_GATEWAY_TOKEN\n" +
+		"unset JSON API_TOKEN CURL_CONFIG_TOKEN USER_ID USER_NAME DEFENSECLAW_GATEWAY_TOKEN\n" +
 		"JSON=\"${1:-}\"\n" +
 		"if [ -z \"${JSON}\" ]; then\n" +
 		"  exit 0\n" +
@@ -2355,6 +2355,18 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"case \"${TS}\" in *$'\\n'*|*$'\\r'*) TS=\"\" ;; esac\n" +
 		"if [ -n \"${TP}\" ]; then TRACE_HEADERS+=(--header \"traceparent: ${TP}\"); fi\n" +
 		"if [ -n \"${TS}\" ]; then TRACE_HEADERS+=(--header \"tracestate: ${TS}\"); fi\n" +
+		// Read identity from the fixed OS utility rather than agent-controlled
+		// environment or PATH. The notify endpoint joins these turn records to
+		// the same per-user stream as the ordinary Codex hook.
+		"IDENTITY_HEADERS=()\n" +
+		"USER_ID=\n" +
+		"USER_NAME=\n" +
+		"if [ -x /usr/bin/id ]; then\n" +
+		"  USER_ID=$(/usr/bin/id -u 2>/dev/null || true)\n" +
+		"  case \"${USER_ID}\" in ''|*[!0-9]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Id: ${USER_ID}\") ;; esac\n" +
+		"  USER_NAME=$(/usr/bin/id -un 2>/dev/null || true)\n" +
+		"  case \"${USER_NAME}\" in ''|*[!A-Za-z0-9._-]*) ;; *) IDENTITY_HEADERS+=(--header \"X-DefenseClaw-User-Name: ${USER_NAME}\") ;; esac\n" +
+		"fi\n" +
 		// curl supported descriptor-backed config files before it added
 		// --header @file in 7.55.0. Keep compatibility without exposing the
 		// connector credential in argv or the child environment. Escape quoted
@@ -2368,7 +2380,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		"API_TOKEN=\n" +
 		"JSON=\n" +
 		"CURL_CONFIG_TOKEN=\n" +
-		"unset API_TOKEN JSON CURL_CONFIG_TOKEN DEFENSECLAW_GATEWAY_TOKEN\n" +
+		"unset API_TOKEN JSON CURL_CONFIG_TOKEN USER_ID USER_NAME DEFENSECLAW_GATEWAY_TOKEN\n" +
 		"curl --silent --show-error --max-time 5 \\\n" +
 		"  --header 'Content-Type: application/json' \\\n" +
 		// Authorization: Bearer is the canonical credential the gateway's
@@ -2381,6 +2393,7 @@ func writeCodexNotifyBridge(opts SetupOpts) error {
 		// observational (logged in audit).
 		"  --header 'X-DefenseClaw-Client: codex-notify/1.0' \\\n" +
 		"  --header 'x-defenseclaw-source: codex-notify' \\\n" +
+		"  \"${IDENTITY_HEADERS[@]+\"${IDENTITY_HEADERS[@]}\"}\" \\\n" +
 		"  \"${TRACE_HEADERS[@]+\"${TRACE_HEADERS[@]}\"}\" \\\n" +
 		"  --data-binary '@/dev/fd/9' \\\n" +
 		"  " + shellSingleQuote(endpoint) + " >/dev/null 2>&1 || true\n" +

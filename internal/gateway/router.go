@@ -1531,6 +1531,17 @@ func (r *EventRouter) handleApprovalRequest(evt EventFrame) {
 	}
 	approval = r.enrichEventRouterApprovalTopology(approval)
 	approvalContext := r.getToolParentCtx(approval.sessionKey, approval.runID)
+	identity := AgentIdentityFromContext(approvalContext)
+	if approval.userID == "" && approval.userName == "" {
+		approval.userID = identity.UserID
+		approval.userIDKind = identity.UserIDKind
+		approval.userName = identity.UserName
+	} else if approval.userID == identity.UserID {
+		approval.userIDKind = identity.UserIDKind
+		approval.userName = firstNonEmpty(approval.userName, identity.UserName)
+	} else {
+		approval.userIDKind = ""
+	}
 	_ = r.emitApprovalRequestedV8(approvalContext, approval)
 
 	// a sparse approval frame with no SystemRunPlan,

@@ -22,7 +22,7 @@ official-client validation metadata remains empty and `live=false`.
 | Platform | Status | Notes |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | The native `devin-hooks-v1` contract manages user hooks under `~/.config/devin` or an explicitly pinned project hook document. |
-| Native Windows x64 | **Supported** | Setup admits only the current user's exact Devin CLI `3000.4.25` executable at its official LocalAppData path with a valid `Exafunction, Inc.` Authenticode signer. DefenseClaw adds no Bash or WSL dependency; Devin's own Windows hook runner evaluates the registered Bash-safe system-PowerShell bridge. |
+| Native Windows x64 | **Supported** | Setup admits only the current user's exact Devin CLI `3000.4.25` executable at its official LocalAppData path with a valid `Exafunction, Inc.` Authenticode signer. DefenseClaw adds no Bash or WSL dependency; Devin's own Windows hook runner invokes the protected native hook executable directly. |
 
 ## Setup
 
@@ -60,10 +60,10 @@ and be signed by `Exafunction, Inc.`. Setup does not trust a different
 PATH-resolved `devin.exe`.
 
 Devin evaluates hook commands through its own Bash execution path on Windows.
-DefenseClaw therefore registers a Bash-safe outer command that invokes system
-Windows PowerShell 5.1 `Start-Process -Wait`, which in turn runs the protected
-`defenseclaw-hook.exe`. DefenseClaw does not install or add Bash, WSL, Docker,
-a VM, Git Bash, Cygwin/MSYS, or a proxy dependency.
+DefenseClaw therefore registers the protected `defenseclaw-hook.exe` as a
+Bash-safe direct command. This preserves the hook JSON streams and blocking
+exit code without a PowerShell decode boundary. DefenseClaw does not install
+or add Bash, WSL, Docker, a VM, Git Bash, Cygwin/MSYS, or a proxy dependency.
 
 ## Configuration custody
 

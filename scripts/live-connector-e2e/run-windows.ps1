@@ -4803,8 +4803,8 @@ function Invoke-RegisteredNativeHook(
         $logPath = Join-Path $script:LogRoot (
             '{0:D3}-devin-registered-{1}.log' -f (++$script:CommandIndex), $safeLabel
         )
-        return Invoke-NativeProcess -FilePath $parsed.PowerShell -ArgumentList @(
-            '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $parsed.Encoded
+        return Invoke-NativeProcess -FilePath $parsed.Target -ArgumentList @(
+            'hook', '--connector', 'devin'
         ) -InputPath $InputPath -TimeoutSeconds $TimeoutSeconds `
             -AllowedExitCodes $AllowedExitCodes -LogPath $logPath
     }
@@ -5573,49 +5573,15 @@ function Assert-AntigravityWindowsHookCommands([string]$Config) {
 }
 
 function Get-DevinWindowsHookCommand([string]$Command, [string]$Context) {
-    $systemPowerShell = Join-Path (
-        [Environment]::SystemDirectory
-    ) 'WindowsPowerShell\v1.0\powershell.exe'
-    $bashPowerShell = $systemPowerShell.Replace('\', '/')
-    $prefix = "'$bashPowerShell' -NoLogo -NoProfile -NonInteractive -EncodedCommand "
-    if (-not $Command.StartsWith($prefix, [StringComparison]::Ordinal)) {
-        throw "$Context does not use the exact POSIX-quoted system Windows PowerShell launcher"
-    }
-    $encoded = $Command.Substring($prefix.Length)
-    if ($encoded -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') {
-        throw "$Context has invalid EncodedCommand content"
-    }
-    try {
-        $scriptBody = [Text.Encoding]::Unicode.GetString(
-            [Convert]::FromBase64String($encoded)
-        )
-    } catch {
-        throw "$Context has invalid EncodedCommand content: $($_.Exception.Message)"
-    }
-    $pattern = "(?i)^\`$ErrorActionPreference='Stop'; \`$env:NoDefaultCurrentDirectoryInExePath='1'; \`$hookProcess=Microsoft\.PowerShell\.Management\\Start-Process -FilePath (?<file>'(?:''|[^'])+') -ArgumentList @\('hook','--connector','devin'\) -NoNewWindow -Wait -PassThru; exit \`$hookProcess\.ExitCode$"
-    $match = [regex]::Match($scriptBody, $pattern)
-    $target = if ($match.Success) {
-        $literal = $match.Groups['file'].Value
-        $literal.Substring(1, $literal.Length - 2).Replace("''", "'")
-    } else {
-        ''
-    }
-    $expectedTarget = Get-StableHookRuntimeExecutable
-    if (-not $match.Success -or
-        -not [IO.Path]::IsPathFullyQualified($target) -or
-        -not [string]::Equals(
-            [IO.Path]::GetFullPath($target),
-            [IO.Path]::GetFullPath($expectedTarget),
-            [StringComparison]::OrdinalIgnoreCase
-        ) -or
-        $scriptBody -match '(?i)\$LASTEXITCODE') {
-        throw "$Context does not use the exact synchronous native Devin hook command"
+    $target = Get-StableHookRuntimeExecutable
+    $bashTarget = $target.Replace('\', '/')
+    $quotedTarget = "'" + $bashTarget.Replace("'", "'\''") + "'"
+    $expectedCommand = "$quotedTarget hook --connector devin"
+    if (-not [string]::Equals($Command, $expectedCommand, [StringComparison]::Ordinal)) {
+        throw "$Context does not use the exact POSIX-quoted direct native Devin hook command"
     }
     return [pscustomobject]@{
         Command = $Command
-        Encoded = $encoded
-        Script = $scriptBody
-        PowerShell = $systemPowerShell
         Target = $target
     }
 }
@@ -6978,15 +6944,12 @@ function Assert-DoctorWindowsHookRegistration {
         $document = $config | ConvertFrom-Json -ErrorAction Stop
         $command = [string]@($document.hooks.PreToolUse)[0].hooks[0].command
         $parsed = Get-DevinWindowsHookCommand $command 'Devin tamper contract'
-        $tamperedScript = [regex]::Replace(
-            $parsed.Script,
+        $tamperedCommand = [regex]::Replace(
+            $parsed.Command,
             '(?i)defenseclaw-hook\.exe',
             'defenseclaw-gateway.exe'
         )
-        $tamperedEncoded = [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes($tamperedScript)
-        )
-        $tamperedConfig = $config.Replace($parsed.Encoded, $tamperedEncoded)
+        $tamperedConfig = $config.Replace($parsed.Command, $tamperedCommand)
     } elseif ($Connector -eq 'amp') {
         $tamperedConfig = $config.Replace(
             'DefenseClaw Amp policy bridge',
@@ -7045,7 +7008,7 @@ function Assert-DoctorWindowsHookRegistration {
             'claudecode' { 'does not use the native hook runtime' }
             'devin' {
                 $missingGatewayLauncher = [regex]::Replace(
-                    $parsed.Target,
+                    $parsed.Target.Replace('\', '/'),
                     '(?i)defenseclaw-hook\.exe$',
                     'defenseclaw-gateway.exe'
                 )

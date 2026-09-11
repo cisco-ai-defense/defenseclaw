@@ -12,6 +12,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	"github.com/defenseclaw/defenseclaw/internal/useridentity"
 	"github.com/google/uuid"
 )
 
@@ -112,6 +113,7 @@ func (l *Logger) emitNetworkEgressV8(
 					DefenseClawAgentLifecycleID: input.AgentLifecycleID,
 					DefenseClawAgentExecutionID: input.AgentExecutionID,
 					UserID:                      input.UserID, GenAIToolCallID: input.ToolCallID,
+					DefenseClawUserIDKind:           input.UserIDKind,
 					DefenseClawNetworkTargetRef:     input.TargetRef,
 					DefenseClawNetworkTargetPath:    input.TargetPath,
 					DefenseClawNetworkPolicyOutcome: input.PolicyOutcome,
@@ -132,6 +134,7 @@ func (l *Logger) emitNetworkEgressV8(
 					DefenseClawAgentLifecycleID: input.AgentLifecycleID,
 					DefenseClawAgentExecutionID: input.AgentExecutionID,
 					UserID:                      input.UserID, GenAIToolCallID: input.ToolCallID,
+					DefenseClawUserIDKind:           input.UserIDKind,
 					DefenseClawNetworkTargetRef:     input.TargetRef,
 					DefenseClawNetworkTargetPath:    input.TargetPath,
 					DefenseClawNetworkPolicyOutcome: input.PolicyOutcome,
@@ -165,6 +168,7 @@ type networkEgressGeneratedInput struct {
 	AgentLifecycleID observability.Optional[string]
 	AgentExecutionID observability.Optional[string]
 	UserID           observability.Optional[string]
+	UserIDKind       observability.Optional[string]
 	ToolCallID       observability.Optional[string]
 	TargetRef        string
 	TargetPath       observability.Optional[string]
@@ -192,8 +196,9 @@ func networkEgressFamilyInput(
 		ParentAgentID: optionalNetworkText(event.ParentAgentID), RootSessionID: optionalNetworkText(event.RootSessionID),
 		AgentLifecycleID: optionalNetworkText(event.AgentLifecycleID),
 		AgentExecutionID: optionalNetworkText(event.AgentExecutionID),
-		UserID:           optionalNetworkText(event.UserID), ToolCallID: optionalNetworkText(event.ToolID),
-		TargetRef: event.Hostname, PolicyOutcome: optionalNetworkText(event.PolicyOutcome),
+		UserID:           optionalNetworkText(event.UserID), UserIDKind: optionalNetworkUserIDKind(event.UserIDKind),
+		ToolCallID: optionalNetworkText(event.ToolID),
+		TargetRef:  event.Hostname, PolicyOutcome: optionalNetworkText(event.PolicyOutcome),
 		DecisionCode:  optionalNetworkIdentifier(event.DecisionCode),
 		Reason:        optionalNetworkText(row.Details),
 		ServerAddress: optionalNetworkText(event.Hostname),
@@ -224,6 +229,15 @@ func optionalNetworkText(value string) observability.Optional[string] {
 		return observability.Absent[string]()
 	}
 	return observability.Present(value)
+}
+
+func optionalNetworkUserIDKind(value string) observability.Optional[string] {
+	switch strings.TrimSpace(value) {
+	case useridentity.KindPOSIXUID, useridentity.KindWindowsSID:
+		return observability.Present(strings.TrimSpace(value))
+	default:
+		return observability.Absent[string]()
+	}
 }
 
 func optionalNetworkIdentifier(value string) observability.Optional[string] {

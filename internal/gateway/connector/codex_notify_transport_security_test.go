@@ -149,6 +149,10 @@ done
 				t.Fatalf("transported headers retained rejected credential %q: %q", rejected, headers)
 			}
 		}
+		if !strings.Contains(headers, "X-DefenseClaw-User-Id: ") ||
+			!strings.Contains(headers, "X-DefenseClaw-User-Name: ") {
+			t.Fatalf("notify bridge omitted OS identity headers: %q", headers)
+		}
 		if body := readCodexNotifyCapture(t, bodyPath); body != wantPayload {
 			t.Fatalf("transported notify body = %q, want %q", body, wantPayload)
 		}

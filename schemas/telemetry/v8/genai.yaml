@@ -732,6 +732,41 @@ attributes:
     id: identifier-v1
     notes: NFC bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.user.email
+  type: string
+  brief: End-user email reported by the agent platform
+  examples:
+  - operator@example.com
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: sensitive
+  cardinality: high
+  normalization:
+    id: identifier-v1
+    overrides:
+      max_utf8_bytes: 254
+      pattern: '^[A-Za-z0-9][A-Za-z0-9._%+-]*@[A-Za-z0-9][A-Za-z0-9.-]*\.[A-Za-z]{2,}$'
+    notes: preserve only an explicitly reported end-user email; never derive it from a display name, a git identity, or the service principal running the sidecar
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.user.id_kind
+  type: string
+  brief: Namespace of the reported user.id principal
+  examples:
+  - windows_sid
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization:
+    id: enum-v1
+    overrides:
+      enum:
+      - windows_sid
+      - posix_uid
+    notes: closed namespace so a consumer can join user.id without inferring the platform from its shape
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.telemetry.input.reported
   type: boolean
   brief: Producer reported input
@@ -2114,7 +2149,11 @@ groups:
   attributes:
   - ref: user.id
     requirement_level: recommended
+  - ref: defenseclaw.user.id_kind
+    requirement_level: recommended
   - ref: defenseclaw.user.name
+    requirement_level: recommended
+  - ref: defenseclaw.user.email
     requirement_level: recommended
   - ref: defenseclaw.policy.id
     requirement_level: recommended

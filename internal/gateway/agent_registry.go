@@ -334,5 +334,6 @@ type AgentIdentity struct {
 	AgentInstanceID   string
 	SidecarInstanceID string
 	UserID            string
+	UserIDKind        string
 	UserName          string
 }

@@ -1051,6 +1051,11 @@
         "include_network_domains": {
           "type": "boolean"
         },
+        "include_user_email": {
+          "type": "boolean",
+          "default": false,
+          "description": "Opt in to attaching the end-user email address a connector reports to identity telemetry. Off by default: unlike the uid or SID it accompanies, the address identifies a person across systems and is emitted as plaintext."
+        },
         "lookup_model_provenance_online": {
           "type": "boolean",
           "default": false,
