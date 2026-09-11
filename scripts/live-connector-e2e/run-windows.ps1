@@ -7008,7 +7008,7 @@ function Assert-DoctorWindowsHookRegistration {
             'claudecode' { 'does not use the native hook runtime' }
             'devin' {
                 $missingGatewayLauncher = [regex]::Replace(
-                    $parsed.Target,
+                    $parsed.Target.Replace('\', '/'),
                     '(?i)defenseclaw-hook\.exe$',
                     'defenseclaw-gateway.exe'
                 )
