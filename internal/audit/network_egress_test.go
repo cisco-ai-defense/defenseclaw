@@ -461,11 +461,14 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	}
 }
 
-// TestStore_GetCounts_ActiveAlertsCountsOnlyEnforcedAIDHookBlocks pins the AVC
-// counter to the durable connector-hook enforcement fact. In managed enterprise
-// AI Defense is the sole hook-lane decision maker, so no severity, advisory,
-// finding, health, egress, deny, or legacy-summary event may inflate the tile.
-func TestStore_GetCounts_ActiveAlertsCountsOnlyEnforcedAIDHookBlocks(t *testing.T) {
+// TestStore_GetCounts_ActiveAlertsCountsEveryEnforcedConnectorHookBlock pins
+// the AVC counter to the durable connector-hook enforcement fact and restores
+// 26.7.3 semantics: any block the connector actually enforced counts,
+// regardless of whether AID or a local ordered rule / MCP-asset policy /
+// judge originated the verdict. Finding, health, egress, deny, allow,
+// alert-action, gateway-source, and legacy-summary events still do not
+// inflate the tile.
+func TestStore_GetCounts_ActiveAlertsCountsEveryEnforcedConnectorHookBlock(t *testing.T) {
 	store, err := NewStore(":memory:")
 	if err != nil {
 		t.Fatal(err)
@@ -604,10 +607,13 @@ func TestStore_GetCounts_ActiveAlertsCountsOnlyEnforcedAIDHookBlocks(t *testing.
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Only the connector-sourced, enforced enforcement.block.applied event is
-	// an active AI Defense block. Its locally assigned severity is immaterial.
-	if counts.Alerts != 1 {
-		t.Errorf("Alerts = %d, want 1 enforced AI Defense hook block", counts.Alerts)
+	// Both connector-sourced enforced enforcement.block.applied rows count
+	// (26.7.3 parity): canonical-medium-block (AID actor) and
+	// local-policy-block (local actor). Locally assigned severity remains
+	// immaterial; deny-action, health, findings, and legacy hook summaries
+	// still do not inflate the count.
+	if counts.Alerts != 2 {
+		t.Errorf("Alerts = %d, want 2 enforced connector-hook blocks", counts.Alerts)
 	}
 }
 
@@ -664,9 +670,11 @@ func TestStore_GetCounts_ActiveAlertsCountsAIDHookBlockUntilAcknowledged(t *test
 		stamp, stamp, stamp, stamp, stamp, stamp, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	// Only the actual connector-hook enforcement companion counts. Severity,
-	// findings, advisory actions, other producers, and unenforced rows do not.
-	assertAlerts(1)
+	// All three connector-sourced enforced enforcement.block.applied rows count
+	// (26.7.3 parity): aid-hook-block, local-hook-block, and
+	// ambiguous-legacy-hook-block. Findings, advisory (deny/allow/alert)
+	// actions, gateway-sourced rows, and unenforced rows are still excluded.
+	assertAlerts(3)
 
 	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
 		alert_id, disposition, actor, disposition_at, projection_version,
@@ -675,7 +683,7 @@ func TestStore_GetCounts_ActiveAlertsCountsAIDHookBlockUntilAcknowledged(t *test
 		'ack-aid-hook-block', ?)`, stamp, stamp); err != nil {
 		t.Fatal(err)
 	}
-	assertAlerts(0)
+	assertAlerts(2)
 }
 
 // --- Logger ---
