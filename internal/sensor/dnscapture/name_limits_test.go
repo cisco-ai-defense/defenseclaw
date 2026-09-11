@@ -25,27 +25,63 @@ func repeatLabel(size int) string {
 // it a name assembled from labels is bounded only by the frame, and the
 // decoded string is cached per address and emitted as telemetry content.
 func TestReadNameRefusesOversizeName(t *testing.T) {
-	label := repeatLabel(63)
-	payload := buildName(label, label, label, label, label)
+	payload := buildName(
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(62),
+	)
 	payload = append(payload, 0)
 
 	if _, _, ok := readName(payload, 0, 0); ok {
-		t.Fatal("readName accepted a name of 5x63 bytes, over the 255-byte wire limit")
+		t.Fatal("readName accepted a 256-byte wire name")
 	}
 }
 
 // TestReadNameAcceptsNameAtLimit proves the check rejects only what is over
 // the line: a legitimate long name still decodes.
 func TestReadNameAcceptsNameAtLimit(t *testing.T) {
-	payload := buildName("api", "anthropic", "com")
+	labels := []string{
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(61),
+	}
+	payload := buildName(labels...)
 	payload = append(payload, 0)
 
 	name, _, ok := readName(payload, 0, 0)
 	if !ok {
 		t.Fatal("readName rejected a well-formed name")
 	}
-	if name != "api.anthropic.com" {
-		t.Fatalf("readName = %q, want %q", name, "api.anthropic.com")
+	want := labels[0] + "." + labels[1] + "." + labels[2] + "." + labels[3]
+	if name != want {
+		t.Fatalf("readName length = %d, want %d", len(name), len(want))
+	}
+	if got := len(payload); got != maxNameTextBytes+2 {
+		t.Fatalf("wire name length = %d, want 255", got)
+	}
+}
+
+func TestReadNameAcceptsNameAtLimitThroughPointer(t *testing.T) {
+	labels := []string{
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(63),
+		repeatLabel(61),
+	}
+	payload := buildName(labels...)
+	payload = append(payload, 0, 0xC0, 0x00)
+
+	name, next, ok := readName(payload, maxNameTextBytes+2, 0)
+	if !ok {
+		t.Fatal("readName rejected a 255-byte wire name reached through a pointer")
+	}
+	if got, want := len(name), maxNameTextBytes; got != want {
+		t.Fatalf("decoded name length = %d, want %d", got, want)
+	}
+	if got, want := next, len(payload); got != want {
+		t.Fatalf("next offset = %d, want %d", got, want)
 	}
 }
 
