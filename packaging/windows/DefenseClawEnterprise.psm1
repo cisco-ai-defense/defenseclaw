@@ -4084,6 +4084,35 @@ function Set-DefenseClawServiceEnvironment {
     [void](Microsoft.PowerShell.Management\New-ItemProperty -LiteralPath $serviceKey -Name Environment -PropertyType MultiString -Value $values -Force)
 }
 
+function Get-DefenseClawSensorHelperEnvironmentValues {
+    param([Parameter(Mandatory)][string]$GatewayServiceName)
+    Assert-DefenseClawServiceName -Name $GatewayServiceName
+    return [string[]]@(
+        "DEFENSECLAW_WINDOWS_GATEWAY_SERVICE_NAME=$GatewayServiceName",
+        "DEFENSECLAW_WINDOWS_SERVICE_ACCOUNT=NT SERVICE\$GatewayServiceName"
+    )
+}
+
+function Set-DefenseClawSensorHelperServiceEnvironment {
+    param(
+        [Parameter(Mandatory)][string]$Name,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    Assert-DefenseClawServiceName -Name $Name
+    $serviceKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$Name"
+    if (-not (Microsoft.PowerShell.Management\Test-Path -LiteralPath $serviceKey)) {
+        throw "service registry key is missing: $Name"
+    }
+    $values = Get-DefenseClawSensorHelperEnvironmentValues `
+        -GatewayServiceName $GatewayServiceName
+    [void](Microsoft.PowerShell.Management\New-ItemProperty `
+        -LiteralPath $serviceKey `
+        -Name Environment `
+        -PropertyType MultiString `
+        -Value $values `
+        -Force)
+}
+
 function Set-DefenseClawCMIDBrokerAuthKey {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -4559,6 +4588,9 @@ function Set-DefenseClawManagedServices {
             ))
         }
         Assert-DefenseClawServiceImagePath -Name $sensorHelperServiceName -ExpectedImage $sensorHelperImage
+        Set-DefenseClawSensorHelperServiceEnvironment `
+            -Name $sensorHelperServiceName `
+            -GatewayServiceName $GatewayServiceName
         $sensorHelperRegistered = $true
     }
 
@@ -4670,6 +4702,9 @@ function Set-DefenseClawManagedServices {
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $BrokerServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $GuardianServiceName, 'unrestricted'))
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $enumeratorServiceName, 'unrestricted'))
+    if ($sensorHelperRegistered) {
+        [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @('sidtype', $sensorHelperServiceName, 'unrestricted'))
+    }
     [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
         'privs', $GatewayServiceName, 'SeChangeNotifyPrivilege'
     ))
@@ -4684,7 +4719,11 @@ function Set-DefenseClawManagedServices {
         'privs', $enumeratorServiceName,
         'SeTcbPrivilege/SeImpersonatePrivilege/SeChangeNotifyPrivilege/SeBackupPrivilege/SeRestorePrivilege'
     ))
-    foreach ($service in @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)) {
+    $hardenedServices = @($BrokerServiceName, $GatewayServiceName, $GuardianServiceName, $enumeratorServiceName)
+    if ($sensorHelperRegistered) {
+        $hardenedServices += $sensorHelperServiceName
+    }
+    foreach ($service in $hardenedServices) {
         [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
             'failure', $service,
             'reset=', '86400',
@@ -5543,7 +5582,7 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
-    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
             Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $gatewaySID
         }
@@ -6905,6 +6944,7 @@ function New-DefenseClawDeploymentMetadata {
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
         @('hook', $Layout.HookPath),
+        @('sensor_helper', $Layout.SensorHelperPath),
         @('cli', $Layout.CLIPath),
         @('installer', $Layout.InstallerPath),
         @('module', $Layout.ModulePath)
@@ -7454,6 +7494,7 @@ function New-DefenseClawTransaction {
         $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
+        $Layout.SensorHelperPath,
         $Layout.CLIPath,
         $Layout.ConfigPath,
         $Layout.ManifestPath,
@@ -14701,6 +14742,12 @@ function Assert-DefenseClawManagedServiceConfigurations {
     $brokerImage = Get-DefenseClawCMIDBrokerImage `
         -Layout $Layout `
         -GatewayServiceName $GatewayServiceName
+    $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName $GatewayServiceName
+    $sensorHelperEnvironment = [string[]]@(
+        Get-DefenseClawSensorHelperEnvironmentValues `
+            -GatewayServiceName $GatewayServiceName
+    )
     Assert-DefenseClawServiceConfiguration `
         -Name $Layout.BrokerServiceName `
         -ExpectedImage $brokerImage `
@@ -14711,6 +14758,15 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedEnvironment @() `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
+        -Name $sensorHelperServiceName `
+        -ExpectedImage (Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Sensor Helper' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @() `
+        -ExpectedEnvironment $sensorHelperEnvironment `
+        -ExpectedStartMode $expectedStartMode
+    Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
         -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
@@ -14718,7 +14774,7 @@ function Assert-DefenseClawManagedServiceConfigurations {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
-        -ExpectedDependencies @($Layout.BrokerServiceName) `
+        -ExpectedDependencies @($Layout.BrokerServiceName, $sensorHelperServiceName) `
         -ExpectedStartMode $expectedStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -15126,7 +15182,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
         -AllowUsersRead
-    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
@@ -15275,7 +15331,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RejectUntrustedRead
     }
 
-    foreach ($requiredHash in @('broker', 'gateway', 'hook', 'installer', 'module')) {
+    foreach ($requiredHash in @('broker', 'gateway', 'hook', 'sensor_helper', 'installer', 'module')) {
         if ($null -eq $metadata.hashes.PSObject.Properties[$requiredHash]) {
             throw "deployment metadata is missing required artifact hash: $requiredHash"
         }
@@ -15290,6 +15346,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             'broker' { $Layout.BrokerPath }
             'gateway' { $Layout.GatewayPath }
             'hook' { $Layout.HookPath }
+            'sensor_helper' { $Layout.SensorHelperPath }
             'cli' { $Layout.CLIPath }
             'installer' { $Layout.InstallerPath }
             'module' { $Layout.ModulePath }
@@ -15351,6 +15408,12 @@ function Assert-DefenseClawEnterpriseDeployment {
                 'DEFENSECLAW_WINDOWS_CLAUDE_EFFECTIVE_POLICY_VERIFIED=1'
         )
     }
+    $sensorHelperServiceName = Get-DefenseClawSensorHelperServiceName `
+        -GatewayServiceName $GatewayServiceName
+    $sensorHelperEnvironment = [string[]]@(
+        Get-DefenseClawSensorHelperEnvironmentValues `
+            -GatewayServiceName $GatewayServiceName
+    )
     # Spec 005 D1 (CR PRRT_kwDORuAK-s6aunSc): the enumerator is a
     # third managed SCM service. Its expected env vars mirror the
     # guardian's (DEFENSECLAW_WINDOWS_SERVICE_NAME differs; everything
@@ -15393,6 +15456,15 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedEnvironment @() `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
+        -Name $sensorHelperServiceName `
+        -ExpectedImage (Get-DefenseClawSensorHelperImage -Layout $Layout -GatewayServiceName $GatewayServiceName) `
+        -ExpectedAccount 'LocalSystem' `
+        -ExpectedDisplayName 'DefenseClaw Sensor Helper' `
+        -ExpectedSidType 1 `
+        -ExpectedPrivileges @() `
+        -ExpectedEnvironment $sensorHelperEnvironment `
+        -ExpectedStartMode $expectedServiceStartMode
+    Assert-DefenseClawServiceConfiguration `
         -Name $GatewayServiceName `
         -ExpectedImage ('"{0}"' -f $Layout.GatewayPath) `
         -ExpectedAccount "NT SERVICE\$GatewayServiceName" `
@@ -15400,7 +15472,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -ExpectedSidType 3 `
         -ExpectedPrivileges @('SeChangeNotifyPrivilege') `
         -ExpectedEnvironment $gatewayEnvironment `
-        -ExpectedDependencies @($Layout.BrokerServiceName) `
+        -ExpectedDependencies @($Layout.BrokerServiceName, $sensorHelperServiceName) `
         -ExpectedStartMode $expectedServiceStartMode
     Assert-DefenseClawServiceConfiguration `
         -Name $GuardianServiceName `
@@ -15445,6 +15517,13 @@ function Assert-DefenseClawEnterpriseDeployment {
         if ($null -eq $brokerService -or
             $brokerService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
             throw 'credential broker SCM process is not running'
+        }
+        $sensorHelperService = Microsoft.PowerShell.Management\Get-Service `
+            -Name $Layout.SensorHelperServiceName `
+            -ErrorAction SilentlyContinue
+        if ($null -eq $sensorHelperService -or
+            $sensorHelperService.Status -ne [ServiceProcess.ServiceControllerStatus]::Running) {
+            throw 'sensor helper SCM process is not running'
         }
         if (-not (Test-DefenseClawGatewayReady -Layout $Layout -GatewayServiceName $GatewayServiceName)) {
             throw 'gateway SCM process is running but authenticated health is not ready'
@@ -15491,6 +15570,7 @@ function Get-DefenseClawArtifactPath {
         'broker' { $Layout.BrokerPath }
         'gateway' { $Layout.GatewayPath }
         'hook' { $Layout.HookPath }
+        'sensor_helper' { $Layout.SensorHelperPath }
         'cli' { $Layout.CLIPath }
         'installer' { $Layout.InstallerPath }
         'module' { $Layout.ModulePath }
@@ -15510,7 +15590,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
-    foreach ($required in @('broker', 'gateway', 'hook', 'installer', 'module')) {
+    foreach ($required in @('broker', 'gateway', 'hook', 'sensor_helper', 'installer', 'module')) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
             throw "deployment metadata is missing required artifact hash: $required"
@@ -15552,6 +15632,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
+        [string]$SensorHelperBinary,
         [string]$CLIBinary,
         [string]$NativeCleanupBinary,
         [string]$Config,
@@ -15584,7 +15665,8 @@ function Get-DefenseClawLifecycleSources {
             @('BrokerBinary', $BrokerBinary),
             @('ProviderLibrary', $ProviderLibrary),
             @('GatewayBinary', $GatewayBinary),
-            @('HookBinary', $HookBinary)
+            @('HookBinary', $HookBinary),
+            @('SensorHelperBinary', $SensorHelperBinary)
         )
         # Legacy compatibility scaffolding: direct callers of this internal
         # helper can still describe the old source shape, but the lifecycle
@@ -15605,8 +15687,9 @@ function Get-DefenseClawLifecycleSources {
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
         [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
         [string]::IsNullOrWhiteSpace($GatewayBinary) -or
-        [string]::IsNullOrWhiteSpace($HookBinary))) {
-        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and -HookBinary'
+        [string]::IsNullOrWhiteSpace($HookBinary) -or
+        [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
+        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, -HookBinary, and -SensorHelperBinary'
     }
 
     foreach ($entry in @(
@@ -15614,6 +15697,7 @@ function Get-DefenseClawLifecycleSources {
         @('provider_library', $ProviderLibrary, 'managed credential provider library', $true),
         @('gateway', $GatewayBinary, 'gateway executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
+        @('sensor_helper', $SensorHelperBinary, 'privileged sensor helper executable', $true),
         @('cli', $CLIBinary, 'CLI executable', $true),
         @('config', $Config, 'managed config', $false),
         @('manifest', $Manifest, 'guardian manifest', $false),
@@ -16066,6 +16150,7 @@ function Assert-DefenseClawManagedInstallTree {
         $Layout.BrokerPath,
         $Layout.GatewayPath,
         $Layout.HookPath,
+        $Layout.SensorHelperPath,
         $Layout.CLIPath,
         $Layout.InstallerPath,
         $Layout.ModulePath
@@ -19449,6 +19534,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 'gateway',
                 'broker',
                 'hook',
+                'sensor_helper',
                 'cli',
                 'installer',
                 'module'
@@ -19596,6 +19682,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         }
         Stop-DefenseClawService -Name $GuardianServiceName
         Stop-DefenseClawService -Name $GatewayServiceName
+        Stop-DefenseClawService -Name $Layout.SensorHelperServiceName
         Stop-DefenseClawService -Name $Layout.BrokerServiceName
         # Upgrade/Repair must capture the old machine-policy identity before a
         # replacement config or manifest changes its endpoint/target set. New
@@ -19635,6 +19722,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             $Layout.GatewayPath,
             $Layout.BrokerPath,
             $Layout.HookPath,
+            $Layout.SensorHelperPath,
             $Layout.ConfigPath,
             $Layout.ManifestPath,
             $Layout.InstallerPath,
@@ -19708,6 +19796,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
             @{Path = $Layout.BrokerPath;    SourceKey = $null},
             @{Path = $Layout.GatewayPath;   SourceKey = $null},
             @{Path = $Layout.HookPath;      SourceKey = $null},
+            @{Path = $Layout.SensorHelperPath; SourceKey = $null},
             @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
             @{Path = $Layout.ManifestPath;  SourceKey = 'manifest'},
             @{Path = $Layout.InstallerPath; SourceKey = $null},
@@ -20021,6 +20110,10 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -Name $Layout.BrokerServiceName `
                 -StartMode 3
             Start-DefenseClawService -Name $Layout.BrokerServiceName
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.SensorHelperServiceName `
+                -StartMode 3
+            Start-DefenseClawService -Name $Layout.SensorHelperServiceName
             # The guardian becomes startable, publishes a fresh successful
             # reconcile, and remains live while gateway is still disabled.
             Set-DefenseClawServiceStartMode `
@@ -20094,6 +20187,9 @@ function Invoke-DefenseClawInstallLikeLifecycle {
                 -StartMode 2
             Set-DefenseClawServiceStartMode `
                 -Name $Layout.BrokerServiceName `
+                -StartMode 2
+            Set-DefenseClawServiceStartMode `
+                -Name $Layout.SensorHelperServiceName `
                 -StartMode 2
             Set-DefenseClawServiceStartMode `
                 -Name $GatewayServiceName `
@@ -20620,6 +20716,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$ProviderLibrary,
         [string]$GatewayBinary,
         [string]$HookBinary,
+        [string]$SensorHelperBinary,
         [string]$CLIBinary,
         [string]$NativeCleanupBinary,
         [string]$Config,
@@ -20840,6 +20937,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -ProviderLibrary $ProviderLibrary `
         -GatewayBinary $GatewayBinary `
         -HookBinary $HookBinary `
+        -SensorHelperBinary $SensorHelperBinary `
         -CLIBinary $CLIBinary `
         -NativeCleanupBinary $NativeCleanupBinary `
         -Config $Config `

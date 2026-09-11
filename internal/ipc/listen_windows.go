@@ -41,6 +41,10 @@ func listenSecuredForOS(ctx context.Context, spec ListenSpec) (net.Listener, err
 	if err := winpath.RejectReparseChain(dir); err != nil {
 		return nil, fmt.Errorf("ipc: reject reparse chain %s: %w", dir, err)
 	}
+	// Both sockets share this parent. Keep the baseline traverse/list ACL on
+	// the directory so ordinary UI IPC clients can path-resolve their socket;
+	// it deliberately grants no create right, so that does not weaken the
+	// helper socket's separate, gateway-only DACL below.
 	if err := applyBaselineIPCACL(dir, aclObjectDirectory); err != nil {
 		return nil, err
 	}
@@ -53,7 +57,11 @@ func listenSecuredForOS(ctx context.Context, spec ListenSpec) (net.Listener, err
 	if err != nil {
 		return nil, fmt.Errorf("ipc: listen unix %s: %w", spec.Path, err)
 	}
-	if err := applyBaselineIPCACL(spec.Path, aclObjectSocketFile); err != nil {
+	applySocketACL := applyBaselineIPCACL
+	if spec.GatewayOnly {
+		applySocketACL = applyGatewayOnlyIPCACL
+	}
+	if err := applySocketACL(spec.Path, aclObjectSocketFile); err != nil {
 		_ = inner.Close()
 		return nil, err
 	}

@@ -49,6 +49,7 @@ type windowsEnterpriseLifecycleOptions struct {
 	brokerBinary                  string
 	gatewayBinary                 string
 	hookBinary                    string
+	sensorHelperBinary            string
 	cliBinary                     string
 	configPath                    string
 	manifestPath                  string
@@ -203,6 +204,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags.StringVar(&opts.brokerBinary, "broker-binary", "", "source defenseclaw-cmid-broker.exe")
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
+	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
 	flags.StringVar(&opts.configPath, "config", "", "administrator-approved managed config.yaml")
 	flags.StringVar(&opts.manifestPath, "manifest", "", "administrator-approved guardian targets.yaml")
@@ -520,6 +522,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-ProviderLibrary", opts.providerLibrary)
 	appendValue("-GatewayBinary", opts.gatewayBinary)
 	appendValue("-HookBinary", opts.hookBinary)
+	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
 	appendValue("-CLIBinary", opts.cliBinary)
 	appendValue("-Config", opts.configPath)
 	appendValue("-Manifest", opts.manifestPath)

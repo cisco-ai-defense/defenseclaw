@@ -125,11 +125,12 @@ func serve(
 		// managed IPC directory and to a declared filename; this service
 		// has its own access boundary, so it must not share the UI IPC
 		// socket's identity.
-		BaseName:   acquire.SocketFileName,
-		SocketMode: 0o660,
-		DirMode:    0o750,
-		OwnerUID:   os.Getuid(),
-		OwnerGID:   socketGID,
+		BaseName:    acquire.SocketFileName,
+		SocketMode:  0o660,
+		DirMode:     0o750,
+		OwnerUID:    os.Getuid(),
+		OwnerGID:    socketGID,
+		GatewayOnly: true,
 	})
 	if err != nil {
 		return err

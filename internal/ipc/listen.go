@@ -61,6 +61,14 @@ type ListenSpec struct {
 	// identity that is not its own; sharing one socket file between two
 	// different access boundaries would be the actually dangerous option.
 	BaseName string
+	// GatewayOnly removes the Authenticated Users ACE from the Windows socket
+	// DACL. The shared parent keeps the baseline traverse/list ACL so UI IPC
+	// clients can still reach their separate socket, while its no-create rule
+	// prevents an unprivileged user from planting a replacement socket.
+	// Privileged services must set this so only SYSTEM, Administrators, and the
+	// exact gateway virtual-service SID can connect. Ignored on Unix, where
+	// peer UID authorization is enforced by the accepting service.
+	GatewayOnly bool
 }
 
 // ListenSecured binds a local socket with the hardening above.

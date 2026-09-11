@@ -95,6 +95,49 @@ func assertBaselineIPCACEs(t *testing.T, class aclObjectClass, wantAuthUsersMask
 	}
 }
 
+func TestGatewayOnlyIPCACEsShape(t *testing.T) {
+	gatewaySID := testGatewayServiceSID(t)
+	entries, err := gatewayOnlyIPCACEsForGatewaySID(gatewaySID)
+	if err != nil {
+		t.Fatalf("gateway-only ACL entries: %v", err)
+	}
+	if got, want := len(entries), 3; got != want {
+		t.Fatalf("gateway-only ACE count = %d, want %d", got, want)
+	}
+
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatalf("resolve Authenticated Users SID: %v", err)
+	}
+	for index, entry := range entries {
+		acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{entry}, nil)
+		if err != nil {
+			t.Fatalf("entry %d: materialize ACL: %v", index, err)
+		}
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(acl, 0, &ace); err != nil {
+			t.Fatalf("entry %d: read ACE: %v", index, err)
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(authenticatedUsers) {
+			t.Fatal("gateway-only ACL must not grant Authenticated Users access")
+		}
+		if entry.AccessPermissions != windows.GENERIC_ALL {
+			t.Fatalf("entry %d grants %#x, want GENERIC_ALL", index, entry.AccessPermissions)
+		}
+	}
+}
+
+func TestGatewayOnlyIPCACEsRejectNonServiceSID(t *testing.T) {
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatalf("resolve Authenticated Users SID: %v", err)
+	}
+	if _, err := gatewayOnlyIPCACEsForGatewaySID(authenticatedUsers); err == nil {
+		t.Fatal("gateway-only ACL accepted a non-service SID")
+	}
+}
+
 // assertExplicitAccessTrusteeSID materializes a single EXPLICIT_ACCESS entry
 // through the same Windows ACL API used by applyBaselineIPCACL, then compares
 // the copied SID contents. TrusteeValue itself embeds a pointer, so comparing
