@@ -80,9 +80,12 @@ describe('command generator shell safety', () => {
   it('omits placeholder assignments that can hide the CLI from Bash or zsh', () => {
     for (const name of ['PATH', 'path']) {
       const result = buildRemoteCommand(name, 'bash');
-      assert.deepStrictEqual(result.preExports, []);
+      assert.deepStrictEqual(result.preExports, [
+        "export CISCO_AI_DEFENSE_API_KEY='<your-cisco-ai-defense-api-key>'",
+      ]);
       assert.match(result.warnings.join(' '), /controls executable lookup in Bash\/zsh/i);
-      assert.ok(result.lines.includes(`--cisco-api-key-env ${name}`));
+      assert.match(result.warnings.join(' '), /falling back.*CISCO_AI_DEFENSE_API_KEY/i);
+      assert.ok(!result.lines.some((line) => line.startsWith('--cisco-api-key-env')));
     }
 
     for (const name of ['Path', 'PATHEXT', 'PATH_API_KEY']) {
@@ -93,17 +96,23 @@ describe('command generator shell safety', () => {
     }
 
     const invalid = buildRemoteCommand('BAD-NAME', 'bash');
-    assert.deepStrictEqual(invalid.preExports, []);
+    assert.deepStrictEqual(invalid.preExports, [
+      "export CISCO_AI_DEFENSE_API_KEY='<your-cisco-ai-defense-api-key>'",
+    ]);
     assert.match(invalid.warnings.join(' '), /is not portable/i);
     assert.doesNotMatch(invalid.warnings.join(' '), /controls executable lookup/i);
+    assert.ok(!invalid.lines.some((line) => line.startsWith('--cisco-api-key-env')));
   });
 
   it('omits case-insensitive Windows command-search placeholder assignments', () => {
     for (const name of ['PATH', 'Path', 'path', 'pAtH', 'PATHEXT', 'PathExt', 'pathext']) {
       const result = buildRemoteCommand(name, 'powershell');
-      assert.deepStrictEqual(result.preExports, []);
+      assert.deepStrictEqual(result.preExports, [
+        "$env:CISCO_AI_DEFENSE_API_KEY = '<your-cisco-ai-defense-api-key>'",
+      ]);
       assert.match(result.warnings.join(' '), /controls executable lookup in PowerShell/i);
-      assert.ok(result.lines.includes(`--cisco-api-key-env '${name}'`));
+      assert.match(result.warnings.join(' '), /falling back.*CISCO_AI_DEFENSE_API_KEY/i);
+      assert.ok(!result.lines.some((line) => line.startsWith('--cisco-api-key-env')));
     }
 
     for (const name of ['MY_PATH_TOKEN', 'PATH_API_KEY']) {
@@ -111,6 +120,25 @@ describe('command generator shell safety', () => {
       assert.deepStrictEqual(valid.preExports, [
         `$env:${name} = '<your-cisco-ai-defense-api-key>'`,
       ]);
+    }
+  });
+
+  it('falls back from command-search names for the judge API key', () => {
+    for (const [shell, name, expectedAssignment] of [
+      ['bash', 'PATH', "export DEFENSECLAW_LLM_KEY='<your-llm-api-key>'"],
+      ['powershell', 'Path', "$env:DEFENSECLAW_LLM_KEY = '<your-llm-api-key>'"],
+    ] as const) {
+      const result = buildCommand(
+        {
+          ...DEFAULT_STATE,
+          detectionStrategy: 'regex_judge',
+          judgeApiKeyEnv: name,
+        },
+        shell,
+      );
+      assert.deepStrictEqual(result.preExports, [expectedAssignment]);
+      assert.ok(!result.lines.some((line) => line.startsWith('--judge-api-key-env')));
+      assert.match(result.warnings.join(' '), /falling back.*DEFENSECLAW_LLM_KEY/i);
     }
   });
 });
