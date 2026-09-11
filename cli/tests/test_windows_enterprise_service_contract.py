@@ -699,6 +699,7 @@ def test_poisoned_program_root_environment_cannot_redirect_defaults(
                 f"-ProviderLibrary '{payload_binary_ps}' "
                 f"-GatewayBinary '{payload_binary_ps}' "
                 f"-HookBinary '{payload_binary_ps}' "
+                f"-SensorHelperBinary '{payload_binary_ps}' "
                 f"-CLIBinary '{payload_binary_ps}' "
                 f"-CodexBinary '{payload_binary_ps}' "
                 f"-ClaudeBinary '{payload_binary_ps}' "

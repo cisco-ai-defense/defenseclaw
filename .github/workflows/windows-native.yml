@@ -135,8 +135,11 @@ jobs:
           # the -run expression while matching parallel tests, so selectors
           # containing hundreds of exact test names can exhaust the hosted
           # runner even after the tests themselves have released resources.
-          # Keep the shards sequential but small enough to bound both retained
-          # test state and selector compilation memory.
+          # Keep the shards sequential and serialize tests inside each binary.
+          # Several gateway tests deliberately replace process-global capture
+          # callbacks; Windows scheduling otherwise lets unrelated parallel
+          # tests close or replace that state mid-assertion. Small shards still
+          # bound retained test state and selector compilation memory.
           $nativeTestShardCount = 16
           $gatewayList = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-list', '^(Test|Fuzz|Example)', './internal/gateway'
@@ -159,7 +162,7 @@ jobs:
             )
             $gatewayShardPattern = '^(' + ($shardTests -join '|') + ')$'
             Invoke-WindowsNativeProcess $go @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1',
+              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1', '-parallel=1',
               '-skip', $windowsInapplicable, '-run', $gatewayShardPattern, './internal/gateway'
             ) -TimeoutSeconds 1500 `
               -LogPath (Join-Path $env:DC_STATE_ROOT ("go-gateway-shard-{0}.log" -f $shard)) `
@@ -184,7 +187,7 @@ jobs:
             )
             $connectorShardPattern = '^(' + ($shardTests -join '|') + ')$'
             Invoke-WindowsNativeProcess $go @(
-              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1',
+              'test', '-vet=off', '-json', '-count=1', '-timeout=20m', '-p=1', '-parallel=1',
               '-skip', $windowsInapplicable, '-run', $connectorShardPattern, './internal/gateway/connector'
             ) -TimeoutSeconds 1500 `
               -LogPath (Join-Path $env:DC_STATE_ROOT ("go-connector-shard-{0}.log" -f $shard)) `

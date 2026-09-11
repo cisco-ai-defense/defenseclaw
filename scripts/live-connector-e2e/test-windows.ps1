@@ -2727,9 +2727,10 @@ connection.close()
         $nativeWorkflowText -match '\$nativeTestShardCount = 16' -and
         [regex]::Matches($nativeWorkflowText, 'foreach \(\$shard in 0\.\.\(\$nativeTestShardCount - 1\)\)').Count -eq 2 -and
         [regex]::Matches($nativeWorkflowText, '\(\$index % \$nativeTestShardCount\) -eq \$shard').Count -eq 2 -and
+        [regex]::Matches($nativeWorkflowText, '''-parallel=1''').Count -eq 2 -and
         $nativeWorkflowText -match '\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway'' -and\s+\$_ -ne ''github\.com/defenseclaw/defenseclaw/internal/gateway/connector''' -and
         $nativeWorkflowText -match '\$remainingArguments = @\(') `
-        'full native Go suite bounds gateway and connector selectors across 16 sequential processes and separately selects every remaining package'
+        'full native Go suite bounds gateway and connector selectors across 16 sequential processes, serializes tests inside each shard, and separately selects every remaining package'
     Assert-True ($nativeWorkflowText -match '(?s)''-p=1''.*?''-skip''.*?\$windowsInapplicable') 'native Go suite serializes packages and excludes only declared Windows-inapplicable tests'
     Assert-True ([regex]::Matches($nativeWorkflowText, '''test'', ''-vet=off''').Count -eq
         [regex]::Matches($nativeWorkflowText, '''test''').Count -and
