@@ -15,6 +15,8 @@ package pipeline
 import (
 	"context"
 	"errors"
+	"fmt"
+	"os"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
@@ -435,6 +437,11 @@ func (pipeline *LocalLogPipeline) process(
 		return LocalLogOutcome{}, &Error{code: ErrorLocalProjection}
 	}
 	if err := pipeline.appender.AppendContext(ctx, record.Clone(), localProjection); err != nil {
+		// Diagnostic: surface the actual underlying error so we can localize
+		// enforcement-block audit-write failures. Remove once resolved.
+		fmt.Fprintf(os.Stderr,
+			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s err=%v\n",
+			record.Bucket(), record.EventName(), record.Signal(), record.Connector(), err)
 		return LocalLogOutcome{}, boundedPipelineError(ErrorLocalWrite, err)
 	}
 	outcome.localPersisted = true
