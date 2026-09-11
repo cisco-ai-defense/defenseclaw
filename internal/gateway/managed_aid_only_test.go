@@ -806,13 +806,15 @@ func TestManagedAIDOnly_NativeHookAccountingFollowsFinalAssetOutcome(t *testing.
 	}
 }
 
-// TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance drives the real
-// native hook handler, AID evaluator, local asset-policy merge, observability
-// runtime, SQLite projection, and AVC count query. A final block is not enough:
-// the block must have been supplied by AID and actually enforced by the
-// connector. Local MCP policy still receives its durable enforcement companion
-// but must never be relabelled as an AI Defense Active Alert.
-func TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance(t *testing.T) {
+// TestManagedAIDOnly_ActiveAlertsCountEveryEnforcedConnectorHookBlock drives
+// the real native hook handler, AID evaluator, local asset-policy merge,
+// observability runtime, SQLite projection, and AVC count query. This restores
+// the 26.7.3 semantics: any enforced connector-hook block increments the
+// Active Alert count, whether the origin was AID or a local ordered rule /
+// MCP-asset policy. Managed-enterprise deployments enforce heavily through
+// local rule packs, and gating the alert on the AID producer alone silently
+// pinned the count at 0 for the tester's scenario.
+func TestManagedAIDOnly_ActiveAlertsCountEveryEnforcedConnectorHookBlock(t *testing.T) {
 	routes := []struct {
 		connector string
 		body      string
@@ -868,13 +870,16 @@ func TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if counts.Alerts != 0 {
-				t.Fatalf("Active Alerts after local-only block=%d, want 0", counts.Alerts)
+			// 26.7.3 parity: a local ordered-rule / MCP-asset block that the
+			// connector actually enforced is an Active Alert even though AID
+			// itself did not supply the verdict.
+			if counts.Alerts != 1 {
+				t.Fatalf("Active Alerts after local-only block=%d, want 1", counts.Alerts)
 			}
 
 			// Disable the local policy and make AID return the block for the
-			// second real hook request. No finding is required: provenance and
-			// actual enforcement, not finding count or severity, define the alert.
+			// second real hook request. Actual enforcement, not the specific
+			// origin lane, defines the alert; both local and AID blocks count.
 			cfg.AssetPolicy.Enabled = false
 			inspector.verdict = &ScanVerdict{
 				Action: "block", Severity: "NONE", Scanner: "ai-defense",
@@ -887,8 +892,8 @@ func TestManagedAIDOnly_ActiveAlertsRequireEnforcedAIDProvenance(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			if counts.Alerts != 1 {
-				t.Fatalf("Active Alerts after AID block=%d, want 1", counts.Alerts)
+			if counts.Alerts != 2 {
+				t.Fatalf("Active Alerts after AID block=%d, want 2", counts.Alerts)
 			}
 
 			events, err := fixture.store.ListEvents(100)

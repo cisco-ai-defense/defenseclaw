@@ -3493,10 +3493,11 @@ func alertEffectiveSeveritySQL() string {
 }
 
 // AIDHookEnforcementProducer is the authenticated provenance stamped on the
-// durable enforcement companion only when Cisco AI Defense supplied the block
-// that the connector actually enforced. Historical connector-hook companions
-// without this marker are intentionally ambiguous and do not enter Active
-// Alerts.
+// durable enforcement companion when Cisco AI Defense supplied the block that
+// the connector actually enforced. Kept as a shared constant so downstream
+// projections that WANT to filter for the AID lane specifically can still do
+// so; the Active-Alert count itself is provenance-agnostic (see the SQL
+// below).
 const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
 
 // HookDecisionMetricsProducer is the authenticated provenance stamped on the
@@ -3506,23 +3507,31 @@ const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
 // the audit projection, and downstream consumers agree on the string.
 const HookDecisionMetricsProducer = "gateway.hook.decision.metrics"
 
-// activeAIDHookBlockSQL identifies the durable enforcement companion emitted
-// after a connector hook actually applies an AI Defense block. The actor
-// column is the canonical event-history projection of provenance.producer; it
-// is checked rather than inferring origin from the final action because local
-// MCP/asset policy can independently turn an AID allow into a block. Severity,
-// findings, advisory outcomes, health events, and legacy or provenance-
-// ambiguous hook summaries are deliberately irrelevant.
-func activeAIDHookBlockSQL() string {
+// activeConnectorHookBlockSQL identifies the durable enforcement companion
+// emitted after a connector hook actually applies a block. This restores the
+// 26.7.3 semantics: any enforced connector-hook block counts as an Active
+// Alert, regardless of whether AID or a local ordered rule / MCP-asset policy
+// / judge / panic-fallback originated the verdict. Managed-enterprise
+// deployments frequently enforce through local rule packs, and gating the
+// alert on a single actor string silently pinned the count at 0 for those
+// scenarios. Severity, findings, advisory outcomes, health events, and legacy
+// hook summaries without enforced=1 remain deliberately irrelevant.
+func activeConnectorHookBlockSQL() string {
 	canonicalOutcome := canonicalAlertOutcomeSQL()
 	return `(
 		event.bucket = 'enforcement.action'
 		AND event.event_name = 'enforcement.block.applied'
 		AND event.source = 'connector'
 		AND COALESCE(event.enforced, 0) = 1
-		AND event.actor = '` + AIDHookEnforcementProducer + `'
 		AND ` + canonicalOutcome + ` IN ('block','blocked')
 	)`
+}
+
+// activeAIDHookBlockSQL retains the historical name for callers that already
+// spell the alert predicate this way; the underlying set is the 26.7.3-parity
+// "any enforced connector-hook block" projection.
+func activeAIDHookBlockSQL() string {
+	return activeConnectorHookBlockSQL()
 }
 
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
