@@ -215,6 +215,38 @@ func TestTurnEvaluationPathsDoNotCollideWithDottedObjectKeys(t *testing.T) {
 	}
 }
 
+func TestTurnEvaluationHighCardinalityToolCallsFitBoundedPayload(t *testing.T) {
+	frames := make([]json.RawMessage, 0, 40_000)
+	total := 0
+	for index := 0; ; index++ {
+		frame := json.RawMessage(fmt.Sprintf(
+			`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"","toolCallId":"%d"}}}`,
+			index,
+		))
+		if total+len(frame)+1 > MaxTurnBuffer {
+			break
+		}
+		frames = append(frames, frame)
+		total += len(frame) + 1
+	}
+	payload, err := BuildTurnEvaluationPayload(frames)
+	if err != nil {
+		t.Fatalf("high-cardinality bounded turn was not evaluable: %v", err)
+	}
+	if len(payload) > MaxTurnEvaluationBytes {
+		t.Fatalf("payload size = %d, bound = %d", len(payload), MaxTurnEvaluationBytes)
+	}
+}
+
+func TestTurnEvaluationRejectsFramesBeyondBufferedTurnBound(t *testing.T) {
+	frame := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"text":"` +
+		strings.Repeat("a", MaxTurnBuffer) + `"}}`)
+	if _, err := BuildTurnEvaluationPayload([]json.RawMessage{frame}); err == nil ||
+		!strings.Contains(err.Error(), "frames exceeded their size bound") {
+		t.Fatalf("oversized completed turn error = %v", err)
+	}
+}
+
 func TestCopyFramesActionPassesInspectedAgentRequestWithoutDeadlock(t *testing.T) {
 	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
 	_, _ = state.track(Message{JSONRPC: "2.0", ID: json.RawMessage("7"), Method: "session/prompt"}, ClientToAgent, ModeAction)

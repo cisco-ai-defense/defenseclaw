@@ -5751,7 +5751,7 @@ def _prepare_acp_contract_lock_updates(
     lock_info = os.lstat(lock_dir)
     if stat.S_ISLNK(lock_info.st_mode) or not stat.S_ISDIR(lock_info.st_mode):
         raise OSError(f"ACP runtime contract directory is unsafe: {lock_dir}")
-    target = os.path.normcase(os.path.abspath(guard_target))
+    target = os.path.normcase(os.path.realpath(guard_target))
     try:
         guard_info = os.lstat(guard_target)
         current_guard_sha256 = (
@@ -5781,7 +5781,7 @@ def _prepare_acp_contract_lock_updates(
         guard = document.get("guard")
         if not isinstance(guard, dict) or not isinstance(guard.get("path"), str):
             raise OSError(f"ACP runtime contract lock omits its guard identity: {path}")
-        if os.path.normcase(os.path.abspath(os.path.expanduser(guard["path"]))) != target:
+        if os.path.normcase(os.path.realpath(os.path.expanduser(guard["path"]))) != target:
             continue
         previous_digest = guard.get("sha256")
         if (

@@ -5175,8 +5175,8 @@ preflight_release_artifacts() {
 }
 
 publish_acp_guard_with_contracts() {
-    local candidate="$1" active="$2" data_dir="$3"
-    python3 - "${candidate}" "${active}" "${data_dir}" <<'PY'
+    local candidate="$1" active="$2" data_dir="$3" operation="${4:-publish}"
+    python3 - "${candidate}" "${active}" "${data_dir}" "${operation}" <<'PY'
 import hashlib
 import json
 import os
@@ -5185,7 +5185,10 @@ import stat
 import sys
 import tempfile
 
-candidate, active, data_dir = map(os.path.abspath, sys.argv[1:])
+candidate, active, data_dir = map(os.path.abspath, sys.argv[1:4])
+operation = sys.argv[4]
+if operation not in {"preflight", "publish"}:
+    raise RuntimeError("unsupported ACP guard publication operation")
 max_lock_bytes = 64 * 1024
 hex_characters = frozenset("0123456789abcdefABCDEF")
 
@@ -5237,8 +5240,14 @@ if not stat.S_ISREG(candidate_info.st_mode) or stat.S_ISLNK(candidate_info.st_mo
     raise RuntimeError("staged ACP guard is not a regular file")
 
 new_digest = digest(candidate)
-target = os.path.normcase(active)
-current_digest = digest(active) if os.path.isfile(active) and not os.path.islink(active) else None
+target = os.path.normcase(os.path.realpath(active))
+active_existed = os.path.lexists(active)
+active_info = None
+if active_existed:
+    active_info = os.lstat(active)
+    if stat.S_ISLNK(active_info.st_mode) or not stat.S_ISREG(active_info.st_mode):
+        raise RuntimeError("active ACP guard is not a regular file")
+current_digest = digest(active) if active_existed else None
 updates = []
 lock_dir = os.path.join(data_dir, "acp")
 if os.path.lexists(lock_dir):
@@ -5267,7 +5276,7 @@ if os.path.lexists(lock_dir):
         guard = document.get("guard")
         if not isinstance(guard, dict) or not isinstance(guard.get("path"), str):
             raise RuntimeError(f"ACP runtime contract lock omits its guard identity: {path}")
-        if os.path.normcase(os.path.abspath(os.path.expanduser(guard["path"]))) != target:
+        if os.path.normcase(os.path.realpath(os.path.expanduser(guard["path"]))) != target:
             continue
         old_digest = guard.get("sha256")
         if (
@@ -5289,12 +5298,11 @@ if os.path.lexists(lock_dir):
             raise RuntimeError(f"ACP runtime contract lock exceeds its size limit: {path}")
         updates.append((path, original, updated))
 
-active_existed = os.path.lexists(active)
+if operation == "preflight":
+    raise SystemExit(0)
+
 rollback = ""
 if active_existed:
-    active_info = os.lstat(active)
-    if stat.S_ISLNK(active_info.st_mode) or not stat.S_ISREG(active_info.st_mode):
-        raise RuntimeError("active ACP guard is not a regular file")
     descriptor, rollback = tempfile.mkstemp(prefix=".defenseclaw-acp.rollback.", dir=os.path.dirname(active))
     os.close(descriptor)
     shutil.copyfile(active, rollback)
@@ -8580,6 +8588,12 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
         preflight_081_observability_source \
             || die "The installed 0.8.1 observability state is malformed or ambiguous for the authenticated hard-cut migration. No installed state changed."
     fi
+fi
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+    publish_acp_guard_with_contracts \
+        "${STAGING_DIR}/defenseclaw-acp" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}" preflight \
+        || die "ACP guard runtime-contract preflight failed; no services changed."
+    ok "ACP guard runtime contracts verified before service stop"
 fi
 
 # ── Confirm ───────────────────────────────────────────────────────────────────

@@ -347,6 +347,8 @@ def test_posix_resolver_requires_and_activates_acp_guard_from_0811() -> None:
     assert 'version_gte "${RELEASE_VERSION}" "${ACP_GUARD_RELEASE_VERSION}"' in preflight
     assert "required defenseclaw-acp guard" in preflight
     assert "com.cisco.defenseclaw.acp" in preflight
+    assert '"${STAGING_DIR}/defenseclaw-acp" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}" preflight' in preflight
+    assert "ACP guard runtime contracts verified before service stop" in preflight
 
     install = source[source.index('section "Installing Artifacts"', stop) :]
     assert "defenseclaw-acp.previous" in install
@@ -421,6 +423,86 @@ def test_posix_resolver_rebinds_acp_contract_with_guard_publication(tmp_path: Pa
     assert "does not match the active guard" in refused.stderr
     assert active.read_bytes() == b"new guard"
     assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"] == "0" * 64
+
+
+@POSIX_UPGRADE_CUSTODY
+def test_posix_resolver_preflights_real_guard_identity_without_mutation(tmp_path: Path) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("publish_acp_guard_with_contracts() {")
+    end = source.index("\n}\n\nconfigure_release", start) + 3
+    function = source[start:end]
+
+    physical = tmp_path / "physical"
+    alias = tmp_path / "alias"
+    lock_dir = tmp_path / "data/acp"
+    physical.mkdir()
+    alias.symlink_to(physical, target_is_directory=True)
+    lock_dir.mkdir(parents=True)
+    active = physical / "defenseclaw-acp"
+    candidate = physical / ".candidate"
+    active.write_bytes(b"old guard")
+    candidate.write_bytes(b"new guard")
+    active.chmod(0o755)
+    candidate.chmod(0o755)
+    lock = lock_dir / "zed-kiro.contract-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "guard": {
+                    "path": str(active),
+                    "sha256": hashlib.sha256(b"old guard").hexdigest(),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock.chmod(0o600)
+    original_lock = lock.read_bytes()
+
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-s",
+            "--",
+            str(alias / ".candidate"),
+            str(alias / "defenseclaw-acp"),
+            str(tmp_path / "data"),
+        ],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3" preflight\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == b"old guard"
+    assert candidate.read_bytes() == b"new guard"
+    assert lock.read_bytes() == original_lock
+
+    document = json.loads(lock.read_text(encoding="utf-8"))
+    document["guard"]["sha256"] = "0" * 64
+    lock.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    lock.chmod(0o600)
+    refused = subprocess.run(
+        [
+            _bash_executable(),
+            "-s",
+            "--",
+            str(alias / ".candidate"),
+            str(alias / "defenseclaw-acp"),
+            str(tmp_path / "data"),
+        ],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3" preflight\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "does not match the active guard" in refused.stderr
+    assert active.read_bytes() == b"old guard"
+    assert candidate.read_bytes() == b"new guard"
 
 
 @pytest.mark.parametrize(
