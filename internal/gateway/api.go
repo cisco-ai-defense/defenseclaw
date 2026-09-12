@@ -890,6 +890,7 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
 	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
 	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
 	mux.HandleFunc("/v1/acp/profiles", a.handleACPProfiles)
@@ -3258,7 +3259,8 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
-		if r.URL.Path == "/api/v1/acp/evaluate" && connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
+		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
+			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
 			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
 			if !ok {
 				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
@@ -3267,6 +3269,11 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			}
 			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
 			serveACPSignedResponse(w, authenticated, next, token, nonce)
+			return
+		}
+		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
 			return
 		}
 
@@ -3366,6 +3373,9 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))

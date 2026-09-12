@@ -58,11 +58,13 @@ lock. A failed config write rolls all three changes back.
 
 Managed deployments keep ACP policy and credential authority in the protected
 machine data directory. Each enrollment receives a unique credential scoped to
-one OS principal, client, agent, and profile. The guard proves possession with
-a fresh nonce-bound HMAC request and the gateway signs the exact status and
-response body; the credential itself never crosses the loopback socket. The
-gateway rejects a request whose declared binding differs from the machine-owned
-enrollment record.
+one OS principal, client, agent, and profile. Before sending ACP content, the
+guard verifies a fresh, nonce-bound gateway challenge. It then encrypts the
+evaluation with AES-256-GCM under a challenge-derived key and HMAC-authenticates
+the ciphertext; the gateway HMAC-authenticates the exact verdict status and
+body. The credential and plaintext ACP content never cross an unauthenticated
+loopback socket. The gateway rejects a request whose declared binding differs
+from the machine-owned enrollment record.
 
 An administrator or guardian first provisions the service record and the
 target user's private copy:
@@ -96,7 +98,9 @@ Windows uses the exact active-session SID token when the LocalSystem guardian
 targets another user. A user running the command for their own matching SID is
 also supported for controlled validation. Re-enrollment after revocation mints
 a different bearer, even when the protected service-owned credential directory
-already exists.
+already exists. Enrollment, rotation, and revocation hold a persistent OS file
+lock across the complete record/index transaction, so independent gateway,
+guardian, and administrator processes cannot interleave credential state.
 
 The managed Windows payload and macOS managed runtime include
 `defenseclaw-acp` as a separately hashed and protected executable. On Linux,
@@ -125,11 +129,12 @@ install it beside `defenseclaw-gateway` under `/opt/defenseclaw/bin`.
 
 The guard launches the agent with literal argv—never a shell. It connects only
 to a literal loopback address, disables environment proxying and redirects,
-and uses nonce-bound HMAC request/response authentication with an ACP-scoped
-credential that has no authority on other API routes. A process that wins the
-configured loopback port sees neither the credential nor an acceptable verdict
-signature, so the guard fails closed instead of trusting an impersonated
-gateway. The contract lock pins the selected guard and agent executable paths
+and authenticates the gateway with a fresh HMAC challenge before encrypting
+each request with AES-256-GCM. The ACP-scoped credential has no authority on
+other API routes. A process that wins the configured loopback port sees neither
+the credential nor ACP plaintext and cannot forge an authenticated verdict, so
+the guard fails closed instead of trusting an impersonated gateway. The
+contract lock pins the selected guard and agent executable paths
 and SHA-256 digests, the exact client configuration path and digest, plus ACP
 [schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
 Normal upgrades replace the guard and rebind every matching user-owned lock in
@@ -234,6 +239,7 @@ it.
 
 | Endpoint | Purpose |
 | --- | --- |
+| `POST /api/v1/acp/challenge` | Empty, scoped request that authenticates the loopback gateway before ACP content is encrypted and sent |
 | `POST /api/v1/acp/evaluate` | Scoped, loopback-only, mutually authenticated frame evaluation |
 | `GET /v1/acp/catalog` | Compiled client/agent catalog |
 | `GET /v1/acp/profiles` | Effective profile inventory |

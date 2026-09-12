@@ -82,7 +82,6 @@ KNOWN_CONNECTORS = {
     "openhands",
     "antigravity",
     "opencode",
-    "kiro",
     "amp",
     "omnigent",
 }

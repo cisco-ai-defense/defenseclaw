@@ -12,11 +12,14 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestACPEvaluateDeniedMethodHonorsProfileMode(t *testing.T) {
@@ -180,12 +183,15 @@ func TestACPEvaluateRejectsManagedRequestWithoutCredential(t *testing.T) {
 }
 
 func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
 	path := filepath.Join(dataDir, "acp", ".token")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safefile.ProtectDirectory(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("scoped-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(path); err != nil {
 		t.Fatal(err)
 	}
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
@@ -203,12 +209,15 @@ func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 }
 
 func TestACPReadinessCachesOnlyHealthProbe(t *testing.T) {
-	dataDir := t.TempDir()
+	dataDir := testenv.PrivateTempDir(t)
 	path := filepath.Join(dataDir, "acp", ".token")
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+	if err := safefile.ProtectDirectory(filepath.Dir(path)); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(path, []byte("scoped-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(path); err != nil {
 		t.Fatal(err)
 	}
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
@@ -294,7 +303,7 @@ func TestACPSignedEvaluatorRoundTripNormal(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
-	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(api.handleACPEvaluate)))
+	server := httptest.NewServer(acpAuthenticatedTestHandler(api))
 	defer server.Close()
 	evaluator, err := acp.NewHTTPEvaluator(server.URL, token)
 	if err != nil {
@@ -309,6 +318,44 @@ func TestACPSignedEvaluatorRoundTripNormal(t *testing.T) {
 	}
 }
 
+func TestACPAuthenticatedTransportRejectsSignedPlaintext(t *testing.T) {
+	dataDir := t.TempDir()
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tokenPath := filepath.Join(dataDir, "acp", ".token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
+	var handlerReached atomic.Bool
+	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		handlerReached.Store(true)
+	})))
+	defer server.Close()
+	body := []byte(`{"payload":"plaintext must not reach the ACP handler"}`)
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/api/v1/acp/evaluate", bytes.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyID := acp.HTTPAuthKeyID(token)
+	nonce := "1111111111111111111111111111111111111111111111111111111111111111"
+	req.Header.Set(acp.AuthKeyIDHeader, keyID)
+	req.Header.Set(acp.AuthNonceHeader, nonce)
+	req.Header.Set(acp.AuthChallengeNonceHeader, "2222222222222222222222222222222222222222222222222222222222222222")
+	req.Header.Set(acp.AuthServerNonceHeader, "3333333333333333333333333333333333333333333333333333333333333333")
+	req.Header.Set(acp.AuthRequestMACHeader, acp.HTTPRequestMAC(token, keyID, nonce, req.Method, req.URL.Path, body))
+	resp, err := server.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized || handlerReached.Load() {
+		t.Fatalf("signed plaintext status=%d handlerReached=%v, want 401/false", resp.StatusCode, handlerReached.Load())
+	}
+}
+
 func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
@@ -319,7 +366,7 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 		t.Fatal(err)
 	}
 	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "managed_enterprise")}
-	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(api.handleACPEvaluate)))
+	server := httptest.NewServer(acpAuthenticatedTestHandler(api))
 	defer server.Close()
 	evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
 	if err != nil {
@@ -332,6 +379,19 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 	if verdict.Action != "block" {
 		t.Fatalf("verdict = %+v, want block", verdict)
 	}
+}
+
+func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
+	return api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/v1/acp/challenge":
+			api.handleACPChallenge(w, r)
+		case "/api/v1/acp/evaluate":
+			api.handleACPEvaluate(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
 }
 
 func acpGatewayTestConfig(dataDir, deploymentMode string) *config.Config {

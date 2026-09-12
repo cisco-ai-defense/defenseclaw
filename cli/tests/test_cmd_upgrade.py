@@ -8608,6 +8608,7 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
 
             self.assertEqual(active.read_bytes(), b"complete bridge gateway")
 
+    @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
     def test_posix_acp_publish_failure_rolls_back_gateway_and_acp(self):
         with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
             install_dir = Path(fake_home) / ".local/bin"

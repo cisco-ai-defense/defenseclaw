@@ -82,7 +82,7 @@
             </mxGeometry>
           </mxCell>
         </UserObject>
-        <UserObject label="nonce-bound HMAC request + signed verdict" mermaidId="e:GUARD-&gt;API#0" mermaidBaseStyle="curved=1;startArrow=block;startSize=7;endArrow=block;endSize=7;strokeColor=light-dark(#333333,#cccccc);html=1;fontSize=16;labelBackgroundColor=light-dark(#E8E8E88D,#2a2a2a8D);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=light-dark(#333333,#cccccc);exitX=1;exitY=0.29;entryX=0;entryY=0.51;" mermaidBaseValue="nonce-bound HMAC request + signed verdict" id="14">
+        <UserObject label="authenticated challenge + encrypted request&lt;br&gt;+ HMAC-authenticated verdict" mermaidId="e:GUARD-&gt;API#0" mermaidBaseStyle="curved=1;startArrow=block;startSize=7;endArrow=block;endSize=7;strokeColor=light-dark(#333333,#cccccc);html=1;fontSize=16;labelBackgroundColor=light-dark(#E8E8E88D,#2a2a2a8D);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=light-dark(#333333,#cccccc);exitX=1;exitY=0.29;entryX=0;entryY=0.51;" mermaidBaseValue="authenticated challenge + encrypted request + HMAC-authenticated verdict" id="14">
           <mxCell edge="1" parent="1" source="4" style="curved=1;startArrow=block;startSize=7;endArrow=block;endSize=7;strokeColor=light-dark(#333333,#cccccc);html=1;fontSize=16;labelBackgroundColor=light-dark(#E8E8E88D,#2a2a2a8D);fontFamily=Trebuchet MS,Verdana,Arial,sans-serif;fontColor=light-dark(#333333,#cccccc);exitX=1;exitY=0.29;entryX=0;entryY=0.51;" target="5">
             <mxGeometry relative="1" as="geometry">
               <Array as="points">
