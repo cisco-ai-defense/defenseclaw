@@ -76,7 +76,7 @@ func writeMaintenanceGatewayArchive(t *testing.T, path, executable string, corru
 		t.Fatal(err)
 	}
 	writer := zip.NewWriter(file)
-	for _, name := range []string{"defenseclaw.exe", "defenseclaw-hook.exe"} {
+	for _, name := range []string{"defenseclaw.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe"} {
 		entry, createErr := writer.Create(name)
 		if createErr != nil {
 			_ = writer.Close()
