@@ -3,7 +3,27 @@
 
 package config
 
-import "testing"
+import (
+	"encoding/json"
+	"strings"
+	"testing"
+)
+
+func TestACPProfileJSONUsesDocumentedKeys(t *testing.T) {
+	body, err := json.Marshal(ACPProfile{
+		Mode: "action", FailMode: "closed", AllowedClients: []string{"zed"},
+		AllowedAgents: []string{"kiro"}, DeniedMethods: []string{"terminal/create"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	value := string(body)
+	for _, key := range []string{"mode", "fail_mode", "allowed_clients", "allowed_agents", "denied_methods"} {
+		if !strings.Contains(value, `"`+key+`"`) {
+			t.Fatalf("ACP profile JSON omits %q: %s", key, value)
+		}
+	}
+}
 
 func validACPConfig() ACPConfig {
 	return ACPConfig{

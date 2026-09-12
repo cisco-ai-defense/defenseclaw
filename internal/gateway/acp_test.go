@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/config"
@@ -148,6 +149,36 @@ func TestACPEvaluateRejectsTamperedCompletedTurnMetadata(t *testing.T) {
 	}
 }
 
+func TestACPEvaluateRejectsManagedRequestWithoutCredential(t *testing.T) {
+	cfg := &config.Config{
+		DataDir: t.TempDir(), DeploymentMode: "managed_enterprise",
+		ACP: config.ACPConfig{
+			Enabled: true, Mode: "action", DefaultProfile: "locked",
+			Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "locked"}},
+			Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "locked"}},
+			Profiles: map[string]config.ACPProfile{"locked": {
+				Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+			}},
+		},
+	}
+	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`)
+	body, err := json.Marshal(acp.Evaluation{
+		ClientID: "zed", AgentID: "kiro", Profile: "locked", Mode: acp.ModeAction,
+		Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt", Payload: payload,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	(&APIServer{scannerCfg: cfg}).handleACPEvaluate(
+		response,
+		httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)),
+	)
+	if response.Code != http.StatusForbidden {
+		t.Fatalf("status=%d, want 403; body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 	dataDir := t.TempDir()
 	path := filepath.Join(dataDir, "acp", ".token")
@@ -168,6 +199,31 @@ func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 		if api.acpAPITokenMatches("scoped-token") {
 			t.Fatal("group/world-readable ACP token was accepted")
 		}
+	}
+}
+
+func TestACPReadinessCachesOnlyHealthProbe(t *testing.T) {
+	dataDir := t.TempDir()
+	path := filepath.Join(dataDir, "acp", ".token")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("scoped-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
+	if !api.acpScopedTokenReady() {
+		t.Fatal("fresh private token was not ready")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if !api.acpScopedTokenReady() {
+		t.Fatal("readiness result was not cached")
+	}
+	api.acpReadinessCheckedAt = time.Now().Add(-time.Second)
+	if api.acpScopedTokenReady() {
+		t.Fatal("expired readiness cache hid token removal")
 	}
 }
 
@@ -224,5 +280,79 @@ func TestACPEnterpriseCredentialPinsRequestBinding(t *testing.T) {
 	api.handleACPEvaluate(w, authenticated)
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("cross-binding scope status = %d, want 403; body=%s", w.Code, w.Body.String())
+	}
+}
+
+func TestACPSignedEvaluatorRoundTripNormal(t *testing.T) {
+	dataDir := t.TempDir()
+	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	tokenPath := filepath.Join(dataDir, "acp", ".token")
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
+	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(api.handleACPEvaluate)))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Action != "block" {
+		t.Fatalf("verdict = %+v, want block", verdict)
+	}
+}
+
+func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
+	}
+	dataDir := t.TempDir()
+	credential, err := acp.EnsureEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "managed_enterprise")}
+	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(api.handleACPEvaluate)))
+	defer server.Close()
+	evaluator, err := acp.NewHTTPEvaluator(server.URL, credential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	verdict, err := evaluator.Evaluate(t.Context(), deniedACPTestEvaluation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if verdict.Action != "block" {
+		t.Fatalf("verdict = %+v, want block", verdict)
+	}
+}
+
+func acpGatewayTestConfig(dataDir, deploymentMode string) *config.Config {
+	return &config.Config{
+		DataDir: dataDir, DeploymentMode: deploymentMode,
+		ACP: config.ACPConfig{
+			Enabled: true, Mode: "action", DefaultProfile: "locked",
+			Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "locked"}},
+			Agents:  map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "locked"}},
+			Profiles: map[string]config.ACPProfile{"locked": {
+				Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"},
+				DeniedMethods: []string{"session/prompt"},
+			}},
+		},
+	}
+}
+
+func deniedACPTestEvaluation() acp.Evaluation {
+	payload := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`)
+	return acp.Evaluation{
+		ClientID: "zed", AgentID: "kiro", Profile: "locked", Mode: acp.ModeAction,
+		Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt", Payload: payload,
 	}
 }

@@ -4,6 +4,7 @@
 package acp
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -79,6 +80,57 @@ func TestEnterpriseCredentialRevocationTombstoneFailsInventoryClosed(t *testing.
 	}
 	if EnterpriseCredentialsReady(dataDir) {
 		t.Fatal("credential inventory reported ready while revocation tombstone was present")
+	}
+}
+
+func TestEnterpriseCredentialRevocationResumesIndexTombstoneCleanup(t *testing.T) {
+	requireDirectEnterpriseCredentialTest(t)
+	dataDir := t.TempDir()
+	credential, err := EnsureEnterpriseCredential(dataDir, "uid:505", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	indexPath, err := EnterpriseCredentialIndexPath(dataDir, credential.Token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(indexPath, indexPath+".revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveEnterpriseCredential(dataDir, "uid:505", "zed", "kiro", "locked"); err != nil {
+		t.Fatalf("revocation retry failed: %v", err)
+	}
+	for _, path := range []string{indexPath, indexPath + ".revoked"} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("revocation residue survived at %s: %v", path, err)
+		}
+	}
+	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+		t.Fatal("revoked token authenticated after cleanup retry")
+	}
+}
+
+func TestEnterpriseCredentialRevocationResumesRecordTombstoneCleanup(t *testing.T) {
+	dataDir := t.TempDir()
+	credential, err := EnsureEnterpriseCredential(dataDir, "alice", "zed", "kiro", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	recordPath, err := EnterpriseCredentialPath(dataDir, "alice", "zed", "kiro", "default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renameEnterpriseCredentialFile(recordPath, recordPath+".revoked"); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveEnterpriseCredential(dataDir, "alice", "zed", "kiro", "default"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(recordPath + ".revoked"); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("record tombstone remains after resumed cleanup: %v", err)
+	}
+	if _, ok := MatchEnterpriseCredential(dataDir, credential.Token); ok {
+		t.Fatal("interrupted record revocation left credential authoritative")
 	}
 }
 

@@ -614,9 +614,14 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
             app.cfg.save()
     except Exception as exc:
         app.cfg.acp = acp_snapshot
+        rollback_errors: list[str] = []
         for managed_path, snapshot in [(path, path_snapshot), *lock_snapshots]:
-            _restore(managed_path, snapshot)
-        raise click.ClickException(f"ACP removal was rolled back: {exc}") from exc
+            try:
+                _restore(managed_path, snapshot)
+            except Exception as rollback_exc:  # pragma: no cover - catastrophic platform failure
+                rollback_errors.append(f"{managed_path}: {type(rollback_exc).__name__}")
+        suffix = f"; rollback problems: {', '.join(rollback_errors)}" if rollback_errors else ""
+        raise click.ClickException(f"ACP removal was rolled back: {exc}{suffix}") from exc
     click.echo(f"Removed the DefenseClaw {agent} entry from {path}")
 
 

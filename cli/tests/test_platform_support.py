@@ -35,6 +35,7 @@ from defenseclaw.connector_paths import (
 )
 from defenseclaw.context import AppContext
 from defenseclaw.platform_support import (
+    ACP_ONLY_CONNECTORS,
     DEPRECATED_CONNECTORS,
     NOT_CERTIFIED,
     PREVIEW,
@@ -74,6 +75,7 @@ WINDOWS_SUPPORTED: set[str] = {
     "copilot",
     "cursor",
     "hermes",
+    "kiro",
     "devin",
     "opencode",
     "omnigent",
@@ -304,8 +306,8 @@ def test_windows_sandbox_init_keeps_nonzero_rejection_with_aligned_wording() -> 
 
 
 def test_all_connector_lists_share_one_taxonomy() -> None:
-    active = ALL_CONNECTORS - DEPRECATED_CONNECTORS
-    assert set(KNOWN_CONNECTORS) == ALL_CONNECTORS
+    active = ALL_CONNECTORS - DEPRECATED_CONNECTORS - ACP_ONLY_CONNECTORS
+    assert set(KNOWN_CONNECTORS) == ALL_CONNECTORS - ACP_ONLY_CONNECTORS
     assert set(_CONNECTOR_NAMES_FALLBACK) == active
     assert set(CONNECTORS) == active
     assert {choice.wire for choice in MODE_PICKER_CHOICES} == active
@@ -314,7 +316,7 @@ def test_all_connector_lists_share_one_taxonomy() -> None:
 
 
 def test_windows_views_include_supported_and_labeled_preview_connectors() -> None:
-    expected = WINDOWS_SUPPORTED | WINDOWS_PREVIEW
+    expected = (WINDOWS_SUPPORTED | WINDOWS_PREVIEW) - ACP_ONLY_CONNECTORS
     assert set(supported_connector_choices("windows")) == expected
     assert set(visible_connector_choices("windows")) == expected
 

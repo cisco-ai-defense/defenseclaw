@@ -18,7 +18,16 @@ actual editor availability and official-client certification remain separate
 claims in the ACP inventory. Use `--client jetbrains` for JetBrains AI
 Assistant. Setup resolves absolute executables, pins their digests, preserves
 foreign editor settings, and never places the ACP scoped token in the editor's
-JSON.
+JSON. The guard also never sends that token over loopback: request and verdict
+authentication use a fresh nonce-bound HMAC exchange.
+
+## Platform support
+
+| Platform | Status | Setup and enforcement boundary |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Configure through `defenseclaw acp setup`; the shipped guard mediates Kiro's ACP stdio transport. |
+| Native Windows x64 | **Supported** | The native installer ships `defenseclaw-acp.exe`; configure it through the ACP CLI/TUI rather than ordinary hook setup. |
+| Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release remains x64-certified only. |
 
 See the [ACP guard guide](/docs/acp-guard) for architecture, guarantees,
 configuration, supported agents, and the direct-launch bypass boundary.

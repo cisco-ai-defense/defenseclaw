@@ -30,7 +30,7 @@ DefenseClaw ships **three** binaries:
 
 - **`defenseclaw`** — the operator-facing Python CLI. Entry point for `init`, `setup`, `audit`, `policy`, `skill`/`mcp`/`plugin` scans, alerts, doctor, etc.
 - **`defenseclaw-gateway`** — the long-running Go sidecar. Owns the on-host daemon (`start`/`stop`/`restart`), policy reload, code scanning, and the audit-DB JSONL exporter.
-- **`defenseclaw-acp`** — the protocol-aware stdio guard spawned by ACP clients. It validates and evaluates traffic before launching the selected agent.
+- **`defenseclaw-acp`** — the protocol-aware stdio guard spawned by ACP clients. It validates its runtime contract before launching the selected agent, then evaluates ACP traffic while it mediates stdio.
 
 Tables below tag each row with the binary that owns it.
 

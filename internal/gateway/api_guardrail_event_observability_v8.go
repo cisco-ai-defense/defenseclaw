@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -191,7 +192,7 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			DefenseClawAcpDirection:             optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.direction }),
 			DefenseClawAcpSurface:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.surface }),
 			DefenseClawAcpProfile:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.profile }),
-			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return "schema-v1.21.0" }),
+			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return acp.SchemaVersion }),
 		})
 	})
 	facts.recordMetrics(ctx, metricRuntime)

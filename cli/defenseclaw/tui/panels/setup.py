@@ -1786,14 +1786,27 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
         return values.get("managed_enrollment") == "yes"
 
     return (
-        WizardFormField("Client", "choice", "--client", value="zed", default="zed", options=ACP_CLIENT_IDS, required=True),
         WizardFormField(
-            "Agent", "choice", "--agent", value="kiro", default="kiro",
+            "Client", "choice", "--client", value="zed", default="zed", options=ACP_CLIENT_IDS, required=True
+        ),
+        WizardFormField(
+            "Agent",
+            "choice",
+            "--agent",
+            value="kiro",
+            default="kiro",
             options=ACP_AGENT_IDS,
             required=True,
         ),
         WizardFormField("Profile", "string", "--profile", value="default", default="default", required=True),
-        WizardFormField("Action Mode", "bool", "--activate", value="no", default="no", hint="No observes only; yes blocks policy violations."),
+        WizardFormField(
+            "Action Mode",
+            "bool",
+            "--activate",
+            value="no",
+            default="no",
+            hint="No observes only; yes blocks policy violations.",
+        ),
         WizardFormField(
             "Managed Enrollment",
             "bool",
@@ -1808,7 +1821,6 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             "--runtime-data-dir",
             hint="Target user's private DefenseClaw data directory.",
             visible_when=managed,
-            required=True,
         ),
         WizardFormField(
             "Token File",
@@ -1816,7 +1828,6 @@ def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
             "--token-file",
             hint="Token path emitted by defenseclaw-gateway enterprise acp enroll.",
             visible_when=managed,
-            required=True,
         ),
     )
 
@@ -3679,12 +3690,18 @@ def _acp_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
     del cfg
     return (
         WizardGoal(
-            "observe", "Observe ACP traffic", summary="Install the guard without blocking traffic.",
-            presets={"--activate": "no"}, fields=("Client", "Agent", "Profile", "Action Mode"),
+            "observe",
+            "Observe ACP traffic",
+            summary="Install the guard without blocking traffic.",
+            presets={"--activate": "no"},
+            fields=("Client", "Agent", "Profile", "Action Mode"),
         ),
         WizardGoal(
-            "action", "Enforce ACP policy", summary="Fail closed and block denied ACP operations.",
-            presets={"--activate": "yes"}, fields=("Client", "Agent", "Profile", "Action Mode"),
+            "action",
+            "Enforce ACP policy",
+            summary="Fail closed and block denied ACP operations.",
+            presets={"--activate": "yes"},
+            fields=("Client", "Agent", "Profile", "Action Mode"),
         ),
         WizardGoal(
             "enterprise",
@@ -3692,8 +3709,13 @@ def _acp_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]
             summary="Use centrally pinned policy and a guardian-provisioned per-binding token.",
             presets={"--managed": "yes"},
             fields=(
-                "Client", "Agent", "Profile", "Action Mode", "Managed Enrollment",
-                "Runtime Data Dir", "Token File",
+                "Client",
+                "Agent",
+                "Profile",
+                "Action Mode",
+                "Managed Enrollment",
+                "Runtime Data Dir",
+                "Token File",
             ),
         ),
     )
@@ -4659,6 +4681,10 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
+        for label in ("Runtime Data Dir", "Token File"):
+            if not wizard_field_value(fields, label):
+                missing.append(label)
     if wizard == SetupWizard.REDACTION:
         action = wizard_field_value(fields, "Action") or "status"
         if action in {"apply-all", "apply-defaults"} and not wizard_field_value(fields, "Profile"):

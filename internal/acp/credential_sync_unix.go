@@ -7,6 +7,10 @@ package acp
 
 import "os"
 
+func renameEnterpriseCredentialFile(source, destination string) error {
+	return os.Rename(source, destination)
+}
+
 func syncEnterpriseCredentialDirectory(path string) error {
 	directory, err := os.Open(path)
 	if err != nil {

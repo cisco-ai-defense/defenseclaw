@@ -661,9 +661,7 @@ def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
     fields = wizard_form_defs(SetupWizard.ACP_GUARD)
     assert wizard_field_value(fields, "Client") == "zed"
     assert wizard_field_value(fields, "Agent") == "kiro"
-    assert {"kiro", "devin", "amp", "antigravity", "codex", "claude"}.issubset(
-        set(_wizard_options(fields, "Agent"))
-    )
+    assert {"kiro", "devin", "amp", "antigravity", "codex", "claude"}.issubset(set(_wizard_options(fields, "Agent")))
     assert build_wizard_args(SetupWizard.ACP_GUARD, fields) == (
         "acp",
         "setup",
@@ -674,10 +672,8 @@ def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
         "--profile",
         "default",
     )
-    action_fields = [
-        field.with_value("yes") if field.label == "Action Mode" else field
-        for field in fields
-    ]
+    assert missing_required_fields(SetupWizard.ACP_GUARD, fields) == ()
+    action_fields = [field.with_value("yes") if field.label == "Action Mode" else field for field in fields]
     assert build_wizard_args(SetupWizard.ACP_GUARD, action_fields)[-1] == "--activate"
 
     managed_fields = [
@@ -696,6 +692,13 @@ def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
         "/home/alice/.defenseclaw",
         "--token-file",
         "/home/alice/.defenseclaw/acp/zed-kiro.token",
+    )
+    missing_managed_fields = [
+        field.with_value("yes") if field.label == "Managed Enrollment" else field for field in fields
+    ]
+    assert missing_required_fields(SetupWizard.ACP_GUARD, missing_managed_fields) == (
+        "Runtime Data Dir",
+        "Token File",
     )
     assert "enterprise" in {goal.id for goal in wizard_goals(SetupWizard.ACP_GUARD)}
 

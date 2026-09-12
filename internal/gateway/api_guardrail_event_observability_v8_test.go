@@ -36,7 +36,7 @@ func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
 		"defenseclaw.acp.client": "zed", "defenseclaw.acp.agent": "kiro",
 		"defenseclaw.acp.method": "session/prompt", "defenseclaw.acp.direction": "client_to_agent",
 		"defenseclaw.acp.surface": "prompt", "defenseclaw.acp.profile": "kiro-only",
-		"defenseclaw.acp.protocol.version": "schema-v1.21.0",
+		"defenseclaw.acp.protocol.version": acp.SchemaVersion,
 		"defenseclaw.guardrail.raw_action": "block", "defenseclaw.guardrail.would_block": true,
 		"defenseclaw.guardrail.effective_action": "allow",
 	}

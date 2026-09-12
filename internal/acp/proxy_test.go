@@ -9,6 +9,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,6 +40,16 @@ func (needle contentBlockingEvaluator) Evaluate(_ context.Context, in Evaluation
 		return Verdict{Action: "block", Reason: "test content policy"}, nil
 	}
 	return Verdict{Action: "allow"}, nil
+}
+
+func TestRunActionModeRequiresEvaluatorBeforeAgentLaunch(t *testing.T) {
+	err := Run(context.Background(), ProxyOptions{
+		Mode: ModeAction, Command: filepath.Join(t.TempDir(), "must-not-launch"),
+		Stdin: bytes.NewReader(nil), Stdout: io.Discard, Stderr: io.Discard,
+	})
+	if err == nil || !strings.Contains(err.Error(), "requires an evaluator") {
+		t.Fatalf("Run error = %v, want missing-evaluator refusal", err)
+	}
 }
 
 func TestCopyFramesActionSynthesizesBlockResponse(t *testing.T) {

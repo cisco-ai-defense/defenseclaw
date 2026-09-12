@@ -52,6 +52,9 @@ func Run(ctx context.Context, opts ProxyOptions) error {
 		return errors.New("ACP mode must be observe or action")
 	}
 	if opts.Evaluator == nil {
+		if opts.Mode == ModeAction {
+			return errors.New("ACP action mode requires an evaluator")
+		}
 		opts.Evaluator = AllowEvaluator{}
 	}
 	cmd := exec.CommandContext(ctx, opts.Command, opts.Args...)

@@ -138,11 +138,11 @@ type ACPBinding struct {
 }
 
 type ACPProfile struct {
-	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty"`
-	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty"`
-	AllowedClients []string `mapstructure:"allowed_clients" yaml:"allowed_clients,omitempty"`
-	AllowedAgents  []string `mapstructure:"allowed_agents" yaml:"allowed_agents,omitempty"`
-	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty"`
+	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty" json:"mode,omitempty"`
+	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
+	AllowedClients []string `mapstructure:"allowed_clients" yaml:"allowed_clients,omitempty" json:"allowed_clients,omitempty"`
+	AllowedAgents  []string `mapstructure:"allowed_agents" yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
+	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty" json:"denied_methods,omitempty"`
 }
 
 // CurrentConfigVersion is the last compatibility-decoder version used by the

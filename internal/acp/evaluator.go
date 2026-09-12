@@ -94,29 +94,35 @@ func (e *HTTPEvaluator) Evaluate(ctx context.Context, in Evaluation) (Verdict, e
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-DefenseClaw-Client", "defenseclaw-acp/1.0")
-	if e.token != "" {
-		req.Header.Set("Authorization", "Bearer "+e.token)
+	keyID := HTTPAuthKeyID(e.token)
+	nonce, err := NewHTTPAuthNonce()
+	if err != nil {
+		return Verdict{}, fmt.Errorf("create ACP evaluator challenge: %w", err)
 	}
+	req.Header.Set(AuthKeyIDHeader, keyID)
+	req.Header.Set(AuthNonceHeader, nonce)
+	req.Header.Set(AuthRequestMACHeader, HTTPRequestMAC(e.token, keyID, nonce, req.Method, req.URL.Path, body))
 	resp, err := e.client.Do(req)
 	if err != nil {
 		return Verdict{}, err
 	}
 	defer resp.Body.Close()
 	limited := io.LimitReader(resp.Body, (64<<10)+1)
-	if resp.StatusCode == http.StatusConflict {
-		_, _ = io.Copy(io.Discard, limited)
-		return Verdict{}, ErrModeMismatch
-	}
-	if resp.StatusCode != http.StatusOK {
-		_, _ = io.Copy(io.Discard, limited)
-		return Verdict{}, fmt.Errorf("ACP evaluator returned HTTP %d", resp.StatusCode)
-	}
 	payload, err := io.ReadAll(limited)
 	if err != nil {
 		return Verdict{}, fmt.Errorf("read ACP verdict: %w", err)
 	}
 	if len(payload) > 64<<10 {
 		return Verdict{}, errors.New("ACP evaluator response is too large")
+	}
+	if !VerifyHTTPResponseMAC(e.token, keyID, nonce, resp.StatusCode, payload, resp.Header.Get(AuthResponseMACHeader)) {
+		return Verdict{}, errors.New("ACP evaluator response authentication failed")
+	}
+	if resp.StatusCode == http.StatusConflict {
+		return Verdict{}, ErrModeMismatch
+	}
+	if resp.StatusCode != http.StatusOK {
+		return Verdict{}, fmt.Errorf("ACP evaluator returned HTTP %d", resp.StatusCode)
 	}
 	var verdict Verdict
 	decoder := json.NewDecoder(bytes.NewReader(payload))
