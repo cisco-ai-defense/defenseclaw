@@ -3,7 +3,7 @@
 # generate-repro-fixture.sh
 #
 # Regenerates internal/build-repro/testdata/signed-payload-fixture.tar.zst
-# from six deterministic placeholder files. Used by the Workstream E
+# from eight deterministic placeholder files. Used by the Workstream E
 # reproducibility gate (see docs/specs/001-windows-deterministic-build/).
 #
 # The generator produces byte-identical output on every run:
