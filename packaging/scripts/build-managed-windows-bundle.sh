@@ -293,7 +293,7 @@ echo "==> building defenseclaw-acp.exe (windows/amd64)"
 echo "==> stamping defenseclaw-acp.exe VERSIONINFO / icon"
 ( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
     -target windows_amd64 -executable "${ACP_EXE}" \
-    -component acp -version "${VERSION}" -icon "${ICON_PATH}" )
+    -component acp-guard -version "${VERSION}" -icon "${ICON_PATH}" )
 
 echo "==> building defenseclaw-hook.exe (windows/amd64 tags=cmid)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \

@@ -204,6 +204,8 @@ def test_unsigned_windows_bundle_instructions_describe_optional_hardening() -> N
     assert "--connector claudecode" in unsigned_instructions
     assert "A full profile uses the shared" in unsigned_instructions
     assert "WDAC/AppLocker is optional defense in depth" in unsigned_instructions
+    assert "-component acp-guard" in builder
+    assert "-component acp -version" not in builder
 
 
 def test_windows_enterprise_uses_cisco_secure_client_roots() -> None:
@@ -698,6 +700,7 @@ def test_poisoned_program_root_environment_cannot_redirect_defaults(
                 f"-BrokerBinary '{payload_binary_ps}' "
                 f"-ProviderLibrary '{payload_binary_ps}' "
                 f"-GatewayBinary '{payload_binary_ps}' "
+                f"-ACPBinary '{payload_binary_ps}' "
                 f"-HookBinary '{payload_binary_ps}' "
                 f"-SensorHelperBinary '{payload_binary_ps}' "
                 f"-CLIBinary '{payload_binary_ps}' "

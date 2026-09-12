@@ -61,6 +61,13 @@ func enterpriseCredentialIndexDir(dataDir string) string {
 	return filepath.Join(dataDir, "acp", "enterprise-token-index")
 }
 
+func enterpriseCredentialLockPath(dataDir string) (string, error) {
+	if strings.TrimSpace(dataDir) == "" {
+		return "", errors.New("ACP enterprise credential data directory is empty")
+	}
+	return filepath.Join(dataDir, "acp", ".enterprise-credentials.lock"), nil
+}
+
 // EnterpriseCredentialIndexPath returns the non-secret token-digest lookup
 // used by the gateway. This keeps authentication O(1) instead of letting an
 // unauthenticated loopback caller force a scan of every enrolled user.
@@ -111,7 +118,16 @@ func EnterpriseUserTokenPath(dataDir, clientID, agentID string) (string, error) 
 func EnsureEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) (EnterpriseCredential, error) {
 	enterpriseCredentialMutationMu.Lock()
 	defer enterpriseCredentialMutationMu.Unlock()
+	var credential EnterpriseCredential
+	err := withEnterpriseCredentialMutationLock(dataDir, func() error {
+		var mutationErr error
+		credential, mutationErr = ensureEnterpriseCredential(dataDir, principal, clientID, agentID, profile)
+		return mutationErr
+	})
+	return credential, err
+}
 
+func ensureEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) (EnterpriseCredential, error) {
 	path, err := EnterpriseCredentialPath(dataDir, principal, clientID, agentID, profile)
 	if err != nil {
 		return EnterpriseCredential{}, err
@@ -295,7 +311,12 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 func RemoveEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) error {
 	enterpriseCredentialMutationMu.Lock()
 	defer enterpriseCredentialMutationMu.Unlock()
+	return withEnterpriseCredentialMutationLock(dataDir, func() error {
+		return removeEnterpriseCredential(dataDir, principal, clientID, agentID, profile)
+	})
+}
 
+func removeEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) error {
 	path, err := EnterpriseCredentialPath(dataDir, principal, clientID, agentID, profile)
 	if err != nil {
 		return err

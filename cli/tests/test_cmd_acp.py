@@ -29,6 +29,18 @@ def _app(tmp_path: Path):
     return make_app_context(str(data))
 
 
+def _isolate_client_config(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / ".config"))
+    monkeypatch.setenv("APPDATA", str(tmp_path / "AppData" / "Roaming"))
+
+
+def _zed_settings(tmp_path: Path) -> Path:
+    if os.name == "nt":
+        return tmp_path / "AppData" / "Roaming" / "Zed" / "settings.json"
+    return tmp_path / ".config" / "zed" / "settings.json"
+
+
 def test_catalog_exposes_connector_coverage_and_bridge_inventory():
     result = CliRunner().invoke(acp_cmd, ["catalog"])
     assert result.exit_code == 0, result.output
@@ -53,9 +65,9 @@ def test_token_secures_parent_directory_before_file_creation(tmp_path):
 
 
 def test_zed_setup_defaults_observe_and_preserves_foreign_entries(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
-    settings = tmp_path / ".config" / "zed" / "settings.json"
+    settings = _zed_settings(tmp_path)
     settings.parent.mkdir(parents=True)
     settings.write_text('// operator comment\n{"theme": "Ayu", "agent_servers": {"Foreign": {"command": "other"}},}\n')
     guard = _binary(tmp_path / "guard")
@@ -101,7 +113,7 @@ def test_zed_setup_defaults_observe_and_preserves_foreign_entries(tmp_path, monk
 
 
 def test_setup_activate_and_remove_are_surgical(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")
@@ -138,11 +150,11 @@ def test_setup_activate_and_remove_are_surgical(tmp_path, monkeypatch):
 
 
 def test_setup_rolls_back_client_token_and_lock_when_config_save_fails(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")
-    settings = tmp_path / ".config" / "zed" / "settings.json"
+    settings = _zed_settings(tmp_path)
     settings.parent.mkdir(parents=True)
     original = b'{"theme":"original"}\n'
     settings.write_bytes(original)
@@ -166,7 +178,7 @@ def test_setup_rolls_back_client_token_and_lock_when_config_save_fails(tmp_path,
 
 
 def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent_path = tmp_path / "kiro-cli"
@@ -189,7 +201,7 @@ def test_verify_detects_agent_digest_drift(tmp_path, monkeypatch):
 
 
 def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")
@@ -200,7 +212,7 @@ def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
             obj=app,
         )
         assert result.exit_code == 0, result.output
-        settings = tmp_path / ".config" / "zed" / "settings.json"
+        settings = _zed_settings(tmp_path)
         document = json.loads(settings.read_text())
         document["theme"] = "drifted"
         settings.write_text(json.dumps(document))
@@ -213,7 +225,7 @@ def test_verify_detects_client_configuration_drift(tmp_path, monkeypatch):
 
 
 def test_same_agent_in_two_clients_uses_distinct_contract_locks(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")
@@ -252,7 +264,7 @@ def test_same_agent_in_two_clients_uses_distinct_contract_locks(tmp_path, monkey
 
 
 def test_multiple_agents_in_one_client_keep_every_contract_current(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     kiro = _binary(tmp_path / "kiro-cli")
@@ -290,7 +302,7 @@ def test_multiple_agents_in_one_client_keep_every_contract_current(tmp_path, mon
 
 
 def test_managed_setup_uses_provisioned_binding_token_without_mutating_central_policy(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     runtime_data = tmp_path / "user-runtime"
     token = runtime_data / "acp" / "zed-kiro.token"
@@ -336,7 +348,7 @@ def test_managed_setup_uses_provisioned_binding_token_without_mutating_central_p
         assert result.exit_code == 0, result.output
         assert json.loads(result.output)["managed"] is True
         assert json.dumps(app.cfg.acp, default=lambda value: value.__dict__, sort_keys=True) == before
-        settings = json.loads((tmp_path / ".config" / "zed" / "settings.json").read_text())
+        settings = json.loads(_zed_settings(tmp_path).read_text())
         args = settings["agent_servers"]["DefenseClaw · Kiro"]["args"]
         assert args[args.index("--token-file") + 1] == str(token.resolve())
         lock = runtime_data / "acp" / "zed-kiro.contract-lock.json"
@@ -347,7 +359,7 @@ def test_managed_setup_uses_provisioned_binding_token_without_mutating_central_p
 
 
 def test_managed_setup_rejects_pair_outside_central_policy(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     app.cfg.deployment_mode = "managed_enterprise"
     guard = _binary(tmp_path / "guard")
@@ -376,7 +388,7 @@ def test_managed_setup_rejects_pair_outside_central_policy(tmp_path, monkeypatch
 
 
 def test_remove_rolls_back_editor_lock_and_policy_on_save_failure(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")
@@ -388,7 +400,7 @@ def test_remove_rolls_back_editor_lock_and_policy_on_save_failure(tmp_path, monk
             obj=app,
         )
         assert result.exit_code == 0, result.output
-        settings = tmp_path / ".config" / "zed" / "settings.json"
+        settings = _zed_settings(tmp_path)
         lock = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
         settings_before = settings.read_bytes()
         lock_before = lock.read_bytes()
@@ -405,7 +417,7 @@ def test_remove_rolls_back_editor_lock_and_policy_on_save_failure(tmp_path, monk
 
 
 def test_remove_reports_one_rollback_failure_and_continues_restoring(tmp_path, monkeypatch):
-    monkeypatch.setenv("HOME", str(tmp_path))
+    _isolate_client_config(monkeypatch, tmp_path)
     app, data_dir, db_path = _app(tmp_path)
     guard = _binary(tmp_path / "guard")
     agent = _binary(tmp_path / "kiro-cli")

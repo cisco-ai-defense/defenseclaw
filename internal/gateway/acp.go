@@ -48,6 +48,19 @@ func (a *APIServer) handleACPProfiles(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *APIServer) handleACPChallenge(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	serverNonce, err := acp.NewHTTPAuthNonce()
+	if err != nil {
+		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP challenge unavailable"})
+		return
+	}
+	a.writeJSON(w, http.StatusOK, map[string]string{"server_nonce": serverNonce})
+}
+
 func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
 	if r.Method != http.MethodPost {
@@ -225,7 +238,7 @@ func acpBindingAllowed(allow []string, value string) bool {
 }
 
 func isACPAPIPath(path string) bool {
-	return path == "/api/v1/acp/evaluate" || strings.HasPrefix(path, "/v1/acp/")
+	return path == "/api/v1/acp/challenge" || path == "/api/v1/acp/evaluate" || strings.HasPrefix(path, "/v1/acp/")
 }
 
 type acpEnterpriseCredentialContextKey struct{}
@@ -258,7 +271,8 @@ func (a *APIServer) authenticateACPToken(r *http.Request, candidate string) (*ht
 }
 
 func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request, string, string, bool) {
-	if a == nil || a.scannerCfg == nil || r == nil || r.Method != http.MethodPost || r.URL.Path != "/api/v1/acp/evaluate" {
+	if a == nil || a.scannerCfg == nil || r == nil || r.Method != http.MethodPost ||
+		(r.URL.Path != "/api/v1/acp/challenge" && r.URL.Path != "/api/v1/acp/evaluate") {
 		return r, "", "", false
 	}
 	keyID := strings.TrimSpace(r.Header.Get(acp.AuthKeyIDHeader))
@@ -282,15 +296,36 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 			return r, "", "", false
 		}
 	}
-	limited := io.LimitReader(r.Body, acp.MaxTurnEvaluationBytes+(64<<10)+1)
+	maxBody := int64(1)
+	if r.URL.Path == "/api/v1/acp/evaluate" {
+		maxBody = int64(acp.MaxTurnEvaluationBytes + (64 << 10) + 16)
+	}
+	limited := io.LimitReader(r.Body, maxBody+1)
 	body, err := io.ReadAll(limited)
-	if err != nil || len(body) > acp.MaxTurnEvaluationBytes+(64<<10) {
+	if err != nil || int64(len(body)) > maxBody {
 		return r, "", "", false
 	}
 	_ = r.Body.Close()
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	if !acp.VerifyHTTPRequestMAC(token, keyID, nonce, r.Method, r.URL.Path, body, candidateMAC) {
 		return r, "", "", false
+	}
+	if r.URL.Path == "/api/v1/acp/challenge" {
+		if len(body) != 0 {
+			return r, "", "", false
+		}
+	} else {
+		challengeNonce := strings.TrimSpace(r.Header.Get(acp.AuthChallengeNonceHeader))
+		serverNonce := strings.TrimSpace(r.Header.Get(acp.AuthServerNonceHeader))
+		plaintext, decryptErr := acp.OpenHTTPPayload(
+			token, keyID, challengeNonce, serverNonce, nonce, r.Method, r.URL.Path, body,
+		)
+		if decryptErr != nil || len(plaintext) > acp.MaxTurnEvaluationBytes+(64<<10) {
+			return r, "", "", false
+		}
+		r.Body = io.NopCloser(bytes.NewReader(plaintext))
+		r.ContentLength = int64(len(plaintext))
+		r.Header.Set("Content-Type", "application/json")
 	}
 	r.Header.Set(acp.AuthKeyIDHeader, keyID)
 	r.Header.Set(acp.AuthNonceHeader, nonce)

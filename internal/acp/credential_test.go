@@ -111,6 +111,7 @@ func TestEnterpriseCredentialRevocationResumesIndexTombstoneCleanup(t *testing.T
 }
 
 func TestEnterpriseCredentialRevocationResumesRecordTombstoneCleanup(t *testing.T) {
+	requireDirectEnterpriseCredentialTest(t)
 	dataDir := t.TempDir()
 	credential, err := EnsureEnterpriseCredential(dataDir, "alice", "zed", "kiro", "default")
 	if err != nil {
