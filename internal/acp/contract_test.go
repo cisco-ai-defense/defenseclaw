@@ -9,10 +9,13 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) {
-	dir := t.TempDir()
+	dir := testenv.PrivateTempDir(t)
 	agent := filepath.Join(dir, "agent")
 	if err := os.WriteFile(agent, []byte("agent-v1"), 0o700); err != nil {
 		t.Fatal(err)
@@ -39,6 +42,9 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	body, _ := json.Marshal(lock)
 	path := filepath.Join(dir, "contract-lock.json")
 	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(path); err != nil {
 		t.Fatal(err)
 	}
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
