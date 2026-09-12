@@ -89,6 +89,7 @@ def test_zed_setup_defaults_observe_and_preserves_foreign_entries(tmp_path, monk
         lock = json.loads((Path(data_dir) / "acp" / "zed-kiro.contract-lock.json").read_text())
         assert lock["protocol"]["schema_version"] == "schema-v1.21.0"
         assert lock["agent"]["version"] == "kiro-cli 2.21.3"
+        assert lock["guard"]["managed_custody"] is False
         assert app.cfg.acp.mode == "observe"
         saved = (Path(data_dir) / "config.yaml").read_text(encoding="utf-8")
         assert "default_profile: default" in saved
@@ -303,11 +304,7 @@ def test_managed_setup_uses_provisioned_binding_token_without_mutating_central_p
     app.cfg.acp.default_profile = "locked"
     app.cfg.acp.clients = {"zed": ACPBinding(enabled=True, profile="locked")}
     app.cfg.acp.agents = {"kiro": ACPBinding(enabled=True, profile="locked")}
-    app.cfg.acp.profiles = {
-        "locked": ACPProfile(
-            fail_mode="closed", allowed_clients=["zed"], allowed_agents=["kiro"]
-        )
-    }
+    app.cfg.acp.profiles = {"locked": ACPProfile(fail_mode="closed", allowed_clients=["zed"], allowed_agents=["kiro"])}
     before = json.dumps(app.cfg.acp, default=lambda value: value.__dict__, sort_keys=True)
     try:
         with patch.object(app.cfg, "save", side_effect=AssertionError("managed enrollment must not save policy")):
@@ -341,7 +338,9 @@ def test_managed_setup_uses_provisioned_binding_token_without_mutating_central_p
         settings = json.loads((tmp_path / ".config" / "zed" / "settings.json").read_text())
         args = settings["agent_servers"]["DefenseClaw · Kiro"]["args"]
         assert args[args.index("--token-file") + 1] == str(token.resolve())
-        assert (runtime_data / "acp" / "zed-kiro.contract-lock.json").is_file()
+        lock = runtime_data / "acp" / "zed-kiro.contract-lock.json"
+        assert lock.is_file()
+        assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["managed_custody"] is True
     finally:
         cleanup_app(app, db_path, data_dir)
 

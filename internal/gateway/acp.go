@@ -55,7 +55,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, acp.MaxFrameBytes+(64<<10))
+	r.Body = http.MaxBytesReader(w, r.Body, acp.MaxTurnEvaluationBytes+(64<<10))
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	var req acp.Evaluation
@@ -67,14 +67,26 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid ACP evaluation body"})
 		return
 	}
-	if len(req.Payload) == 0 || len(req.Payload) > acp.MaxFrameBytes {
+	maxPayload := acp.MaxFrameBytes
+	if req.Aggregate {
+		maxPayload = acp.MaxTurnEvaluationBytes
+	}
+	if len(req.Payload) == 0 || len(req.Payload) > maxPayload {
 		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP payload is empty or too large"})
 		return
 	}
-	msg, err := acp.ParseMessage(req.Payload)
-	if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
-		a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
-		return
+	if req.Aggregate {
+		if req.Direction != acp.AgentToClient || req.Surface != acp.SurfaceOutput || req.Method != "session/update" ||
+			acp.ValidateTurnEvaluationPayload(req.Payload) != nil {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP completed-turn metadata does not match payload"})
+			return
+		}
+	} else {
+		msg, err := acp.ParseMessage(req.Payload)
+		if err != nil || msg.Method != req.Method || acp.Classify(msg, req.Direction) != req.Surface {
+			a.writeJSON(w, http.StatusBadRequest, map[string]string{"error": "ACP envelope metadata does not match payload"})
+			return
+		}
 	}
 	agent, err := acp.LookupAgent(req.AgentID)
 	if err != nil || strings.TrimSpace(agent.ConnectorID) == "" {

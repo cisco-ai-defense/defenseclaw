@@ -28,6 +28,7 @@ type Evaluation struct {
 	Surface   Surface         `json:"surface"`
 	Method    string          `json:"method,omitempty"`
 	Payload   json.RawMessage `json:"payload"`
+	Aggregate bool            `json:"aggregate,omitempty"`
 }
 
 type Verdict struct {

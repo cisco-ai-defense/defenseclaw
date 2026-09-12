@@ -11,6 +11,7 @@ import json
 import os
 import secrets
 import shutil
+import stat
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -179,6 +180,7 @@ def _write_contract_lock(
     guard: str,
     agent_executable: str,
     client_path: Path,
+    managed: bool,
 ) -> Path:
     path = _contract_lock_path(data_dir, client, agent)
     document = {
@@ -192,7 +194,7 @@ def _write_contract_lock(
             "sha256": _sha256_file(agent_executable),
             "version": _agent_version(agent_executable),
         },
-        "guard": {"path": guard, "sha256": _sha256_file(guard)},
+        "guard": {"path": guard, "sha256": _sha256_file(guard), "managed_custody": managed},
         "profile": profile,
         "mode": mode,
     }
@@ -278,6 +280,46 @@ def _managed_pairs() -> set[tuple[str, str]]:
     return pairs
 
 
+def _managed_guard_custody_is_trusted(path_value: str) -> bool:
+    """Conservatively preflight the runtime's admin-owned managed-path signal."""
+
+    try:
+        path = Path(path_value).expanduser().absolute()
+        if os.name == "nt":
+            from defenseclaw.file_permissions import (
+                reject_reparse_path,
+                windows_acl_custody_write_error,
+            )
+
+            reject_reparse_path(path)
+            if not path.is_file():
+                return False
+            for index, element in enumerate((path, *path.parents)):
+                if (
+                    windows_acl_custody_write_error(
+                        element,
+                        allow_current_user=False,
+                        ancestor_replace_only=index > 0,
+                    )
+                    is not None
+                ):
+                    return False
+            return True
+        for index, element in enumerate((path, *path.parents)):
+            info = element.lstat()
+            if stat.S_ISLNK(info.st_mode):
+                return False
+            if index == 0 and not stat.S_ISREG(info.st_mode):
+                return False
+            if index > 0 and not stat.S_ISDIR(info.st_mode):
+                return False
+            if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
+                return False
+        return True
+    except (OSError, ValueError):
+        return False
+
+
 def _verify_binding(data_dir: str, client: str, agent: str) -> list[str]:
     problems: list[str] = []
     client_path = _client_path(client)
@@ -321,7 +363,12 @@ def _verify_binding(data_dir: str, client: str, agent: str) -> list[str]:
         digest = item.get("sha256") if isinstance(item, dict) else None
         if not isinstance(path_value, str) or not Path(path_value).is_file():
             problems.append(f"{key} executable is missing")
-        elif digest != _sha256_file(path_value):
+        elif digest != _sha256_file(path_value) and not (
+            key == "guard"
+            and isinstance(lock_guard, dict)
+            and lock_guard.get("managed_custody") is True
+            and _managed_guard_custody_is_trusted(path_value)
+        ):
             problems.append(f"{key} executable digest has drifted")
     if isinstance(entry, dict):
         args = entry.get("args")
@@ -476,6 +523,7 @@ def setup_cmd(
             guard=guard,
             agent_executable=agent_executable,
             client_path=path,
+            managed=managed,
         )
         _refresh_client_contract_digests(data_dir, client, path)
         if not managed:

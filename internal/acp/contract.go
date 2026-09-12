@@ -15,6 +15,7 @@ import (
 	"runtime"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
@@ -39,8 +40,9 @@ type RuntimeContractLock struct {
 		Version string `json:"version"`
 	} `json:"agent"`
 	Guard struct {
-		Path   string `json:"path"`
-		SHA256 string `json:"sha256"`
+		Path           string `json:"path"`
+		SHA256         string `json:"sha256"`
+		ManagedCustody bool   `json:"managed_custody,omitempty"`
 	} `json:"guard"`
 	Profile string `json:"profile"`
 	Mode    string `json:"mode"`
@@ -99,11 +101,21 @@ func ValidateRuntimeContract(path, clientID, agentID, profile string, mode Mode,
 	for _, item := range []struct{ path, expected, label string }{
 		{clientConfigPath, lock.Client.ConfigSHA256, "client configuration"},
 		{agentPath, lock.Agent.SHA256, "agent"},
-		{guardPath, lock.Guard.SHA256, "guard"},
 	} {
 		observed, digestErr := fileSHA256(item.path)
 		if digestErr != nil || !strings.EqualFold(observed, item.expected) {
 			return fmt.Errorf("ACP %s executable digest does not match the runtime contract", item.label)
+		}
+	}
+	observedGuardDigest, err := fileSHA256(guardPath)
+	if err != nil || !strings.EqualFold(observedGuardDigest, lock.Guard.SHA256) {
+		// Managed deployments bind the guard to an administrator-controlled
+		// path rather than bytes that necessarily change on every signed
+		// enterprise upgrade. This exception is valid only while the complete
+		// path still passes the platform root/Admin ownership and no-untrusted-
+		// writer contract. User-owned guards always retain exact digest pinning.
+		if !lock.Guard.ManagedCustody || managed.ValidateTrustedFilePath(guardPath, "managed ACP guard") != nil {
+			return errors.New("ACP guard executable digest does not match the runtime contract")
 		}
 	}
 	return nil
