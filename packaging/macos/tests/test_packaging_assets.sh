@@ -291,6 +291,14 @@ t_install_sh_is_executable() {
   fi
 }
 
+t_enterprise_installer_requires_and_installs_acp_guard() {
+  local body="${REPO_ROOT}/packaging/launchd/install-enterprise.sh"
+  assert_contains "$(cat "${body}")" '--acp-binary' "enterprise ACP binary option"
+  assert_contains "$(cat "${body}")" '"${BIN_DIR}/defenseclaw-acp"' "enterprise ACP destination"
+  assert_contains "$(cat "${body}")" 'install_file_atomic "$ACP_BINARY_SOURCE" "${BIN_DIR}/defenseclaw-acp" root wheel 0755' \
+    "enterprise ACP protected installation"
+}
+
 t_uninstall_sh_is_executable() {
   if [[ ! -x "${PKG_DIR}/uninstall.sh" ]]; then
     _fail "uninstall.sh missing +x"
@@ -708,6 +716,7 @@ run_case "installer_lib.sh syntax"    t_install_lib_syntax
 run_case "install.sh syntax"          t_install_sh_syntax
 run_case "uninstall.sh syntax"        t_uninstall_sh_syntax
 run_case "install.sh executable"      t_install_sh_is_executable
+run_case "enterprise installer includes ACP guard" t_enterprise_installer_requires_and_installs_acp_guard
 run_case "uninstall.sh executable"    t_uninstall_sh_is_executable
 run_case "scrub_agent_configs.py present and +x" t_scrub_py_exists_and_executable
 run_case "scrub_agent_configs.py syntax"          t_scrub_py_syntax

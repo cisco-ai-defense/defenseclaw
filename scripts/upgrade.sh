@@ -118,6 +118,7 @@ readonly BRIDGE_PHASE1_STATE_NAMES_JSON='[".env",".migration_state.json","guardr
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly UPGRADE_PROTOCOL_VERSION=2
 readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
+readonly ACP_GUARD_RELEASE_VERSION="0.8.11"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UV_BOOTSTRAP_VERSION="0.11.28"
@@ -5188,6 +5189,7 @@ BRIDGE_CANDIDATE_VENV=""
 BRIDGE_SOURCE_WAS_RUNNING=0
 BRIDGE_SOURCE_HEALTH_URL=""
 BRIDGE_GATEWAY_INSTALL_TEMP=""
+ACP_GUARD_INSTALL_TEMP=""
 BRIDGE_RECOVERY_PLAN_ID=""
 BRIDGE_STATE_SNAPSHOT_READY=0
 BRIDGE_EXPECTED_GATEWAY_SHA256=""
@@ -5214,6 +5216,7 @@ upgrade_exit_trap() {
             || true
     fi
     [[ -z "${BRIDGE_GATEWAY_INSTALL_TEMP:-}" ]] || rm -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"
+    [[ -z "${ACP_GUARD_INSTALL_TEMP:-}" ]] || rm -f "${ACP_GUARD_INSTALL_TEMP}"
     [[ -z "${BRIDGE_CANDIDATE_VENV:-}" ]] || rm -rf "${BRIDGE_CANDIDATE_VENV}"
     cleanup_upgrade_staging
     release_upgrade_lock
@@ -8368,10 +8371,19 @@ tar -xzf "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}" -C "${STAGING_DIR}" \
     || die "Could not extract gateway tarball"
 [[ -f "${STAGING_DIR}/defenseclaw" ]] \
     || die "Gateway tarball did not contain the expected defenseclaw binary"
+if version_gte "${RELEASE_VERSION}" "${ACP_GUARD_RELEASE_VERSION}"; then
+    [[ -f "${STAGING_DIR}/defenseclaw-acp" && ! -L "${STAGING_DIR}/defenseclaw-acp" ]] \
+        || die "Gateway tarball did not contain the required defenseclaw-acp guard"
+fi
 if [[ "${OS}" == "darwin" ]]; then
     /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
         "${STAGING_DIR}/defenseclaw" 2>/dev/null \
         || die "Could not ad-hoc sign the staged macOS gateway; no services changed."
+    if [[ -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+        /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.acp \
+            "${STAGING_DIR}/defenseclaw-acp" 2>/dev/null \
+            || die "Could not ad-hoc sign the staged macOS ACP guard; no services changed."
+    fi
 fi
 ok "Gateway binary downloaded"
 
@@ -9211,6 +9223,14 @@ if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${INSTALL_DIR}/defenseclaw-gateway" ]]; th
         && ok "Snapshotted previous gateway → ${BACKUP_DIR}/defenseclaw-gateway.previous" \
         || warn "Could not snapshot previous gateway binary"
 fi
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${INSTALL_DIR}/defenseclaw-acp" ]]; then
+    if cp "${INSTALL_DIR}/defenseclaw-acp" "${BACKUP_DIR}/defenseclaw-acp.previous" \
+        && chmod +x "${BACKUP_DIR}/defenseclaw-acp.previous"; then
+        ok "Snapshotted previous ACP guard → ${BACKUP_DIR}/defenseclaw-acp.previous"
+    else
+        warn "Could not snapshot previous ACP guard binary"
+    fi
+fi
 
 BRIDGE_GATEWAY_INSTALL_TEMP="$(mktemp "${INSTALL_DIR}/.defenseclaw-gateway.upgrade.XXXXXX")" \
     || die "Could not create a collision-safe gateway activation file"
@@ -9282,6 +9302,19 @@ else
 fi
 BRIDGE_GATEWAY_INSTALL_TEMP=""
 ok "Gateway binary installed"
+
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+    ACP_GUARD_INSTALL_TEMP="$(mktemp "${INSTALL_DIR}/.defenseclaw-acp.upgrade.XXXXXX")" \
+        || die "Could not create a collision-safe ACP guard activation file"
+    cp "${STAGING_DIR}/defenseclaw-acp" "${ACP_GUARD_INSTALL_TEMP}"
+    chmod +x "${ACP_GUARD_INSTALL_TEMP}"
+    mv -f "${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp"
+    ACP_GUARD_INSTALL_TEMP=""
+    acp_version_output="$("${INSTALL_DIR}/defenseclaw-acp" --version 2>&1 || true)"
+    printf '%s' "${acp_version_output}" | grep -Fq "${RELEASE_VERSION}" \
+        || die "ACP guard version verification failed: expected ${RELEASE_VERSION}; binary reported: $(printf '%s' "${acp_version_output}" | head -n1 | cut -c1-200)"
+    ok "ACP guard binary installed and verified (${RELEASE_VERSION})"
+fi
 
 # Verify the freshly-installed binary reports the expected version. A
 # truncated tarball or failed copy surfaces here as a warning instead of

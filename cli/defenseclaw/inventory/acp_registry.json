@@ -1,0 +1,55 @@
+{
+  "schema_version": 1,
+  "protocol": {
+    "release": "schema-v1.21.0",
+    "source_url": "https://github.com/agentclientprotocol/agent-client-protocol/releases/download/schema-v1.21.0/schema.json",
+    "sha256": "caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42",
+    "transport": "stdio-ndjson",
+    "json_rpc": "2.0",
+    "max_frame_bytes": 1048576,
+    "max_pending_ids": 128,
+    "batch_supported": false
+  },
+  "upstream_registry": {
+    "url": "https://cdn.agentclientprotocol.com/registry/v1/latest/registry.json",
+    "schema_version": "1.0.0",
+    "checked_at": "2026-09-11"
+  },
+  "environment_variables": [],
+  "clients": [
+    {"id": "zed", "name": "Zed", "support": "tested", "config_kind": "zed-settings", "source_url": "https://zed.dev/docs/ai/external-agents"},
+    {"id": "jetbrains", "name": "JetBrains AI Assistant", "support": "cataloged", "config_kind": "jetbrains-acp", "source_url": "https://www.jetbrains.com/help/ai-assistant/acp.html"}
+  ],
+  "agents": [
+    {"id": "kiro", "name": "Kiro CLI", "command": "kiro-cli", "args": ["acp"], "support": "tested", "connector_id": "kiro", "kind": "native", "source_url": "https://kiro.dev/docs/cli/acp/"},
+    {"id": "cursor", "name": "Cursor Agent", "command": "agent", "args": ["acp"], "support": "cataloged", "connector_id": "cursor", "kind": "native", "registry_id": "cursor", "source_url": "https://cursor.com/docs/cli/acp"},
+    {"id": "opencode", "name": "OpenCode", "command": "opencode", "args": ["acp"], "support": "cataloged", "connector_id": "opencode", "kind": "native", "registry_id": "opencode", "source_url": "https://opencode.ai/docs/cli/"},
+    {"id": "hermes", "name": "Hermes Agent", "command": "hermes", "args": ["acp"], "support": "cataloged", "connector_id": "hermes", "kind": "native", "source_url": "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"},
+    {"id": "copilot", "name": "GitHub Copilot CLI", "command": "copilot", "args": ["--acp", "--stdio"], "support": "cataloged", "connector_id": "copilot", "kind": "native", "registry_id": "github-copilot-cli", "source_url": "https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server"},
+    {"id": "openhands", "name": "OpenHands", "command": "openhands", "args": ["acp"], "support": "cataloged", "connector_id": "openhands", "kind": "native", "source_url": "https://docs.openhands.dev/openhands/usage/cli/ide/overview"},
+    {"id": "openclaw", "name": "OpenClaw", "command": "openclaw", "args": ["acp"], "support": "cataloged", "connector_id": "openclaw", "kind": "bridge", "source_url": "https://docs.openclaw.ai/cli/acp"},
+    {"id": "gemini", "name": "Gemini CLI", "command": "gemini", "args": ["--acp"], "support": "cataloged", "connector_id": "geminicli", "kind": "native", "registry_id": "gemini", "source_url": "https://agentclientprotocol.com/get-started/registry"},
+    {"id": "devin", "name": "Devin", "command": "devin", "args": ["acp"], "support": "cataloged", "connector_id": "devin", "kind": "native", "registry_id": "devin", "source_url": "https://agentclientprotocol.com/get-started/registry"},
+    {"id": "amp", "name": "Amp ACP bridge", "command": "amp-acp", "args": [], "support": "cataloged", "connector_id": "amp", "kind": "bridge", "registry_id": "amp-acp", "source_url": "https://agentclientprotocol.com/get-started/registry"},
+    {"id": "antigravity", "name": "Google Antigravity ACP server", "command": "agy_acp_server", "args": [], "support": "cataloged", "connector_id": "antigravity", "kind": "bridge", "registry_id": "antigravity-acp", "source_url": "https://agentclientprotocol.com/get-started/registry"},
+    {"id": "claude", "name": "Claude ACP bridge", "command": "claude-agent-acp", "args": [], "support": "cataloged", "connector_id": "claudecode", "kind": "bridge", "registry_id": "claude-acp", "source_url": "https://agentclientprotocol.com/get-started/registry"},
+    {"id": "codex", "name": "Codex ACP bridge", "command": "codex-acp", "args": [], "support": "cataloged", "connector_id": "codex", "kind": "bridge", "registry_id": "codex-acp", "source_url": "https://agentclientprotocol.com/get-started/registry"}
+  ],
+  "connector_coverage": [
+    {"connector_id": "kiro", "acp_support": "native", "agent_id": "kiro"},
+    {"connector_id": "cursor", "acp_support": "native", "agent_id": "cursor"},
+    {"connector_id": "opencode", "acp_support": "native", "agent_id": "opencode"},
+    {"connector_id": "hermes", "acp_support": "native", "agent_id": "hermes"},
+    {"connector_id": "copilot", "acp_support": "native", "agent_id": "copilot"},
+    {"connector_id": "openhands", "acp_support": "native", "agent_id": "openhands"},
+    {"connector_id": "openclaw", "acp_support": "bridge", "agent_id": "openclaw"},
+    {"connector_id": "geminicli", "acp_support": "native", "agent_id": "gemini"},
+    {"connector_id": "claudecode", "acp_support": "bridge", "agent_id": "claude"},
+    {"connector_id": "codex", "acp_support": "bridge", "agent_id": "codex"},
+    {"connector_id": "amp", "acp_support": "bridge", "agent_id": "amp"},
+    {"connector_id": "antigravity", "acp_support": "bridge", "agent_id": "antigravity"},
+    {"connector_id": "devin", "acp_support": "native", "agent_id": "devin"},
+    {"connector_id": "omnigent", "acp_support": "none"},
+    {"connector_id": "zeptoclaw", "acp_support": "none"}
+  ]
+}

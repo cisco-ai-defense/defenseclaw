@@ -48,6 +48,7 @@ var (
 		"bin/defenseclaw-observability.exe",
 		"bin/defenseclaw-startup.exe",
 		"bin/defenseclaw-gateway.exe",
+		"bin/defenseclaw-acp.exe",
 		"bin/defenseclaw-hook.exe",
 		hookLauncherInstalledPath,
 	}

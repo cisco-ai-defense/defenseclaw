@@ -64,7 +64,7 @@ env:
   # Single source of truth for the seven payload filenames the fixture and
   # the emit-payload-metadata gate agree on. Referenced by both emit-linux
   # and emit-macos so a future edit stays in one place.
-  EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw-sensor-helper.exe,defenseclaw.exe,install-enterprise.ps1"
+  EXPECTED_PAYLOAD_FILENAMES: "DefenseClawEnterprise.psm1,defenseclaw-acp.exe,defenseclaw-cmid-broker.exe,defenseclaw-gateway.exe,defenseclaw-hook.exe,defenseclaw-sensor-helper.exe,defenseclaw.exe,install-enterprise.ps1"
 
 jobs:
   # Fast lint job that runs both reproducibility lints on every PR to

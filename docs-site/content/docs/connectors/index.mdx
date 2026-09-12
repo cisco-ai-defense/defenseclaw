@@ -1,6 +1,6 @@
 ---
 title: Connectors
-description: Thirteen active connectors share one adapter interface while exposing connector-specific proxy, hook, policy, telemetry, and approval capabilities.
+description: Fifteen active connectors share one adapter interface while exposing connector-specific proxy, hook, ACP, policy, telemetry, and approval capabilities.
 keywords:
   - DefenseClaw connectors
   - Claude Code connector
@@ -29,6 +29,7 @@ native telemetry, and approval support therefore vary by connector.
   <Card title="Proxy connectors" description="OpenClaw, ZeptoClaw. Model requests routed through the DefenseClaw proxy and their responses are inspected; OpenClaw classifies recognized provider/request shapes, while ZeptoClaw rewrites configured provider api_base values." />
   <Card title="Hook connectors" description="Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, and OpenCode. DefenseClaw wires into the agent's native lifecycle hooks; the agent talks directly to its upstream." />
   <Card title="Custom policy connector" description="OmniGent. DefenseClaw installs an in-process Python policy bridge and maps six awaited policy phases to ALLOW, ASK, or DENY without proxying model traffic." />
+  <Card title="ACP connector" href="/docs/acp-guard" description="Kiro is ACP-first. The shared guard also protects verified native ACP entry points for existing connectors without creating an IDE-specific extension." />
   <Card title="Compatibility contracts" href="/docs/connectors/compatibility" description="Versioned hook contracts, setup-time connector version checks, and the runtime hook_contract_lock.json." />
 </Cards>
 
@@ -52,9 +53,10 @@ evidence has not been recorded.
 | --- | --- | --- | --- |
 | [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. |
 | [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. |
+| [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | ACP-first via the shipped stdio guard; native hooks are inventory-only defense in depth. |
 | [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
 | [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
-| [Devin](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` admission; cloud Devin, ACP, proxy, and native OTLP are excluded. |
+| [Devin](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission; its separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |
 | [GitHub Copilot CLI](/docs/connectors/copilot) | **Supported** | **Supported** | Uses Copilot's PowerShell hook field; upstream Windows sandboxing cannot enforce per-path denials. |
 | [Antigravity](/docs/connectors/antigravity) | **Supported** | **Supported** | Native PowerShell launcher; only `PreToolUse` can block or ask. |
 | [Hermes](/docs/connectors/hermes) | **Supported** | **Supported** | Direct executable hook is shell-free, but Hermes' own terminal tool depends on its bundled Git Bash. |
@@ -76,6 +78,7 @@ receipt-bound teardown.
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
 | Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook |
 | Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
+| ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, OpenHands, Gemini, and Devin; bridge modes for OpenClaw, Amp, Antigravity, Claude, and Codex | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
 
 Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code
 (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only),

@@ -1,0 +1,24 @@
+---
+title: Kiro
+description: Use Kiro CLI through DefenseClaw's ACP guard in Zed or JetBrains.
+---
+
+Kiro is DefenseClaw's first ACP-first connector. The authoritative enforcement
+path is `kiro-cli acp` behind `defenseclaw-acp`; native Kiro hooks are
+cataloged separately as future defense in depth.
+
+```bash
+defenseclaw acp setup --client zed --agent kiro
+# after reviewing observe-mode evidence
+defenseclaw acp setup --client zed --agent kiro --activate
+```
+
+The guard and setup path are supported on macOS, Linux, and native Windows;
+actual editor availability and official-client certification remain separate
+claims in the ACP inventory. Use `--client jetbrains` for JetBrains AI
+Assistant. Setup resolves absolute executables, pins their digests, preserves
+foreign editor settings, and never places the ACP scoped token in the editor's
+JSON.
+
+See the [ACP guard guide](/docs/acp-guard) for architecture, guarantees,
+configuration, supported agents, and the direct-launch bypass boundary.

@@ -7,7 +7,9 @@ import (
 	"database/sql"
 	"encoding/json"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
@@ -17,6 +19,32 @@ type storedGuardrailEventV8 struct {
 	Mandatory   int
 	Body        map[string]any
 	Correlation observability.Correlation
+}
+
+func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	api.recordACPEvaluationV8(t.Context(), acp.Evaluation{
+		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
+		Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
+	}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"}, "kiro", "kiro-only", 12*time.Millisecond)
+
+	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+	want := map[string]any{
+		"defenseclaw.acp.client": "zed", "defenseclaw.acp.agent": "kiro",
+		"defenseclaw.acp.method": "session/prompt", "defenseclaw.acp.direction": "client_to_agent",
+		"defenseclaw.acp.surface": "prompt", "defenseclaw.acp.profile": "kiro-only",
+		"defenseclaw.acp.protocol.version": "schema-v1.21.0",
+		"defenseclaw.guardrail.raw_action": "block", "defenseclaw.guardrail.would_block": true,
+		"defenseclaw.guardrail.effective_action": "allow",
+	}
+	for key, value := range want {
+		if got := events[0].Body[key]; got != value {
+			t.Errorf("%s = %#v, want %#v (body=%v)", key, got, value, events[0].Body)
+		}
+	}
 }
 
 func newGuardrailEventV8TestAPI(

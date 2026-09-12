@@ -639,6 +639,67 @@ def check_telemetry_registry() -> bool:
     return result.returncode == 0
 
 
+def check_acp_inventory_instances() -> bool:
+    """Validate ACP registry/evidence documents and the packaged mirror."""
+    try:
+        import jsonschema  # type: ignore[import-not-found]
+    except ImportError:
+        print(
+            "check_schemas: jsonschema is required for ACP inventory validation",
+            file=sys.stderr,
+        )
+        return False
+
+    pairs = (
+        (SCHEMA_DIR / "acp" / "registry.schema.json", ROOT / "internal" / "inventory" / "acp_registry.json"),
+        (
+            SCHEMA_DIR / "acp" / "certifications.schema.json",
+            ROOT / "internal" / "inventory" / "acp_certifications.json",
+        ),
+    )
+    ok = True
+    for schema_path, instance_path in pairs:
+        schema = load_json(schema_path)
+        instance = load_json(instance_path)
+        errors = sorted(
+            jsonschema.Draft202012Validator(schema).iter_errors(instance),
+            key=lambda error: list(error.absolute_path),
+        )
+        if errors:
+            ok = False
+            for error in errors:
+                location = ".".join(str(part) for part in error.absolute_path) or "<root>"
+                print(
+                    f"check_schemas: {instance_path.relative_to(ROOT)} {location}: {error.message}",
+                    file=sys.stderr,
+                )
+        else:
+            print(f"check_schemas: {instance_path.relative_to(ROOT)} OK")
+
+    canonical = ROOT / "internal" / "inventory" / "acp_registry.json"
+    packaged = ROOT / "cli" / "defenseclaw" / "inventory" / "acp_registry.json"
+    canonical_doc = load_json(canonical)
+    protocol = canonical_doc.get("protocol", {})
+    release = protocol.get("release")
+    expected_source = (
+        "https://github.com/agentclientprotocol/agent-client-protocol/"
+        f"releases/download/{release}/schema.json"
+    )
+    if protocol.get("source_url") != expected_source:
+        print("check_schemas: ACP protocol source URL does not match its pinned release", file=sys.stderr)
+        ok = False
+    certifications = load_json(ROOT / "internal" / "inventory" / "acp_certifications.json")
+    if any(item.get("protocol_release") != release for item in certifications.get("certifications", [])):
+        print("check_schemas: ACP certification protocol release has drifted", file=sys.stderr)
+        ok = False
+    if canonical.read_bytes() != packaged.read_bytes():
+        print("check_schemas: packaged ACP registry mirror has drifted", file=sys.stderr)
+        ok = False
+    else:
+        print("check_schemas: packaged ACP registry mirror OK")
+    return ok
+
+
 def main() -> int:
     if not SCHEMA_DIR.is_dir():
         print(f"check_schemas: schema dir not found: {SCHEMA_DIR}", file=sys.stderr)
@@ -746,6 +807,9 @@ def main() -> int:
             ok = False
 
         if not check_telemetry_registry():
+            ok = False
+
+        if not check_acp_inventory_instances():
             ok = False
 
     return 0 if ok else 1

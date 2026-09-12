@@ -337,6 +337,24 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     assert 'print("recover" if len(latest) == 1 else "invalid")' in split_phase
 
 
+def test_posix_resolver_requires_and_activates_acp_guard_from_0811() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+
+    extraction = source.index('tar -xzf "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}"')
+    stop = source.index('section "Stopping Services"', extraction)
+    preflight = source[extraction:stop]
+    assert 'ACP_GUARD_RELEASE_VERSION="0.8.11"' in source
+    assert 'version_gte "${RELEASE_VERSION}" "${ACP_GUARD_RELEASE_VERSION}"' in preflight
+    assert "required defenseclaw-acp guard" in preflight
+    assert "com.cisco.defenseclaw.acp" in preflight
+
+    install = source[source.index('section "Installing Artifacts"', stop) :]
+    assert "defenseclaw-acp.previous" in install
+    assert ".defenseclaw-acp.upgrade.XXXXXX" in install
+    assert 'mv -f "${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp"' in install
+    assert "ACP guard binary installed and verified (${RELEASE_VERSION})" in install
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_success", "expected_probes"),
     (
@@ -1329,9 +1347,7 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
 
 def test_missing_cursor_first_run_verifier_uses_published_source_python() -> None:
     script = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
-    start = script.index(
-        "# Reproduce the real field state through the exact authenticated"
-    )
+    start = script.index("# Reproduce the real field state through the exact authenticated")
     end = script.index("source_config_sha256=", start)
     verifier = script[start:end]
 
@@ -1919,7 +1935,7 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
 def test_candidate_resolver_paths_do_not_inherit_runner_uv() -> None:
     protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
     assert 'readonly RESOLVER_SYSTEM_TOOL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"' in protocol
-    assert 'PATH="${resolver_path}" /bin/sh -c \'command -v uv\'' in protocol
+    assert "PATH=\"${resolver_path}\" /bin/sh -c 'command -v uv'" in protocol
     assert 'PATH="${resolver_path}" command -v uv' not in protocol
 
     for function_name, following_name in (

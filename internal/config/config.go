@@ -119,6 +119,32 @@ type AgentConfig struct {
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
+// ACPConfig controls the local stdio ACP guard. It contains no executable
+// commands or secrets: agent entry points are selected from the compiled ACP
+// catalog (or supplied explicitly to defenseclaw-acp), and credentials stay in
+// permission-restricted token files.
+type ACPConfig struct {
+	Enabled        bool                  `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Mode           string                `mapstructure:"mode" yaml:"mode,omitempty"`
+	DefaultProfile string                `mapstructure:"default_profile" yaml:"default_profile,omitempty"`
+	Clients        map[string]ACPBinding `mapstructure:"clients" yaml:"clients,omitempty"`
+	Agents         map[string]ACPBinding `mapstructure:"agents" yaml:"agents,omitempty"`
+	Profiles       map[string]ACPProfile `mapstructure:"profiles" yaml:"profiles,omitempty"`
+}
+
+type ACPBinding struct {
+	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
+}
+
+type ACPProfile struct {
+	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty"`
+	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty"`
+	AllowedClients []string `mapstructure:"allowed_clients" yaml:"allowed_clients,omitempty"`
+	AllowedAgents  []string `mapstructure:"allowed_agents" yaml:"allowed_agents,omitempty"`
+	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty"`
+}
+
 // CurrentConfigVersion is the last compatibility-decoder version used by the
 // explicit release upgrader. The strict target runtime is schema v8 and is
 // loaded through LoadRuntimeV8FromBytes plus the observability-v8 compiler; do
@@ -199,6 +225,7 @@ type Config struct {
 	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
 	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
 	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	ACP             ACPConfig                  `mapstructure:"acp"              yaml:"acp,omitempty"`
 	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
 	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
@@ -2894,6 +2921,12 @@ func loadConfigSource(
 			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
 		}
 		return nil, err
+	}
+	if err := cfg.ACP.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "acp_invalid")
+		}
+		return nil, fmt.Errorf("config: acp: %w", err)
 	}
 
 	if err := cfg.Guardrail.Validate(); err != nil {

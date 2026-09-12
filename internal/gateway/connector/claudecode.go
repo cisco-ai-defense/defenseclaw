@@ -365,6 +365,7 @@ func (c *ClaudeCodeConnector) Capabilities(opts SetupOpts) ConnectorCapabilities
 
 	return ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeForConnector(c.Name()),
+		ACP:            ACPAgentCapabilityForConnector(c.Name()),
 		Hooks:          c.HookCapabilities(opts),
 		MCP: SurfaceCapability{
 			Supported:       true,

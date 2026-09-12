@@ -3648,6 +3648,7 @@ def _validate_windows_gateway_zip_payload(
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             seen: set[PurePosixPath] = set()
             gateway_payloads: list[bytes] = []
+            acp_payloads: list[bytes] = []
             for member in archive.infolist():
                 raw_name = member.filename[:-1] if member.is_dir() else member.filename
                 member_path = _safe_archive_member_path(raw_name, archive_name)
@@ -3662,19 +3663,34 @@ def _validate_windows_gateway_zip_payload(
                     continue
                 if member.flag_bits & 0x1:
                     raise CandidateError(f"encrypted member in gateway archive {archive_name}: {member.filename}")
-                if member_path != PurePosixPath("defenseclaw.exe"):
+                if member_path not in {PurePosixPath("defenseclaw.exe"), PurePosixPath("defenseclaw-acp.exe")}:
                     continue
                 if member.file_size <= 0 or member.file_size > MAX_GATEWAY_BINARY_BYTES:
                     raise CandidateError(f"gateway binary size is invalid in {archive_name}")
-                gateway_payloads.append(archive.read(member))
+                if member_path == PurePosixPath("defenseclaw.exe"):
+                    gateway_payloads.append(archive.read(member))
+                else:
+                    acp_payloads.append(archive.read(member))
     except CandidateError:
         raise
     except (OSError, RuntimeError, zipfile.BadZipFile) as exc:
         raise CandidateError(f"invalid gateway archive {archive_name}: {exc}") from exc
     if len(gateway_payloads) != 1:
         raise CandidateError(f"gateway archive {archive_name} must contain exactly one root defenseclaw.exe binary")
+    if len(acp_payloads) != 1:
+        raise CandidateError(
+            f"gateway archive {archive_name} must contain exactly one root defenseclaw-acp.exe binary"
+        )
     _validate_gateway_binary(
         gateway_payloads[0],
+        os_name="windows",
+        arch=arch,
+        version=version,
+        commit=commit,
+        archive_name=archive_name,
+    )
+    _validate_gateway_binary(
+        acp_payloads[0],
         os_name="windows",
         arch=arch,
         version=version,
@@ -3697,6 +3713,7 @@ def _validate_gateway_archives(
                 with tarfile.open(fileobj=io.BytesIO(_protected_payload(path)), mode="r:gz") as archive:
                     seen: set[PurePosixPath] = set()
                     gateway_payloads: list[bytes] = []
+                    acp_payloads: list[bytes] = []
                     for member in archive.getmembers():
                         raw_name = member.name[:-1] if member.isdir() and member.name.endswith("/") else member.name
                         member_path = _safe_archive_member_path(raw_name, path.name)
@@ -3707,22 +3724,37 @@ def _validate_gateway_archives(
                             continue
                         if not member.isfile():
                             raise CandidateError(f"non-regular member in gateway archive {path.name}: {member.name}")
-                        if member_path != PurePosixPath("defenseclaw"):
+                        if member_path not in {PurePosixPath("defenseclaw"), PurePosixPath("defenseclaw-acp")}:
                             continue
                         if member.size <= 0 or member.size > MAX_GATEWAY_BINARY_BYTES:
                             raise CandidateError(f"gateway binary size is invalid in {path.name}")
                         stream = archive.extractfile(member)
                         if stream is None:
                             raise CandidateError(f"gateway binary could not be read from {path.name}")
-                        gateway_payloads.append(stream.read(MAX_GATEWAY_BINARY_BYTES + 1))
+                        if member_path == PurePosixPath("defenseclaw"):
+                            gateway_payloads.append(stream.read(MAX_GATEWAY_BINARY_BYTES + 1))
+                        else:
+                            acp_payloads.append(stream.read(MAX_GATEWAY_BINARY_BYTES + 1))
             except CandidateError:
                 raise
             except (OSError, tarfile.TarError) as exc:
                 raise CandidateError(f"invalid gateway archive {path}: {exc}") from exc
             if len(gateway_payloads) != 1:
                 raise CandidateError(f"gateway archive {path.name} must contain exactly one root defenseclaw binary")
+            if len(acp_payloads) != 1:
+                raise CandidateError(
+                    f"gateway archive {path.name} must contain exactly one root defenseclaw-acp binary"
+                )
             _validate_gateway_binary(
                 gateway_payloads[0],
+                os_name=os_name,
+                arch=arch,
+                version=version,
+                commit=commit,
+                archive_name=path.name,
+            )
+            _validate_gateway_binary(
+                acp_payloads[0],
                 os_name=os_name,
                 arch=arch,
                 version=version,
@@ -3868,8 +3900,15 @@ def stage_runtime(release_dir: Path, output_dir: Path, version: str) -> None:
         )
 
 
-def extract_gateway(release_dir: Path, output: Path, version: str, os_name: str, arch: str) -> None:
-    """Safely extract one POSIX gateway from a verified candidate archive."""
+def extract_gateway(
+    release_dir: Path,
+    output: Path,
+    version: str,
+    os_name: str,
+    arch: str,
+    acp_output: Path | None = None,
+) -> None:
+    """Safely extract the POSIX gateway and optional ACP guard from a verified archive."""
 
     if os_name not in {"darwin", "linux"} or arch not in {"amd64", "arm64"}:
         raise CandidateError("gateway extraction supports darwin/linux and amd64/arm64")
@@ -3878,27 +3917,48 @@ def extract_gateway(release_dir: Path, output: Path, version: str, os_name: str,
     try:
         with tarfile.open(fileobj=io.BytesIO(_protected_payload(archive_path)), mode="r:gz") as archive:
             matches = []
+            acp_matches = []
             for member in archive.getmembers():
                 member_path = PurePosixPath(member.name)
                 if member_path.is_absolute() or ".." in member_path.parts:
                     raise CandidateError(f"unsafe gateway archive member: {member.name}")
                 if member_path.name == "defenseclaw" and member.isfile():
                     matches.append(member)
+                if member_path.name == "defenseclaw-acp" and member.isfile():
+                    acp_matches.append(member)
             if len(matches) != 1:
                 raise CandidateError(f"gateway archive must contain exactly one gateway, got {len(matches)}")
+            if acp_output is not None and len(acp_matches) != 1:
+                raise CandidateError(
+                    f"gateway archive must contain exactly one ACP guard, got {len(acp_matches)}"
+                )
+            if output.exists() or output.is_symlink():
+                raise CandidateError(f"gateway extraction output already exists: {output}")
+            if acp_output is not None and (acp_output.exists() or acp_output.is_symlink()):
+                raise CandidateError(f"ACP guard extraction output already exists: {acp_output}")
             stream = archive.extractfile(matches[0])
             if stream is None:
                 raise CandidateError("gateway archive member could not be read")
+            gateway_payload = stream.read()
+            acp_payload = None
+            if acp_output is not None:
+                acp_stream = archive.extractfile(acp_matches[0])
+                if acp_stream is None:
+                    raise CandidateError("ACP guard archive member could not be read")
+                acp_payload = acp_stream.read()
             output.parent.mkdir(parents=True, exist_ok=True)
-            if output.exists() or output.is_symlink():
-                raise CandidateError(f"gateway extraction output already exists: {output}")
-            with output.open("xb") as handle:
-                shutil.copyfileobj(stream, handle)
+            _write_exclusive_file(output, gateway_payload, mode=0o755)
+            if acp_output is not None:
+                acp_output.parent.mkdir(parents=True, exist_ok=True)
+                try:
+                    _write_exclusive_file(acp_output, acp_payload or b"", mode=0o755)
+                except CandidateError:
+                    output.unlink(missing_ok=True)
+                    raise
     except CandidateError:
         raise
     except (OSError, tarfile.TarError) as exc:
         raise CandidateError(f"could not extract candidate gateway: {exc}") from exc
-    output.chmod(0o755)
 
 
 def _write_exclusive_file(path: Path, payload: bytes, *, mode: int = 0o600) -> None:
@@ -5515,6 +5575,7 @@ def _parser() -> argparse.ArgumentParser:
     extract_parser = subparsers.add_parser("extract-gateway")
     extract_parser.add_argument("--release-dir", type=Path, required=True)
     extract_parser.add_argument("--output", type=Path, required=True)
+    extract_parser.add_argument("--acp-output", type=Path)
     extract_parser.add_argument("--version", required=True)
     extract_parser.add_argument("--os", choices=("darwin", "linux"), required=True)
     extract_parser.add_argument("--arch", choices=("amd64", "arm64"), required=True)
@@ -5609,7 +5670,14 @@ def main(argv: list[str] | None = None) -> int:
             stage_installers(args.release_dir, args.version)
             print(f"release installers staged: {args.version}")
         elif args.command == "extract-gateway":
-            extract_gateway(args.release_dir, args.output, args.version, args.os, args.arch)
+            extract_gateway(
+                args.release_dir,
+                args.output,
+                args.version,
+                args.os,
+                args.arch,
+                args.acp_output,
+            )
             print(f"candidate gateway extracted: {args.output}")
         elif args.command == "extract-windows-installer-inputs":
             extract_windows_installer_inputs(args.release_dir, args.output_dir, args.version)

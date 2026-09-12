@@ -4,6 +4,32 @@
   "runtime_lock_file": "hook_contract_lock.json",
   "description": "DefenseClaw hook connector compatibility contracts. Each hook connector maps agent CLI version ranges to the hook script contract DefenseClaw knows how to install, decode, evaluate, and respond to.",
   "connectors": {
+    "kiro": {
+      "kind": "acp-with-native-hook-defense-in-depth",
+      "compatibility_gate": "acp-contract",
+      "version_probe": "kiro-cli --version",
+      "contracts": [],
+      "native_hook_inventory": {
+        "status": "cataloged-only",
+        "format": "kiro-hooks-v3",
+        "workspace_path": ".kiro/hooks/*.json",
+        "events": [
+          "UserPromptSubmit",
+          "PreToolUse",
+          "PostToolUse",
+          "Stop"
+        ],
+        "block_events": [
+          "UserPromptSubmit",
+          "PreToolUse"
+        ]
+      },
+      "notes": [
+        "The ACP guard is the authoritative enforcement path and is versioned independently from Kiro native hooks.",
+        "Native hooks are inventoried for future defense in depth but are not installed or certification-claimed by this release.",
+        "Hook stdout must remain empty because Kiro adds stdout to agent context."
+      ]
+    },
     "openclaw": {
       "kind": "proxy",
       "compatibility_gate": "not-gated",

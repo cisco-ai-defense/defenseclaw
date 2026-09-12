@@ -195,6 +195,7 @@ func newBuiltinConnectors() []Connector {
 		NewOpenCodeConnector(),
 		NewAMPConnector(),
 		NewOmnigentConnector(),
+		NewKiroConnector(),
 	}
 }
 
