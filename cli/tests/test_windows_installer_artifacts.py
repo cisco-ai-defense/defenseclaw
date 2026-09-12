@@ -820,6 +820,12 @@ def test_native_windows_workflow_builds_distinct_hook_launcher() -> None:
     assert "HookRuntime launcher exceeds the unsigned 8 MiB size ceiling" in workflow
 
 
+def test_native_windows_artifact_builder_supports_acp_resource_component() -> None:
+    harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8-sig")
+    assert "[ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')]" in harness
+    assert "@('defenseclaw-acp.exe', './cmd/defenseclaw-acp'" in harness
+
+
 def test_native_lifecycle_ci_binds_stable_launcher_to_installed_source() -> None:
     harness = WINDOWS_NATIVE_CI.read_text(encoding="utf-8")
     publication = re.search(
