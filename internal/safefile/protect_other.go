@@ -8,9 +8,14 @@ package safefile
 import (
 	"fmt"
 	"os"
+	"strings"
 )
 
 func protectFile(_ string, file *os.File) error { return file.Chmod(0o600) }
+
+func isContainerMode() bool {
+	return strings.EqualFold(strings.TrimSpace(os.Getenv("DEFENSECLAW_DEPLOYMENT_MODE")), "container")
+}
 
 func protectDirectory(path string) error {
 	info, err := os.Stat(path)
@@ -31,6 +36,9 @@ func validatePrivateProtection(path string, wantDirectory bool) error {
 	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
 		(!wantDirectory && !info.Mode().IsRegular()) {
 		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	if isContainerMode() {
+		return nil
 	}
 	if wantDirectory && info.Mode().Perm()&0o077 != 0 {
 		return fmt.Errorf("safefile: private directory permissions are too broad: %s", path)
