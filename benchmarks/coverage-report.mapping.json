@@ -1,0 +1,1165 @@
+{
+  "schema_version": "1",
+  "datasets": {
+    "defenseclaw-smoke": {
+      "intended_use": [
+        "text",
+        "action",
+        "code"
+      ],
+      "limitations": [
+        "Smoke fixture; validates harness behavior rather than population performance."
+      ]
+    },
+    "defenseclaw-cloud-production-conformance-v1": {
+      "intended_use": [
+        "action",
+        "cloud-policy-conformance"
+      ],
+      "limitations": [
+        "Policy-conformance fixture; use enforcement metrics as the primary result."
+      ]
+    },
+    "defenseclaw-database-destruction-conformance-v1": {
+      "intended_use": [
+        "action",
+        "database-policy-conformance"
+      ],
+      "limitations": [
+        "Policy-conformance fixture; use enforcement metrics as the primary result."
+      ]
+    },
+    "defenseclaw-kubernetes-production-conformance-v1": {
+      "intended_use": [
+        "action",
+        "kubernetes-policy-conformance"
+      ],
+      "limitations": [
+        "Policy-conformance fixture; use enforcement metrics as the primary result."
+      ]
+    },
+    "defenseclaw-infrastructure-destruction-conformance-v1": {
+      "intended_use": [
+        "action",
+        "infrastructure-policy-conformance"
+      ],
+      "limitations": [
+        "Policy-conformance fixture; use enforcement metrics as the primary result."
+      ]
+    },
+    "defenseclaw-postgresql-copy-program-v1": {
+      "intended_use": [
+        "action",
+        "database-command-execution-conformance"
+      ],
+      "limitations": [
+        "Focused grammar-conformance fixture; not a population estimate."
+      ]
+    },
+    "defenseclaw-sql-command-udf-atomic-v1": {
+      "intended_use": [
+        "action",
+        "command-positive",
+        "hard-negative",
+        "real-tool-arguments"
+      ],
+      "limitations": [
+        "Focused grammar-conformance fixture; not a population estimate."
+      ]
+    },
+    "atomic-red-team": {
+      "intended_use": [
+        "action",
+        "command-positive"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "shell-attack-evolution": {
+      "intended_use": [
+        "action",
+        "command-positive-candidate",
+        "real-tool-arguments",
+        "silver-development-only"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "zenodo-cyber-training-shell-v4": {
+      "intended_use": [
+        "action",
+        "command-unlabeled",
+        "command-positive-candidate",
+        "hard-negative-candidate"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "nl2bash": {
+      "intended_use": [
+        "action",
+        "command-benign"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "nl2bash-pii-negative": {
+      "intended_use": [
+        "text",
+        "pii-negative",
+        "pii-hard-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "tldr": {
+      "intended_use": [
+        "action",
+        "command-benign",
+        "hard-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "secretbench": {
+      "intended_use": [
+        "secret-positive",
+        "secret-negative"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "fpsecretbench": {
+      "intended_use": [
+        "secret-hard-negative"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "nemotron-pii": {
+      "intended_use": [
+        "pii-positive",
+        "pii-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "gretel-pii-en-v1": {
+      "intended_use": [
+        "pii-positive",
+        "pii-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "ylemis-india-pii-benchmark": {
+      "intended_use": [
+        "pii-independent-holdout",
+        "pii-positive",
+        "pii-hard-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "polyai-banking77": {
+      "intended_use": [
+        "pii-negative-candidate",
+        "banking-language",
+        "metadata-only"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "spy-pii": {
+      "intended_use": [
+        "pii-positive",
+        "pii-hard-negative"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "owasp-benchmark-java": {
+      "intended_use": [
+        "code-positive",
+        "code-negative"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "nist-juliet-1.3": {
+      "intended_use": [
+        "code-positive",
+        "code-negative"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "ossf-malicious-packages": {
+      "intended_use": [
+        "package-positive",
+        "plugin-positive"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "agentdojo": {
+      "intended_use": [
+        "stateful",
+        "tool-injection-positive",
+        "tool-benign"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "injecagent": {
+      "intended_use": [
+        "stateful",
+        "tool-injection-positive"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "agentic-redteam-benchmark": {
+      "intended_use": [
+        "stateful",
+        "trajectory-drift-positive",
+        "trajectory-prefix-negative"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "hf-agentic-red-team": {
+      "intended_use": [
+        "stateful",
+        "synthetic-command-positive-candidate",
+        "synthetic-chain-positive-candidate",
+        "real-tool-arguments"
+      ],
+      "limitations": [
+        "Synthetic authorized red-team corpus; results do not establish real-world prevalence."
+      ]
+    },
+    "trace-commons-agent-traces": {
+      "intended_use": [
+        "action",
+        "benign",
+        "hard-negative",
+        "real-tool-arguments"
+      ]
+    },
+    "rogue-coding-agent-security": {
+      "intended_use": [
+        "action",
+        "benign",
+        "security-positive-candidate",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "toolsandbox": {
+      "intended_use": [
+        "stateful",
+        "tool-benign"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "tau2-bench": {
+      "intended_use": [
+        "stateful",
+        "tool-benign"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "msb": {
+      "intended_use": [
+        "mcp-positive",
+        "mcp-benign",
+        "stateful"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "mcptox": {
+      "intended_use": [
+        "mcp-positive",
+        "mcp-benign"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "assay": {
+      "intended_use": [
+        "mcp-positive",
+        "mcp-benign",
+        "stateful"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    },
+    "AI45Research/ATBench-Codex": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "trajectory-safety",
+        "sealed-reserve"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "AI45Research/ATBench-Claw": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "trajectory-safety",
+        "sealed-reserve"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "AI45Research/ATBench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "trajectory-safety",
+        "sealed-reserve"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "yoonholee/terminalbench-trajectories": {
+      "intended_use": [
+        "action",
+        "benign",
+        "hard-negative",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "AnodeAI/Agent-Trace-Cyber-v1": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "cyber-trajectory",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "anonymouslinuxarena/linuxarena-public": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "attack-context",
+        "hard-negative",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "eval-aware/linuxarena-trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "attack-context",
+        "hard-negative",
+        "real-tool-arguments"
+      ],
+      "limitations": [
+        "The current aggregate artifact contains only two applicable cases; treat it as coverage evidence, not a population estimate."
+      ]
+    },
+    "AISafety-Student/labeled-bashBench": {
+      "intended_use": [
+        "action",
+        "command-positive-candidate",
+        "silver-development-only"
+      ],
+      "limitations": [
+        "Silver development labels; not an independent holdout."
+      ]
+    },
+    "neur26anonsub/ctrldataset2026": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "environment-verified-attack",
+        "real-tool-arguments"
+      ]
+    },
+    "valiere/ISETrace": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "AI-Secure/DTap-Bench-Agent-Trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "judge-confirmed-attack",
+        "benign",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "ScaleAI/MCP-Atlas": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "real-tool-arguments",
+        "execution-status"
+      ]
+    },
+    "Yunhao-Feng/AgentHazard": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "harmful-scenario",
+        "execution-status",
+        "real-tool-arguments"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "Normalized scenario-level harmful labels are retained for rule mining; they are not atomic call truth."
+      ]
+    },
+    "forgelab/mole": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "service-state-verified-account-day",
+        "resource-lineage",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "DataDog/stratus-red-team": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "executed-attack",
+        "cloud-audit",
+        "resource-lineage",
+        "execution-status",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "CyCraftAI/TraceSafe": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "paired-benign",
+        "deterministic-mutation",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "soc-agent-traces-10k": {
+      "intended_use": [
+        "action",
+        "benign",
+        "hard-negative",
+        "soc-investigation",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "open-swe-traces-v1.2": {
+      "intended_use": [
+        "action",
+        "benign",
+        "hard-negative",
+        "coding-agent",
+        "execution-backed"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "swe-rebench-openhands-trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign-candidate",
+        "hard-negative",
+        "coding-agent",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "Agent-Ark/Toucan-1.5M": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "unlabeled-candidate",
+        "mcp",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "HuggingEnvs/data-agent-sft": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "data-analysis",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "DiscoPosse/agent-llm-traces": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "saas",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "actbench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "paired-benign",
+        "grader-verified-attack",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "MLZoo/CrossMCP-Bench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "paired-benign",
+        "authorization-context",
+        "canonical-attack-sequence"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "lihaonan0716/mcphunt-agent-traces": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "paired-benign",
+        "hard-negative",
+        "executed-attack",
+        "real-tool-arguments",
+        "real-tool-result-state",
+        "canary-lineage"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "TokenWasteGroup/DynamicMCPBench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "contextual-sequence",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "internlm/WildClawBench-Trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "safety-contextual",
+        "real-tool-arguments",
+        "real-tool-result-state"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "splunk/attack_data": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "endpoint-security-control",
+        "audit-policy",
+        "firewall",
+        "kubernetes",
+        "sql-shell",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "zenodo/19933893": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "cloud-audit",
+        "destructive-operation",
+        "paired-control",
+        "real-tool-results",
+        "aws",
+        "azure",
+        "gcp"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "mihail-gribov/quadrat-ipi-model-eval": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "paired-benign",
+        "indirect-prompt-injection",
+        "canary-lineage",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "lyptus-research/cyber-task-horizons-data": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "offensive-cyber",
+        "contextual-sequence",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "zenodo/21860163": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "credential-lineage",
+        "confirmed-exfiltration",
+        "paired-benign-audit",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "microsoft/Orchard": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "coding-agent",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "enigma-agent/trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "offensive-cyber",
+        "exact-observation-lineage",
+        "verifier-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "andreashappe/cochise": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "offensive-cyber",
+        "credential-extraction",
+        "authentication-chain",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "lxSYSU/DriftSQL-Recovery": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "sql",
+        "hard-negative",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ]
+    },
+    "ibm-research/ITBench-Trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "sre",
+        "hard-negative",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "alirezaaminzadeh/soc-agent-traces-100k": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "soc-investigation",
+        "observation-confusion",
+        "hard-negative",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "zenodo/bixbench-audit-trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "data-science-agent",
+        "hard-negative",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "OTRF/Security-Datasets": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "security-positive",
+        "execution-backed",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "LulaCola/AgentProcessBench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "process-label",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "limitations": [
+        "Only source-backed successful positive-step rows are scored; contextual rows remain outside atomic evaluation."
+      ]
+    },
+    "cheatbench": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "security-positive",
+        "benign",
+        "reward-hacking",
+        "human-vetted",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "sentinel-flow": {
+      "intended_use": [
+        "stateful",
+        "synthetic-conformance",
+        "contextual-security",
+        "source-sink-lineage",
+        "real-tool-arguments"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "thu-coai/Agent-SafetyBench": {
+      "intended_use": [
+        "action",
+        "contextual-security",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "Normalized task-level safety labels are retained for rule mining; they are not atomic call truth."
+      ]
+    },
+    "openguardrails/terminal-bench-2.1-deepseek-v4-flash-trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "terminal",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ]
+    },
+    "few-sh/terminal-wrench-trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "contextual-security",
+        "hard-negative",
+        "terminal",
+        "bounded-sequence",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "Normalized trajectory-level outcomes are retained for bounded-sequence mining; they are not atomic call truth."
+      ]
+    },
+    "few-sh/terminal-wrench": {
+      "intended_use": [
+        "trajectory-content-source",
+        "action",
+        "stateful",
+        "terminal",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory.",
+        "Source repository for trajectory content; no standalone aggregate result is currently available."
+      ]
+    },
+    "infraset/infraset": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "infrastructure",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ]
+    },
+    "stepshield": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "coding-agent-policy",
+        "paired-development-context",
+        "heldout-evaluation",
+        "bounded-sequence",
+        "real-tool-arguments",
+        "observation-derived-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+      ]
+    },
+    "secebl-public-examples": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "contextual-security",
+        "deterministic-malicious-subset",
+        "linux",
+        "kubernetes",
+        "bounded-sequence",
+        "exact-command-arguments",
+        "reviewed-behavior-tags"
+      ],
+      "limitations": [
+        "Only reviewed deterministic events are applicable; contextual session rows remain mining-only."
+      ]
+    },
+    "agent-trace": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "execution-status",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "limitations": [
+        "Disabled by the public dataset lock; excluded from benchmark execution."
+      ]
+    }
+  },
+  "domain_group_selectors": {
+    "bounded_chains": [
+      {
+        "dimension": "stateful_lens",
+        "group_values": [
+          "bounded_completed",
+          "bounded_intent"
+        ],
+        "dataset_ids": [
+          "defenseclaw-smoke",
+          "ScaleAI/MCP-Atlas",
+          "lxSYSU/DriftSQL-Recovery",
+          "LulaCola/AgentProcessBench"
+        ]
+      }
+    ],
+    "sql": [
+      {
+        "dimension": "dataset",
+        "group_values": [
+          "defenseclaw-database-destruction-conformance-v1",
+          "defenseclaw-postgresql-copy-program-v1",
+          "defenseclaw-sql-command-udf-atomic-v1",
+          "lxSYSU/DriftSQL-Recovery"
+        ],
+        "dataset_ids": [
+          "defenseclaw-database-destruction-conformance-v1",
+          "defenseclaw-postgresql-copy-program-v1",
+          "defenseclaw-sql-command-udf-atomic-v1",
+          "lxSYSU/DriftSQL-Recovery"
+        ]
+      }
+    ],
+    "kubernetes": [
+      {
+        "dimension": "category",
+        "group_values": [
+          "kubernetes-hard-negative",
+          "kubernetes-policy-violation"
+        ],
+        "dataset_ids": [
+          "defenseclaw-kubernetes-production-conformance-v1"
+        ]
+      },
+      {
+        "dimension": "category",
+        "group_values": [
+          "platform_k8s"
+        ],
+        "dataset_ids": [
+          "secebl-public-examples"
+        ]
+      }
+    ],
+    "endpoint_host": [
+      {
+        "dimension": "domain",
+        "group_values": [
+          "backdoor_installation",
+          "credential_exfiltration",
+          "data_exfiltration",
+          "firewall_manipulation",
+          "privilege_escalation",
+          "remote_code_execution"
+        ],
+        "dataset_ids": [
+          "AISafety-Student/labeled-bashBench"
+        ]
+      },
+      {
+        "dimension": "domain",
+        "group_values": [
+          "firewall",
+          "malware",
+          "password_leak",
+          "sudo"
+        ],
+        "dataset_ids": [
+          "neur26anonsub/ctrldataset2026"
+        ]
+      },
+      {
+        "dimension": "domain",
+        "group_values": [
+          "host_security"
+        ],
+        "dataset_ids": [
+          "secebl-public-examples"
+        ]
+      }
+    ],
+    "credentials": [
+      {
+        "dimension": "domain",
+        "group_values": [
+          "credential_exfiltration"
+        ],
+        "dataset_ids": [
+          "AISafety-Student/labeled-bashBench"
+        ]
+      },
+      {
+        "dimension": "domain",
+        "group_values": [
+          "password_leak"
+        ],
+        "dataset_ids": [
+          "neur26anonsub/ctrldataset2026"
+        ]
+      }
+    ]
+  }
+}
