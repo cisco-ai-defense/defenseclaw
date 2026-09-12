@@ -1222,17 +1222,19 @@ def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    ("permissions", "sid", "expected_problem"),
+    ("permissions", "sid", "inheritance", "expected_problem"),
     [
-        (0x00000002, "S-1-5-32-545", False),  # FILE_WRITE_DATA cannot replace an existing child.
-        (0x00000040, "S-1-5-32-545", True),  # FILE_DELETE_CHILD can replace it.
-        (0x00000002, "S-1-1-0", True),  # Everyone always retains the strict leaf mask.
+        (0x00000002, "S-1-5-32-545", 0, False),  # FILE_WRITE_DATA cannot replace an existing child.
+        (0x00000040, "S-1-5-32-545", 0, True),  # FILE_DELETE_CHILD can replace it.
+        (0x00000002, "S-1-1-0", 0, True),  # Everyone always retains the strict leaf mask.
+        (0x00000040, "S-1-5-32-545", 0x08, False),  # INHERIT_ONLY_ACE does not apply here.
     ],
 )
 def test_windows_custody_ancestor_uses_replace_authority(
     monkeypatch,
     permissions,
     sid,
+    inheritance,
     expected_problem,
 ):
     owner_sid = "S-1-5-32-544"
@@ -1241,7 +1243,7 @@ def test_windows_custody_ancestor_uses_replace_authority(
     monkeypatch.setattr(
         file_permissions,
         "_windows_acl_snapshot",
-        lambda _path: (owner_sid, False, [(permissions, 1, 0, sid)]),
+        lambda _path: (owner_sid, False, [(permissions, 1, inheritance, sid)]),
     )
 
     problem = file_permissions.windows_acl_custody_write_error(

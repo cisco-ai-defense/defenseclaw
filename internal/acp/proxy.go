@@ -7,6 +7,8 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -242,7 +244,12 @@ func BuildTurnEvaluationPayload(frames []json.RawMessage) (json.RawMessage, erro
 		Frames:  make([]json.RawMessage, 0, len(frames)),
 		Streams: make(map[string]string),
 	}
+	turnBytes := 0
 	for _, raw := range frames {
+		if len(raw) > MaxTurnBuffer-turnBytes-1 {
+			return nil, errors.New("ACP completed-turn frames exceeded their size bound")
+		}
+		turnBytes += len(raw) + 1
 		msg, err := ParseMessage(raw)
 		if err != nil {
 			return nil, fmt.Errorf("invalid ACP completed-turn frame: %w", err)
@@ -252,7 +259,10 @@ func BuildTurnEvaluationPayload(frames []json.RawMessage) (json.RawMessage, erro
 		if err := json.Unmarshal(msg.Raw, &value); err != nil {
 			return nil, fmt.Errorf("decode ACP completed-turn frame: %w", err)
 		}
-		collectTurnStrings(value, turnStreamScope(msg, value), payload.Streams)
+		scopeKey := sha256.Sum256([]byte(turnStreamScope(msg, value)))
+		if err := collectTurnStrings(value, scopeKey, payload.Streams); err != nil {
+			return nil, err
+		}
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -278,13 +288,20 @@ func turnStreamScope(msg Message, value any) string {
 		"/v:" + escapeTurnPathSegment(variant) + "/t:" + escapeTurnPathSegment(toolCallID)
 }
 
-func collectTurnStrings(value any, path string, streams map[string]string) {
+func collectTurnStrings(value any, path [sha256.Size]byte, streams map[string]string) error {
 	switch item := value.(type) {
 	case string:
-		streams[path] += item
+		key := hex.EncodeToString(path[:])
+		if _, ok := streams[key]; !ok && len(streams) >= MaxTurnStreams {
+			return errors.New("ACP completed-turn stream count exceeded its bound")
+		}
+		streams[key] += item
 	case []any:
+		childPath := advanceTurnStreamPath(path, "a:*")
 		for _, child := range item {
-			collectTurnStrings(child, path+"/a:*", streams)
+			if err := collectTurnStrings(child, childPath, streams); err != nil {
+				return err
+			}
 		}
 	case map[string]any:
 		keys := make([]string, 0, len(item))
@@ -293,9 +310,19 @@ func collectTurnStrings(value any, path string, streams map[string]string) {
 		}
 		slices.Sort(keys)
 		for _, key := range keys {
-			collectTurnStrings(item[key], path+"/o:"+escapeTurnPathSegment(key), streams)
+			if err := collectTurnStrings(item[key], advanceTurnStreamPath(path, "o:"+key), streams); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func advanceTurnStreamPath(parent [sha256.Size]byte, segment string) [sha256.Size]byte {
+	value := make([]byte, 0, len(parent)+len(segment))
+	value = append(value, parent[:]...)
+	value = append(value, segment...)
+	return sha256.Sum256(value)
 }
 
 func escapeTurnPathSegment(value string) string {

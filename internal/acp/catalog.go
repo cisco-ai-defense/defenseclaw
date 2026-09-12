@@ -18,11 +18,13 @@ const (
 	MaxFrameBytes = 1 << 20
 	MaxPendingIDs = 128
 	MaxTurnBuffer = 4 << 20
-	// A completed-turn evaluation contains the original bounded frames plus
-	// canonical per-field string streams used to catch tokens split across
-	// session/update chunks. The streams can duplicate at most the string
-	// bytes already present in the turn; the fixed allowance covers JSON keys.
-	MaxTurnEvaluationBytes = 2*MaxTurnBuffer + (256 << 10)
+	// Stream identities are fixed-width SHA-256 keys and their count is capped,
+	// so even adversarially deep paths or high-cardinality tool-call metadata
+	// cannot amplify a bounded turn into unbounded evaluation state. The 16x
+	// envelope covers original frames, worst-case JSON escaping of duplicated
+	// string values, and every permitted stream-map entry.
+	MaxTurnStreams         = 1 << 18
+	MaxTurnEvaluationBytes = 16 * MaxTurnBuffer
 )
 
 type Support string

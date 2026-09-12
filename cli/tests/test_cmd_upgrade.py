@@ -8674,6 +8674,31 @@ class TestInstallGatewaySnapshotsPrevious(unittest.TestCase):
             self.assertEqual(acp_target.read_bytes(), b"new acp")
             self.assertEqual(stat.S_IMODE(lock.stat().st_mode), 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX symlink-prefix fixture")
+    def test_acp_contract_rebind_resolves_install_prefix_symlink(self):
+        with TemporaryDirectory() as fake_home:
+            home = Path(fake_home)
+            physical = home / "physical-bin"
+            physical.mkdir()
+            lexical = home / "linked-bin"
+            lexical.symlink_to(physical, target_is_directory=True)
+            guard = physical / "defenseclaw-acp"
+            guard.write_bytes(b"old acp")
+            data_dir = home / ".defenseclaw"
+            lock = self._write_acp_contract_lock(
+                data_dir,
+                guard.resolve(),
+                hashlib.sha256(b"old acp").hexdigest(),
+            )
+
+            updates = cmd_upgrade_module._prepare_acp_contract_lock_updates(
+                str(data_dir),
+                str(lexical / "defenseclaw-acp"),
+                hashlib.sha256(b"new acp").hexdigest(),
+            )
+
+            self.assertEqual([update.path for update in updates], [str(lock)])
+
     @unittest.skipIf(os.name == "nt", "POSIX gateway transaction fixture")
     def test_acp_contract_rebind_failure_rolls_back_gateway_and_guard(self):
         with TemporaryDirectory() as fake_home, patch.dict(os.environ, {"HOME": fake_home}):
