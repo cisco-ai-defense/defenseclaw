@@ -238,6 +238,47 @@ func TestTurnEvaluationHighCardinalityToolCallsFitBoundedPayload(t *testing.T) {
 	}
 }
 
+func TestTurnEvaluationManyArrayStringsAggregateIntoOneStream(t *testing.T) {
+	const itemCount = 32_768
+	items := make([]string, itemCount)
+	for index := range items {
+		items[index] = "x"
+	}
+	frame, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0",
+		"method":  "session/update",
+		"params": map[string]any{
+			"sessionId": "s",
+			"update": map[string]any{
+				"sessionUpdate": "agent_message_chunk",
+				"content":       items,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload, err := BuildTurnEvaluationPayload([]json.RawMessage{frame})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var decoded turnEvaluationPayload
+	if err := json.Unmarshal(payload, &decoded); err != nil {
+		t.Fatal(err)
+	}
+	want := strings.Repeat("x", itemCount)
+	found := false
+	for _, stream := range decoded.Streams {
+		if stream == want {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("array string leaves were not aggregated into one completed-turn stream")
+	}
+}
+
 func TestTurnEvaluationRejectsFramesBeyondBufferedTurnBound(t *testing.T) {
 	frame := json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"text":"` +
 		strings.Repeat("a", MaxTurnBuffer) + `"}}`)
