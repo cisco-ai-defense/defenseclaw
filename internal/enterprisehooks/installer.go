@@ -213,6 +213,15 @@ func Verify(ctx context.Context, opts InstallOptions) (InstallResult, error) {
 			if lock.Connector != conn.Name() {
 				return fmt.Errorf("enterprise hooks: connector %s hook contract lock is missing", conn.Name())
 			}
+			if strictManagedRuntime {
+				if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+					return fmt.Errorf(
+						"enterprise hooks: connector %s managed gateway binding: %w",
+						conn.Name(),
+						err,
+					)
+				}
+			}
 			current, err := connector.NewHookContractLockEntryForMode(
 				setupOpts,
 				conn,

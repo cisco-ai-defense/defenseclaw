@@ -215,7 +215,20 @@ func setEnterpriseWindowsManagedProtection(
 	if isDirectory != directory {
 		return fmt.Errorf("managed path type changed while applying ACL")
 	}
-	if err := windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION, owner, nil, nil, nil); err != nil {
+	// Set owner + primary group in a single call so the file's canonical
+	// descriptor matches the AdminFile/AdminDirectory SDDL contract
+	// (O:BAG:BA...) validated by validateWindowsTargetsManifestObject.
+	// Windows otherwise leaves the group as whatever default it defers to
+	// (commonly "None" / current-user primary group), which causes
+	// downstream group-match checks to fail with
+	// "hook guardian manifest object has noncanonical group" — the
+	// exact symptom that broke uninstall of the managed hook contract
+	// cleanup receipt.
+	if err := windows.SetSecurityInfo(
+		handle, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION,
+		owner, administrators, nil, nil,
+	); err != nil {
 		return err
 	}
 	return windows.SetSecurityInfo(handle, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION, nil, nil, acl, nil)

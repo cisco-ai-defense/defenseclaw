@@ -20,6 +20,28 @@ import (
 	"golang.org/x/sys/windows/registry"
 )
 
+func TestIsInteractiveUserSIDSupportsEntraAndRejectsServicePrincipals(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		sid  string
+		want bool
+	}{
+		{name: "local or domain user", sid: "S-1-5-21-1000-2000-3000-1001", want: true},
+		{name: "Microsoft Entra ID user", sid: "S-1-12-1-1111111111-2222222222-3333333333-4000000000", want: true},
+		{name: "truncated Microsoft Entra ID user", sid: "S-1-12-1-1111111111-2222222222-3333333333"},
+		{name: "LocalSystem", sid: "S-1-5-18"},
+		{name: "LocalService", sid: "S-1-5-19"},
+		{name: "NetworkService", sid: "S-1-5-20"},
+		{name: "NT SERVICE", sid: "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := isInteractiveUserSID(tc.sid); got != tc.want {
+				t.Fatalf("isInteractiveUserSID(%q) = %t, want %t", tc.sid, got, tc.want)
+			}
+		})
+	}
+}
+
 func TestCollectWindowsApplicationNamesCoversStartMenuAndProgramDirectories(t *testing.T) {
 	tmp := t.TempDir()
 	startMenu := filepath.Join(tmp, "Start Menu", "Programs")

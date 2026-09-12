@@ -145,6 +145,36 @@ func TestWindowsEnterpriseDesiredEnrollmentsResolvesLocalUser(t *testing.T) {
 	}
 }
 
+func TestWindowsEnterpriseDesiredEnrollmentsAcceptEntraIDForAllConnectors(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	home := filepath.Clean(`C:\Users\entra-user`)
+	manifest := enterprisehooks.Manifest{Targets: []enterprisehooks.ManifestTarget{
+		{SID: entraSID, UserHome: home, Connector: "claudecode"},
+		{SID: entraSID, UserHome: home, Connector: "codex"},
+		{SID: entraSID, UserHome: home, Connector: "cursor"},
+	}}
+
+	claude, codex, err := windowsEnterpriseDesiredEnrollments(manifest)
+	if err != nil {
+		t.Fatalf("resolve Claude Code and Codex enrollments: %v", err)
+	}
+	if len(claude) != 1 || claude[0] != entraSID {
+		t.Fatalf("Claude Code enrollments = %v, want %s", claude, entraSID)
+	}
+	if len(codex) != 1 || codex[0].SID != entraSID ||
+		!sameWindowsEnterprisePathCLI(codex[0].DataDir, filepath.Join(home, ".defenseclaw")) {
+		t.Fatalf("Codex enrollments = %+v, want Microsoft Entra ID target", codex)
+	}
+	cursor, err := windowsEnterpriseDesiredCursorEnrollments(manifest)
+	if err != nil {
+		t.Fatalf("resolve Cursor enrollments: %v", err)
+	}
+	if len(cursor) != 1 || cursor[0].SID != entraSID ||
+		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, filepath.Join(home, ".defenseclaw")) {
+		t.Fatalf("Cursor enrollments = %+v, want Microsoft Entra ID target", cursor)
+	}
+}
+
 func TestManagedEnrollmentIdentityRejectsStaleDeploymentWithSameSID(t *testing.T) {
 	previousClaude := enterpriseHookClaudePolicyIdentityVerifier
 	previousCursor := enterpriseHookCursorPolicyIdentityVerifier

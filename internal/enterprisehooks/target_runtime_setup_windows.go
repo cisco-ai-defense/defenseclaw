@@ -152,6 +152,19 @@ func ValidateWindowsManagedRuntimeAdminFile(path string) error {
 	return validateWindowsTargetsManifestObject(path, false)
 }
 
+// ProtectWindowsManagedRuntimeAdminFile stamps an existing file with the exact
+// two-ACE AdminFile SDDL (Administrators owner+group, protected DACL granting
+// SYSTEM + Administrators FULL). This is the writer counterpart to
+// ValidateWindowsManagedRuntimeAdminFile; use it for installer-only lifecycle
+// receipts whose readers are always elevated (no service-read ACE needed).
+// Combining a mismatched writer (which had granted an extra service-read ACE)
+// with this validator's strict two-ACE expectation was the root cause of the
+// "hook guardian manifest DACL has 3 ACEs, want 2" uninstall regression on
+// managed_enterprise Windows.
+func ProtectWindowsManagedRuntimeAdminFile(path string) error {
+	return protectWindowsTargetsManifestObject(path, false)
+}
+
 // PlanWindowsManagedRuntimeRoots resolves and de-duplicates every enabled
 // manifest row without mutating a profile. Existing roots are accepted only
 // if they already have the exact target-owner/seven-ACE contract, and their

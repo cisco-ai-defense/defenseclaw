@@ -633,8 +633,10 @@ func TestAlertAcknowledgementTargetsUseExactEligibility(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != len(alerts) {
-		t.Fatalf("active alert count=%d, REST alerts=%d", counts.Alerts, len(alerts))
+	// The REST alert queue remains broad, while AVC ActiveAlerts is deliberately
+	// restricted to durable managed-enterprise AI Defense hook blocks.
+	if counts.Alerts != 0 {
+		t.Fatalf("active AI Defense block count=%d, want 0", counts.Alerts)
 	}
 }
 
@@ -733,6 +735,12 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', NULL),
 		('malformed-finding', '2026-07-17T12:00:04.5Z', 'scan-finding', 'scanner', '',
 		 'HIGH', 'security.finding', 'finding.observed', '{not-json', NULL),
+		('canonical-hook-block', '2026-07-17T12:00:04.7Z', 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=HIGH',
+		 'INFO', 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 1),
+		('canonical-hook-clean', '2026-07-17T12:00:04.8Z', 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=action severity=NONE',
+		 'INFO', 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 0),
 		('legacy-block', '2026-07-17T12:00:05Z', 'connector-hook', 'gateway',
 		 'connector=codex action=block mode=action severity=INFO',
 		 'INFO', NULL, NULL, NULL, 0),
@@ -755,7 +763,8 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	exact, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		AlertIDs: []string{
 			"blank-severity-deny", "canonical-deny", "canonical-egress", "health-error", "canonical-allow",
-			"detection-only", "malformed-finding", "legacy-block", "legacy-clean-high",
+			"detection-only", "malformed-finding", "canonical-hook-block", "canonical-hook-clean",
+			"legacy-block", "legacy-clean-high",
 			"legacy-unrelated-high",
 		},
 	})
@@ -783,6 +792,18 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 			t.Fatalf("unexpected broad target=%+v", target)
 		}
 	}
+	visible, err := store.ListAlerts(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(visible) != len(want) {
+		t.Fatalf("visible alerts=%+v", visible)
+	}
+	for _, event := range visible {
+		if !want[event.ID] {
+			t.Fatalf("unexpected visible alert=%+v", event)
+		}
+	}
 
 	high, err := store.SelectAlertAcknowledgementTargets(t.Context(), AlertAcknowledgementSelector{
 		Severity: " high ",
@@ -808,8 +829,8 @@ func TestAlertAcknowledgementTargetsMatchVisibleCanonicalAndLegacyAlerts(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts.Alerts != 5 {
-		t.Fatalf("actionable alert count=%d, want blank-severity deny promoted into 5 total", counts.Alerts)
+	if counts.Alerts != 0 {
+		t.Fatalf("active AI Defense block count=%d, want 0", counts.Alerts)
 	}
 
 }

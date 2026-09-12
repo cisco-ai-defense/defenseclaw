@@ -43,3 +43,31 @@ func TestMergeCodexToolResultVerdictsRanksRawAction(t *testing.T) {
 		})
 	}
 }
+
+func TestMergeCodexToolResultVerdictsCarriesOnlyEffectiveAIDBlockProvenance(t *testing.T) {
+	t.Parallel()
+
+	t.Run("clamped source AID plus local untrusted block is local", func(t *testing.T) {
+		source := &ToolInspectVerdict{Action: "block", Severity: "HIGH", aiDefenseBlock: true}
+		clampSourceScopeVerdict(source)
+		if source.aiDefenseBlock {
+			t.Fatal("source clamp retained AID enforcement provenance")
+		}
+		got := mergeCodexToolResultVerdicts(source, &ToolInspectVerdict{
+			Action: "block", Severity: "HIGH",
+		})
+		if got.Action != "block" || got.aiDefenseBlock {
+			t.Fatalf("merged action=%q AID=%t, want local block", got.Action, got.aiDefenseBlock)
+		}
+	})
+
+	t.Run("untrusted AID block survives source allow", func(t *testing.T) {
+		got := mergeCodexToolResultVerdicts(
+			&ToolInspectVerdict{Action: "allow", Severity: "NONE"},
+			&ToolInspectVerdict{Action: "block", Severity: "HIGH", aiDefenseBlock: true},
+		)
+		if got.Action != "block" || !got.aiDefenseBlock {
+			t.Fatalf("merged action=%q AID=%t, want AID block", got.Action, got.aiDefenseBlock)
+		}
+	})
+}

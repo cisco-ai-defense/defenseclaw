@@ -772,7 +772,7 @@ func normalizeAIDiscoveryOptions(opts AIDiscoveryOptions) AIDiscoveryOptions {
 	}
 	// Windows service-context override. When no caller-supplied HomeDirs
 	// are set and the platform enumerator finds real interactive-user
-	// profiles (HKLM\...\ProfileList → S-1-5-21-... SIDs), prefer those
+	// profiles (HKLM\...\ProfileList → local/domain or Entra user SIDs), prefer those
 	// over the current-user Known Folder — the sidecar runs as a service
 	// account whose ~ resolves to a virtual C:\Windows\ServiceProfiles
 	// path, so a bare-~ scan never sees any real .claude/.codex/.cursor

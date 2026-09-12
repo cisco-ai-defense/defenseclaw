@@ -26,6 +26,19 @@ const managedTargetRuntimeStageAttempts = 128
 var managedTargetRuntimeBeforePublish func(string) error
 
 func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace bool) error {
+	target, err := windowsManagedTargetRuntimeSID()
+	if err != nil {
+		return err
+	}
+	return writeManagedTargetRuntimeFileForTarget(path, data, replace, target)
+}
+
+func writeManagedTargetRuntimeFileForTarget(
+	path string,
+	data []byte,
+	replace bool,
+	target *windows.SID,
+) error {
 	if len(data) > atomicTransformMaxConfigBytes {
 		return fmt.Errorf(
 			"managed target runtime file exceeds %d-byte limit",
@@ -39,9 +52,8 @@ func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace boo
 	if err := validateAtomicTransformBoundLeaf(name); err != nil {
 		return fmt.Errorf("validate managed target runtime file name: %w", err)
 	}
-	target, err := windowsManagedTargetRuntimeSID()
-	if err != nil {
-		return err
+	if target == nil || !isWindowsManagedTargetRuntimeInteractiveUser(target) {
+		return fmt.Errorf("managed target runtime owner is not an interactive user")
 	}
 	descriptor, err := windowsManagedTargetRuntimeSecurityDescriptor(target)
 	if err != nil {
@@ -159,13 +171,67 @@ func windowsManagedTargetRuntimeSID() (*windows.SID, error) {
 	if err != nil || target == nil {
 		return nil, fmt.Errorf("resolve authenticated effective target SID: %w", err)
 	}
-	if target.IsWellKnown(windows.WinLocalSystemSid) ||
-		target.IsWellKnown(windows.WinLocalServiceSid) ||
-		target.IsWellKnown(windows.WinNetworkServiceSid) ||
-		target.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if !isWindowsManagedTargetRuntimeInteractiveUser(target) {
 		return nil, fmt.Errorf("effective Windows identity is not an interactive target user")
 	}
 	return target, nil
+}
+
+// isWindowsManagedTargetRuntimeInteractiveUser rejects the well-known service,
+// group, and virtual-account SIDs that must never own a managed target-runtime
+// artifact. A caller-supplied target SID must resolve to a specific interactive
+// user; broad group SIDs (Everyone, Authenticated Users, BUILTIN\Users,
+// Interactive, Guests, network/service groups) would let any signed-in account
+// race the protected write path once the DACL is stamped.
+func isWindowsManagedTargetRuntimeInteractiveUser(target *windows.SID) bool {
+	if target == nil {
+		return false
+	}
+	rejected := []windows.WELL_KNOWN_SID_TYPE{
+		windows.WinNullSid,
+		windows.WinWorldSid,
+		windows.WinLocalSid,
+		windows.WinCreatorOwnerSid,
+		windows.WinCreatorGroupSid,
+		windows.WinCreatorOwnerServerSid,
+		windows.WinCreatorGroupServerSid,
+		windows.WinNtAuthoritySid,
+		windows.WinDialupSid,
+		windows.WinNetworkSid,
+		windows.WinBatchSid,
+		windows.WinInteractiveSid,
+		windows.WinServiceSid,
+		windows.WinAnonymousSid,
+		windows.WinProxySid,
+		windows.WinEnterpriseControllersSid,
+		windows.WinSelfSid,
+		windows.WinAuthenticatedUserSid,
+		windows.WinRestrictedCodeSid,
+		windows.WinTerminalServerSid,
+		windows.WinRemoteLogonIdSid,
+		windows.WinLogonIdsSid,
+		windows.WinLocalSystemSid,
+		windows.WinLocalServiceSid,
+		windows.WinNetworkServiceSid,
+		windows.WinBuiltinAdministratorsSid,
+		windows.WinBuiltinUsersSid,
+		windows.WinBuiltinGuestsSid,
+		windows.WinBuiltinPowerUsersSid,
+		windows.WinBuiltinAccountOperatorsSid,
+		windows.WinBuiltinSystemOperatorsSid,
+		windows.WinBuiltinPrintOperatorsSid,
+		windows.WinBuiltinBackupOperatorsSid,
+		windows.WinBuiltinReplicatorSid,
+		windows.WinBuiltinPreWindows2000CompatibleAccessSid,
+		windows.WinBuiltinRemoteDesktopUsersSid,
+		windows.WinBuiltinNetworkConfigurationOperatorsSid,
+	}
+	for _, sid := range rejected {
+		if target.IsWellKnown(sid) {
+			return false
+		}
+	}
+	return true
 }
 
 func windowsManagedTargetRuntimeSecurityDescriptor(

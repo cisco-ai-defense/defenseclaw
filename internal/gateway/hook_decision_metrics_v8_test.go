@@ -11,8 +11,36 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
+	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	oteltrace "go.opentelemetry.io/otel/trace"
 )
+
+type hookDecisionRecordCapture struct {
+	admission func(router.Metadata) router.Admission
+	records   []observability.Record
+}
+
+func (capture *hookDecisionRecordCapture) Emit(
+	_ context.Context,
+	metadata router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	admission := router.AdmissionOrdinary
+	if capture.admission != nil {
+		admission = capture.admission(metadata)
+	}
+	if admission == router.AdmissionDrop {
+		return pipeline.LocalLogOutcome{}, nil
+	}
+	record, err := build(observabilityruntime.EmitContext{}, admission)
+	if err != nil {
+		return pipeline.LocalLogOutcome{}, err
+	}
+	capture.records = append(capture.records, record)
+	return pipeline.LocalLogOutcome{}, nil
+}
 
 func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvider(t *testing.T) {
 	api, capture := bindHookModelV8Runtime(t, []string{"logs", "metrics"})
@@ -166,6 +194,207 @@ func TestHookDecisionMetricsV8ExportCompleteCompatibilitySetWithoutLegacyProvide
 	assertHookV8MetricPoint(t, dispatch, map[string]string{
 		"defenseclaw.connector.source": "codex",
 	}, 1)
+}
+
+func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
+	for _, connector := range []string{"codex", "claudecode", "cursor"} {
+		for _, mode := range []struct {
+			name        string
+			capture     *hookDecisionRecordCapture
+			wantRecords int
+			wantFloor   bool
+		}{
+			{name: "ordinary_collection", capture: &hookDecisionRecordCapture{}, wantRecords: 2},
+			{
+				name: "mandatory_floor",
+				capture: &hookDecisionRecordCapture{admission: func(metadata router.Metadata) router.Admission {
+					if metadata.Identity().Bucket == observability.BucketEnforcementAction {
+						return router.AdmissionFloor
+					}
+					return router.AdmissionDrop
+				}},
+				wantRecords: 1,
+				wantFloor:   true,
+			},
+		} {
+			t.Run(connector+"/"+mode.name, func(t *testing.T) {
+				capture := mode.capture
+				api := &APIServer{observabilityV8: capture}
+				ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+					RequestID: "request-active-alert-" + connector,
+					SessionID: "session-active-alert-" + connector,
+					PolicyID:  "policy-active-alert",
+				})
+				api.emitHookDecisionObservabilityV8(ctx, agentHookRequest{
+					ConnectorName: connector,
+					HookEventName: "UserPromptSubmit",
+					SessionID:     "session-active-alert-" + connector,
+				}, agentHookResponse{
+					Action:            "block",
+					RawAction:         "block",
+					Severity:          "HIGH",
+					Mode:              "action",
+					EvaluationID:      "evaluation-active-alert-" + connector,
+					aiDefenseEnforced: true,
+				}, HookAuditEnvelope{Enforced: true}, false)
+
+				if len(capture.records) != mode.wantRecords {
+					t.Fatalf("records=%d, want %d", len(capture.records), mode.wantRecords)
+				}
+				var enforcement observability.Record
+				for _, record := range capture.records {
+					if record.EventName() == observability.EventName(observability.TelemetryEventEnforcementBlockApplied) {
+						enforcement = record
+						break
+					}
+				}
+				if enforcement.EventName() == "" {
+					t.Fatalf("records=%+v, missing enforcement companion", capture.records)
+				}
+				if enforcement.Bucket() != observability.BucketEnforcementAction ||
+					enforcement.Connector() != connector ||
+					enforcement.Action() != string(audit.ActionBlock) ||
+					enforcement.Outcome() != observability.OutcomeBlocked ||
+					!enforcement.Mandatory() {
+					t.Fatalf("enforcement identity=%+v connector=%q action=%q outcome=%q",
+						enforcement.Identity(), enforcement.Connector(), enforcement.Action(), enforcement.Outcome())
+				}
+				if got := enforcement.Provenance().Producer; got != audit.AIDHookEnforcementProducer {
+					t.Errorf("enforcement producer=%q want=%q", got, audit.AIDHookEnforcementProducer)
+				}
+				if mode.wantFloor {
+					body, present := enforcement.Body()
+					if !present {
+						t.Fatal("mandatory enforcement floor body is absent")
+					}
+					floor, err := body.Object()
+					if err != nil {
+						t.Fatal(err)
+					}
+					if len(floor) != 2 || floor["floor_only"] != true || floor["detail_state"] != "omitted" {
+						t.Errorf("mandatory enforcement floor body=%v", floor)
+					}
+					if got := enforcement.Correlation().EvaluationID; got != "evaluation-active-alert-"+connector {
+						t.Errorf("floor evaluation_id=%q", got)
+					}
+				} else {
+					body, present := enforcement.Body()
+					if !present {
+						t.Fatal("enforcement body is absent")
+					}
+					attributes, err := body.Object()
+					if err != nil {
+						t.Fatal(err)
+					}
+					for key, want := range map[string]any{
+						"defenseclaw.enforcement.effective_action": "block",
+						"defenseclaw.enforcement.initiator":        "connector-hook",
+						"defenseclaw.evaluation.id":                "evaluation-active-alert-" + connector,
+					} {
+						if got := attributes[key]; got != want {
+							t.Errorf("enforcement %s=%v want=%v", key, got, want)
+						}
+					}
+				}
+				severity, present := enforcement.Severity()
+				if !present || severity != observability.SeverityHigh {
+					t.Errorf("enforcement severity=%q present=%t, want HIGH", severity, present)
+				}
+			})
+		}
+	}
+}
+
+func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
+	fixture := newSidecarV8BootstrapFixture(t, 8, "")
+	dispatcher, notifications := newWiringDispatcher()
+	api := &APIServer{store: fixture.store, logger: fixture.logger}
+	api.SetNotifier(dispatcher)
+	fixture.sidecar.setAPIServer(api)
+	bound, err := fixture.sidecar.BootstrapObservabilityRuntime(
+		t.Context(), fixture.configPath, fixture.raw,
+	)
+	if err != nil || !bound {
+		t.Fatalf("observability bootstrap bound=%t error=%v", bound, err)
+	}
+
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-finalized-block",
+		SessionID: "session-finalized-block",
+		PolicyID:  "policy-finalized-block",
+	})
+	req := agentHookRequest{
+		ConnectorName: "cursor",
+		HookEventName: "beforeShellExecution",
+		SessionID:     "session-finalized-block",
+		ToolName:      "shell",
+	}
+	resp := agentHookResponse{
+		Action:            "block",
+		RawAction:         "block",
+		aiDefenseEnforced: true,
+		// NONE proves severity cannot suppress an enforced block's Active Alert.
+		Severity:     "NONE",
+		Reason:       "AI Defense blocked the request",
+		SourceReason: "AI Defense blocked the request",
+		Mode:         "action",
+		EvaluationID: "evaluation-finalized-block",
+		RuleIDs:      []string{"aid-policy-block"},
+	}
+
+	finalization := api.finalizeAgentHook(
+		ctx, "cursor", req, resp, nil, []byte(`{"hook_event_name":"beforeShellExecution"}`),
+		time.Millisecond, false, nil,
+	)
+	if !finalization.Enforced || !finalization.EnforcementPersisted || !finalization.AuditPersisted {
+		t.Fatalf("finalization=%+v, want enforced block with both records persisted", finalization)
+	}
+	counts, err := fixture.store.GetCounts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.Alerts != 1 {
+		t.Fatalf("Active Alerts before notification = %d, want 1", counts.Alerts)
+	}
+	events, err := fixture.store.ListEvents(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	connectorAuditRows := 0
+	for _, event := range events {
+		if event.Action == string(audit.ActionConnectorHook) {
+			connectorAuditRows++
+		}
+	}
+	if connectorAuditRows != 1 {
+		t.Fatalf("connector-hook audit rows before notification = %d, want 1", connectorAuditRows)
+	}
+
+	api.dispatchFinalizedAgentHookNotification(ctx, req, resp, finalization)
+	if got := notifications.WaitFor(t, 1); len(got) != 1 {
+		t.Fatalf("notifications = %d, want 1", len(got))
+	}
+}
+
+func TestHookFinalizationNotificationGate(t *testing.T) {
+	tests := []struct {
+		name   string
+		result hookFinalizationResult
+		want   bool
+	}{
+		{name: "ordinary audit persisted", result: hookFinalizationResult{AuditPersisted: true}, want: true},
+		{name: "ordinary audit missing", result: hookFinalizationResult{}, want: false},
+		{name: "block both persisted", result: hookFinalizationResult{AuditPersisted: true, EnforcementPersisted: true, Enforced: true}, want: true},
+		{name: "block connector audit missing", result: hookFinalizationResult{EnforcementPersisted: true, Enforced: true}, want: false},
+		{name: "block active alert missing", result: hookFinalizationResult{AuditPersisted: true, Enforced: true}, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := test.result.notificationReady(); got != test.want {
+				t.Fatalf("notificationReady() = %t, want %t", got, test.want)
+			}
+		})
+	}
 }
 
 func TestHookDecisionSharesSessionStartExecutionIdentityRealShape(t *testing.T) {

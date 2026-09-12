@@ -66,9 +66,8 @@ const profileListRegistryKey = `SOFTWARE\Microsoft\Windows NT\CurrentVersion\Pro
 // user's .claude/.codex/.cursor directories. Feeding this list into
 // AIDiscoveryOptions.HomeDirs makes homesToScan() enumerate real profiles.
 //
-// Filter: only S-1-5-21-... SIDs (local-account or domain-account interactive
-// users, 5+ sub-authorities), matching the same coarse gate the hook
-// enumerator applies at internal/enterprisehooks/enumerator_windows.go. Stale
+// Filter: only S-1-5-21-... local/domain user SIDs and canonical S-1-12-1-...
+// Microsoft Entra ID user SIDs, matching the hook enumerator's gate. Stale
 // ProfileList entries whose ProfileImagePath no longer exists are skipped so
 // the scan does not waste ticks on ghost profiles.
 func platformDiscoveryHomeDirs() []string {
@@ -121,19 +120,24 @@ func platformDiscoveryHomeDirs() []string {
 	return out
 }
 
-// isInteractiveUserSID reports whether sid names a local or domain user
-// account whose profile hosts real per-user configuration. Matches the
-// coarse gate the enterprise-hook enumerator uses (S-1-5-21-... with 5+
-// sub-authorities); virtual service accounts (S-1-5-80-...), well-known
-// principals (S-1-5-18 LocalSystem, S-1-5-19/20), and machine SIDs never
+// isInteractiveUserSID reports whether sid names a local, domain, or Microsoft
+// Entra ID user account whose profile hosts real per-user configuration.
+// Virtual service accounts, well-known principals, and machine SIDs never
 // carry AI-agent config directories worth scanning.
 func isInteractiveUserSID(sid string) bool {
-	if !strings.HasPrefix(sid, "S-1-5-21-") {
+	parsed, err := windows.StringToSid(strings.TrimSpace(sid))
+	if err != nil || parsed == nil {
 		return false
 	}
-	// S-1-5-21-<domain-3-tuple>-<RID> → at least 5 sub-authorities after
-	// the S-1-5- prefix. Splitting on '-' produces >=8 pieces.
-	return len(strings.Split(sid, "-")) >= 8
+	authority := parsed.IdentifierAuthority().Value
+	switch authority {
+	case [6]byte{0, 0, 0, 0, 0, 5}:
+		return parsed.SubAuthorityCount() >= 5 && parsed.SubAuthority(0) == 21
+	case [6]byte{0, 0, 0, 0, 0, 12}:
+		return parsed.SubAuthorityCount() == 5 && parsed.SubAuthority(0) == 1
+	default:
+		return false
+	}
 }
 
 func platformDiscoveryVariable(name, home string) (string, bool) {

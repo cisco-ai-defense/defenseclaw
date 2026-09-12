@@ -908,6 +908,9 @@ func validateWindowsClaudeManagedRuntime(target windowsClaudeManagedPolicyTarget
 			err,
 		)
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: managed Claude gateway binding: %w", err)
+	}
 	if lock.Connector != "claudecode" || len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], target.policyPath) {
 		return errors.New("enterprise hooks: managed Claude hook contract lock does not identify the active administrator policy")
@@ -984,6 +987,9 @@ func validateWindowsClaudeManagedRuntimeVersion(target windowsClaudeManagedPolic
 			"enterprise hooks: load managed Claude hook contract: %w",
 			err,
 		)
+	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf("enterprise hooks: managed Claude gateway binding: %w", err)
 	}
 	if lock.Connector != "claudecode" || len(lock.Locations.HookConfigPaths) != 1 ||
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], target.policyPath) {
