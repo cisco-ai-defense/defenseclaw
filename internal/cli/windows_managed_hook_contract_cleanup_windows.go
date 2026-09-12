@@ -263,7 +263,14 @@ func writeWindowsManagedHookContractCleanupReceipt(
 	if err := validateWindowsManagedHookContractCleanupReceiptDestination(path, true); err != nil {
 		return err
 	}
-	if err := writeEnterpriseHookProtectedFile(path, body); err != nil {
+	// Cleanup receipt readers are always elevated (installer/repair flows);
+	// no running service ever reads this file. Use the strict two-ACE
+	// AdminFile writer so windowsTargetRuntimeAdminValidate below accepts
+	// the freshly-published receipt. Using the ordinary protected-file
+	// writer here granted the gateway service an extra read ACE and
+	// tripped the validator's "DACL has 3 ACEs, want 2" rejection on
+	// every uninstall.
+	if err := writeEnterpriseHookAdminOnlyFile(path, body); err != nil {
 		return fmt.Errorf("write protected managed hook contract cleanup receipt: %w", err)
 	}
 	if err := windowsTargetRuntimeAdminValidate(path); err != nil {
