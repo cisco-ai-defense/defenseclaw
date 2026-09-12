@@ -122,6 +122,32 @@ func TestACPEvaluateRejectsEnvelopeMetadataMismatch(t *testing.T) {
 	}
 }
 
+func TestACPEvaluateRejectsTamperedCompletedTurnMetadata(t *testing.T) {
+	payload, err := acp.BuildTurnEvaluationPayload([]json.RawMessage{
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update":{"content":{"text":"safe"}}}}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload = bytes.Replace(payload, []byte(`"safe"`), []byte(`"fake"`), 1)
+	body, err := json.Marshal(acp.Evaluation{
+		Profile: "default", Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+		Direction: acp.AgentToClient, Surface: acp.SurfaceOutput, Method: "session/update",
+		Payload: payload, Aggregate: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := httptest.NewRecorder()
+	(&APIServer{scannerCfg: &config.Config{ACP: config.ACPConfig{Enabled: true}}}).handleACPEvaluate(
+		response,
+		httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body)),
+	)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d body=%s", response.Code, response.Body.String())
+	}
+}
+
 func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 	dataDir := t.TempDir()
 	path := filepath.Join(dataDir, "acp", ".token")

@@ -351,8 +351,76 @@ def test_posix_resolver_requires_and_activates_acp_guard_from_0811() -> None:
     install = source[source.index('section "Installing Artifacts"', stop) :]
     assert "defenseclaw-acp.previous" in install
     assert ".defenseclaw-acp.upgrade.XXXXXX" in install
-    assert 'mv -f "${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp"' in install
+    assert "publish_acp_guard_with_contracts" in source
+    assert '"${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}"' in install
+    assert "ACP runtime contract lock permissions are too broad" in source
+    assert "ACP guard/contract publication failed and rollback also failed" in source
     assert "ACP guard binary installed and verified (${RELEASE_VERSION})" in install
+
+
+@POSIX_UPGRADE_CUSTODY
+def test_posix_resolver_rebinds_acp_contract_with_guard_publication(tmp_path: Path) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("publish_acp_guard_with_contracts() {")
+    end = source.index("\n}\n\nconfigure_release", start) + 3
+    function = source[start:end]
+
+    binary_dir = tmp_path / "bin"
+    lock_dir = tmp_path / "data/acp"
+    binary_dir.mkdir()
+    lock_dir.mkdir(parents=True)
+    active = binary_dir / "defenseclaw-acp"
+    candidate = binary_dir / ".candidate"
+    active.write_bytes(b"old guard")
+    candidate.write_bytes(b"new guard")
+    active.chmod(0o755)
+    candidate.chmod(0o755)
+    lock = lock_dir / "zed-kiro.contract-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "guard": {
+                    "path": str(active),
+                    "sha256": hashlib.sha256(b"old guard").hexdigest(),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock.chmod(0o600)
+
+    completed = subprocess.run(
+        [_bash_executable(), "-s", "--", str(candidate), str(active), str(tmp_path / "data")],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3"\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == b"new guard"
+    assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"] == hashlib.sha256(b"new guard").hexdigest()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+    candidate.write_bytes(b"third guard")
+    candidate.chmod(0o755)
+    document = json.loads(lock.read_text(encoding="utf-8"))
+    document["guard"]["sha256"] = "0" * 64
+    lock.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    lock.chmod(0o600)
+    refused = subprocess.run(
+        [_bash_executable(), "-s", "--", str(candidate), str(active), str(tmp_path / "data")],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3"\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "does not match the active guard" in refused.stderr
+    assert active.read_bytes() == b"new guard"
+    assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"] == "0" * 64
 
 
 @pytest.mark.parametrize(

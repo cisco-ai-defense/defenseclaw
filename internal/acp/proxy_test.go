@@ -30,6 +30,15 @@ func (method methodBlockingEvaluator) Evaluate(_ context.Context, in Evaluation)
 	return Verdict{Action: "allow"}, nil
 }
 
+type contentBlockingEvaluator string
+
+func (needle contentBlockingEvaluator) Evaluate(_ context.Context, in Evaluation) (Verdict, error) {
+	if bytes.Contains(in.Payload, []byte(needle)) {
+		return Verdict{Action: "block", Reason: "test content policy"}, nil
+	}
+	return Verdict{Action: "allow"}, nil
+}
+
 func TestCopyFramesActionSynthesizesBlockResponse(t *testing.T) {
 	input := bytes.NewBufferString(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"prompt":[]}}` + "\n")
 	var forwarded, rejected bytes.Buffer
@@ -105,6 +114,91 @@ func TestCopyFramesActionBuffersOutputUntilPromptResponse(t *testing.T) {
 	}
 	if !bytes.Contains(clientOutput.Bytes(), []byte("secret")) || !bytes.Contains(clientOutput.Bytes(), []byte("stopReason")) {
 		t.Fatalf("buffered turn did not flush atomically: %s", clientOutput.String())
+	}
+}
+
+func TestCopyFramesActionInspectsStringsAcrossBufferedFrameBoundaries(t *testing.T) {
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	var agentInput, clientOutput bytes.Buffer
+	prompt := bytes.NewBufferString(`{"jsonrpc":"2.0","id":7,"method":"session/prompt","params":{"prompt":[]}}` + "\n")
+	if err := copyFrames(context.Background(), ProxyOptions{Mode: ModeAction, Evaluator: AllowEvaluator{}}, state, ClientToAgent, prompt, &agentInput, &clientOutput); err != nil {
+		t.Fatal(err)
+	}
+	updates := bytes.NewBufferString(
+		`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"split-"}}}}` + "\n" +
+			`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"secret"}}}}` + "\n" +
+			`{"jsonrpc":"2.0","id":7,"result":{"stopReason":"end_turn"}}` + "\n",
+	)
+	if err := copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeAction, Evaluator: contentBlockingEvaluator("split-secret"),
+	}, state, AgentToClient, updates, &clientOutput, &agentInput); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(clientOutput.Bytes(), []byte("split-")) || bytes.Contains(clientOutput.Bytes(), []byte("secret")) {
+		t.Fatalf("split blocked content escaped the completed-turn buffer: %s", clientOutput.String())
+	}
+	if !bytes.Contains(clientOutput.Bytes(), []byte(`"id":7`)) || !bytes.Contains(clientOutput.Bytes(), []byte(`"code":-32001`)) {
+		t.Fatalf("completed-turn block omitted terminal prompt error: %s", clientOutput.String())
+	}
+}
+
+func TestCopyFramesActionRepliesWhenClientResponseIsBlocked(t *testing.T) {
+	state := &proxyState{pendingClient: map[string]string{}, pendingAgent: map[string]string{}}
+	request := Message{JSONRPC: "2.0", ID: json.RawMessage("9"), Method: "fs/read_text_file"}
+	if _, err := state.track(request, AgentToClient, ModeAction); err != nil {
+		t.Fatal(err)
+	}
+	response := bytes.NewBufferString(`{"jsonrpc":"2.0","id":9,"result":{"content":"blocked-secret"}}` + "\n")
+	var agentInput, clientOutput bytes.Buffer
+	if err := copyFrames(context.Background(), ProxyOptions{
+		Mode: ModeAction, Evaluator: contentBlockingEvaluator("blocked-secret"),
+	}, state, ClientToAgent, response, &agentInput, &clientOutput); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Contains(agentInput.Bytes(), []byte("blocked-secret")) {
+		t.Fatalf("blocked client response reached the agent: %s", agentInput.String())
+	}
+	if !bytes.Contains(agentInput.Bytes(), []byte(`"id":9`)) || !bytes.Contains(agentInput.Bytes(), []byte(`"code":-32001`)) {
+		t.Fatalf("agent did not receive a terminal block response: %s", agentInput.String())
+	}
+	if clientOutput.Len() != 0 || len(state.pendingAgent) != 0 {
+		t.Fatalf("blocked response left peer output or pending state: client=%q pending=%v", clientOutput.String(), state.pendingAgent)
+	}
+}
+
+func TestTurnEvaluationPayloadRejectsTamperedStreams(t *testing.T) {
+	frames := []json.RawMessage{
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"left"}}}}`),
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"right"}}}}`),
+	}
+	payload, err := BuildTurnEvaluationPayload(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte("leftright")) {
+		t.Fatalf("completed-turn stream did not join matching paths: %s", payload)
+	}
+	if err := ValidateTurnEvaluationPayload(payload); err != nil {
+		t.Fatalf("canonical completed-turn payload was rejected: %v", err)
+	}
+	tampered := bytes.Replace(payload, []byte("leftright"), []byte("leftxxxxx"), 1)
+	if err := ValidateTurnEvaluationPayload(tampered); err == nil {
+		t.Fatal("tampered completed-turn stream was accepted")
+	}
+}
+
+func TestTurnEvaluationPathsDoNotCollideWithDottedObjectKeys(t *testing.T) {
+	frames := []json.RawMessage{
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"split-"}}}}`),
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"update.content.text":"ignored-junk"}}`),
+		json.RawMessage(`{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s","update":{"sessionUpdate":"agent_message_chunk","content":{"text":"secret"}}}}`),
+	}
+	payload, err := BuildTurnEvaluationPayload(frames)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Contains(payload, []byte("split-secret")) {
+		t.Fatalf("a colliding metadata key disrupted the semantic content stream: %s", payload)
 	}
 }
 

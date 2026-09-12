@@ -18,6 +18,11 @@ const (
 	MaxFrameBytes = 1 << 20
 	MaxPendingIDs = 128
 	MaxTurnBuffer = 4 << 20
+	// A completed-turn evaluation contains the original bounded frames plus
+	// canonical per-field string streams used to catch tokens split across
+	// session/update chunks. The streams can duplicate at most the string
+	// bytes already present in the turn; the fixed allowance covers JSON keys.
+	MaxTurnEvaluationBytes = 2*MaxTurnBuffer + (256 << 10)
 )
 
 type Support string

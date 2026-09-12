@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -42,6 +43,19 @@ func TestValidateRuntimeContractBindsExecutableDigestsAndMetadata(t *testing.T) 
 	}
 	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err != nil {
 		t.Fatalf("valid contract rejected: %v", err)
+	}
+	lock["guard"] = map[string]any{"path": guard, "sha256": strings.Repeat("0", 64), "managed_custody": true}
+	body, _ = json.Marshal(lock)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ValidateRuntimeContract(path, "zed", "kiro", "default", ModeAction, agent); err == nil {
+		t.Fatal("managed-custody flag bypassed digest pinning for a user-owned guard")
+	}
+	lock["guard"] = map[string]any{"path": guard, "sha256": guardDigest}
+	body, _ = json.Marshal(lock)
+	if err := os.WriteFile(path, body, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	if err := os.WriteFile(agent, []byte("agent-v2"), 0o700); err != nil {
 		t.Fatal(err)

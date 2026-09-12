@@ -5,12 +5,16 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os/exec"
+	"slices"
+	"strings"
 	"sync"
 )
 
@@ -111,6 +115,7 @@ type proxyState struct {
 	pendingAgent  map[string]string
 	activePrompt  string
 	turnBuffer    []byte
+	turnFrames    []json.RawMessage
 }
 
 type lockedWriter struct {
@@ -147,6 +152,7 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 			}
 			s.activePrompt = key
 			s.turnBuffer = s.turnBuffer[:0]
+			s.turnFrames = s.turnFrames[:0]
 		}
 		return "", nil
 	}
@@ -165,30 +171,41 @@ func (s *proxyState) track(msg Message, direction Direction, mode Mode) (string,
 	return "", nil
 }
 
-func (s *proxyState) bufferOrFlush(msg Message, direction Direction, matchedMethod string, frame []byte) ([]byte, error) {
+func (s *proxyState) bufferOrFlush(
+	msg Message,
+	direction Direction,
+	matchedMethod string,
+	frame []byte,
+) ([]byte, json.RawMessage, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if direction != AgentToClient || s.activePrompt == "" {
-		return append(frame, '\n'), nil
+		return append(frame, '\n'), nil, nil
 	}
 	// Agent requests must be delivered after evaluation so the editor can
 	// answer them; buffering them would deadlock the turn. Non-prompt
 	// responses likewise belong to an independently pending client request.
 	if msg.IsRequest() || (msg.Method == "" && matchedMethod != "session/prompt") {
-		return append(frame, '\n'), nil
+		return append(frame, '\n'), nil, nil
 	}
 	if len(s.turnBuffer)+len(frame)+1 > MaxTurnBuffer {
-		return nil, errors.New("ACP turn output exceeded the bounded action-mode buffer")
+		return nil, nil, errors.New("ACP turn output exceeded the bounded action-mode buffer")
 	}
 	s.turnBuffer = append(s.turnBuffer, frame...)
 	s.turnBuffer = append(s.turnBuffer, '\n')
+	s.turnFrames = append(s.turnFrames, append(json.RawMessage(nil), msg.Raw...))
 	if matchedMethod != "session/prompt" || msg.IDKey() != s.activePrompt {
-		return nil, nil
+		return nil, nil, nil
 	}
 	out := append([]byte(nil), s.turnBuffer...)
+	aggregate, err := BuildTurnEvaluationPayload(s.turnFrames)
+	if err != nil {
+		return nil, nil, err
+	}
 	s.turnBuffer = s.turnBuffer[:0]
+	s.turnFrames = s.turnFrames[:0]
 	s.activePrompt = ""
-	return out, nil
+	return out, aggregate, nil
 }
 
 func (s *proxyState) abortPrompt() json.RawMessage {
@@ -201,7 +218,116 @@ func (s *proxyState) abortPrompt() json.RawMessage {
 	delete(s.pendingClient, s.activePrompt)
 	s.activePrompt = ""
 	s.turnBuffer = s.turnBuffer[:0]
+	s.turnFrames = s.turnFrames[:0]
 	return id
+}
+
+type turnEvaluationPayload struct {
+	Frames  []json.RawMessage `json:"frames"`
+	Streams map[string]string `json:"streams"`
+}
+
+// BuildTurnEvaluationPayload produces a bounded, canonical representation of
+// one buffered turn. Streams concatenate string leaves at the same normalized
+// JSON path, so content split at arbitrary ACP frame boundaries is inspected
+// as one value before any buffered byte is released.
+func BuildTurnEvaluationPayload(frames []json.RawMessage) (json.RawMessage, error) {
+	if len(frames) == 0 {
+		return nil, errors.New("ACP completed turn has no frames")
+	}
+	payload := turnEvaluationPayload{
+		Frames:  make([]json.RawMessage, 0, len(frames)),
+		Streams: make(map[string]string),
+	}
+	for _, raw := range frames {
+		msg, err := ParseMessage(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid ACP completed-turn frame: %w", err)
+		}
+		payload.Frames = append(payload.Frames, append(json.RawMessage(nil), msg.Raw...))
+		var value any
+		if err := json.Unmarshal(msg.Raw, &value); err != nil {
+			return nil, fmt.Errorf("decode ACP completed-turn frame: %w", err)
+		}
+		collectTurnStrings(value, turnStreamScope(msg, value), payload.Streams)
+	}
+	out, err := json.Marshal(payload)
+	if err != nil {
+		return nil, fmt.Errorf("encode ACP completed-turn evaluation: %w", err)
+	}
+	if len(out) > MaxTurnEvaluationBytes {
+		return nil, errors.New("ACP completed-turn evaluation exceeded its size bound")
+	}
+	return out, nil
+}
+
+func turnStreamScope(msg Message, value any) string {
+	if msg.Method != "session/update" {
+		return "$/m:" + escapeTurnPathSegment(msg.Method)
+	}
+	root, _ := value.(map[string]any)
+	params, _ := root["params"].(map[string]any)
+	update, _ := params["update"].(map[string]any)
+	sessionID, _ := params["sessionId"].(string)
+	variant, _ := update["sessionUpdate"].(string)
+	toolCallID, _ := update["toolCallId"].(string)
+	return "$/m:session~1update/s:" + escapeTurnPathSegment(sessionID) +
+		"/v:" + escapeTurnPathSegment(variant) + "/t:" + escapeTurnPathSegment(toolCallID)
+}
+
+func collectTurnStrings(value any, path string, streams map[string]string) {
+	switch item := value.(type) {
+	case string:
+		streams[path] += item
+	case []any:
+		for _, child := range item {
+			collectTurnStrings(child, path+"/a:*", streams)
+		}
+	case map[string]any:
+		keys := make([]string, 0, len(item))
+		for key := range item {
+			keys = append(keys, key)
+		}
+		slices.Sort(keys)
+		for _, key := range keys {
+			collectTurnStrings(item[key], path+"/o:"+escapeTurnPathSegment(key), streams)
+		}
+	}
+}
+
+func escapeTurnPathSegment(value string) string {
+	value = strings.ReplaceAll(value, "~", "~0")
+	return strings.ReplaceAll(value, "/", "~1")
+}
+
+// ValidateTurnEvaluationPayload rejects aggregate metadata that does not
+// exactly match its frames. The gateway therefore never trusts caller-supplied
+// streams that could omit or rewrite inspected output.
+func ValidateTurnEvaluationPayload(raw json.RawMessage) error {
+	if len(raw) == 0 || len(raw) > MaxTurnEvaluationBytes {
+		return errors.New("ACP completed-turn evaluation has an invalid size")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	var payload turnEvaluationPayload
+	if err := decoder.Decode(&payload); err != nil {
+		return errors.New("ACP completed-turn evaluation is malformed")
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return errors.New("ACP completed-turn evaluation has trailing JSON")
+	}
+	canonical, err := BuildTurnEvaluationPayload(payload.Frames)
+	if err != nil {
+		return err
+	}
+	var expected turnEvaluationPayload
+	if err := json.Unmarshal(canonical, &expected); err != nil {
+		return err
+	}
+	if !maps.Equal(payload.Streams, expected.Streams) {
+		return errors.New("ACP completed-turn streams do not match their frames")
+	}
+	return nil
 }
 
 func (s *proxyState) reject(msg Message, direction Direction) {
@@ -253,12 +379,22 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 					if err != nil {
 						return err
 					}
+				} else if msg.Method == "" {
+					// A response belongs to the peer in the direction it was
+					// already travelling. Never drop it silently: return a
+					// terminal JSON-RPC error for the same pending ID.
+					response := ErrorResponse(msg.ID, -32001, "blocked by DefenseClaw ACP policy")
+					if _, err = fmt.Fprintln(dst, string(response)); err != nil {
+						return err
+					}
 				}
 				if direction == AgentToClient {
 					if promptID := state.abortPrompt(); len(promptID) > 0 {
-						response := ErrorResponse(promptID, -32001, "blocked by DefenseClaw ACP policy")
-						if _, err = fmt.Fprintln(dst, string(response)); err != nil {
-							return err
+						if msg.Method != "" || !bytes.Equal(bytes.TrimSpace(promptID), bytes.TrimSpace(msg.ID)) {
+							response := ErrorResponse(promptID, -32001, "blocked by DefenseClaw ACP policy")
+							if _, err = fmt.Fprintln(dst, string(response)); err != nil {
+								return err
+							}
 						}
 					}
 				}
@@ -267,9 +403,26 @@ func copyFrames(ctx context.Context, opts ProxyOptions, state *proxyState, direc
 			fmt.Fprintf(opts.Stderr, "[defenseclaw-acp] would block %s %s: %s\n", direction, msg.Method, verdict.Reason)
 		}
 		if opts.Mode == ModeAction {
-			out, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
+			out, aggregate, bufferErr := state.bufferOrFlush(msg, direction, matchedMethod, frame)
 			if bufferErr != nil {
 				return bufferErr
+			}
+			if len(aggregate) > 0 {
+				turnVerdict, turnErr := opts.Evaluator.Evaluate(ctx, Evaluation{
+					Profile: opts.Profile, Mode: opts.Mode, AgentID: opts.AgentID, ClientID: opts.ClientID,
+					Direction: AgentToClient, Surface: SurfaceOutput, Method: "session/update",
+					Payload: aggregate, Aggregate: true,
+				})
+				if turnErr != nil {
+					return fmt.Errorf("ACP completed-turn evaluation unavailable: %w", turnErr)
+				}
+				if turnVerdict.Action == "block" || turnVerdict.Action == "confirm" {
+					response := ErrorResponse(msg.ID, -32001, "blocked by DefenseClaw ACP policy")
+					if _, err := fmt.Fprintln(dst, string(response)); err != nil {
+						return err
+					}
+					continue
+				}
 			}
 			if len(out) > 0 {
 				if _, err := dst.Write(out); err != nil {

@@ -59,6 +59,7 @@ import requests
 
 from defenseclaw import ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.file_permissions import atomic_write_private_bytes, open_regular_file_no_follow
 from defenseclaw.platform_support import (
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_NOT_CERTIFIED_ARCHITECTURES,
@@ -1218,6 +1219,7 @@ def upgrade(
             os_name,
             backup_dir=backup_dir,
             target_version=target_version,
+            data_dir=data_dir,
         )
         _verify_installed_gateway_version(installed_gateway_path, target_version)
         _install_wheel(
@@ -2916,10 +2918,7 @@ def _native_windows_install_state(
         "maintenance path": (state.get("maintenance_path"), setup),
     }
     for label, (recorded, expected) in expected_paths.items():
-        if (
-            not isinstance(recorded, str)
-            or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected)
-        ):
+        if not isinstance(recorded, str) or os.path.normcase(os.path.realpath(recorded)) != os.path.normcase(expected):
             ux.err(f"Native installer state has an unexpected {label}.", indent="  ")
             raise SystemExit(1)
     gateway_path = _trusted_child_path(command_dir, _installed_gateway_filename(os_name))
@@ -3270,17 +3269,13 @@ def _preflight_installed_source_coherence(
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} native installer state has no canonical gateway."
             )
-        legacy_gateway = os.path.expanduser(
-            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
-        )
+        legacy_gateway = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
         if os.path.lexists(legacy_gateway):
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} has a shadow gateway outside native installer custody."
             )
     else:
-        gateway_path = os.path.expanduser(
-            os.path.join("~/.local/bin", _installed_gateway_filename(os_name))
-        )
+        gateway_path = os.path.expanduser(os.path.join("~/.local/bin", _installed_gateway_filename(os_name)))
     try:
         gateway_stat = os.lstat(gateway_path)
     except OSError:
@@ -3345,8 +3340,7 @@ def _preflight_installed_source_coherence(
         if (
             stat.S_ISLNK(gateway_after.st_mode)
             or not stat.S_ISREG(gateway_after.st_mode)
-            or (gateway_stat.st_dev, gateway_stat.st_ino)
-            != (gateway_after.st_dev, gateway_after.st_ino)
+            or (gateway_stat.st_dev, gateway_stat.st_ino) != (gateway_after.st_dev, gateway_after.st_ino)
         ):
             _fail_installed_source_coherence(
                 f"Installed DefenseClaw {current_version} gateway changed during validation."
@@ -5707,6 +5701,136 @@ def _stage_upgrade_binary(source: str, install_dir: str, label: str) -> str:
     return staged
 
 
+_MAX_ACP_CONTRACT_LOCK_BYTES = 64 * 1024
+
+
+@dataclass(frozen=True)
+class _ACPContractLockUpdate:
+    path: str
+    original: bytes
+    updated: bytes
+
+
+def _read_acp_contract_lock(path: str) -> bytes:
+    descriptor = open_regular_file_no_follow(path)
+    try:
+        chunks: list[bytes] = []
+        remaining = _MAX_ACP_CONTRACT_LOCK_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(remaining, 64 * 1024))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+    finally:
+        os.close(descriptor)
+    payload = b"".join(chunks)
+    if not payload or len(payload) > _MAX_ACP_CONTRACT_LOCK_BYTES:
+        raise OSError(f"ACP runtime contract lock has an invalid size: {path}")
+    return payload
+
+
+def _sha256_path(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _prepare_acp_contract_lock_updates(
+    data_dir: str,
+    guard_target: str,
+    guard_sha256: str,
+) -> tuple[_ACPContractLockUpdate, ...]:
+    """Validate and stage digest-only updates for locks bound to one guard."""
+
+    lock_dir = os.path.abspath(os.path.join(os.path.expanduser(data_dir), "acp"))
+    if not os.path.lexists(lock_dir):
+        return ()
+    lock_info = os.lstat(lock_dir)
+    if stat.S_ISLNK(lock_info.st_mode) or not stat.S_ISDIR(lock_info.st_mode):
+        raise OSError(f"ACP runtime contract directory is unsafe: {lock_dir}")
+    target = os.path.normcase(os.path.abspath(guard_target))
+    try:
+        guard_info = os.lstat(guard_target)
+        current_guard_sha256 = (
+            _sha256_path(guard_target)
+            if stat.S_ISREG(guard_info.st_mode) and not stat.S_ISLNK(guard_info.st_mode)
+            else None
+        )
+    except FileNotFoundError:
+        current_guard_sha256 = None
+    updates: list[_ACPContractLockUpdate] = []
+    for entry in sorted(os.scandir(lock_dir), key=lambda item: item.name):
+        if not entry.name.endswith(".contract-lock.json"):
+            continue
+        path = os.path.abspath(entry.path)
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise OSError(f"ACP runtime contract lock is unsafe: {path}")
+        if os.name != "nt" and stat.S_IMODE(info.st_mode) & 0o077:
+            raise OSError(f"ACP runtime contract lock permissions are too broad: {path}")
+        original = _read_acp_contract_lock(path)
+        try:
+            document = json.loads(original)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise OSError(f"ACP runtime contract lock is malformed: {path}") from exc
+        if not isinstance(document, dict) or document.get("version") != 1:
+            raise OSError(f"ACP runtime contract lock has an unsupported version: {path}")
+        guard = document.get("guard")
+        if not isinstance(guard, dict) or not isinstance(guard.get("path"), str):
+            raise OSError(f"ACP runtime contract lock omits its guard identity: {path}")
+        if os.path.normcase(os.path.abspath(os.path.expanduser(guard["path"]))) != target:
+            continue
+        previous_digest = guard.get("sha256")
+        if (
+            not isinstance(previous_digest, str)
+            or len(previous_digest) != 64
+            or any(character not in _SHA256_HEX for character in previous_digest)
+        ):
+            raise OSError(f"ACP runtime contract lock has an invalid guard digest: {path}")
+        managed_custody = guard.get("managed_custody", False)
+        if not isinstance(managed_custody, bool):
+            raise OSError(f"ACP runtime contract lock has invalid custody metadata: {path}")
+        if managed_custody:
+            # Enterprise continuity is the admin-owned path contract. Do not
+            # rewrite a user lock from an administrator's upgrade context.
+            continue
+        if current_guard_sha256 is None or not secrets.compare_digest(
+            previous_digest.lower(), current_guard_sha256.lower()
+        ):
+            raise OSError(f"ACP runtime contract lock does not match the active guard: {path}")
+        guard["sha256"] = guard_sha256
+        updated = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if len(updated) > _MAX_ACP_CONTRACT_LOCK_BYTES:
+            raise OSError(f"ACP runtime contract lock exceeds its size limit after migration: {path}")
+        updates.append(_ACPContractLockUpdate(path=path, original=original, updated=updated))
+    return tuple(updates)
+
+
+def _apply_acp_contract_lock_updates(updates: tuple[_ACPContractLockUpdate, ...]) -> None:
+    """Publish lock migrations atomically and restore prior bytes on failure."""
+
+    applied: list[_ACPContractLockUpdate] = []
+    try:
+        for update in updates:
+            atomic_write_private_bytes(update.path, update.updated)
+            applied.append(update)
+    except OSError as update_error:
+        rollback_errors: list[str] = []
+        for update in reversed(applied):
+            try:
+                atomic_write_private_bytes(update.path, update.original)
+            except OSError as rollback_error:
+                rollback_errors.append(f"{update.path}: {rollback_error}")
+        if rollback_errors:
+            raise OSError(
+                "ACP contract migration failed and rollback also failed: " + "; ".join(rollback_errors)
+            ) from update_error
+        raise
+
+
 def _install_posix_gateway_pair(
     gateway_source: str,
     gateway_target: str,
@@ -5714,6 +5838,7 @@ def _install_posix_gateway_pair(
     acp_target: str,
     install_dir: str,
     os_name: str,
+    data_dir: str | None = None,
 ) -> None:
     """Stage, publish, and recover the POSIX gateway/ACP runtime as one unit."""
     staged_gateway = _stage_upgrade_binary(gateway_source, install_dir, "defenseclaw-gateway")
@@ -5724,6 +5849,7 @@ def _install_posix_gateway_pair(
     acp_existed = os.path.isfile(acp_target)
     gateway_replaced = False
     acp_replaced = False
+    lock_updates: tuple[_ACPContractLockUpdate, ...] = ()
     try:
         staged_acp = _stage_upgrade_binary(acp_source, install_dir, "defenseclaw-acp")
         for staged in (staged_gateway, staged_acp):
@@ -5738,6 +5864,12 @@ def _install_posix_gateway_pair(
                 ["/usr/bin/codesign", "-f", "-s", "-", "-i", "com.cisco.defenseclaw.acp", staged_acp],
                 capture_output=True,
                 check=True,
+            )
+        if data_dir:
+            lock_updates = _prepare_acp_contract_lock_updates(
+                data_dir,
+                acp_target,
+                _sha256_path(staged_acp),
             )
         if gateway_existed:
             previous_gateway = _stage_upgrade_binary(
@@ -5763,6 +5895,7 @@ def _install_posix_gateway_pair(
                 os.fsync(directory_fd)
             finally:
                 os.close(directory_fd)
+        _apply_acp_contract_lock_updates(lock_updates)
     except OSError as install_error:
         rollback_errors: list[str] = []
         for label, replaced, existed, previous, target in (
@@ -5781,9 +5914,7 @@ def _install_posix_gateway_pair(
                 else:
                     os.remove(target)
             except OSError as rollback_error:
-                rollback_errors.append(
-                    f"{label}: {rollback_error}; recovery copy: {previous or 'unavailable'}"
-                )
+                rollback_errors.append(f"{label}: {rollback_error}; recovery copy: {previous or 'unavailable'}")
                 if label == "ACP guard":
                     previous_acp = ""
                 else:
@@ -5810,6 +5941,7 @@ def _install_windows_gateway_pair(
     install_dir: str,
     acp_source: str | None = None,
     acp_target: str | None = None,
+    data_dir: str | None = None,
 ) -> None:
     """Replace the Windows gateway, hook, and optional ACP guard transactionally."""
     staged_gateway = _stage_upgrade_binary(
@@ -5821,10 +5953,14 @@ def _install_windows_gateway_pair(
     staged_acp = ""
     previous_hook = ""
     previous_acp = ""
+    previous_gateway = ""
+    gateway_existed = os.path.isfile(gateway_target)
     hook_existed = os.path.isfile(hook_target)
     acp_existed = bool(acp_target and os.path.isfile(acp_target))
     hook_replaced = False
     acp_replaced = False
+    gateway_replaced = False
+    lock_updates: tuple[_ACPContractLockUpdate, ...] = ()
     try:
         staged_hook = _stage_upgrade_binary(
             hook_source,
@@ -5837,6 +5973,12 @@ def _install_windows_gateway_pair(
                 install_dir,
                 "defenseclaw-hook-rollback",
             )
+        if gateway_existed:
+            previous_gateway = _stage_upgrade_binary(
+                gateway_target,
+                install_dir,
+                "defenseclaw-gateway-rollback",
+            )
 
         if acp_source and acp_target:
             staged_acp = _stage_upgrade_binary(acp_source, install_dir, "defenseclaw-acp")
@@ -5845,6 +5987,12 @@ def _install_windows_gateway_pair(
                     acp_target,
                     install_dir,
                     "defenseclaw-acp-rollback",
+                )
+            if data_dir:
+                lock_updates = _prepare_acp_contract_lock_updates(
+                    data_dir,
+                    acp_target,
+                    _sha256_path(staged_acp),
                 )
 
         # Replace the gateway last. It stays untouched if either auxiliary
@@ -5860,8 +6008,23 @@ def _install_windows_gateway_pair(
                 acp_replaced = True
             os.replace(staged_gateway, gateway_target)
             staged_gateway = ""
+            gateway_replaced = True
+            _apply_acp_contract_lock_updates(lock_updates)
         except OSError as install_error:
             rollback_errors: list[str] = []
+            if gateway_replaced:
+                try:
+                    if previous_gateway:
+                        os.replace(previous_gateway, gateway_target)
+                        previous_gateway = ""
+                    else:
+                        os.remove(gateway_target)
+                except OSError as rollback_error:
+                    recovery_path = previous_gateway
+                    previous_gateway = ""
+                    rollback_errors.append(
+                        f"gateway: {rollback_error}; recovery copy: {recovery_path or 'unavailable'}"
+                    )
             if acp_replaced and acp_target:
                 try:
                     if previous_acp:
@@ -5887,17 +6050,21 @@ def _install_windows_gateway_pair(
             except OSError as rollback_error:
                 recovery_path = previous_hook
                 previous_hook = ""
-                rollback_errors.append(
-                    f"hook: {rollback_error}; recovery copy: {recovery_path or 'unavailable'}"
-                )
+                rollback_errors.append(f"hook: {rollback_error}; recovery copy: {recovery_path or 'unavailable'}")
             if rollback_errors:
                 raise OSError(
-                    "gateway transaction failed and auxiliary rollback also failed: "
-                    + "; ".join(rollback_errors),
+                    "gateway transaction failed and auxiliary rollback also failed: " + "; ".join(rollback_errors),
                 ) from install_error
             raise
     finally:
-        for temporary in (staged_gateway, staged_hook, staged_acp, previous_hook, previous_acp):
+        for temporary in (
+            staged_gateway,
+            staged_hook,
+            staged_acp,
+            previous_gateway,
+            previous_hook,
+            previous_acp,
+        ):
             if temporary:
                 try:
                     os.remove(temporary)
@@ -5911,6 +6078,7 @@ def _install_gateway(
     backup_dir: str | None = None,
     *,
     target_version: str | None = None,
+    data_dir: str | None = None,
 ) -> str:
     """Install a pre-downloaded gateway binary.
 
@@ -5986,6 +6154,7 @@ def _install_gateway(
             install_dir,
             acp_source if install_acp else None,
             acp_target if install_acp else None,
+            data_dir,
         )
     elif install_acp:
         _install_posix_gateway_pair(
@@ -5995,6 +6164,7 @@ def _install_gateway(
             acp_target,
             install_dir,
             os_name,
+            data_dir,
         )
     else:
         # Publish from a fully copied, flushed same-directory file. A power

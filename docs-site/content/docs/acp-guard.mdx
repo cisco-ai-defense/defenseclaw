@@ -115,7 +115,7 @@ install it beside `defenseclaw-gateway` under `/opt/defenseclaw/bin`.
 | --- | --- | --- |
 | Protocol | initialize, auth, session lifecycle, cancellation, extensions | Strict JSON-RPC 2.0 NDJSON validation; no batches; 1 MiB frame and 128 pending-ID bounds |
 | Prompt | `session/prompt` | Rules, scanners, optional judge, observe/action policy |
-| Output | `session/update` and prompt response | Evaluated before release; action-mode turn output is buffered until the terminal prompt response |
+| Output | `session/update` and prompt response | Evaluated per frame and again as canonical per-field streams across the complete buffered turn; action mode releases nothing before the terminal prompt response passes |
 | Approval | `session/request_permission`, `elicitation/create` | Allow or block; an unresolved confirmation verdict fails closed in action mode |
 | Filesystem | `fs/read_text_file`, `fs/write_text_file` | Bidirectional content/method policy |
 | Terminal | `terminal/*` | Bidirectional content/method policy |
@@ -126,6 +126,13 @@ only to loopback with an ACP-scoped token that has no authority on other API
 routes. The contract lock pins the selected guard and agent executable paths
 and SHA-256 digests, the exact client configuration path and digest, plus ACP
 [schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
+Normal upgrades replace the guard and rebind every matching user-owned lock in
+one rollback-capable transaction, after first proving the old lock still
+matches the active guard. A managed lock is not rewritten by that transaction;
+it instead permits an administrator upgrade to change guard bytes only while
+the complete guard path continues to pass the platform root/Admin ownership,
+no-symlink, and no-untrusted-writer custody checks. Agent and editor
+configuration digests stay exactly pinned in both modes.
 If central policy mode and the launched contract mode drift,
 the guard stops the session even when the old contract was observe-only; rerun
 setup to make an observe-to-action promotion explicit.
