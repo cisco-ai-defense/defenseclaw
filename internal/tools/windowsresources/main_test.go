@@ -74,8 +74,8 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 	if err := scanner.Err(); err != nil {
 		t.Fatal(err)
 	}
-	if len(commands) != 4 {
-		t.Fatalf("GoReleaser Windows resource hook count = %d, want 4", len(commands))
+	if len(commands) != 5 {
+		t.Fatalf("GoReleaser Windows resource hook count = %d, want 5", len(commands))
 	}
 
 	for _, architecture := range []string{"amd64", "arm64"} {
@@ -93,7 +93,7 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 				Path:    `C:\dist\defenseclaw.exe`,
 				Version: "1.2.3",
 			}
-			components := map[string]int{"gateway": 0, "hook": 0}
+			components := map[string]int{"gateway": 0, "hook": 0, "acp-guard": 0}
 			for index, command := range commands {
 				parsed, err := template.New("hook").Option("missingkey=error").Parse(command)
 				if err != nil {
@@ -121,7 +121,7 @@ func TestGoReleaserHooksUseCanonicalWindowsTarget(t *testing.T) {
 					t.Fatalf("hook %d selected %d supported components, want 1: %s", index, matches, actual)
 				}
 			}
-			expectedComponents := map[string]int{"gateway": 3, "hook": 1}
+			expectedComponents := map[string]int{"gateway": 3, "hook": 1, "acp-guard": 1}
 			for component, count := range components {
 				if count != expectedComponents[component] {
 					t.Errorf(

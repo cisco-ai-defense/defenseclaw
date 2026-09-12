@@ -5591,7 +5591,7 @@ function Set-DefenseClawManagedAcls {
     if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $Layout.GatewayPath -PathType Leaf) {
         Set-DefenseClawPathAcl -Path $Layout.GatewayPath -Kind ServiceInstallFile -GatewayServiceSID $gatewaySID
     }
-    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.ACPPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $path -PathType Leaf) {
             Set-DefenseClawPathAcl -Path $path -Kind InstallFile -GatewayServiceSID $gatewaySID
         }
@@ -6558,6 +6558,7 @@ function Get-DefenseClawLayout {
         GuardianLogPath = (Microsoft.PowerShell.Management\Join-Path $guardianLogDirectory 'hook-guardian.log')
         InstallStateDirectory = $installState
         GatewayPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-gateway.exe')
+        ACPPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-acp.exe')
         BrokerPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-cmid-broker.exe')
         BrokerServiceName = (Get-DefenseClawCMIDBrokerServiceName -GatewayServiceName $GatewayServiceName)
         SensorHelperPath = (Microsoft.PowerShell.Management\Join-Path $bin 'defenseclaw-sensor-helper.exe')
@@ -6952,6 +6953,7 @@ function New-DefenseClawDeploymentMetadata {
     foreach ($entry in @(
         @('broker', $Layout.BrokerPath),
         @('gateway', $Layout.GatewayPath),
+        @('acp', $Layout.ACPPath),
         @('hook', $Layout.HookPath),
         @('sensor_helper', $Layout.SensorHelperPath),
         @('cli', $Layout.CLIPath),
@@ -7514,6 +7516,7 @@ function New-DefenseClawTransaction {
     foreach ($destination in @(
         $Layout.BrokerPath,
         $Layout.GatewayPath,
+        $Layout.ACPPath,
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
@@ -15203,7 +15206,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         -AllowedWriterSIDs $adminWriters `
         -RequiredRights $serviceInstallRights `
         -AllowUsersRead
-    foreach ($path in @($Layout.BrokerPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
+    foreach ($path in @($Layout.BrokerPath, $Layout.ACPPath, $Layout.HookPath, $Layout.SensorHelperPath, $Layout.InstallerPath, $Layout.ModulePath)) {
         Assert-DefenseClawPathAcl `
             -Path $path `
             -AllowedWriterSIDs $adminWriters `
@@ -15352,7 +15355,7 @@ function Assert-DefenseClawEnterpriseDeployment {
             -RejectUntrustedRead
     }
 
-    foreach ($requiredHash in @('broker', 'gateway', 'hook', 'sensor_helper', 'installer', 'module')) {
+    foreach ($requiredHash in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')) {
         if ($null -eq $metadata.hashes.PSObject.Properties[$requiredHash]) {
             throw "deployment metadata is missing required artifact hash: $requiredHash"
         }
@@ -15366,6 +15369,7 @@ function Assert-DefenseClawEnterpriseDeployment {
         $path = switch ($property.Name) {
             'broker' { $Layout.BrokerPath }
             'gateway' { $Layout.GatewayPath }
+            'acp' { $Layout.ACPPath }
             'hook' { $Layout.HookPath }
             'sensor_helper' { $Layout.SensorHelperPath }
             'cli' { $Layout.CLIPath }
@@ -15590,6 +15594,7 @@ function Get-DefenseClawArtifactPath {
     $path = switch ($Name) {
         'broker' { $Layout.BrokerPath }
         'gateway' { $Layout.GatewayPath }
+        'acp' { $Layout.ACPPath }
         'hook' { $Layout.HookPath }
         'sensor_helper' { $Layout.SensorHelperPath }
         'cli' { $Layout.CLIPath }
@@ -15611,7 +15616,7 @@ function Assert-DefenseClawRecordedArtifactHashes {
         # gate, and the only way out is an Upgrade that replaces the artifact.
         [string]$Action = 'this action'
     )
-    foreach ($required in @('broker', 'gateway', 'hook', 'sensor_helper', 'installer', 'module')) {
+    foreach ($required in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'installer', 'module')) {
         if ($required -notin $ReplacedArtifacts -and
             $null -eq $Metadata.hashes.PSObject.Properties[$required]) {
             throw "deployment metadata is missing required artifact hash: $required"
@@ -15652,6 +15657,7 @@ function Get-DefenseClawLifecycleSources {
         [string]$BrokerBinary,
         [string]$ProviderLibrary,
         [string]$GatewayBinary,
+        [string]$ACPBinary,
         [string]$HookBinary,
         [string]$SensorHelperBinary,
         [string]$CLIBinary,
@@ -15686,6 +15692,7 @@ function Get-DefenseClawLifecycleSources {
             @('BrokerBinary', $BrokerBinary),
             @('ProviderLibrary', $ProviderLibrary),
             @('GatewayBinary', $GatewayBinary),
+            @('ACPBinary', $ACPBinary),
             @('HookBinary', $HookBinary),
             @('SensorHelperBinary', $SensorHelperBinary)
         )
@@ -15708,15 +15715,17 @@ function Get-DefenseClawLifecycleSources {
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
         [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
         [string]::IsNullOrWhiteSpace($GatewayBinary) -or
+        [string]::IsNullOrWhiteSpace($ACPBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary) -or
         [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
-        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, -HookBinary, and -SensorHelperBinary'
+        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
     }
 
     foreach ($entry in @(
         @('broker', $BrokerBinary, 'credential broker executable', $true),
         @('provider_library', $ProviderLibrary, 'managed credential provider library', $true),
         @('gateway', $GatewayBinary, 'gateway executable', $true),
+        @('acp', $ACPBinary, 'ACP guard executable', $true),
         @('hook', $HookBinary, 'hook executable', $true),
         @('sensor_helper', $SensorHelperBinary, 'privileged sensor helper executable', $true),
         @('cli', $CLIBinary, 'CLI executable', $true),
@@ -16170,6 +16179,7 @@ function Assert-DefenseClawManagedInstallTree {
     $allowedFiles = @(
         $Layout.BrokerPath,
         $Layout.GatewayPath,
+        $Layout.ACPPath,
         $Layout.HookPath,
         $Layout.SensorHelperPath,
         $Layout.CLIPath,
@@ -19755,6 +19765,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         foreach ($requiredPath in @(
             $Layout.GatewayPath,
             $Layout.BrokerPath,
+            $Layout.ACPPath,
             $Layout.HookPath,
             $Layout.SensorHelperPath,
             $Layout.ConfigPath,
@@ -19829,6 +19840,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $requiredArtifacts = @(
             @{Path = $Layout.BrokerPath;    SourceKey = $null},
             @{Path = $Layout.GatewayPath;   SourceKey = $null},
+            @{Path = $Layout.ACPPath;       SourceKey = $null},
             @{Path = $Layout.HookPath;      SourceKey = $null},
             @{Path = $Layout.SensorHelperPath; SourceKey = $null},
             @{Path = $Layout.ConfigPath;    SourceKey = 'config'},
@@ -20757,6 +20769,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         [string]$BrokerBinary,
         [string]$ProviderLibrary,
         [string]$GatewayBinary,
+        [string]$ACPBinary,
         [string]$HookBinary,
         [string]$SensorHelperBinary,
         [string]$CLIBinary,
@@ -20978,6 +20991,7 @@ function Invoke-DefenseClawEnterpriseLifecycle {
         -BrokerBinary $BrokerBinary `
         -ProviderLibrary $ProviderLibrary `
         -GatewayBinary $GatewayBinary `
+        -ACPBinary $ACPBinary `
         -HookBinary $HookBinary `
         -SensorHelperBinary $SensorHelperBinary `
         -CLIBinary $CLIBinary `

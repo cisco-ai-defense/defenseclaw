@@ -86,10 +86,33 @@ builds:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
+  - id: defenseclaw-acp
+    main: ./cmd/defenseclaw-acp
+    binary: defenseclaw-acp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-acp-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component acp-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
 archives:
   - id: default
     ids:
       - defenseclaw
+      - defenseclaw-acp
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -107,6 +130,7 @@ archives:
     ids:
       - defenseclaw-windows-amd64
       - defenseclaw-hook
+      - defenseclaw-acp
     formats:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -123,6 +147,7 @@ archives:
     # manifest, but ARM64 is not part of the certified native installer.
     ids:
       - defenseclaw-windows-arm64
+      - defenseclaw-acp
     formats:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"

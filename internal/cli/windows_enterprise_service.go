@@ -48,6 +48,7 @@ const (
 type windowsEnterpriseLifecycleOptions struct {
 	brokerBinary                  string
 	gatewayBinary                 string
+	acpBinary                     string
 	hookBinary                    string
 	sensorHelperBinary            string
 	cliBinary                     string
@@ -203,6 +204,7 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	flags := cmd.Flags()
 	flags.StringVar(&opts.brokerBinary, "broker-binary", "", "source defenseclaw-cmid-broker.exe")
 	flags.StringVar(&opts.gatewayBinary, "gateway-binary", "", "source defenseclaw-gateway.exe")
+	flags.StringVar(&opts.acpBinary, "acp-binary", "", "source defenseclaw-acp.exe")
 	flags.StringVar(&opts.hookBinary, "hook-binary", "", "source defenseclaw-hook.exe")
 	flags.StringVar(&opts.sensorHelperBinary, "sensor-helper-binary", "", "source defenseclaw-sensor-helper.exe")
 	flags.StringVar(&opts.cliBinary, "cli-binary", "", "optional source defenseclaw.exe")
@@ -521,6 +523,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-BrokerBinary", opts.brokerBinary)
 	appendValue("-ProviderLibrary", opts.providerLibrary)
 	appendValue("-GatewayBinary", opts.gatewayBinary)
+	appendValue("-ACPBinary", opts.acpBinary)
 	appendValue("-HookBinary", opts.hookBinary)
 	appendValue("-SensorHelperBinary", opts.sensorHelperBinary)
 	appendValue("-CLIBinary", opts.cliBinary)

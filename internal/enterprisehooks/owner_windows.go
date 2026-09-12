@@ -9,8 +9,10 @@ package enterprisehooks
 import (
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"golang.org/x/sys/windows"
 )
 
 var errEnterpriseHooksUnsupportedWindows = fmt.Errorf("enterprise hook guardian is unsupported on Windows until SID impersonation, DACL validation, and reparse-safe writes are implemented")
@@ -29,6 +31,25 @@ func fileOwnerMatches(_ string, uid int) (bool, int) {
 
 func withOwnerCredentials(_, _ int, fn func() error) error {
 	return errEnterpriseHooksUnsupportedWindows
+}
+
+func runAsTarget(target TargetCredentials, fn func() error) error {
+	home, sid, err := validateWindowsEnterpriseHome(target.UserHome, strings.TrimSpace(target.SID))
+	if err != nil {
+		return err
+	}
+	process := windows.GetCurrentProcessToken()
+	user, err := process.GetTokenUser()
+	if err != nil {
+		return fmt.Errorf("enterprise hooks: resolve current process SID: %w", err)
+	}
+	if user != nil && user.User.Sid != nil && user.User.Sid.Equals(sid) {
+		if err := validateWindowsEnterpriseTokenProfile(process, home); err != nil {
+			return err
+		}
+		return fn()
+	}
+	return withWindowsEnterpriseTargetImpersonation(sid, home, fn)
 }
 
 func chmodOwnedPath(path string, mode os.FileMode) error {

@@ -45,6 +45,7 @@ type Component string
 
 const (
 	ComponentGateway    Component = "gateway"
+	ComponentACPGuard   Component = "acp-guard"
 	ComponentCMIDBroker Component = "cmid-broker"
 	// ComponentSensorHelper is the privileged AI runtime acquisition
 	// service. It exists so the gateway does not have to hold the
@@ -67,6 +68,7 @@ const (
 // identity and resources. CPython and cosign retain their upstream resources.
 var AllComponents = []Component{
 	ComponentGateway,
+	ComponentACPGuard,
 	ComponentCMIDBroker,
 	ComponentSensorHelper,
 	ComponentHook,
@@ -133,6 +135,13 @@ var componentMetadataByName = map[Component]componentMetadata{
 		FileDescription:  "DefenseClaw Gateway",
 		InternalName:     "defenseclaw-gateway",
 		OriginalFilename: "defenseclaw.exe",
+	},
+	ComponentACPGuard: {
+		AssemblyName:     "Cisco.DefenseClaw.ACPGuard",
+		Description:      "DefenseClaw Agent Client Protocol security mediator",
+		FileDescription:  "DefenseClaw ACP Guard",
+		InternalName:     "defenseclaw-acp",
+		OriginalFilename: "defenseclaw-acp.exe",
 	},
 	ComponentCMIDBroker: {
 		AssemblyName:     "Cisco.DefenseClaw.CMIDBroker",

@@ -2260,7 +2260,7 @@
       "category": "ai_cli",
       "confidence": 0.9,
       "specificity": 0.95,
-      "supported_connector": "",
+      "supported_connector": "kiro",
       "binary_names": [
         "kiro-cli",
         "kiro-cli.appimage"

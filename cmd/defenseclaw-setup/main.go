@@ -1923,6 +1923,9 @@ func extractGateway(payload loadedPayload, binDir string) error {
 	if err := copyFile(filepath.Join(tmp, "defenseclaw-hook.exe"), filepath.Join(binDir, "defenseclaw-hook.exe")); err != nil {
 		return fmt.Errorf("install hook launcher: %w", err)
 	}
+	if err := copyFile(filepath.Join(tmp, "defenseclaw-acp.exe"), filepath.Join(binDir, "defenseclaw-acp.exe")); err != nil {
+		return fmt.Errorf("install ACP guard: %w", err)
+	}
 	return nil
 }
 
@@ -1984,6 +1987,14 @@ func validateInstallContext(ctx context.Context, root, version string) error {
 	}
 	if err := validateMachineVersion(output, "defenseclaw-hook", version, manifest.SourceCommit); err != nil {
 		return fmt.Errorf("hook version check: %w", err)
+	}
+	acpGuard := filepath.Join(root, "bin", "defenseclaw-acp.exe")
+	output, err = runCapturedSetupCommandContext(ctx, setupValidationTimeout, false, childEnv, acpGuard, "--version-json")
+	if err != nil {
+		return fmt.Errorf("ACP guard version check failed: %w: %s", err, strings.TrimSpace(string(output)))
+	}
+	if err := validateMachineVersion(output, "defenseclaw-acp", version, manifest.SourceCommit); err != nil {
+		return fmt.Errorf("ACP guard version check: %w", err)
 	}
 	return nil
 }

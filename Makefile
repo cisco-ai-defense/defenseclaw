@@ -1,5 +1,6 @@
 BINARY      := defenseclaw
 GATEWAY     := defenseclaw-gateway
+ACP_GUARD   := defenseclaw-acp
 HOOK_LAUNCHER := defenseclaw-hook
 VERSION     := 0.8.10
 .DEFAULT_GOAL := help
@@ -307,6 +308,7 @@ build: pycli gateway plugin
 	@echo "All components built:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw"
 	@echo "  • Go gateway   → ./$(GATEWAY)"
+	@echo "  • ACP guard    → ./$(ACP_GUARD)"
 	@echo "  • OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo ""
 	@echo "Build only: checkout artifacts were not published and managed install state was not changed."
@@ -322,6 +324,7 @@ install: _source-install-preflight cli-install gateway-install $(SOURCE_PLUGIN_I
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -431,8 +434,11 @@ proto-check: proto
 
 gateway: sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
+	go build $(GOFLAGS) -o $(ACP_GUARD)$(EXE) ./cmd/defenseclaw-acp
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
+	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(ACP_GUARD)$(EXE) -component acp-guard -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
+	@echo "Built $(ACP_GUARD)$(EXE)"
 	@echo "  Run with: ./$(GATEWAY)$(EXE)"
 	@echo "  Check status: ./$(GATEWAY)$(EXE) status"
 ifeq ($(OS),Windows_NT)
@@ -514,9 +520,13 @@ gateway-cross: sync-openclaw-extension
 		echo "native Windows release resources currently certify only GOARCH=amd64" >&2; exit 1; \
 	fi
 	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(BINARY)-$(GOOS)-$(GOARCH) ./cmd/defenseclaw
+	GOOS=$(GOOS) GOARCH=$(GOARCH) go build $(GOFLAGS) -o $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,) ./cmd/defenseclaw-acp
 	@if [ "$(GOOS)" = "windows" ]; then \
 		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
 			-executable $(BINARY)-$(GOOS)-$(GOARCH) -component gateway -version $(VERSION) \
+			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
+		go run ./internal/tools/windowsresources -target windows_$(GOARCH) \
+			-executable $(ACP_GUARD)-$(GOOS)-$(GOARCH).exe -component acp-guard -version $(VERSION) \
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 		GOOS=$(GOOS) GOARCH=$(GOARCH) go build \
 			-ldflags "-H=windowsgui -X main.version=$(VERSION)" \
@@ -526,6 +536,7 @@ gateway-cross: sync-openclaw-extension
 			-icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"; \
 	fi
 	@echo "Built $(BINARY)-$(GOOS)-$(GOARCH)"
+	@echo "Built $(ACP_GUARD)-$(GOOS)-$(GOARCH)$(if $(filter windows,$(GOOS)),.exe,)"
 
 gateway-run: gateway
 	./$(GATEWAY)$(EXE)
@@ -598,6 +609,8 @@ _source-dev-install: _source-install-dev-preflight
 	@./scripts/source-install-preflight.sh dev-publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@python3 ./scripts/source-install-publish.py regular \
+		"$(CURDIR)/$(ACP_GUARD)$(EXE)" "$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@./scripts/source-install-preflight.sh dev-claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
@@ -606,6 +619,7 @@ _source-dev-install: _source-install-dev-preflight
 	@echo "All components installed:"
 	@echo "  • Python CLI   → $(VENV)/bin/defenseclaw  (activate with: source $(VENV)/bin/activate)"
 	@echo "  • Go gateway   → $(INSTALL_DIR)/$(GATEWAY)"
+	@echo "  • ACP guard    → $(INSTALL_DIR)/$(ACP_GUARD)"
 	@if [ "$${CONNECTOR:-codex}" = "openclaw" ]; then \
 		echo "  • OpenClaw plugin → ~/.defenseclaw/extensions/defenseclaw/"; \
 	else \
@@ -656,6 +670,8 @@ gateway-install: _source-install-preflight cli-install
 	@./scripts/source-install-preflight.sh publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
+	@python3 ./scripts/source-install-publish.py regular \
+		"$(CURDIR)/$(ACP_GUARD)$(EXE)" "$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
 	@./scripts/source-install-preflight.sh claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
@@ -1273,8 +1289,12 @@ dist-gateway:
 			-ldflags "-s -w -X main.version=$(VERSION)" \
 			-o $(DIST_DIR)/$(GATEWAY)-$${goos}-$${goarch} \
 			./cmd/defenseclaw; \
+		CGO_ENABLED=0 GOOS=$$goos GOARCH=$$goarch go build \
+			-ldflags "-s -w -X main.version=$(VERSION)" \
+			-o $(DIST_DIR)/$(ACP_GUARD)-$${goos}-$${goarch} \
+			./cmd/defenseclaw-acp; \
 	done
-	@echo "Gateway binaries built for all platforms"
+	@echo "Gateway and ACP guard binaries built for all platforms"
 
 dist-plugin: _stage-extension-fingerprint
 	@mkdir -p $(DIST_DIR)
@@ -1332,7 +1352,7 @@ dist-clean:
 	rm -rf sandbox-test-*
 
 clean:
-	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(HOOK_LAUNCHER)-windows-*.exe
+	rm -f $(GATEWAY) $(GATEWAY)$(EXE) $(ACP_GUARD) $(ACP_GUARD)$(EXE) $(HOOK_LAUNCHER).exe $(BINARY)-linux-* $(BINARY)-darwin-* $(ACP_GUARD)-linux-* $(ACP_GUARD)-darwin-* $(ACP_GUARD)-windows-*.exe $(HOOK_LAUNCHER)-windows-*.exe
 	rm -rf $(VENV) cli/*.egg-info
 	rm -rf $(PLUGIN_DIR)/dist $(PLUGIN_DIR)/node_modules
 	rm -f coverage.out coverage-py.xml

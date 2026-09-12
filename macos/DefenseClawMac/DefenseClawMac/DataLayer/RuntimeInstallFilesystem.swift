@@ -110,6 +110,7 @@ enum RuntimeInstallFilesystem {
         let markers = [
             home + "/.local/bin/defenseclaw",
             home + "/.local/bin/defenseclaw-gateway",
+            home + "/.local/bin/defenseclaw-acp",
             home + "/.local/bin/.defenseclaw-source-root",
         ]
         return markers.first(where: lexicalPathExists)
@@ -890,11 +891,21 @@ enum RuntimeInstallFilesystem {
         binDir: String
     ) -> Bool {
         let venv = splitPath(venvDir)
-        let expected: [(destination: String, stageParent: String, stagePrefix: String)] = [
+        let legacyExpected: [(destination: String, stageParent: String, stagePrefix: String)] = [
             (venvDir, venv.parent, venv.leaf + ".staging-"),
             (binDir + "/defenseclaw-gateway", binDir, "defenseclaw-gateway.install-"),
             (binDir + "/defenseclaw", binDir, "defenseclaw.install-"),
         ]
+        // Accept the previous three-target journal solely for crash recovery
+        // across an upgrade; every newly-created installation uses all four.
+        let expected = targets.count == legacyExpected.count
+            ? legacyExpected
+            : [
+                legacyExpected[0],
+                legacyExpected[1],
+                (binDir + "/defenseclaw-acp", binDir, "defenseclaw-acp.install-"),
+                legacyExpected[2],
+            ]
         guard targets.count == expected.count,
               !venv.leaf.isEmpty,
               venvDir == URL(fileURLWithPath: venvDir).standardizedFileURL.path

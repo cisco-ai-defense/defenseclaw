@@ -332,6 +332,7 @@ func TestDefenseClawConfigV8SchemaIdentityAndClosure(t *testing.T) {
 		"privacy",
 		"ai_discovery",
 		"application_protection",
+		"acp",
 		"notifications",
 		"managed",
 		"routing",

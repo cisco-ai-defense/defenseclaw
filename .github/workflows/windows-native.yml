@@ -242,6 +242,7 @@ jobs:
           $env:GOOS = 'windows'
           $env:GOARCH = 'amd64'
           Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-gateway.exe'), './cmd/defenseclaw') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-gateway.log') | Out-Null
+          Invoke-WindowsNativeProcess $go @('build', '-o', (Join-Path $bin 'defenseclaw-acp.exe'), './cmd/defenseclaw-acp') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-acp.log') | Out-Null
           Invoke-WindowsNativeProcess $go @('build', '-ldflags', '-H=windowsgui', '-o', (Join-Path $bin 'defenseclaw-hook.exe'), './cmd/defenseclaw-hook') -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook.log') | Out-Null
           $hookLauncher = Join-Path $bin 'defenseclaw-hook-launcher.exe'
           Invoke-WindowsNativeProcess $go @(
@@ -250,6 +251,7 @@ jobs:
           ) -TimeoutSeconds 900 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-build-hook-launcher.log') | Out-Null
           $packageVersion = Get-WorkspacePackageVersion
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-gateway.exe') -Component 'gateway' -Version $packageVersion -Apply
+          Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-acp.exe') -Component 'acp-guard' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path (Join-Path $bin 'defenseclaw-hook.exe') -Component 'hook' -Version $packageVersion -Apply
           Assert-WindowsExecutableResource -Path $hookLauncher -Component 'hook' -Version $packageVersion -Apply
           if ((Get-Item -LiteralPath $hookLauncher -Force).Length -gt 8MB) {

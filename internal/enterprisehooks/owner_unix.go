@@ -145,6 +145,21 @@ func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 	return fn()
 }
 
+func runAsTarget(target TargetCredentials, fn func() error) error {
+	home, err := validateUserHome(target.UserHome)
+	if err != nil {
+		return err
+	}
+	uid, gid, err := resolveOwner(home, target.UID, target.GID)
+	if err != nil {
+		return err
+	}
+	if err := validateHomeOwner(home, uid); err != nil {
+		return err
+	}
+	return withOwnerCredentials(uid, gid, fn)
+}
+
 func chmodOwnedPath(path string, mode os.FileMode) error {
 	info, err := os.Lstat(path)
 	if err != nil {

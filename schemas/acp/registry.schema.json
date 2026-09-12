@@ -1,0 +1,63 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://schemas.defenseclaw.dev/acp/registry.schema.json",
+  "title": "DefenseClaw ACP registry",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "protocol", "upstream_registry", "environment_variables", "clients", "agents", "connector_coverage"],
+  "properties": {
+    "schema_version": {"type": "integer", "const": 1},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["release", "source_url", "sha256", "transport", "json_rpc", "max_frame_bytes", "max_pending_ids", "batch_supported"],
+      "properties": {
+        "release": {"type": "string", "pattern": "^schema-v[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "source_url": {"type": "string", "format": "uri", "pattern": "^https://github\\.com/agentclientprotocol/agent-client-protocol/releases/download/schema-v[0-9]+\\.[0-9]+\\.[0-9]+/schema\\.json$"},
+        "sha256": {"type": "string", "pattern": "^[a-f0-9]{64}$"},
+        "transport": {"const": "stdio-ndjson"},
+        "json_rpc": {"const": "2.0"},
+        "max_frame_bytes": {"type": "integer", "minimum": 1024, "maximum": 1048576},
+        "max_pending_ids": {"type": "integer", "minimum": 1, "maximum": 128},
+        "batch_supported": {"const": false}
+      }
+    },
+    "upstream_registry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["url", "schema_version", "checked_at"],
+      "properties": {
+        "url": {"type": "string", "format": "uri", "pattern": "^https://"},
+        "schema_version": {"type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$"},
+        "checked_at": {"type": "string", "format": "date"}
+      }
+    },
+    "environment_variables": {"type": "array", "maxItems": 0},
+    "clients": {"type": "array", "items": {"$ref": "#/$defs/client"}},
+    "agents": {"type": "array", "items": {"$ref": "#/$defs/agent"}},
+    "connector_coverage": {"type": "array", "items": {"$ref": "#/$defs/coverage"}}
+  },
+  "$defs": {
+    "id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"},
+    "support": {"enum": ["cataloged", "tested", "certified"]},
+    "client": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "support", "config_kind"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "support": {"$ref": "#/$defs/support"}, "config_kind": {"$ref": "#/$defs/id"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
+    },
+    "agent": {
+      "type": "object", "additionalProperties": false,
+      "required": ["id", "name", "command", "args", "support", "connector_id"],
+      "properties": {"id": {"$ref": "#/$defs/id"}, "name": {"type": "string"}, "command": {"type": "string", "minLength": 1}, "args": {"type": "array", "items": {"type": "string"}}, "support": {"$ref": "#/$defs/support"}, "connector_id": {"$ref": "#/$defs/id"}, "kind": {"enum": ["native", "bridge"]}, "registry_id": {"$ref": "#/$defs/id"}, "source_url": {"type": "string", "format": "uri", "pattern": "^https://"}}
+    },
+    "coverage": {
+      "type": "object", "additionalProperties": false,
+      "required": ["connector_id", "acp_support"],
+      "properties": {
+        "connector_id": {"$ref": "#/$defs/id"},
+        "acp_support": {"enum": ["native", "bridge", "none"]},
+        "agent_id": {"$ref": "#/$defs/id"}
+      }
+    }
+  }
+}

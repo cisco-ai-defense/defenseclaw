@@ -113,9 +113,11 @@ discovered from the documented `.devin` and `.agents` roots, including
 bounded and does not follow links or reparse points.
 
 Devin plugins are closed beta, so DefenseClaw does not advertise plugin setup
-or enforcement. Cloud Devin execution, ACP, proxy transport, native OTLP,
-sandboxing, egress control, and managed higher-layer policy are also outside
-this connector's support boundary.
+or enforcement. The separate `devin acp` entry point is cataloged for the
+shared [ACP guard](/docs/acp-guard), but it has not completed official-client
+testing and is not part of this hook contract. Cloud Devin execution, proxy
+transport, native OTLP, sandboxing, egress control, and managed higher-layer
+policy are also outside this connector's support boundary.
 
 <Files>
   <Folder name="~/.config/devin" defaultOpen>

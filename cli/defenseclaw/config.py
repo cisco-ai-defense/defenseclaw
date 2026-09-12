@@ -553,6 +553,33 @@ class ClawConfig:
     openclaw_home_original: str = ""
 
 
+@dataclass
+class ACPBinding:
+    enabled: bool = False
+    profile: str = ""
+
+
+@dataclass
+class ACPProfile:
+    mode: str = ""
+    fail_mode: str = ""
+    allowed_clients: list[str] = field(default_factory=list)
+    allowed_agents: list[str] = field(default_factory=list)
+    denied_methods: list[str] = field(default_factory=list)
+
+
+@dataclass
+class ACPConfig:
+    """Local ACP guard configuration; executable argv and secrets are excluded."""
+
+    enabled: bool = False
+    mode: str = "observe"
+    default_profile: str = "default"
+    clients: dict[str, ACPBinding] = field(default_factory=dict)
+    agents: dict[str, ACPBinding] = field(default_factory=dict)
+    profiles: dict[str, ACPProfile] = field(default_factory=dict)
+
+
 # Canonical LLM environment variables. Mirrors internal/config/config.go.
 #
 # DEFENSECLAW_LLM_KEY is THE single env var users set to supply a shared
@@ -2389,6 +2416,7 @@ class Config:
     deployment_mode: str = ""
     discovery_source: str = ""
     claw: ClawConfig = field(default_factory=ClawConfig)
+    acp: ACPConfig = field(default_factory=ACPConfig)
     inspect_llm: InspectLLMConfig = field(default_factory=InspectLLMConfig)
     cisco_ai_defense: CiscoAIDefenseConfig = field(default_factory=CiscoAIDefenseConfig)
     scanners: ScannersConfig = field(default_factory=ScannersConfig)
@@ -2824,6 +2852,15 @@ class Config:
         merged = _merge_v8_modeled_changes(existing, dataclass_data, self._loaded_v8_modeled_snapshot)
         merged["config_version"] = 8
         merged.setdefault("observability", {})
+        # The Go runtime requires an explicit profile selector whenever ACP is
+        # enabled. A literal ``default`` value otherwise looks unchanged from
+        # the Python dataclass baseline and can disappear during the modeled
+        # v8 merge even though enabling ACP changed the field's obligation.
+        if self.acp.enabled:
+            acp_document = merged.setdefault("acp", {})
+            if not isinstance(acp_document, dict):
+                raise ConfigVersionError("acp must be a mapping")
+            acp_document["default_profile"] = self.acp.default_profile
         from defenseclaw.observability.v8_config import load_validate_v8
 
         load_validate_v8(merged, source_name=path)
@@ -3028,6 +3065,10 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 gw.pop("config_reload", None)
             else:
                 config_reload["mode"] = mode
+    acp = d.get("acp")
+    if isinstance(acp, dict):
+        if not acp.get("enabled") and not acp.get("clients") and not acp.get("agents") and not acp.get("profiles"):
+            d.pop("acp", None)
     _strip_empty_llm(d, "llm")
     scanners = d.get("scanners") or {}
     _strip_empty_llm(scanners.get("skill_scanner"), "llm")
@@ -3279,6 +3320,9 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         # and saving must propagate to disk rather than being rescued by the
         # non-authoritative merge from the prior file.
         "observability.connectors",
+        "acp.clients",
+        "acp.agents",
+        "acp.profiles",
     }
 )
 
@@ -4532,6 +4576,43 @@ def _merge_observability_connectors(
     return out
 
 
+def _merge_acp(raw: Any) -> ACPConfig:
+    if not isinstance(raw, dict):
+        return ACPConfig()
+
+    def _bindings(value: Any) -> dict[str, ACPBinding]:
+        if not isinstance(value, dict):
+            return {}
+        return {
+            str(name): ACPBinding(
+                enabled=_coerce_bool(item.get("enabled", False)),
+                profile=str(item.get("profile", "")),
+            )
+            for name, item in value.items()
+            if isinstance(item, dict)
+        }
+
+    profiles: dict[str, ACPProfile] = {}
+    for name, item in (raw.get("profiles") or {}).items():
+        if not isinstance(item, dict):
+            continue
+        profiles[str(name)] = ACPProfile(
+            mode=str(item.get("mode", "")),
+            fail_mode=str(item.get("fail_mode", "")),
+            allowed_clients=[str(value) for value in (item.get("allowed_clients") or [])],
+            allowed_agents=[str(value) for value in (item.get("allowed_agents") or [])],
+            denied_methods=[str(value) for value in (item.get("denied_methods") or [])],
+        )
+    return ACPConfig(
+        enabled=_coerce_bool(raw.get("enabled", False)),
+        mode=str(raw.get("mode", "observe")),
+        default_profile=str(raw.get("default_profile", "default")),
+        clients=_bindings(raw.get("clients")),
+        agents=_bindings(raw.get("agents")),
+        profiles=profiles,
+    )
+
+
 def _merge_openshell(raw: dict[str, Any] | None) -> OpenShellConfig:
     if not raw:
         return OpenShellConfig()
@@ -4830,6 +4911,7 @@ def load(*, data_dir: str | os.PathLike[str] | None = None) -> Config:
             workspace_dir=raw.get("claw", {}).get("workspace_dir", ""),
             openclaw_home_original=raw.get("claw", {}).get("openclaw_home_original", ""),
         ),
+        acp=_merge_acp(raw.get("acp")),
         inspect_llm=_merge_inspect_llm(raw.get("inspect_llm")),
         cisco_ai_defense=_merge_cisco_ai_defense(raw.get("cisco_ai_defense")),
         scanners=ScannersConfig(
