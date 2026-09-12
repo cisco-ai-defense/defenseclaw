@@ -25,6 +25,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"os"
+
+	acpcatalog "github.com/defenseclaw/defenseclaw/internal/acp"
 )
 
 // ToolInspectionMode describes how a connector monitors tool calls.
@@ -347,6 +349,20 @@ type TelemetryCapability struct {
 	Notes            []string         `json:"notes,omitempty"`
 }
 
+// ACPCapability advertises whether a connector can run as an ACP agent or
+// client. ACP is a transport boundary, not an executable registry: EntryPoint
+// is descriptive argv selected from DefenseClaw's separately validated ACP
+// catalog and is never executed through a shell.
+type ACPCapability struct {
+	Agent          bool     `json:"agent"`
+	Client         bool     `json:"client"`
+	Kind           string   `json:"kind,omitempty"`
+	EntryPoint     []string `json:"entry_point,omitempty"`
+	Support        string   `json:"support,omitempty"`
+	GuardedBy      string   `json:"guarded_by,omitempty"`
+	ProtocolSchema string   `json:"protocol_schema,omitempty"`
+}
+
 // ConnectorCapabilities is the first-class capability matrix used by setup,
 // doctor, API metadata, and future installer flows. HookCapabilityProvider
 // remains as a compatibility shim for the verdict mapper.
@@ -367,6 +383,22 @@ type ConnectorCapabilities struct {
 	Agents         SurfaceCapability   `json:"agents"`
 	CodeGuard      CodeGuardCapability `json:"codeguard"`
 	Telemetry      TelemetryCapability `json:"telemetry"`
+	ACP            ACPCapability       `json:"acp"`
+}
+
+func ACPAgentCapabilityForConnector(name string) ACPCapability {
+	connectorName := normalizeConnectorName(name)
+	for _, agent := range acpcatalog.BuiltinCatalog().Agents {
+		if agent.ConnectorID != connectorName {
+			continue
+		}
+		entryPoint := append([]string{agent.Command}, agent.Args...)
+		return ACPCapability{
+			Agent: true, Kind: agent.Kind, EntryPoint: entryPoint, Support: string(agent.Support),
+			GuardedBy: "defenseclaw-acp", ProtocolSchema: acpcatalog.SchemaVersion,
+		}
+	}
+	return ACPCapability{}
 }
 
 // LLMTrafficModeProxy / LLMTrafficModeHooksOnly are the two values of

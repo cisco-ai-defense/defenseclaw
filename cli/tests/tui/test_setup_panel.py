@@ -560,7 +560,6 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "both",
         "--no-verify",
     )
-
     fields = connector_setup_wizard_fields({})
     fields = _with_field(fields, "Connector", "codex")
     fields = _with_field(fields, "Restart Gateway", "no")
@@ -656,6 +655,52 @@ def test_connector_wizard_builds_go_argv_for_supported_connectors() -> None:
         "amp",
         "omnigent",
     }
+
+
+def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
+    fields = wizard_form_defs(SetupWizard.ACP_GUARD)
+    assert wizard_field_value(fields, "Client") == "zed"
+    assert wizard_field_value(fields, "Agent") == "kiro"
+    assert {"kiro", "devin", "amp", "antigravity", "codex", "claude"}.issubset(set(_wizard_options(fields, "Agent")))
+    assert build_wizard_args(SetupWizard.ACP_GUARD, fields) == (
+        "acp",
+        "setup",
+        "--client",
+        "zed",
+        "--agent",
+        "kiro",
+        "--profile",
+        "default",
+    )
+    assert missing_required_fields(SetupWizard.ACP_GUARD, fields) == ()
+    action_fields = [field.with_value("yes") if field.label == "Action Mode" else field for field in fields]
+    assert build_wizard_args(SetupWizard.ACP_GUARD, action_fields)[-1] == "--activate"
+
+    managed_fields = [
+        field.with_value(
+            {
+                "Managed Enrollment": "yes",
+                "Runtime Data Dir": "/home/alice/.defenseclaw",
+                "Token File": "/home/alice/.defenseclaw/acp/zed-kiro.token",
+            }.get(field.label, field.value)
+        )
+        for field in fields
+    ]
+    assert build_wizard_args(SetupWizard.ACP_GUARD, managed_fields)[-5:] == (
+        "--managed",
+        "--runtime-data-dir",
+        "/home/alice/.defenseclaw",
+        "--token-file",
+        "/home/alice/.defenseclaw/acp/zed-kiro.token",
+    )
+    missing_managed_fields = [
+        field.with_value("yes") if field.label == "Managed Enrollment" else field for field in fields
+    ]
+    assert missing_required_fields(SetupWizard.ACP_GUARD, missing_managed_fields) == (
+        "Runtime Data Dir",
+        "Token File",
+    )
+    assert "enterprise" in {goal.id for goal in wizard_goals(SetupWizard.ACP_GUARD)}
 
 
 def test_connector_wizard_builds_amp_action_setup_argv() -> None:

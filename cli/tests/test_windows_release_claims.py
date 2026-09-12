@@ -9,6 +9,7 @@ from pathlib import Path
 
 import yaml
 from defenseclaw.platform_support import (
+    ACP_ONLY_CONNECTORS,
     DEPRECATED_CONNECTORS,
     WINDOWS_CERTIFIED_ARCHITECTURES,
     WINDOWS_CONNECTOR_SUPPORT,
@@ -52,6 +53,7 @@ def test_windows_release_metadata_is_exact() -> None:
         "cursor",
         "devin",
         "hermes",
+        "kiro",
         "opencode",
         "omnigent",
         "antigravity",
@@ -269,6 +271,9 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
         "defenseclaw-windows-amd64",
         "defenseclaw-windows-arm64",
         "defenseclaw-hook",
+        "defenseclaw-acp-posix",
+        "defenseclaw-acp-windows-amd64",
+        "defenseclaw-acp-windows-arm64",
     }
     assert builds["defenseclaw"]["goos"] == ["linux", "darwin"]
     assert builds["defenseclaw"]["goarch"] == ["amd64", "arm64"]
@@ -278,20 +283,30 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
     assert builds["defenseclaw-windows-arm64"]["goarch"] == ["arm64"]
     assert builds["defenseclaw-hook"]["goos"] == ["windows"]
     assert builds["defenseclaw-hook"]["goarch"] == ["amd64"]
+    assert builds["defenseclaw-acp-posix"]["goos"] == ["linux", "darwin"]
+    assert builds["defenseclaw-acp-posix"]["goarch"] == ["amd64", "arm64"]
+    assert builds["defenseclaw-acp-windows-amd64"]["goos"] == ["windows"]
+    assert builds["defenseclaw-acp-windows-amd64"]["goarch"] == ["amd64"]
+    assert builds["defenseclaw-acp-windows-arm64"]["goos"] == ["windows"]
+    assert builds["defenseclaw-acp-windows-arm64"]["goarch"] == ["arm64"]
 
     archives = {archive["id"]: archive for archive in release["archives"]}
     canonical_name = "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     assert set(archives) == {"default", "windows-amd64", "windows-arm64"}
-    assert archives["default"]["ids"] == ["defenseclaw"]
+    assert archives["default"]["ids"] == ["defenseclaw", "defenseclaw-acp-posix"]
     assert archives["default"]["formats"] == ["tar.gz"]
     assert archives["default"]["name_template"] == canonical_name
     assert archives["windows-amd64"]["ids"] == [
         "defenseclaw-windows-amd64",
         "defenseclaw-hook",
+        "defenseclaw-acp-windows-amd64",
     ]
     assert archives["windows-amd64"]["formats"] == ["zip"]
     assert archives["windows-amd64"]["name_template"] == canonical_name
-    assert archives["windows-arm64"]["ids"] == ["defenseclaw-windows-arm64"]
+    assert archives["windows-arm64"]["ids"] == [
+        "defenseclaw-windows-arm64",
+        "defenseclaw-acp-windows-arm64",
+    ]
     assert archives["windows-arm64"]["formats"] == ["zip"]
     assert archives["windows-arm64"]["name_template"] == canonical_name
     assert all(
@@ -311,7 +326,7 @@ def test_release_runtime_custody_splits_certified_x64_from_compatibility_arm64()
         WINDOWS_SUPPORTED_CONNECTORS
         | WINDOWS_PREVIEW_CONNECTORS
         | WINDOWS_NOT_CERTIFIED_CONNECTORS
-    )
+    ) - ACP_ONLY_CONNECTORS
 
 
 def test_connector_matrix_delegates_current_support_to_the_website() -> None:

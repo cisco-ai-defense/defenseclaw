@@ -10,6 +10,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityrouter "github.com/defenseclaw/defenseclaw/internal/observability/router"
@@ -33,6 +34,11 @@ type apiGuardrailEventV8Facts struct {
 	observedAt time.Time
 	meta       llmEventMeta
 	identity   AgentIdentity
+	acp        *acpEvaluationV8Context
+}
+
+type acpEvaluationV8Context struct {
+	client, agent, method, direction, surface, profile string
 }
 
 func newAPIGuardrailEventV8Facts(
@@ -43,6 +49,10 @@ func newAPIGuardrailEventV8Facts(
 	request.EvaluationID = strings.TrimSpace(request.EvaluationID)
 	request.Direction = strings.ToLower(strings.TrimSpace(request.Direction))
 	request.Action = strings.ToLower(strings.TrimSpace(request.Action))
+	request.RawAction = strings.ToLower(strings.TrimSpace(request.RawAction))
+	if request.RawAction == "" {
+		request.RawAction = request.Action
+	}
 	if !hookModelV8Identifier(request.EvaluationID) {
 		return apiGuardrailEventV8Facts{}, errors.New("evaluation_id must be a stable identifier")
 	}
@@ -51,6 +61,9 @@ func newAPIGuardrailEventV8Facts(
 	}
 	if request.Action != "allow" && request.Action != "alert" && request.Action != "block" {
 		return apiGuardrailEventV8Facts{}, errors.New("action must be allow, alert, or block")
+	}
+	if request.RawAction != "allow" && request.RawAction != "alert" && request.RawAction != "block" && request.RawAction != "confirm" {
+		return apiGuardrailEventV8Facts{}, errors.New("raw_action must be allow, alert, block, or confirm")
 	}
 	rawSeverity := strings.ToUpper(strings.TrimSpace(request.Severity))
 	switch rawSeverity {
@@ -166,15 +179,31 @@ func (a *APIServer) emitGuardrailEventV8(ctx context.Context, facts apiGuardrail
 			DefenseClawGuardrailRuleIds:         facts.ruleIDs,
 			DefenseClawGuardrailFindingCount:    observability.Present(int64(len(facts.request.Findings))),
 			DefenseClawGuardrailDecision:        facts.decision,
+			DefenseClawGuardrailRawAction:       observability.Present(facts.request.RawAction),
 			DefenseClawGuardrailEffectiveAction: observability.Present(facts.request.Action),
+			DefenseClawGuardrailWouldBlock:      observability.Present(facts.request.WouldBlock),
 			DefenseClawSecuritySeverity:         observability.Present(string(facts.severity)),
 			DefenseClawGuardrailReason:          facts.reason,
 			GenAIRequestModel:                   facts.model,
 			ConditionSecuritySeverityAvailable:  true,
+			DefenseClawAcpClient:                optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.client }),
+			DefenseClawAcpAgent:                 optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.agent }),
+			DefenseClawAcpMethod:                optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.method }),
+			DefenseClawAcpDirection:             optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.direction }),
+			DefenseClawAcpSurface:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.surface }),
+			DefenseClawAcpProfile:               optionalACPFact(facts.acp, func(value *acpEvaluationV8Context) string { return value.profile }),
+			DefenseClawAcpProtocolVersion:       optionalACPFact(facts.acp, func(_ *acpEvaluationV8Context) string { return acp.SchemaVersion }),
 		})
 	})
 	facts.recordMetrics(ctx, metricRuntime)
 	return logErr
+}
+
+func optionalACPFact(value *acpEvaluationV8Context, read func(*acpEvaluationV8Context) string) observability.Optional[string] {
+	if value == nil {
+		return observability.Absent[string]()
+	}
+	return hookV8OptionalText(read(value), 256)
 }
 
 func (facts apiGuardrailEventV8Facts) recordMetrics(

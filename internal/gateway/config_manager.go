@@ -924,6 +924,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 	add("llm", oldCfg.LLM, newCfg.LLM)
 	add("claw", oldCfg.Claw, newCfg.Claw)
 	add("agent", oldCfg.Agent, newCfg.Agent)
+	add("acp", oldCfg.ACP, newCfg.ACP)
 	add("cisco_ai_defense", oldCfg.CiscoAIDefense, newCfg.CiscoAIDefense)
 	add("scanners", oldCfg.Scanners, newCfg.Scanners)
 	add("watch", oldCfg.Watch, newCfg.Watch)
@@ -956,6 +957,7 @@ func diffConfigs(oldCfg, newCfg *config.Config) ConfigDiff {
 
 	var restart []string
 	hotReloadable := map[string]struct{}{
+		"acp":              {},
 		"guardrail":        {},
 		"webhooks":         {},
 		"observability":    {},

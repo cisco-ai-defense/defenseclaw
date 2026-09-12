@@ -27,6 +27,7 @@ func TestEnterpriseLifecycleArgumentsUsePublicMachineTransaction(t *testing.T) {
 		"--installer", filepath.Join(stage, "install-enterprise.ps1"),
 		"--broker-binary", filepath.Join(stage, "defenseclaw-cmid-broker.exe"),
 		"--gateway-binary", filepath.Join(stage, "defenseclaw-gateway.exe"),
+		"--acp-binary", filepath.Join(stage, "defenseclaw-acp.exe"),
 		"--hook-binary", filepath.Join(stage, "defenseclaw-hook.exe"),
 		"--sensor-helper-binary", filepath.Join(stage, "defenseclaw-sensor-helper.exe"),
 		"--cli-binary", filepath.Join(stage, "defenseclaw.exe"),

@@ -72,6 +72,7 @@ readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
+readonly ACP_GUARD_START_VERSION="0.8.11"
 readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
 COSIGN_BIN=""
@@ -440,11 +441,22 @@ cleanup_install_attempt() {
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rollback-token \
                 "${GATEWAY_ROLLBACK_TOKEN}" || true
         fi
+        if [[ -n "${ACP_ROLLBACK_TOKEN:-}" \
+            && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" rollback-token \
+                "${ACP_ROLLBACK_TOKEN}" || true
+        fi
         if [[ -n "${GATEWAY_PUBLISHED_ID:-}" ]]; then
             warn "Legacy gateway rollback residue was preserved because exact retirement is unavailable"
         fi
         if [[ -n "${GATEWAY_ACTIVATION:-}" ]]; then
             warn "Legacy gateway activation residue was preserved because exact retirement is unavailable"
+        fi
+        if [[ -n "${ACP_PUBLISHED_ID:-}" ]]; then
+            warn "Legacy ACP guard rollback residue was preserved because exact retirement is unavailable"
+        fi
+        if [[ -n "${ACP_ACTIVATION:-}" ]]; then
+            warn "Legacy ACP guard activation residue was preserved because exact retirement is unavailable"
         fi
         if [[ -n "${VENV_CLAIM_ID:-}" ]]; then
             if [[ "${MODERN_RELEASE:-false}" == true \
@@ -658,6 +670,13 @@ complete_install_attempt() {
         GATEWAY_ROLLBACK_TOKEN=""
         retained_install_custody=true
     fi
+    if [[ -n "${ACP_ROLLBACK_TOKEN:-}" ]]; then
+        "${POLICY_PYTHON}" "${PUBLISH_HELPER}" commit-token \
+            "${ACP_ROLLBACK_TOKEN}" \
+            || die "Could not close fresh ACP guard rollback custody"
+        ACP_ROLLBACK_TOKEN=""
+        retained_install_custody=true
+    fi
     if [[ -n "${GATEWAY_ACTIVATION:-}" ]]; then
         warn "Legacy gateway activation residue was preserved because exact retirement is unavailable"
     fi
@@ -665,6 +684,12 @@ complete_install_attempt() {
     GATEWAY_PRECLAIM_ID=""
     GATEWAY_ACTIVATION_ID=""
     GATEWAY_PUBLISHED_ID=""
+    if [[ -n "${ACP_ACTIVATION:-}" ]]; then
+        warn "Legacy ACP guard activation residue was preserved because exact retirement is unavailable"
+    fi
+    ACP_ACTIVATION=""
+    ACP_ACTIVATION_ID=""
+    ACP_PUBLISHED_ID=""
     if [[ -n "${PICKED_CONNECTOR_ACTIVATION:-}" ]]; then
         warn "Legacy connector activation residue was preserved because exact retirement is unavailable"
     fi
@@ -1083,6 +1108,7 @@ PY
     fi
 
     MODERN_RELEASE=false
+	ACP_GUARD_RELEASE=false
     if version_gte "${RELEASE_VERSION}" "0.8.4"; then
         MODERN_RELEASE=true
         local signature="${POLICY_DIR}/checksums.txt.sig"
@@ -1105,6 +1131,9 @@ PY
             "${CHECKSUMS_FILE}" >/dev/null \
             || die "Sigstore verification failed; no DefenseClaw payload was activated"
     fi
+	if version_gte "${RELEASE_VERSION}" "${ACP_GUARD_START_VERSION}"; then
+		ACP_GUARD_RELEASE=true
+	fi
 
     local manifest_expected manifest_actual
     manifest_expected="$(awk '$2 == "upgrade-manifest.json" {print $1; exit}' "${CHECKSUMS_FILE}")"
@@ -1254,21 +1283,26 @@ for source_value, destination_value, expected_outer_sha256 in zip(
         os.close(directory_fd)
 PY
         GATEWAY_STAGED_BINARY="${POLICY_DIR}/defenseclaw"
+        ACP_STAGED_BINARY="${POLICY_DIR}/defenseclaw-acp"
         PUBLISH_HELPER="${POLICY_DIR}/install_publish.py"
         "${POLICY_PYTHON}" - \
             "${GATEWAY_STAGED}" "${WHEEL_STAGED}" \
-            "${GATEWAY_STAGED_BINARY}" "${PUBLISH_HELPER}" <<'PY'
+			"${GATEWAY_STAGED_BINARY}" "${ACP_STAGED_BINARY}" "${PUBLISH_HELPER}" "${ACP_GUARD_RELEASE}" <<'PY'
 import os
 import stat
 import sys
 import tarfile
 import zipfile
 
-gateway, wheel, output, helper_output = sys.argv[1:]
+gateway, wheel, output, acp_output, helper_output, require_acp_value = sys.argv[1:]
+require_acp = require_acp_value == "true"
 with tarfile.open(gateway, "r:gz") as archive:
     matches = [member for member in archive.getmembers() if member.isfile() and member.name == "defenseclaw"]
+    acp_matches = [member for member in archive.getmembers() if member.isfile() and member.name == "defenseclaw-acp"]
     if len(matches) != 1:
         raise SystemExit("protected gateway archive lacks its exact runtime binary")
+    if require_acp and len(acp_matches) != 1:
+        raise SystemExit("protected gateway archive lacks its exact ACP guard binary")
     if not 0 < matches[0].size <= 512 * 1024 * 1024:
         raise SystemExit("protected gateway runtime is outside its size bound")
     stream = archive.extractfile(matches[0])
@@ -1279,6 +1313,17 @@ with tarfile.open(gateway, "r:gz") as archive:
         handle.flush()
         os.fsync(handle.fileno())
     os.chmod(output, 0o700)
+    if require_acp:
+        if not 0 < acp_matches[0].size <= 512 * 1024 * 1024:
+            raise SystemExit("protected ACP guard runtime is outside its size bound")
+        acp_stream = archive.extractfile(acp_matches[0])
+        if acp_stream is None:
+            raise SystemExit("protected ACP guard runtime could not be read")
+        with open(acp_output, "xb") as handle:
+            handle.write(acp_stream.read())
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(acp_output, 0o700)
 with zipfile.ZipFile(wheel) as archive:
     if not any(name.endswith(".dist-info/METADATA") for name in archive.namelist()):
         raise SystemExit("protected wheel lacks package metadata")
@@ -1404,14 +1449,17 @@ install_gateway() {
         mkdir -p "${INSTALL_DIR}"
     fi
     local gateway_source=""
+    local acp_source=""
     local extraction_dir=""
 
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         gateway_source="${GATEWAY_STAGED_BINARY}"
+		[[ "${ACP_GUARD_RELEASE:-false}" != true ]] || acp_source="${ACP_STAGED_BINARY}"
     elif [[ -n "${LOCAL_DIR}" ]]; then
         local artifact
         artifact="$(artifact_path "defenseclaw-gateway-${OS}-${ARCH_NORM}")"
         gateway_source="${artifact}"
+		[[ "${ACP_GUARD_RELEASE:-false}" != true ]] || acp_source="$(artifact_path "defenseclaw-acp-${OS}-${ARCH_NORM}")"
     else
         local url
         local tarball_name="defenseclaw_${RELEASE_VERSION}_${OS}_${ARCH_NORM}.tar.gz"
@@ -1421,13 +1469,23 @@ install_gateway() {
         verify_checksum "${extraction_dir}/gateway.tar.gz" "${tarball_name}"
         tar -xzf "${extraction_dir}/gateway.tar.gz" -C "${extraction_dir}"
         gateway_source="${extraction_dir}/defenseclaw"
+		[[ "${ACP_GUARD_RELEASE:-false}" != true ]] || acp_source="${extraction_dir}/defenseclaw-acp"
     fi
+	if [[ "${ACP_GUARD_RELEASE:-false}" == true ]]; then
+		[[ -f "${acp_source}" && ! -L "${acp_source}" ]] \
+			|| die "Authenticated runtime archive does not contain a regular defenseclaw-acp binary"
+	fi
 
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         if [[ "${OS}" == "darwin" ]]; then
             /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
                 "${gateway_source}" >/dev/null 2>&1 \
                 || die "Could not normalize the macOS gateway signature; installation was not activated"
+			if [[ "${ACP_GUARD_RELEASE:-false}" == true ]]; then
+				/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.acp \
+					"${acp_source}" >/dev/null 2>&1 \
+					|| die "Could not normalize the macOS ACP guard signature; installation was not activated"
+			fi
         fi
         GATEWAY_ROLLBACK_TOKEN="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
@@ -1436,6 +1494,15 @@ install_gateway() {
         )" || die "A DefenseClaw gateway appeared during installation; it was preserved and this installation was not activated"
         [[ -n "${GATEWAY_ROLLBACK_TOKEN}" ]] \
             || die "Fresh gateway publication did not return rollback custody"
+		if [[ "${ACP_GUARD_RELEASE:-false}" == true ]]; then
+			ACP_ROLLBACK_TOKEN="$(
+				"${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-regular \
+					"${acp_source}" "${INSTALL_DIR}/defenseclaw-acp" \
+					--retain-token --custody-root "${INSTALL_CUSTODY_ROOT}"
+			)" || die "A DefenseClaw ACP guard appeared during installation; it was preserved and this installation was not activated"
+			[[ -n "${ACP_ROLLBACK_TOKEN}" ]] \
+				|| die "Fresh ACP guard publication did not return rollback custody"
+		fi
     else
         local activation
         activation="$(mktemp "${INSTALL_DIR}/.defenseclaw-gateway.install.XXXXXX")" \
@@ -1475,6 +1542,30 @@ install_gateway() {
         GATEWAY_PUBLISHED_ID="${observed_gateway_id}"
         [[ "${observed_gateway_id}" == "${GATEWAY_ACTIVATION_ID}" ]] \
             || die "Fresh gateway activation identity changed during publication"
+		if [[ "${ACP_GUARD_RELEASE:-false}" == true ]]; then
+			local acp_activation
+			acp_activation="$(mktemp "${INSTALL_DIR}/.defenseclaw-acp.install.XXXXXX")" \
+			|| die "Could not allocate an ACP guard activation file"
+		ACP_ACTIVATION="${acp_activation}"
+		cp "${acp_source}" "${acp_activation}" \
+			|| die "Could not stage the ACP guard for activation"
+		chmod +x "${acp_activation}" \
+			|| die "Could not make the staged ACP guard executable"
+		if [[ "${OS}" == "darwin" ]]; then
+			/usr/bin/codesign -f -s - -i com.cisco.defenseclaw.acp \
+				"${acp_activation}" >/dev/null 2>&1 \
+				|| die "Could not normalize the macOS ACP guard signature; installation was not activated"
+		fi
+		ACP_ACTIVATION_ID="$(path_identity "${acp_activation}")" \
+			|| die "Could not bind ACP guard activation custody"
+		if ! ln "${acp_activation}" "${INSTALL_DIR}/defenseclaw-acp"; then
+			die "A DefenseClaw ACP guard appeared during installation; it was preserved"
+		fi
+		ACP_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/defenseclaw-acp")" \
+			|| die "Could not bind ACP guard publication identity"
+			[[ "${ACP_PUBLISHED_ID}" == "${ACP_ACTIVATION_ID}" ]] \
+				|| die "Fresh ACP guard activation identity changed during publication"
+		fi
     fi
     [[ -z "${extraction_dir}" ]] \
         || warn "Legacy gateway extraction residue was preserved because exact retirement is unavailable"
@@ -1833,10 +1924,12 @@ POLICY_DIR=""
 POLICY_DIR_ID=""
 POLICY_CUSTODY_ROOT=""
 MODERN_RELEASE=false
+ACP_GUARD_RELEASE=false
 GATEWAY_ARTIFACT=""
 WHEEL_ARTIFACT=""
 GATEWAY_STAGED=""
 GATEWAY_STAGED_BINARY=""
+ACP_STAGED_BINARY=""
 WHEEL_STAGED=""
 PUBLISH_HELPER=""
 POLICY_PYTHON=""
@@ -1852,6 +1945,10 @@ GATEWAY_PRECLAIM_ID=""
 GATEWAY_ACTIVATION_ID=""
 GATEWAY_PUBLISHED_ID=""
 GATEWAY_ROLLBACK_TOKEN=""
+ACP_ROLLBACK_TOKEN=""
+ACP_ACTIVATION=""
+ACP_ACTIVATION_ID=""
+ACP_PUBLISHED_ID=""
 PICKED_CONNECTOR_ACTIVATION=""
 PICKED_CONNECTOR_ACTIVATION_ID=""
 CONNECTOR_MARKER_ROLLBACK_TOKEN=""

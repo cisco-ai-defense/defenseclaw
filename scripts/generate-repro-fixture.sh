@@ -3,7 +3,7 @@
 # generate-repro-fixture.sh
 #
 # Regenerates internal/build-repro/testdata/signed-payload-fixture.tar.zst
-# from six deterministic placeholder files. Used by the Workstream E
+# from eight deterministic placeholder files. Used by the Workstream E
 # reproducibility gate (see docs/specs/001-windows-deterministic-build/).
 #
 # The generator produces byte-identical output on every run:
@@ -41,6 +41,7 @@ trap 'rm -rf "${work}"' EXIT
 # testdata/README.md for why placeholder bytes are fine.
 mkdir -p "${work}/payload"
 printf 'DefenseClawEnterprise-module-fixture-v1\n'  > "${work}/payload/DefenseClawEnterprise.psm1"
+printf 'defenseclaw-acp-fixture-v1\n'               > "${work}/payload/defenseclaw-acp.exe"
 printf 'defenseclaw-broker-fixture-v1\n'            > "${work}/payload/defenseclaw-cmid-broker.exe"
 printf 'defenseclaw-sensor-helper-fixture-v1\n'     > "${work}/payload/defenseclaw-sensor-helper.exe"
 printf 'defenseclaw-gateway-fixture-v1\n'           > "${work}/payload/defenseclaw-gateway.exe"

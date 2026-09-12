@@ -15,7 +15,7 @@ agent/runtime and a DefenseClaw integration that can be wired without WSL are
 both required. The resulting status is one of ``supported``, ``preview``,
 ``not_certified``, or ``unsupported`` and always carries a reason.
 
-DefenseClaw runs hook-only on Windows: most agents invoke the native Go hook
+DefenseClaw runs hooks plus the ACP guard on Windows: most agents invoke the native Go hook
 entrypoint directly. Cursor invokes a native PowerShell adapter first because
 its Windows command-hook transport materializes stdin as PowerShell pipeline
 objects. There is no Windows guardrail-proxy lifecycle. The proxy/chat
@@ -44,6 +44,7 @@ NOT_CERTIFIED: SupportStatus = "not_certified"
 UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
+ACP_ONLY_CONNECTORS: frozenset[str] = frozenset({"kiro"})
 DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli", "windsurf"})
 
 _DEPRECATED_REASONS: dict[str, str] = {
@@ -79,6 +80,11 @@ class ConnectorPlatformSupport:
 # Keep in exact parity with the Go ``windowsConnectorSupport`` map. A working
 # upstream Windows binary is not sufficient for DefenseClaw certification.
 WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
+    "kiro": ConnectorPlatformSupport(
+        SUPPORTED,
+        "Kiro CLI ACP stdio mediation is supported on native Windows x64; "
+        "release certification requires official-client live evidence.",
+    ),
     "codex": ConnectorPlatformSupport(
         SUPPORTED,
         "Codex CLI and the DefenseClaw hook entrypoint are supported on native "
@@ -100,8 +106,9 @@ WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "devin": ConnectorPlatformSupport(
         SUPPORTED,
         "Native Devin CLI lifecycle hooks are supported on Windows x64 using the "
-        "pinned 3000.4.25 CLI; cloud Devin, proxy, ACP, native OTLP, and managed "
-        "higher-layer enforcement are not covered.",
+        "pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client "
+        "live certification, cloud Devin, proxy, native OTLP, and managed higher-layer "
+        "enforcement are not covered.",
     ),
     "geminicli": ConnectorPlatformSupport(UNSUPPORTED, _DEPRECATED_REASONS["geminicli"]),
     "copilot": ConnectorPlatformSupport(

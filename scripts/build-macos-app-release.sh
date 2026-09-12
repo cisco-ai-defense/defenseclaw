@@ -73,6 +73,8 @@ RUNTIME_ATTESTATION="${ROOT}/dist/runtime-candidate-checksums.txt"
 WHEEL=""
 GATEWAY="${WORK}/defenseclaw-gateway"
 GATEWAY_INPUT="${MACOS_GATEWAY_INPUT:-}"
+ACP_GUARD="${WORK}/defenseclaw-acp"
+ACP_INPUT="${MACOS_ACP_INPUT:-}"
 OVERRIDES="${WORK}/overrides.txt"
 KEYCHAIN_PATH=""
 KEYCHAIN_PASSWORD=""
@@ -98,8 +100,12 @@ for command in xcodebuild xcrun codesign ditto file hdiutil python3 shasum spctl
         exit 1
     }
 done
-if [[ -z "${GATEWAY_INPUT}" ]]; then
+if [[ -z "${GATEWAY_INPUT}" || -z "${ACP_INPUT}" ]]; then
     command -v go >/dev/null || { echo "required command not found: go" >&2; exit 1; }
+fi
+if [[ -n "${GATEWAY_INPUT}" && -z "${ACP_INPUT}" ]] || [[ -z "${GATEWAY_INPUT}" && -n "${ACP_INPUT}" ]]; then
+    echo "MACOS_GATEWAY_INPUT and MACOS_ACP_INPUT must be provided together" >&2
+    exit 1
 fi
 [[ -d "${PROJECT}" ]] || { echo "Xcode project not found: ${PROJECT}" >&2; exit 1; }
 [[ -f "${UPGRADE_MANIFEST}" && -f "${RUNTIME_ATTESTATION}" ]] || {
@@ -238,6 +244,16 @@ if [[ -n "${GATEWAY_INPUT}" ]]; then
         echo "copied gateway bytes differ from MACOS_GATEWAY_INPUT" >&2
         exit 1
     }
+    [[ -f "${ACP_INPUT}" && ! -L "${ACP_INPUT}" ]] || {
+        echo "MACOS_ACP_INPUT must name a regular non-symlink candidate binary" >&2
+        exit 1
+    }
+    cp "${ACP_INPUT}" "${ACP_GUARD}"
+    chmod 755 "${ACP_GUARD}"
+    cmp -s "${ACP_INPUT}" "${ACP_GUARD}" || {
+        echo "copied ACP guard bytes differ from MACOS_ACP_INPUT" >&2
+        exit 1
+    }
 else
     echo "Building DefenseClaw gateway ${VERSION} (darwin/arm64)"
     COMMIT="$(git -C "${ROOT}" rev-parse --short=12 HEAD)"
@@ -247,6 +263,12 @@ else
             -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
             -o "${GATEWAY}" ./cmd/defenseclaw
     )
+    (
+        cd "${ROOT}"
+        CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-s -w -X main.version=${VERSION} -X main.commit=${COMMIT} -X main.date=${BUILD_DATE}" \
+            -o "${ACP_GUARD}" ./cmd/defenseclaw-acp
+    )
 fi
 file "${GATEWAY}" | grep -q 'Mach-O 64-bit executable arm64' || {
     echo "gateway is not a darwin/arm64 Mach-O" >&2
@@ -254,6 +276,18 @@ file "${GATEWAY}" | grep -q 'Mach-O 64-bit executable arm64' || {
 }
 GATEWAY_VERSION_OUTPUT="$("${GATEWAY}" --version 2>&1)" || {
     echo "gateway candidate did not execute for version verification" >&2
+    exit 1
+}
+file "${ACP_GUARD}" | grep -q 'Mach-O 64-bit executable arm64' || {
+    echo "ACP guard is not a darwin/arm64 Mach-O" >&2
+    exit 1
+}
+ACP_VERSION_OUTPUT="$("${ACP_GUARD}" --version 2>&1)" || {
+    echo "ACP guard candidate did not execute for version verification" >&2
+    exit 1
+}
+printf '%s' "${ACP_VERSION_OUTPUT}" | grep -Fq "${VERSION}" || {
+    echo "ACP guard candidate version mismatch: expected ${VERSION}" >&2
     exit 1
 }
 printf '%s' "${GATEWAY_VERSION_OUTPUT}" | grep -Fq "${VERSION}" || {
@@ -298,6 +332,7 @@ codesign --verify --deep --strict --verbose=2 "${PLAIN_APP}"
 ditto "${PLAIN_APP}" "${APP}"
 mkdir -p "${PAYLOAD}"
 cp "${GATEWAY}" "${PAYLOAD}/defenseclaw-gateway"
+cp "${ACP_GUARD}" "${PAYLOAD}/defenseclaw-acp"
 cp "${WHEEL}" "${PAYLOAD}/$(basename "${WHEEL}")"
 cp "${OVERRIDES}" "${PAYLOAD}/overrides.txt"
 cp "${UPGRADE_MANIFEST}" "${PAYLOAD}/upgrade-manifest.json"
@@ -308,6 +343,8 @@ cp "${ROOT}/THIRD_PARTY_LICENSES.txt" "${PAYLOAD}/THIRD_PARTY_LICENSES.txt"
 
 codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.gateway \
     "${PAYLOAD}/defenseclaw-gateway"
+codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.acp \
+    "${PAYLOAD}/defenseclaw-acp"
 GATEWAY_REQUIREMENT='=identifier "com.cisco.defenseclaw.gateway"'
 if [[ "${SIGNING_IDENTITY}" != "-" ]]; then
     EXPECTED_TEAM_ID="$(
@@ -323,14 +360,22 @@ fi
 codesign --verify --strict -R "${GATEWAY_REQUIREMENT}" --verbose=2 \
     "${PAYLOAD}/defenseclaw-gateway"
 unset GATEWAY_REQUIREMENT
+ACP_REQUIREMENT='=identifier "com.cisco.defenseclaw.acp"'
+if [[ "${SIGNING_IDENTITY}" != "-" ]]; then
+    ACP_REQUIREMENT+=" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
+fi
+codesign --verify --strict -R "${ACP_REQUIREMENT}" --verbose=2 \
+    "${PAYLOAD}/defenseclaw-acp"
+unset ACP_REQUIREMENT
 
 GATEWAY_SHA="$(shasum -a 256 "${PAYLOAD}/defenseclaw-gateway" | awk '{print $1}')"
+ACP_SHA="$(shasum -a 256 "${PAYLOAD}/defenseclaw-acp" | awk '{print $1}')"
 WHEEL_SHA="$(shasum -a 256 "${PAYLOAD}/$(basename "${WHEEL}")" | awk '{print $1}')"
 OVERRIDES_SHA="$(shasum -a 256 "${PAYLOAD}/overrides.txt" | awk '{print $1}')"
 UPGRADE_MANIFEST_SHA="$(shasum -a 256 "${PAYLOAD}/upgrade-manifest.json" | awk '{print $1}')"
 RUNTIME_ATTESTATION_SHA="$(shasum -a 256 "${PAYLOAD}/runtime-candidate-checksums.txt" | awk '{print $1}')"
 
-python3 - "${PAYLOAD}/payload-manifest.json" "${VERSION}" "${GATEWAY_SHA}" \
+python3 - "${PAYLOAD}/payload-manifest.json" "${VERSION}" "${GATEWAY_SHA}" "${ACP_SHA}" \
     "$(basename "${WHEEL}")" "${WHEEL_SHA}" "${OVERRIDES_SHA}" \
     "${UPGRADE_MANIFEST_SHA}" "${RUNTIME_ATTESTATION_SHA}" "${BUILD_DATE}" <<'PY'
 import json
@@ -341,6 +386,7 @@ import sys
     path,
     version,
     gateway_sha,
+    acp_sha,
     wheel_name,
     wheel_sha,
     overrides_sha,
@@ -353,6 +399,7 @@ payload = {
     "runtime_tag": version,
     "arch": "arm64",
     "gateway": {"file": "defenseclaw-gateway", "sha256": gateway_sha},
+    "acp_guard": {"file": "defenseclaw-acp", "sha256": acp_sha},
     "wheel": {"file": wheel_name, "sha256": wheel_sha},
     "overrides": {"file": "overrides.txt", "sha256": overrides_sha},
     "upgrade_manifest": {"file": "upgrade-manifest.json", "sha256": upgrade_manifest_sha},
@@ -369,6 +416,10 @@ codesign "${sign_args[@]}" "${APP}"
 codesign --verify --deep --strict --verbose=2 "${APP}"
 [[ "$(shasum -a 256 "${PAYLOAD}/defenseclaw-gateway" | awk '{print $1}')" == "${GATEWAY_SHA}" ]] || {
     echo "outer app signing changed the release-attested gateway bytes" >&2
+    exit 1
+}
+[[ "$(shasum -a 256 "${PAYLOAD}/defenseclaw-acp" | awk '{print $1}')" == "${ACP_SHA}" ]] || {
+    echo "outer app signing changed the release-attested ACP guard bytes" >&2
     exit 1
 }
 

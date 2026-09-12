@@ -82,7 +82,10 @@ def test_pre_activation_failure_cleanup_is_staging_only_and_atomic() -> None:
 
 def test_final_identity_failure_cleans_every_known_stage() -> None:
     source = _source()
-    guard = source.index("guard let gatewayStageIdentity, let cliStageIdentity,\n              let venvStageIdentity")
+    guard = source.index(
+        "guard let gatewayStageIdentity, let acpGuardStageIdentity, let cliStageIdentity,\n"
+        "              let venvStageIdentity"
+    )
     failure = source.index(
         'runtimeInstallState = .failed("Runtime staging identity could not be verified;',
         guard,
@@ -195,6 +198,7 @@ def test_true_fresh_install_still_stages_and_verifies_both_components() -> None:
     verify = VERIFY_MACOS_RELEASE.read_text(encoding="utf-8")
     assert 'codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.gateway' in build
     assert '"gateway": {"file": "defenseclaw-gateway", "sha256": gateway_sha}' in build
+    assert '"acp_guard": {"file": "defenseclaw-acp", "sha256": acp_sha}' in build
     assert "outer app signing changed the release-attested gateway bytes" in build
     for script in (build, verify):
         assert "GATEWAY_REQUIREMENT='=identifier \"com.cisco.defenseclaw.gateway\"'" in script

@@ -150,6 +150,83 @@ attributes:
     id: identifier-v1
     notes: nonempty bounded
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.acp.client
+  type: string
+  brief: ACP client identity selected by the guarded binding
+  examples: [zed]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization: {id: identifier-v1}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.agent
+  type: string
+  brief: ACP agent identity selected by the guarded binding
+  examples: [kiro]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: low
+  normalization: {id: identifier-v1}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.method
+  type: string
+  brief: ACP JSON-RPC method under evaluation
+  examples: [session/prompt]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: bounded
+  normalization: {id: bounded-v1}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.direction
+  type: string
+  brief: Direction of the guarded ACP frame
+  examples: [client_to_agent]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization: {id: enum-v1, overrides: {enum: [client_to_agent, agent_to_client]}}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.surface
+  type: string
+  brief: Security surface assigned to the ACP frame
+  examples: [prompt]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization: {id: enum-v1, overrides: {enum: [protocol, prompt, output, tool, permission, filesystem, terminal]}}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.profile
+  type: string
+  brief: ACP policy profile used for evaluation
+  examples: [default]
+  stability: stable
+  owner: defenseclaw
+  field_class: identifier
+  sensitivity: internal
+  cardinality: bounded
+  normalization: {id: identifier-v1}
+  introduced_in: telemetry-registry-v2
+- id: defenseclaw.acp.protocol.version
+  type: string
+  brief: Pinned ACP schema release used by the guard
+  examples: [schema-v1.21.0]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: safe
+  cardinality: low
+  normalization: {id: identifier-v1}
+  introduced_in: telemetry-registry-v2
 - id: defenseclaw.guardrail.name
   type: string
   brief: Guardrail identity
@@ -3023,7 +3100,21 @@ groups:
   introduced_in: telemetry-registry-v1
   extends:
   - body.guardrail.evaluation
-  attributes: []
+  attributes:
+  - ref: defenseclaw.acp.client
+    requirement_level: optional
+  - ref: defenseclaw.acp.agent
+    requirement_level: optional
+  - ref: defenseclaw.acp.method
+    requirement_level: optional
+  - ref: defenseclaw.acp.direction
+    requirement_level: optional
+  - ref: defenseclaw.acp.surface
+    requirement_level: optional
+  - ref: defenseclaw.acp.profile
+    requirement_level: optional
+  - ref: defenseclaw.acp.protocol.version
+    requirement_level: optional
   body_fields:
   - ref: defenseclaw.guardrail.decision
     requirement_level: required

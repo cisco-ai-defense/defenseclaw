@@ -26,10 +26,11 @@ commands require optional configuration or are unavailable there. Use the
 and each connector page for native Windows setup and quirks.
 </Callout>
 
-DefenseClaw ships **two** binaries:
+DefenseClaw ships **three** binaries:
 
 - **`defenseclaw`** — the operator-facing Python CLI. Entry point for `init`, `setup`, `audit`, `policy`, `skill`/`mcp`/`plugin` scans, alerts, doctor, etc.
 - **`defenseclaw-gateway`** — the long-running Go sidecar. Owns the on-host daemon (`start`/`stop`/`restart`), policy reload, code scanning, and the audit-DB JSONL exporter.
+- **`defenseclaw-acp`** — the protocol-aware stdio guard spawned by ACP clients. It validates its runtime contract before launching the selected agent, then evaluates ACP traffic while it mediates stdio.
 
 Tables below tag each row with the binary that owns it.
 
@@ -83,6 +84,15 @@ policy or experimental work. A JSON repair must be a dry-run preview or include
 for token, audit, identity, compatibility, and recovery safety boundaries.
 
 ## Setup
+
+| Command | Use it for |
+| --- | --- |
+| `defenseclaw acp catalog` | Show the pinned ACP schema and built-in client/agent inventory. |
+| `defenseclaw acp setup --client zed\|jetbrains --agent <name> [--activate]` | Install or reconfigure a managed guarded entry. Defaults to observe mode. |
+| `defenseclaw acp setup --managed ... --runtime-data-dir <dir> --token-file <path>` | Install only user-side editor/lock files for a centrally authorized enterprise enrollment. |
+| `defenseclaw acp status` | Show the ACP posture and configured bindings. |
+| `defenseclaw acp remove --client <client> --agent <agent>` | Remove only the DefenseClaw-owned entry. |
+| `defenseclaw-gateway enterprise acp enroll\|verify\|revoke ...` | Manage the protected per-principal/client/agent/profile credential and its private user copy. |
 
 Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the rest) add or reconfigure one connector. On a host with another hook connector already active, choose **Add** to join the active roster; choose **Replace** only when you want to return to one wired connector. Proxy connectors (`openclaw`, `zeptoclaw`) own the traffic plane and do not join the hook-connector roster.
 

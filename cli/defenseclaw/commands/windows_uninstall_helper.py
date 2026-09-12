@@ -19,6 +19,7 @@ from pathlib import Path
 _ALLOWED_BINARIES = {
     "defenseclaw.cmd",
     "defenseclaw-gateway.exe",
+    "defenseclaw-acp.exe",
     "defenseclaw-hook.exe",
 }
 _OWNERSHIP_MARKERS = {"config.yaml", "audit.db", ".env", "policies", "quarantine", ".venv"}

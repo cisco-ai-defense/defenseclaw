@@ -40,6 +40,7 @@ import (
 
 	"github.com/google/uuid"
 
+	"github.com/defenseclaw/defenseclaw/internal/acp"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
@@ -98,6 +99,13 @@ type APIServer struct {
 	// prove that post-cancellation worker completion cannot record a fail-open
 	// decision after the handler has already returned 504.
 	inspectToolWorkerDone func()
+	// ACP readiness is surfaced on unauthenticated /health. Cache the bounded
+	// custody probe briefly so health polling cannot force repeated protected-
+	// directory traversal. Authentication never uses this cache.
+	acpReadinessMu        sync.Mutex
+	acpReadinessCheckedAt time.Time
+	acpReadinessKey       string
+	acpReadinessValue     bool
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -882,6 +890,10 @@ func (a *APIServer) Run(ctx context.Context) error {
 	mux.HandleFunc("/v1/guardrail/event", a.handleGuardrailEvent)
 	mux.HandleFunc("/v1/guardrail/evaluate", a.handleGuardrailEvaluate)
 	mux.HandleFunc("/v1/guardrail/config", a.handleGuardrailConfig)
+	mux.HandleFunc("/api/v1/acp/challenge", a.handleACPChallenge)
+	mux.HandleFunc("/api/v1/acp/evaluate", a.handleACPEvaluate)
+	mux.HandleFunc("/v1/acp/catalog", a.handleACPCatalog)
+	mux.HandleFunc("/v1/acp/profiles", a.handleACPProfiles)
 	// Provider configuration belongs to the management API so hook-only
 	// deployments can inspect and reload it without enabling the proxy listener.
 	a.registerProviderRoutes(mux)
@@ -1112,6 +1124,14 @@ func (a *APIServer) handleHealth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	body["provenance"] = version.Current()
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		body["acp"] = map[string]interface{}{
+			"enabled": cfg.ACP.Enabled, "mode": effectiveACPMode(cfg.ACP, ""),
+			"schema_version": acp.SchemaVersion, "schema_sha256": acp.SchemaSHA256,
+			"configured_clients": len(cfg.ACP.Clients), "configured_agents": len(cfg.ACP.Agents),
+			"scoped_token_ready": a.acpScopedTokenReady(),
+		}
+	}
 	a.writeJSON(w, http.StatusOK, body)
 }
 
@@ -1144,6 +1164,7 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 		LLMTrafficMode   string                           `json:"llm_traffic_mode"`
 		HookCapabilities *connector.HookCapability        `json:"hook_capabilities,omitempty"`
 		Capabilities     *connector.ConnectorCapabilities `json:"capabilities,omitempty"`
+		ACP              *connector.ACPCapability         `json:"acp,omitempty"`
 		Locations        *connector.ConnectorLocations    `json:"locations,omitempty"`
 	}
 	avail := reg.Available()
@@ -1160,6 +1181,9 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			LLMTrafficMode:     connector.LLMTrafficModeForConnector(info.Name),
 		}
 		if conn, ok := reg.Get(info.Name); ok {
+			if capability := connector.ACPAgentCapabilityForConnector(info.Name); capability.Agent || capability.Client {
+				entry.ACP = &capability
+			}
 			opts := connector.SetupOpts{
 				DataDir:      a.configDataDir(),
 				APIAddr:      a.apiAddrForCapabilities(),
@@ -1170,6 +1194,9 @@ func (a *APIServer) handleConnectors(w http.ResponseWriter, r *http.Request) {
 			if cp, ok := conn.(connector.ConnectorCapabilityProvider); ok {
 				caps := cp.Capabilities(opts)
 				entry.Capabilities = &caps
+				if caps.ACP.Agent || caps.ACP.Client {
+					entry.ACP = &caps.ACP
+				}
 				entry.HookCapabilities = &caps.Hooks
 			}
 			if hp, ok := conn.(connector.HookCapabilityProvider); ok {
@@ -2568,6 +2595,8 @@ type guardrailEventRequest struct {
 	Direction      string   `json:"direction"`
 	Model          string   `json:"model"`
 	Action         string   `json:"action"`
+	RawAction      string   `json:"raw_action,omitempty"`
+	WouldBlock     bool     `json:"would_block,omitempty"`
 	Severity       string   `json:"severity"`
 	Reason         string   `json:"reason"`
 	Findings       []string `json:"findings"`
@@ -3230,6 +3259,23 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
+		if (r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate") &&
+			connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
+			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
+			if !ok {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			serveACPSignedResponse(w, authenticated, next, token, nonce)
+			return
+		}
+		if r.URL.Path == "/api/v1/acp/challenge" || r.URL.Path == "/api/v1/acp/evaluate" {
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "missing_acp_authenticated_transport")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
+		}
 
 		token := ""
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {
@@ -3320,6 +3366,16 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 				next.ServeHTTP(w, r)
 				return
 			}
+		}
+		if isACPAPIPath(r.URL.Path) && connector.IsLoopback(r) {
+			if authenticated, ok := a.authenticateACPToken(r, token); ok {
+				r = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+				next.ServeHTTP(w, r)
+				return
+			}
+			a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_scoped_token")
+			http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/v1/inspect/") && connector.IsLoopback(r) && token != "" {
 			hookScope := strings.ToLower(strings.TrimSpace(r.Header.Get("X-DefenseClaw-Connector")))

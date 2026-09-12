@@ -300,9 +300,7 @@ def test_windows_durable_replace_supports_path_beyond_max_path(tmp_path):
     extended_parent = Path(file_permissions._windows_extended_path(parent))
     extended_target = Path(file_permissions._windows_extended_path(target))
     extended_staging = Path(file_permissions._windows_extended_path(staging))
-    extended_root = Path(
-        file_permissions._windows_extended_path(tmp_path / "durable-segment-00")
-    )
+    extended_root = Path(file_permissions._windows_extended_path(tmp_path / "durable-segment-00"))
     try:
         extended_parent.mkdir(parents=True)
         extended_target.write_bytes(b"old")
@@ -1221,6 +1219,40 @@ def test_windows_custody_distinguishes_user_and_system_paths(monkeypatch):
         allow_current_user=False,
     )
     assert problem == f"owner SID {current_sid} is not a trusted custody principal"
+
+
+@pytest.mark.parametrize(
+    ("permissions", "sid", "inheritance", "expected_problem"),
+    [
+        (0x00000002, "S-1-5-32-545", 0, False),  # FILE_WRITE_DATA cannot replace an existing child.
+        (0x00000040, "S-1-5-32-545", 0, True),  # FILE_DELETE_CHILD can replace it.
+        (0x00000002, "S-1-1-0", 0, True),  # Everyone always retains the strict leaf mask.
+        (0x00000040, "S-1-5-32-545", 0x08, False),  # INHERIT_ONLY_ACE does not apply here.
+    ],
+)
+def test_windows_custody_ancestor_uses_replace_authority(
+    monkeypatch,
+    permissions,
+    sid,
+    inheritance,
+    expected_problem,
+):
+    owner_sid = "S-1-5-32-544"
+    fake_os = SimpleNamespace(name="nt", fspath=os.fspath)
+    monkeypatch.setattr(file_permissions, "os", fake_os)
+    monkeypatch.setattr(
+        file_permissions,
+        "_windows_acl_snapshot",
+        lambda _path: (owner_sid, False, [(permissions, 1, inheritance, sid)]),
+    )
+
+    problem = file_permissions.windows_acl_custody_write_error(
+        "synthetic-managed-ancestor",
+        allow_current_user=False,
+        ancestor_replace_only=True,
+    )
+
+    assert (problem is not None) is expected_problem
 
 
 def test_windows_runtime_custody_accepts_trusted_system_writers(monkeypatch):

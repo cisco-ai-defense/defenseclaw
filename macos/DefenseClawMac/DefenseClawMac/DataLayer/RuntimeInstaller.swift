@@ -61,6 +61,8 @@ struct RuntimePayload: Sendable {
     var arch: String
     var gatewayURL: URL
     var gatewaySHA256: String
+    var acpGuardURL: URL
+    var acpGuardSHA256: String
     var wheelURL: URL
     var wheelSHA256: String
     /// Optional dependency overrides — upstream pyproject's [tool.uv]
@@ -88,6 +90,9 @@ struct RuntimePayload: Sendable {
               let gateway = root["gateway"] as? [String: Any],
               let gatewayFile = gateway["file"] as? String,
               let gatewaySHA = gateway["sha256"] as? String,
+              let acpGuard = root["acp_guard"] as? [String: Any],
+              let acpGuardFile = acpGuard["file"] as? String,
+              let acpGuardSHA = acpGuard["sha256"] as? String,
               let wheel = root["wheel"] as? [String: Any],
               let wheelFile = wheel["file"] as? String,
               let wheelSHA = wheel["sha256"] as? String,
@@ -105,6 +110,8 @@ struct RuntimePayload: Sendable {
             arch: (root["arch"] as? String) ?? "",
             gatewayURL: payloadDir.appendingPathComponent(gatewayFile),
             gatewaySHA256: gatewaySHA,
+            acpGuardURL: payloadDir.appendingPathComponent(acpGuardFile),
+            acpGuardSHA256: acpGuardSHA,
             wheelURL: payloadDir.appendingPathComponent(wheelFile),
             wheelSHA256: wheelSHA,
             overridesURL: overridesFile.map(payloadDir.appendingPathComponent),
@@ -124,6 +131,12 @@ struct RuntimePayload: Sendable {
         }
         guard gatewayActual == gatewaySHA256 else {
             return "Bundled gateway does not match its manifest checksum."
+        }
+        guard let acpGuardActual = Self.sha256(of: acpGuardURL) else {
+            return "Bundled ACP guard is missing or unreadable."
+        }
+        guard acpGuardActual == acpGuardSHA256 else {
+            return "Bundled ACP guard does not match its manifest checksum."
         }
         guard let wheelActual = Self.sha256(of: wheelURL) else {
             return "Bundled wheel is missing or unreadable."
@@ -377,7 +390,7 @@ extension AppState {
             return
         }
 
-        // A prior process may have died between the three canonical no-replace
+        // A prior process may have died between the canonical no-replace
         // moves. Recover the exact, inode-bound plan before the ordinary
         // existing-install gate sees that partial activation.
         do {
@@ -708,14 +721,17 @@ extension AppState {
         // descriptor against the bundle manifest. The release build already
         // signed those exact bytes with the fixed gateway identifier; never
         // rewrite the staging inode with the install host's codesign version.
-        // All three canonical targets remain absent until every component is
+        // All four canonical targets remain absent until every component is
         // staged and ready for no-replace activation.
         runtimeInstallState = .running("Staging gateway \(payload.version)")
         let gatewayDest = binDir + "/defenseclaw-gateway"
+        let acpGuardDest = binDir + "/defenseclaw-acp"
         let cliDest = binDir + "/defenseclaw"
         let gatewayStage = gatewayDest + ".install-" + UUID().uuidString
+        let acpGuardStage = acpGuardDest + ".install-" + UUID().uuidString
         let cliStage = cliDest + ".install-" + UUID().uuidString
         var gatewayStageIdentity: RuntimeInstallFilesystem.PathIdentity?
+        var acpGuardStageIdentity: RuntimeInstallFilesystem.PathIdentity?
         do {
             gatewayStageIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
                 source: payload.gatewayURL.path,
@@ -724,7 +740,26 @@ extension AppState {
                 mode: 0o755,
                 expectedSourceSHA256: payload.gatewaySHA256
             )
+            acpGuardStageIdentity = try RuntimeInstallFilesystem.installRegularFileNoReplace(
+                source: payload.acpGuardURL.path,
+                destination: acpGuardStage,
+                expectedParentIdentity: binDirectoryIdentity,
+                mode: 0o755,
+                expectedSourceSHA256: payload.acpGuardSHA256
+            )
         } catch {
+            if let gatewayStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    gatewayStage,
+                    identity: gatewayStageIdentity
+                )
+            }
+            if let acpGuardStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    acpGuardStage,
+                    identity: acpGuardStageIdentity
+                )
+            }
             RuntimeInstallFilesystem.cleanupFailedFreshInstall(
                 stagingDir: stagingDir,
                 stagingIdentity: stagingIdentity,
@@ -742,6 +777,12 @@ extension AppState {
                 RuntimeInstallFilesystem.cleanupOwnedPath(
                     gatewayStage,
                     identity: gatewayStageIdentity
+                )
+            }
+            if let acpGuardStageIdentity {
+                RuntimeInstallFilesystem.cleanupOwnedPath(
+                    acpGuardStage,
+                    identity: acpGuardStageIdentity
                 )
             }
             if let cliStageIdentity {
@@ -784,6 +825,33 @@ extension AppState {
             )
             return
         }
+        guard let attestedACPGuardIdentity = acpGuardStageIdentity else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed("Release-attested ACP guard staging identity is unavailable.")
+            return
+        }
+        let acpSignatureVerify = await installerStep(
+            "Verify release-attested ACP guard signature and identifier",
+            binary: "/usr/bin/codesign",
+            arguments: [
+                "--verify", "--strict", "-R",
+                #"=identifier "com.cisco.defenseclaw.acp""#,
+                "--verbose=4", acpGuardStage,
+            ],
+            category: "info"
+        )
+        guard acpSignatureVerify.succeeded,
+              RuntimeInstallFilesystem.pathIdentity(binDir) == binDirectoryIdentity,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
+        else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed(
+                "Release-attested ACP guard signature requirement, parent, or hash verification failed; nothing was activated."
+            )
+            return
+        }
         let stagedGatewayVersion = await installerStep(
             "Verify staged DefenseClaw gateway",
             binary: gatewayStage,
@@ -800,6 +868,24 @@ extension AppState {
             cleanupKnownStages()
             runtimeInstallState = .failed(
                 "Staged gateway did not report expected version \(payload.version), or its parent/inode changed; nothing was activated."
+            )
+            return
+        }
+        let stagedACPGuardVersion = await installerStep(
+            "Verify staged DefenseClaw ACP guard",
+            binary: acpGuardStage,
+            arguments: ["--version"],
+            category: "info"
+        )
+        guard stagedACPGuardVersion.succeeded,
+              UpdateChecker.parseVersion(stagedACPGuardVersion.output) == payload.version,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
+        else {
+            cleanupKnownStages()
+            runtimeInstallState = .failed(
+                "Staged ACP guard did not report expected version \(payload.version), or its inode changed; nothing was activated."
             )
             return
         }
@@ -821,7 +907,10 @@ extension AppState {
         guard RuntimeInstallFilesystem.pathIdentity(binDir) == binDirectoryIdentity,
               RuntimeInstallFilesystem.pathIdentity(gatewayStage) == attestedGatewayIdentity,
               RuntimePayload.sha256(of: URL(fileURLWithPath: gatewayStage))
-                == payload.gatewaySHA256
+                == payload.gatewaySHA256,
+              RuntimeInstallFilesystem.pathIdentity(acpGuardStage) == attestedACPGuardIdentity,
+              RuntimePayload.sha256(of: URL(fileURLWithPath: acpGuardStage))
+                == payload.acpGuardSHA256
         else {
             cleanupKnownStages()
             runtimeInstallState = .failed(
@@ -830,7 +919,7 @@ extension AppState {
             return
         }
 
-        guard let gatewayStageIdentity, let cliStageIdentity,
+        guard let gatewayStageIdentity, let acpGuardStageIdentity, let cliStageIdentity,
               let venvStageIdentity = RuntimeInstallFilesystem.pathIdentity(stagingDir),
               venvStageIdentity == stagingIdentity
         else {
@@ -850,12 +939,13 @@ extension AppState {
             activationTargets = try RuntimeInstallFilesystem.prepareActivationTargets([
                 (staged: stagingDir, destination: venvDir),
                 (staged: gatewayStage, destination: gatewayDest),
+                (staged: acpGuardStage, destination: acpGuardDest),
                 (staged: cliStage, destination: cliDest),
             ])
             // Ensure preparation captured exactly the inodes created by this
             // attempt before entering the no-replace transaction.
             guard activationTargets.map(\.stagedIdentity) == [
-                venvStageIdentity, gatewayStageIdentity, cliStageIdentity,
+                venvStageIdentity, gatewayStageIdentity, acpGuardStageIdentity, cliStageIdentity,
             ] else {
                 throw RuntimeInstallFilesystem.ActivationError.missingOrChangedStage(stagingDir)
             }
@@ -871,6 +961,10 @@ extension AppState {
             _ = RuntimeInstallFilesystem.cleanupOwnedPath(
                 gatewayStage,
                 identity: gatewayStageIdentity
+            )
+            _ = RuntimeInstallFilesystem.cleanupOwnedPath(
+                acpGuardStage,
+                identity: acpGuardStageIdentity
             )
             _ = RuntimeInstallFilesystem.cleanupOwnedPath(
                 cliStage,
@@ -924,6 +1018,23 @@ extension AppState {
                 preserved.isEmpty
                     ? "Installed gateway did not report expected version \(payload.version); this attempt was removed and can be retried."
                     : "Installed gateway version check failed and concurrent state was preserved at \(preserved.joined(separator: ", "))."
+            )
+            return
+        }
+        let acpGuardVerify = await installerStep(
+            "Verify DefenseClaw ACP guard",
+            binary: acpGuardDest,
+            arguments: ["--version"],
+            category: "info"
+        )
+        guard acpGuardVerify.succeeded,
+              UpdateChecker.parseVersion(acpGuardVerify.output) == payload.version
+        else {
+            let preserved = RuntimeInstallFilesystem.rollbackActivation(activation)
+            runtimeInstallState = .failed(
+                preserved.isEmpty
+                    ? "Installed ACP guard did not report expected version \(payload.version); this attempt was removed and can be retried."
+                    : "Installed ACP guard version check failed and concurrent state was preserved at \(preserved.joined(separator: ", "))."
             )
             return
         }

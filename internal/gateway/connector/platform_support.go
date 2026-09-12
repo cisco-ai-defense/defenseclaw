@@ -66,6 +66,10 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 		Status: PlatformSupported,
 		Reason: "Codex CLI and the DefenseClaw hook entrypoint are supported on native Windows x64; authentic packaged plus official-client validation metadata is not recorded and live evidence remains false.",
 	},
+	"kiro": {
+		Status: PlatformSupported,
+		Reason: "Kiro CLI ACP stdio mediation is supported on native Windows x64; release certification requires official-client live evidence.",
+	},
 	"claudecode": {
 		Status: PlatformSupported,
 		Reason: "Claude Code and the DefenseClaw native executable hook entrypoint are supported on native Windows x64; immutable packaged plus official-client validation metadata is not recorded and live evidence remains false.",
@@ -76,7 +80,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"devin": {
 		Status: PlatformSupported,
-		Reason: "Native Devin CLI lifecycle hooks are supported on Windows x64 using the pinned 3000.4.25 CLI; cloud Devin, proxy, ACP, native OTLP, and managed higher-layer enforcement are not covered.",
+		Reason: "Native Devin CLI lifecycle hooks are supported on Windows x64 using the pinned 3000.4.25 CLI; generic ACP mediation is cataloged but official-client live certification, cloud Devin, proxy, native OTLP, and managed higher-layer enforcement are not covered.",
 	},
 	"geminicli": {
 		Status: PlatformUnsupported,

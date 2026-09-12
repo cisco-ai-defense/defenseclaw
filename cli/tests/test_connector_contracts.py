@@ -42,6 +42,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -67,7 +68,7 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(HOOK_CONTRACT_MANIFEST["schema_version"], 2)
         self.assertEqual(
             set(HOOK_CONTRACT_MANIFEST["connectors"]),
-            set(KNOWN_CONNECTORS),
+            set(KNOWN_CONNECTORS) | set(ACP_ONLY_CONNECTORS),
         )
 
     def test_live_e2e_pretool_goldens_follow_exact_default_contract(self) -> None:

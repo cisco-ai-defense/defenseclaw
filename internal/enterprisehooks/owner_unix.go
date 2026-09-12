@@ -11,8 +11,10 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"os/user"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
@@ -59,6 +61,23 @@ func resolveOwner(home string, uid, gid int) (int, int, error) {
 	}
 	if uid == 0 {
 		return 0, 0, fmt.Errorf("enterprise hooks: refusing to target uid 0")
+	}
+	if err := validateHomeOwner(home, uid); err != nil {
+		return 0, 0, err
+	}
+	account, err := user.LookupId(strconv.Itoa(uid))
+	if err != nil {
+		return 0, 0, fmt.Errorf("enterprise hooks: resolve target uid %d: %w", uid, err)
+	}
+	accountGID, err := strconv.Atoi(account.Gid)
+	if err != nil || accountGID < 0 {
+		return 0, 0, fmt.Errorf("enterprise hooks: target uid %d has an invalid primary gid", uid)
+	}
+	if gid != accountGID {
+		return 0, 0, fmt.Errorf(
+			"enterprise hooks: target gid %d does not match uid %d primary gid %d",
+			gid, uid, accountGID,
+		)
 	}
 	return uid, gid, nil
 }
@@ -143,6 +162,18 @@ func withOwnerCredentials(uid, gid int, fn func() error) (err error) {
 		return fmt.Errorf("enterprise hooks: drop euid to %d: %w", uid, err)
 	}
 	return fn()
+}
+
+func runAsTarget(target TargetCredentials, fn func() error) error {
+	home, err := validateUserHome(target.UserHome)
+	if err != nil {
+		return err
+	}
+	uid, gid, err := resolveOwner(home, target.UID, target.GID)
+	if err != nil {
+		return err
+	}
+	return withOwnerCredentials(uid, gid, fn)
 }
 
 func chmodOwnedPath(path string, mode os.FileMode) error {

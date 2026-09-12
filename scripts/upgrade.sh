@@ -118,6 +118,7 @@ readonly BRIDGE_PHASE1_STATE_NAMES_JSON='[".env",".migration_state.json","guardr
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly UPGRADE_PROTOCOL_VERSION=2
 readonly OBSERVABILITY_V8_HARD_CUT_VERSION="0.8.5"
+readonly ACP_GUARD_RELEASE_VERSION="0.8.11"
 readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
 readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
 readonly UV_BOOTSTRAP_VERSION="0.11.28"
@@ -5173,6 +5174,183 @@ preflight_release_artifacts() {
     ok "Release ${RELEASE_VERSION} artifacts verified"
 }
 
+publish_acp_guard_with_contracts() {
+    local candidate="$1" active="$2" data_dir="$3" operation="${4:-publish}"
+    python3 - "${candidate}" "${active}" "${data_dir}" "${operation}" <<'PY'
+import hashlib
+import json
+import os
+import shutil
+import stat
+import sys
+import tempfile
+
+candidate, active, data_dir = map(os.path.abspath, sys.argv[1:4])
+operation = sys.argv[4]
+if operation not in {"preflight", "publish"}:
+    raise RuntimeError("unsupported ACP guard publication operation")
+max_lock_bytes = 64 * 1024
+hex_characters = frozenset("0123456789abcdefABCDEF")
+
+
+def digest(path):
+    value = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            value.update(chunk)
+    return value.hexdigest()
+
+
+def fsync_directory(path):
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def atomic_private_write(path, payload):
+    descriptor, temporary = tempfile.mkstemp(prefix=".acp-contract-upgrade.", dir=os.path.dirname(path))
+    try:
+        os.fchmod(descriptor, 0o600)
+        view = memoryview(payload)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short ACP contract-lock write")
+            view = view[written:]
+        os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = -1
+        os.replace(temporary, path)
+        temporary = ""
+        fsync_directory(os.path.dirname(path))
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        if temporary:
+            try:
+                os.unlink(temporary)
+            except FileNotFoundError:
+                pass
+
+
+candidate_info = os.lstat(candidate)
+if not stat.S_ISREG(candidate_info.st_mode) or stat.S_ISLNK(candidate_info.st_mode):
+    raise RuntimeError("staged ACP guard is not a regular file")
+
+new_digest = digest(candidate)
+target = os.path.normcase(os.path.realpath(active))
+active_existed = os.path.lexists(active)
+active_info = None
+if active_existed:
+    active_info = os.lstat(active)
+    if stat.S_ISLNK(active_info.st_mode) or not stat.S_ISREG(active_info.st_mode):
+        raise RuntimeError("active ACP guard is not a regular file")
+current_digest = digest(active) if active_existed else None
+updates = []
+lock_dir = os.path.join(data_dir, "acp")
+if os.path.lexists(lock_dir):
+    lock_dir_info = os.lstat(lock_dir)
+    if stat.S_ISLNK(lock_dir_info.st_mode) or not stat.S_ISDIR(lock_dir_info.st_mode):
+        raise RuntimeError("ACP runtime contract directory is unsafe")
+    for name in sorted(os.listdir(lock_dir)):
+        if not name.endswith(".contract-lock.json"):
+            continue
+        path = os.path.abspath(os.path.join(lock_dir, name))
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            raise RuntimeError(f"ACP runtime contract lock is unsafe: {path}")
+        if stat.S_IMODE(info.st_mode) & 0o077:
+            raise RuntimeError(f"ACP runtime contract lock permissions are too broad: {path}")
+        with open(path, "rb") as stream:
+            original = stream.read(max_lock_bytes + 1)
+        if not original or len(original) > max_lock_bytes:
+            raise RuntimeError(f"ACP runtime contract lock has an invalid size: {path}")
+        try:
+            document = json.loads(original)
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"ACP runtime contract lock is malformed: {path}") from exc
+        if not isinstance(document, dict) or document.get("version") != 1:
+            raise RuntimeError(f"ACP runtime contract lock has an unsupported version: {path}")
+        guard = document.get("guard")
+        if not isinstance(guard, dict) or not isinstance(guard.get("path"), str):
+            raise RuntimeError(f"ACP runtime contract lock omits its guard identity: {path}")
+        if os.path.normcase(os.path.realpath(os.path.expanduser(guard["path"]))) != target:
+            continue
+        old_digest = guard.get("sha256")
+        if (
+            not isinstance(old_digest, str)
+            or len(old_digest) != 64
+            or any(character not in hex_characters for character in old_digest)
+        ):
+            raise RuntimeError(f"ACP runtime contract lock has an invalid guard digest: {path}")
+        managed_custody = guard.get("managed_custody", False)
+        if not isinstance(managed_custody, bool):
+            raise RuntimeError(f"ACP runtime contract lock has invalid custody metadata: {path}")
+        if managed_custody:
+            continue
+        if current_digest is None or old_digest.lower() != current_digest.lower():
+            raise RuntimeError(f"ACP runtime contract lock does not match the active guard: {path}")
+        guard["sha256"] = new_digest
+        updated = (json.dumps(document, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        if len(updated) > max_lock_bytes:
+            raise RuntimeError(f"ACP runtime contract lock exceeds its size limit: {path}")
+        updates.append((path, original, updated))
+
+if operation == "preflight":
+    raise SystemExit(0)
+
+rollback = ""
+if active_existed:
+    descriptor, rollback = tempfile.mkstemp(prefix=".defenseclaw-acp.rollback.", dir=os.path.dirname(active))
+    os.close(descriptor)
+    shutil.copyfile(active, rollback)
+    os.chmod(rollback, stat.S_IMODE(active_info.st_mode))
+    with open(rollback, "rb") as stream:
+        os.fsync(stream.fileno())
+
+applied = []
+published = False
+try:
+    os.replace(candidate, active)
+    published = True
+    fsync_directory(os.path.dirname(active))
+    for update in updates:
+        atomic_private_write(update[0], update[2])
+        applied.append(update)
+except BaseException as publish_error:
+    rollback_errors = []
+    for path, original, _updated in reversed(applied):
+        try:
+            atomic_private_write(path, original)
+        except OSError as rollback_error:
+            rollback_errors.append(f"{path}: {rollback_error}")
+    if published:
+        try:
+            if active_existed and rollback:
+                os.replace(rollback, active)
+                rollback = ""
+            else:
+                os.unlink(active)
+            fsync_directory(os.path.dirname(active))
+        except OSError as rollback_error:
+            rollback_errors.append(f"ACP guard: {rollback_error}; recovery copy: {rollback or 'unavailable'}")
+            rollback = ""
+    if rollback_errors:
+        raise RuntimeError(
+            "ACP guard/contract publication failed and rollback also failed: " + "; ".join(rollback_errors)
+        ) from publish_error
+    raise
+finally:
+    if rollback:
+        try:
+            os.unlink(rollback)
+        except FileNotFoundError:
+            pass
+PY
+}
+
 configure_release
 
 # ── Download artifacts to staging (gateway still running) ─────────────────────
@@ -5188,6 +5366,7 @@ BRIDGE_CANDIDATE_VENV=""
 BRIDGE_SOURCE_WAS_RUNNING=0
 BRIDGE_SOURCE_HEALTH_URL=""
 BRIDGE_GATEWAY_INSTALL_TEMP=""
+ACP_GUARD_INSTALL_TEMP=""
 BRIDGE_RECOVERY_PLAN_ID=""
 BRIDGE_STATE_SNAPSHOT_READY=0
 BRIDGE_EXPECTED_GATEWAY_SHA256=""
@@ -5214,6 +5393,7 @@ upgrade_exit_trap() {
             || true
     fi
     [[ -z "${BRIDGE_GATEWAY_INSTALL_TEMP:-}" ]] || rm -f "${BRIDGE_GATEWAY_INSTALL_TEMP}"
+    [[ -z "${ACP_GUARD_INSTALL_TEMP:-}" ]] || rm -f "${ACP_GUARD_INSTALL_TEMP}"
     [[ -z "${BRIDGE_CANDIDATE_VENV:-}" ]] || rm -rf "${BRIDGE_CANDIDATE_VENV}"
     cleanup_upgrade_staging
     release_upgrade_lock
@@ -8368,10 +8548,19 @@ tar -xzf "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}" -C "${STAGING_DIR}" \
     || die "Could not extract gateway tarball"
 [[ -f "${STAGING_DIR}/defenseclaw" ]] \
     || die "Gateway tarball did not contain the expected defenseclaw binary"
+if version_gte "${RELEASE_VERSION}" "${ACP_GUARD_RELEASE_VERSION}"; then
+    [[ -f "${STAGING_DIR}/defenseclaw-acp" && ! -L "${STAGING_DIR}/defenseclaw-acp" ]] \
+        || die "Gateway tarball did not contain the required defenseclaw-acp guard"
+fi
 if [[ "${OS}" == "darwin" ]]; then
     /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.gateway \
         "${STAGING_DIR}/defenseclaw" 2>/dev/null \
         || die "Could not ad-hoc sign the staged macOS gateway; no services changed."
+    if [[ -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+        /usr/bin/codesign -f -s - -i com.cisco.defenseclaw.acp \
+            "${STAGING_DIR}/defenseclaw-acp" 2>/dev/null \
+            || die "Could not ad-hoc sign the staged macOS ACP guard; no services changed."
+    fi
 fi
 ok "Gateway binary downloaded"
 
@@ -8399,6 +8588,12 @@ if [[ "${BRIDGE_PHASE1}" -eq 1 ]]; then
         preflight_081_observability_source \
             || die "The installed 0.8.1 observability state is malformed or ambiguous for the authenticated hard-cut migration. No installed state changed."
     fi
+fi
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+    publish_acp_guard_with_contracts \
+        "${STAGING_DIR}/defenseclaw-acp" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}" preflight \
+        || die "ACP guard runtime-contract preflight failed; no services changed."
+    ok "ACP guard runtime contracts verified before service stop"
 fi
 
 # ── Confirm ───────────────────────────────────────────────────────────────────
@@ -9211,6 +9406,14 @@ if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${INSTALL_DIR}/defenseclaw-gateway" ]]; th
         && ok "Snapshotted previous gateway → ${BACKUP_DIR}/defenseclaw-gateway.previous" \
         || warn "Could not snapshot previous gateway binary"
 fi
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${INSTALL_DIR}/defenseclaw-acp" ]]; then
+    if cp "${INSTALL_DIR}/defenseclaw-acp" "${BACKUP_DIR}/defenseclaw-acp.previous" \
+        && chmod +x "${BACKUP_DIR}/defenseclaw-acp.previous"; then
+        ok "Snapshotted previous ACP guard → ${BACKUP_DIR}/defenseclaw-acp.previous"
+    else
+        warn "Could not snapshot previous ACP guard binary"
+    fi
+fi
 
 BRIDGE_GATEWAY_INSTALL_TEMP="$(mktemp "${INSTALL_DIR}/.defenseclaw-gateway.upgrade.XXXXXX")" \
     || die "Could not create a collision-safe gateway activation file"
@@ -9282,6 +9485,21 @@ else
 fi
 BRIDGE_GATEWAY_INSTALL_TEMP=""
 ok "Gateway binary installed"
+
+if [[ "${BRIDGE_PHASE1}" -ne 1 && -f "${STAGING_DIR}/defenseclaw-acp" ]]; then
+    ACP_GUARD_INSTALL_TEMP="$(mktemp "${INSTALL_DIR}/.defenseclaw-acp.upgrade.XXXXXX")" \
+        || die "Could not create a collision-safe ACP guard activation file"
+    cp "${STAGING_DIR}/defenseclaw-acp" "${ACP_GUARD_INSTALL_TEMP}"
+    chmod +x "${ACP_GUARD_INSTALL_TEMP}"
+    publish_acp_guard_with_contracts \
+        "${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}" \
+        || die "Could not transactionally publish the ACP guard and rebind runtime contracts"
+    ACP_GUARD_INSTALL_TEMP=""
+    acp_version_output="$("${INSTALL_DIR}/defenseclaw-acp" --version 2>&1 || true)"
+    printf '%s' "${acp_version_output}" | grep -Fq "${RELEASE_VERSION}" \
+        || die "ACP guard version verification failed: expected ${RELEASE_VERSION}; binary reported: $(printf '%s' "${acp_version_output}" | head -n1 | cut -c1-200)"
+    ok "ACP guard binary installed and verified (${RELEASE_VERSION})"
+fi
 
 # Verify the freshly-installed binary reports the expected version. A
 # truncated tarball or failed copy surfaces here as a warning instead of

@@ -435,6 +435,7 @@ jobs:
           python3 scripts/release_candidate.py extract-gateway \
             --release-dir dist \
             --output macos-runtime/defenseclaw \
+            --acp-output macos-runtime/defenseclaw-acp \
             --version "$RELEASE_TAG" \
             --os darwin \
             --arch arm64
@@ -454,6 +455,7 @@ jobs:
           # credentials fail in preflight and again inside the builder.
           MACOS_REQUIRE_NOTARIZATION: "false"
           MACOS_GATEWAY_INPUT: ${{ github.workspace }}/macos-runtime/defenseclaw
+          MACOS_ACP_INPUT: ${{ github.workspace }}/macos-runtime/defenseclaw-acp
         run: scripts/build-macos-app-release.sh "$RELEASE_VERSION" macos-candidate
 
       - name: Accept notarized or explicitly unverified macOS assets

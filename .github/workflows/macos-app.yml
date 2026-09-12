@@ -200,6 +200,7 @@ jobs:
           python3 scripts/release_candidate.py extract-gateway \
             --release-dir dist \
             --output build/macos-app/runtime-input/defenseclaw \
+            --acp-output build/macos-app/runtime-input/defenseclaw-acp \
             --version "$version" \
             --os darwin \
             --arch arm64
@@ -258,6 +259,8 @@ jobs:
           uv cache clean
           echo "MACOS_CI_RELEASE_VERSION=$version" >> "$GITHUB_ENV"
           echo "MACOS_GATEWAY_INPUT=$GITHUB_WORKSPACE/build/macos-app/runtime-input/defenseclaw" \
+            >> "$GITHUB_ENV"
+          echo "MACOS_ACP_INPUT=$GITHUB_WORKSPACE/build/macos-app/runtime-input/defenseclaw-acp" \
             >> "$GITHUB_ENV"
       - name: Build unified ad-hoc release artifact
         run: scripts/build-macos-app-release.sh "$MACOS_CI_RELEASE_VERSION" dist
