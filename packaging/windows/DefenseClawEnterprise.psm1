@@ -19576,6 +19576,7 @@ function Invoke-DefenseClawInstallLikeLifecycle {
         $replaced = @($Sources.Keys | Microsoft.PowerShell.Core\Where-Object {
             $_ -in @(
                 'gateway',
+                'acp',
                 'broker',
                 'hook',
                 'sensor_helper',

@@ -244,6 +244,7 @@ func BuildTurnEvaluationPayload(frames []json.RawMessage) (json.RawMessage, erro
 		Frames:  make([]json.RawMessage, 0, len(frames)),
 		Streams: make(map[string]string),
 	}
+	streamBuilders := make(map[string]*strings.Builder)
 	turnBytes := 0
 	for _, raw := range frames {
 		if len(raw) > MaxTurnBuffer-turnBytes-1 {
@@ -260,9 +261,12 @@ func BuildTurnEvaluationPayload(frames []json.RawMessage) (json.RawMessage, erro
 			return nil, fmt.Errorf("decode ACP completed-turn frame: %w", err)
 		}
 		scopeKey := sha256.Sum256([]byte(turnStreamScope(msg, value)))
-		if err := collectTurnStrings(value, scopeKey, payload.Streams); err != nil {
+		if err := collectTurnStrings(value, scopeKey, streamBuilders); err != nil {
 			return nil, err
 		}
+	}
+	for key, builder := range streamBuilders {
+		payload.Streams[key] = builder.String()
 	}
 	out, err := json.Marshal(payload)
 	if err != nil {
@@ -288,14 +292,19 @@ func turnStreamScope(msg Message, value any) string {
 		"/v:" + escapeTurnPathSegment(variant) + "/t:" + escapeTurnPathSegment(toolCallID)
 }
 
-func collectTurnStrings(value any, path [sha256.Size]byte, streams map[string]string) error {
+func collectTurnStrings(value any, path [sha256.Size]byte, streams map[string]*strings.Builder) error {
 	switch item := value.(type) {
 	case string:
 		key := hex.EncodeToString(path[:])
-		if _, ok := streams[key]; !ok && len(streams) >= MaxTurnStreams {
-			return errors.New("ACP completed-turn stream count exceeded its bound")
+		builder, ok := streams[key]
+		if !ok {
+			if len(streams) >= MaxTurnStreams {
+				return errors.New("ACP completed-turn stream count exceeded its bound")
+			}
+			builder = new(strings.Builder)
+			streams[key] = builder
 		}
-		streams[key] += item
+		_, _ = builder.WriteString(item)
 	case []any:
 		childPath := advanceTurnStreamPath(path, "a:*")
 		for _, child := range item {

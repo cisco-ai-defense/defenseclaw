@@ -598,6 +598,15 @@ def test_enterprise_process_json_and_machine_root_contracts() -> None:
     assert "CurrentUserKnownFolderPath" not in claude_policy
 
 
+def test_windows_enterprise_upgrade_treats_acp_as_replaceable() -> None:
+    module = read(MODULE)
+    replacement_start = module.index("$replaced = @($Sources.Keys")
+    replacement_end = module.index("Assert-DefenseClawRecordedArtifactHashes", replacement_start)
+    replacement = module[replacement_start:replacement_end]
+
+    assert "'acp'," in replacement
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows PowerShell")
 def test_poisoned_program_root_environment_cannot_redirect_defaults(
     tmp_path: Path,
