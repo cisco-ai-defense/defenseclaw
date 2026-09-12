@@ -5559,7 +5559,7 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert 'ApplicationStarted' not in cleanup[
         cleanup_identity_start : cleanup_report_start
     ]
-    assert 'writeEnterpriseHookProtectedFile(path, body)' in cleanup
+    assert 'writeEnterpriseHookAdminOnlyFile(path, body)' in cleanup
     assert 'writeWindowsTargetRuntimeProtectedJSON(path, receipt)' not in cleanup
     assert 'errors.Is(' in cleanup
     assert 'ErrWindowsManagedHookContractCleanupSuperseded' in cleanup
@@ -5569,7 +5569,11 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert "'contract_locks_finalized'" in state_purge
     assert "'state_root_removed'" in state_purge
     assert state_purge.count('Write-DefenseClawStatePurgeIntentAtomic `') == 3
-    assert '[IO.File]::Replace($temporary, $destination, $null, $true)' in purge_writer
+    # File.Replace requires a non-empty backup path on both .NET Framework
+    # and modern .NET; passing $null throws "path is not of a legal form".
+    # The writer now stages a unique same-directory backup and retires it
+    # after the swap completes.
+    assert '[IO.File]::Replace($temporary, $destination, $backup, $true)' in purge_writer
     assert '[IO.File]::Move($temporary, $destination)' in purge_writer
     assert 'Microsoft.PowerShell.Management\\Move-Item' not in purge_writer
     assert purge_writer.index('Set-DefenseClawPathAcl `') < purge_writer.index(

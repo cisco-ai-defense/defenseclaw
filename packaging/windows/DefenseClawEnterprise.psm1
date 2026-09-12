@@ -17360,10 +17360,28 @@ function Write-DefenseClawStatePurgeIntentAtomic {
             # FileSystemProvider's Move-Item -Force deletes the destination
             # before moving the staged file on Windows. File.Replace keeps the
             # prior or next authenticated phase continuously visible.
-            # The four-argument .NET Framework/.NET overload accepts a null
-            # backup name. No backup is needed because either complete phase
-            # is sufficient for idempotent retry.
-            [IO.File]::Replace($temporary, $destination, $null, $true)
+            #
+            # File.Replace requires a non-empty backup path on both .NET
+            # Framework and modern .NET; passing $null throws
+            # "The path is not of a legal form." Stage a unique
+            # same-directory backup, run Replace, then retire the backup
+            # after the swap completes. This mirrors the atomic-replace
+            # pattern in the sibling helper above (~line 3851).
+            $backup = "$destination.backup.$([Guid]::NewGuid().ToString('N'))"
+            Assert-DefenseClawNoReparsePath -Path $backup -AllowMissingLeaf
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                throw "state purge intent backup path unexpectedly exists: $backup"
+            }
+            try {
+                [IO.File]::Replace($temporary, $destination, $backup, $true)
+            }
+            finally {
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                    Microsoft.PowerShell.Management\Remove-Item `
+                        -LiteralPath $backup `
+                        -Force
+                }
+            }
         }
         else {
             # File.Move is no-replace for the first publication.
