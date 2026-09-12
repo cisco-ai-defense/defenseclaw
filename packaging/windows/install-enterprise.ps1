@@ -21,6 +21,7 @@ param(
     [string]$BrokerBinary,
     [string]$ProviderLibrary,
     [string]$GatewayBinary,
+    [string]$ACPBinary,
     [string]$HookBinary,
     [string]$SensorHelperBinary,
     [string]$CLIBinary,
@@ -3071,6 +3072,7 @@ try {
         BrokerBinary = $BrokerBinary
         ProviderLibrary = $ProviderLibrary
         GatewayBinary = $GatewayBinary
+        ACPBinary = $ACPBinary
         HookBinary = $HookBinary
         SensorHelperBinary = $SensorHelperBinary
         CLIBinary = $CLIBinary

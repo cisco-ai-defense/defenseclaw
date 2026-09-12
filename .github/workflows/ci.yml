@@ -913,14 +913,19 @@ jobs:
       - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
         with:
           go-version-file: go.mod
-      - name: Build enterprise gateway CLI
+      - name: Build enterprise gateway and ACP CLIs
         shell: bash
-        run: go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
+        run: |
+          go build -o "$RUNNER_TEMP/defenseclaw-gateway" ./cmd/defenseclaw
+          go build -o "$RUNNER_TEMP/defenseclaw-acp" ./cmd/defenseclaw-acp
       - name: Test managed package ownership enforcement
         shell: bash
         env:
           MACOS_ENTERPRISE_PACKAGING_SMOKE: "1"
-        run: ./scripts/test-macos-enterprise-packaging.sh "$RUNNER_TEMP/defenseclaw-gateway"
+        run: |
+          ./scripts/test-macos-enterprise-packaging.sh \
+            "$RUNNER_TEMP/defenseclaw-gateway" \
+            "$RUNNER_TEMP/defenseclaw-acp"
 
   python-audit:
     name: Python Dependency Audit

@@ -48,10 +48,13 @@ sha256_of() {
 [ "$(uname -s)" = Darwin ] || fail "this smoke test requires macOS"
 [ "$(id -u)" -ne 0 ] || fail "run as a non-root CI user"
 [ "${MACOS_ENTERPRISE_PACKAGING_SMOKE:-}" = 1 ] || fail "set MACOS_ENTERPRISE_PACKAGING_SMOKE=1 on a disposable host"
-[ "$#" -eq 1 ] || fail "usage: $0 <defenseclaw-gateway-binary>"
+[ "$#" -eq 2 ] || fail "usage: $0 <defenseclaw-gateway-binary> <defenseclaw-acp-binary>"
 
 binary="$(cd "$(dirname "$1")" && pwd -P)/$(basename "$1")"
 [ -f "$binary" ] && [ ! -L "$binary" ] && [ -x "$binary" ] || fail "binary must be a regular executable"
+acp_binary="$(cd "$(dirname "$2")" && pwd -P)/$(basename "$2")"
+[ -f "$acp_binary" ] && [ ! -L "$acp_binary" ] && [ -x "$acp_binary" ] \
+    || fail "ACP binary must be a regular executable"
 sudo -n true || fail "passwordless sudo is required"
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
@@ -62,6 +65,7 @@ gateway_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist
 guardian_plist=/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist
 log_dir=/Library/Logs/Cisco/SecureClient/DefenseClaw
 gateway_dest="${managed_root}/bin/defenseclaw-gateway"
+acp_dest="${managed_root}/bin/defenseclaw-acp"
 legacy_binary_root=/Library/DefenseClaw
 legacy_managed_root="/Library/Application Support/DefenseClaw"
 legacy_log_dir=/Library/Logs/DefenseClaw
@@ -169,6 +173,7 @@ manifest_source="${trusted_fixture}/targets.yaml"
 
 sudo -n "$installer" \
     --binary "$binary" \
+    --acp-binary "$acp_binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start
@@ -178,11 +183,16 @@ wheel_gid="$(stat -f '%g' /Library)"
 [ "$(sudo -n stat -f '%g' "$config_dest")" = "$wheel_gid" ] || fail "managed config group is not wheel"
 [ "$(sudo -n stat -f '%Lp' "$config_dest")" = 640 ] || fail "managed config mode is not 0640"
 [ ! -w "$config_dest" ] || fail "standard user can write managed config"
+[ "$(sudo -n stat -f '%u' "$acp_dest")" = 0 ] || fail "ACP guard is not root-owned"
+[ "$(sudo -n stat -f '%g' "$acp_dest")" = "$wheel_gid" ] || fail "ACP guard group is not wheel"
+[ "$(sudo -n stat -f '%Lp' "$acp_dest")" = 755 ] || fail "ACP guard mode is not 0755"
+[ ! -w "$acp_dest" ] || fail "standard user can write ACP guard"
 assert_no_defenseclaw_identity "installer created a defenseclaw identity during fresh install"
 
 # Record hashes so we can prove the reinstall below actually swapped the files.
 config_hash_after_install="$(sha256_of "$config_dest")"
 gateway_hash_after_install="$(sha256_of "$gateway_dest")"
+acp_hash_after_install="$(sha256_of "$acp_dest")"
 
 # Drop a marker inside the per-user probe home so we can verify a
 # reinstall doesn't touch it.
@@ -201,6 +211,7 @@ config_hash_before_reinstall="$(sha256_of "$config_dest")"
 
 sudo -n "$installer" \
     --binary "$binary" \
+    --acp-binary "$acp_binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start >"${fixture}/reinstall.stdout" 2>"${fixture}/reinstall.stderr" \
@@ -220,6 +231,9 @@ config_hash_after_reinstall="$(sha256_of "$config_dest")"
 gateway_hash_after_reinstall="$(sha256_of "$gateway_dest")"
 [ "$gateway_hash_after_reinstall" = "$gateway_hash_after_install" ] \
     || fail "reinstall did not restore gateway binary to source content"
+acp_hash_after_reinstall="$(sha256_of "$acp_dest")"
+[ "$acp_hash_after_reinstall" = "$acp_hash_after_install" ] \
+    || fail "reinstall did not restore ACP guard to source content"
 
 # Per-user probe home must be untouched.
 [ "$(cat "${probe_marker}/existing-state")" = preserve ] \
@@ -245,6 +259,7 @@ chmod 0666 "${writable_config_dir}/config.yaml" "${writable_config_dir}/targets.
 
 if sudo -n "$installer" \
     --binary "$binary" \
+    --acp-binary "$acp_binary" \
     --config "${writable_config_dir}/config.yaml" \
     --manifest "${writable_config_dir}/targets.yaml" \
     --no-start >"${fixture}/untrusted-source.stdout" 2>"${fixture}/untrusted-source.stderr"; then
@@ -259,6 +274,8 @@ grep -Fq "managed config is not root-owned" "${fixture}/untrusted-source.stderr"
     || fail "untrusted-source refusal modified managed config"
 [ "$(sha256_of "$gateway_dest")" = "$gateway_hash_after_reinstall" ] \
     || fail "untrusted-source refusal modified gateway binary"
+[ "$(sha256_of "$acp_dest")" = "$acp_hash_after_reinstall" ] \
+    || fail "untrusted-source refusal modified ACP guard"
 
 # ---- 4. Legacy path relocation -----------------------------------------
 # Pre-create a legacy path and re-run; the reinstaller should relocate
@@ -268,6 +285,7 @@ sudo -n mkdir -p -- "$legacy_binary_root"
 printf 'legacy-content\n' | sudo -n tee -- "${legacy_binary_root}/marker" >/dev/null
 sudo -n "$installer" \
     --binary "$binary" \
+    --acp-binary "$acp_binary" \
     --config "$config_source" \
     --manifest "$manifest_source" \
     --no-start >"${fixture}/legacy.stdout" 2>"${fixture}/legacy.stderr" \

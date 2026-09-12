@@ -513,6 +513,7 @@ $Installer = Join-Path $Stage 'install-enterprise.ps1'
   -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  -ACPBinary (Join-Path $Stage 'defenseclaw-acp.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -531,6 +532,7 @@ $DefenseClaw = Join-Path $Stage 'defenseclaw.exe'
   --installer $Installer `
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  --acp-binary (Join-Path $Stage 'defenseclaw-acp.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $DefenseClaw `
@@ -561,6 +563,7 @@ or a causal client block may the administrator run:
   -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  -ACPBinary (Join-Path $Stage 'defenseclaw-acp.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -576,6 +579,7 @@ The equivalent post-proof CLI transaction is:
   --installer $Installer `
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  --acp-binary (Join-Path $Stage 'defenseclaw-acp.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $DefenseClaw `
@@ -861,6 +865,7 @@ only on a disposable Windows validation endpoint:
   -BrokerBinary .\defenseclaw-cmid-broker.exe `
   -ProviderLibrary 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\cmidapi.dll' `
   -GatewayBinary .\defenseclaw-gateway.exe `
+  -ACPBinary .\defenseclaw-acp.exe `
   -HookBinary .\defenseclaw-hook.exe `
   -SensorHelperBinary .\defenseclaw-sensor-helper.exe `
   -CLIBinary .\defenseclaw.exe `
@@ -872,6 +877,7 @@ only on a disposable Windows validation endpoint:
   -RejectedClaudeBinary C:\cert\claude-2.1.151.exe `
   -UpgradeBrokerBinary .\v2\defenseclaw-cmid-broker.exe `
   -UpgradeGatewayBinary .\v2\defenseclaw-gateway.exe `
+  -UpgradeACPBinary .\v2\defenseclaw-acp.exe `
   -UpgradeHookBinary .\v2\defenseclaw-hook.exe `
   -UpgradeSensorHelperBinary .\v2\defenseclaw-sensor-helper.exe `
   -UpgradeCLIBinary .\v2\defenseclaw.exe `
@@ -973,6 +979,7 @@ $ProviderLibrary = 'C:\Program Files\Cisco\Cisco Secure Client\CM\<cm-version>\C
   -BrokerBinary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   -ProviderLibrary $ProviderLibrary `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  -ACPBinary (Join-Path $Stage 'defenseclaw-acp.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
@@ -1003,6 +1010,7 @@ $ReleaseCLI = Join-Path $Stage 'defenseclaw.exe'
   --installer $Installer `
   --broker-binary (Join-Path $Stage 'defenseclaw-cmid-broker.exe') `
   --gateway-binary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  --acp-binary (Join-Path $Stage 'defenseclaw-acp.exe') `
   --hook-binary (Join-Path $Stage 'defenseclaw-hook.exe') `
   --sensor-helper-binary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   --cli-binary $ReleaseCLI `
@@ -1539,6 +1547,7 @@ $Stage = 'C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw'
 & $PowerShell -NoLogo -NoProfile -NonInteractive -File $Installer `
   -Action Repair `
   -GatewayBinary (Join-Path $Stage 'defenseclaw-gateway.exe') `
+  -ACPBinary (Join-Path $Stage 'defenseclaw-acp.exe') `
   -HookBinary (Join-Path $Stage 'defenseclaw-hook.exe') `
   -SensorHelperBinary (Join-Path $Stage 'defenseclaw-sensor-helper.exe') `
   -CLIBinary (Join-Path $Stage 'defenseclaw.exe') `
