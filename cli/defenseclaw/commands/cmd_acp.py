@@ -11,7 +11,7 @@ import json
 import os
 import secrets
 import shutil
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -183,7 +183,7 @@ def _write_contract_lock(
     path = _contract_lock_path(data_dir, client, agent)
     document = {
         "version": 1,
-        "generated_at": datetime.now(UTC).isoformat(),
+        "generated_at": datetime.now(timezone.utc).isoformat(),
         "protocol": {"schema_version": _SCHEMA_VERSION, "schema_sha256": _SCHEMA_SHA256},
         "client": {"id": client, "config_path": str(client_path), "config_sha256": _sha256_file(str(client_path))},
         "agent": {
