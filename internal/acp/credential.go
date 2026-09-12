@@ -17,6 +17,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"sync"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/safefile"
@@ -31,6 +32,7 @@ const (
 
 var credentialScopeRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:@\\-]{0,255}$`)
 var credentialRecordNameRE = regexp.MustCompile(`^[a-f0-9]{64}\.json$`)
+var enterpriseCredentialMutationMu sync.Mutex
 
 // EnterpriseCredential is an administrator-owned, per-user and per-binding
 // ACP credential. The plaintext is retained only in the protected service
@@ -107,6 +109,9 @@ func EnterpriseUserTokenPath(dataDir, clientID, agentID string) (string, error) 
 // EnsureEnterpriseCredential mints or returns the stable service-owned
 // credential for an exact managed enrollment.
 func EnsureEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) (EnterpriseCredential, error) {
+	enterpriseCredentialMutationMu.Lock()
+	defer enterpriseCredentialMutationMu.Unlock()
+
 	path, err := EnterpriseCredentialPath(dataDir, principal, clientID, agentID, profile)
 	if err != nil {
 		return EnterpriseCredential{}, err
@@ -221,6 +226,31 @@ func MatchEnterpriseCredential(dataDir, candidate string) (EnterpriseCredential,
 	return credential, subtle.ConstantTimeCompare(expectedHash[:], candidateHash[:]) == 1
 }
 
+// MatchEnterpriseCredentialKeyID resolves a non-secret SHA-256 token key ID
+// through the protected index. It is used by the signed ACP HTTP transport so
+// the bearer itself never crosses the loopback socket.
+func MatchEnterpriseCredentialKeyID(dataDir, keyID string) (EnterpriseCredential, string, bool) {
+	if !validCredentialKeyID(keyID) {
+		return EnterpriseCredential{}, "", false
+	}
+	if err := validateEnterpriseCredentialDirectory(enterpriseCredentialDir(dataDir)); err != nil {
+		return EnterpriseCredential{}, "", false
+	}
+	if err := validateEnterpriseCredentialDirectory(enterpriseCredentialIndexDir(dataDir)); err != nil {
+		return EnterpriseCredential{}, "", false
+	}
+	indexPath := filepath.Join(enterpriseCredentialIndexDir(dataDir), keyID+".json")
+	index, err := loadEnterpriseCredentialIndexForKeyID(indexPath, keyID)
+	if err != nil {
+		return EnterpriseCredential{}, "", false
+	}
+	credential, err := loadEnterpriseCredentialFile(filepath.Join(enterpriseCredentialDir(dataDir), index.Record))
+	if err != nil || HTTPAuthKeyID(credential.Token) != keyID {
+		return EnterpriseCredential{}, "", false
+	}
+	return credential, credential.Token, true
+}
+
 // EnterpriseCredentialsReady validates the bounded managed credential
 // inventory and reports whether at least one enrollment is usable.
 func EnterpriseCredentialsReady(dataDir string) bool {
@@ -263,13 +293,23 @@ func EnterpriseCredentialsReady(dataDir string) bool {
 // RemoveEnterpriseCredential revokes the service-side credential immediately.
 // A stale user token then has no authority even if user-side cleanup fails.
 func RemoveEnterpriseCredential(dataDir, principal, clientID, agentID, profile string) error {
+	enterpriseCredentialMutationMu.Lock()
+	defer enterpriseCredentialMutationMu.Unlock()
+
 	path, err := EnterpriseCredentialPath(dataDir, principal, clientID, agentID, profile)
 	if err != nil {
 		return err
 	}
 	credential, err := loadEnterpriseCredentialFile(path)
 	if errors.Is(err, os.ErrNotExist) {
-		return nil
+		tombstone := path + ".revoked"
+		credential, err = loadEnterpriseCredentialFileAtPath(tombstone, path)
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("inspect interrupted ACP enterprise credential revocation: %w", err)
+		}
 	} else if err != nil {
 		return fmt.Errorf("inspect ACP enterprise credential for revocation: %w", err)
 	}
@@ -289,12 +329,32 @@ func removeEnterpriseCredentialFile(path string) error {
 	// Rename first so a crash or interrupted cleanup leaves a non-authoritative
 	// tombstone. Readiness rejects every non-.json inventory entry.
 	tombstone := path + ".revoked"
-	if _, err := os.Lstat(tombstone); err == nil {
-		return errors.New("ACP enterprise credential revocation tombstone already exists")
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("inspect ACP enterprise credential revocation tombstone: %w", err)
+	_, pathErr := os.Lstat(path)
+	_, tombstoneErr := os.Lstat(tombstone)
+	if errors.Is(pathErr, os.ErrNotExist) {
+		if errors.Is(tombstoneErr, os.ErrNotExist) {
+			return nil
+		}
+		if tombstoneErr != nil {
+			return fmt.Errorf("inspect ACP enterprise credential revocation tombstone: %w", tombstoneErr)
+		}
+		if err := validateEnterpriseCredentialFile(tombstone); err != nil {
+			return fmt.Errorf("validate interrupted ACP credential revocation: %w", err)
+		}
+		if err := os.Remove(tombstone); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("resume ACP enterprise credential cleanup: %w", err)
+		}
+		return syncEnterpriseCredentialDirectory(filepath.Dir(path))
 	}
-	if err := os.Rename(path, tombstone); err != nil {
+	if pathErr != nil {
+		return fmt.Errorf("inspect ACP enterprise credential before revocation: %w", pathErr)
+	}
+	if tombstoneErr == nil {
+		return errors.New("ACP enterprise credential and revocation tombstone both exist")
+	} else if !errors.Is(tombstoneErr, os.ErrNotExist) {
+		return fmt.Errorf("inspect ACP enterprise credential revocation tombstone: %w", tombstoneErr)
+	}
+	if err := renameEnterpriseCredentialFile(path, tombstone); err != nil {
 		return fmt.Errorf("revoke ACP enterprise credential: %w", err)
 	}
 	if err := syncEnterpriseCredentialDirectory(filepath.Dir(path)); err != nil {
@@ -339,6 +399,13 @@ func ensureEnterpriseCredentialIndex(dataDir, recordPath, token string) error {
 }
 
 func loadEnterpriseCredentialIndex(path, token string) (enterpriseCredentialIndex, error) {
+	return loadEnterpriseCredentialIndexForKeyID(path, HTTPAuthKeyID(token))
+}
+
+func loadEnterpriseCredentialIndexForKeyID(path, keyID string) (enterpriseCredentialIndex, error) {
+	if !validCredentialKeyID(keyID) {
+		return enterpriseCredentialIndex{}, errors.New("ACP enterprise credential key ID is malformed")
+	}
 	if err := validateEnterpriseCredentialFile(path); err != nil {
 		return enterpriseCredentialIndex{}, err
 	}
@@ -358,18 +425,22 @@ func loadEnterpriseCredentialIndex(path, token string) (enterpriseCredentialInde
 	if index.Version != enterpriseCredentialVersion || !credentialRecordNameRE.MatchString(index.Record) {
 		return enterpriseCredentialIndex{}, errors.New("ACP enterprise credential index is malformed")
 	}
-	expected, err := EnterpriseCredentialIndexPath(filepath.Dir(filepath.Dir(filepath.Dir(path))), token)
-	if err != nil || filepath.Clean(expected) != filepath.Clean(path) {
+	expected := filepath.Join(filepath.Dir(path), keyID+".json")
+	if filepath.Clean(expected) != filepath.Clean(path) {
 		return enterpriseCredentialIndex{}, errors.New("ACP enterprise credential index filename does not match its bearer")
 	}
 	return index, nil
 }
 
 func loadEnterpriseCredentialFile(path string) (EnterpriseCredential, error) {
-	if err := validateEnterpriseCredentialFile(path); err != nil {
+	return loadEnterpriseCredentialFileAtPath(path, path)
+}
+
+func loadEnterpriseCredentialFileAtPath(readPath, identityPath string) (EnterpriseCredential, error) {
+	if err := validateEnterpriseCredentialFile(readPath); err != nil {
 		return EnterpriseCredential{}, err
 	}
-	body, err := safefile.ReadRegularFileBounded(path, maxEnterpriseCredentialBytes)
+	body, err := safefile.ReadRegularFileBounded(readPath, maxEnterpriseCredentialBytes)
 	if err != nil {
 		return EnterpriseCredential{}, err
 	}
@@ -390,8 +461,8 @@ func loadEnterpriseCredentialFile(path string) (EnterpriseCredential, error) {
 			return EnterpriseCredential{}, errors.New("ACP enterprise credential scope is malformed")
 		}
 	}
-	expected, err := EnterpriseCredentialPath(filepath.Dir(filepath.Dir(filepath.Dir(path))), credential.Principal, credential.ClientID, credential.AgentID, credential.Profile)
-	if err != nil || filepath.Clean(expected) != filepath.Clean(path) {
+	expected, err := EnterpriseCredentialPath(filepath.Dir(filepath.Dir(filepath.Dir(identityPath))), credential.Principal, credential.ClientID, credential.AgentID, credential.Profile)
+	if err != nil || filepath.Clean(expected) != filepath.Clean(identityPath) {
 		return EnterpriseCredential{}, errors.New("ACP enterprise credential filename does not match its scope")
 	}
 	return credential, nil
@@ -421,4 +492,12 @@ func validCredentialToken(token string) bool {
 	}
 	_, err := hex.DecodeString(token)
 	return err == nil
+}
+
+func validCredentialKeyID(keyID string) bool {
+	if len(keyID) != 64 {
+		return false
+	}
+	_, err := hex.DecodeString(keyID)
+	return err == nil && keyID == strings.ToLower(keyID)
 }

@@ -4,9 +4,8 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -258,6 +257,90 @@ func (a *APIServer) authenticateACPToken(r *http.Request, candidate string) (*ht
 	return r.WithContext(withACPEnterpriseCredential(r.Context(), credential)), true
 }
 
+func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request, string, string, bool) {
+	if a == nil || a.scannerCfg == nil || r == nil || r.Method != http.MethodPost || r.URL.Path != "/api/v1/acp/evaluate" {
+		return r, "", "", false
+	}
+	keyID := strings.TrimSpace(r.Header.Get(acp.AuthKeyIDHeader))
+	nonce := strings.TrimSpace(r.Header.Get(acp.AuthNonceHeader))
+	candidateMAC := strings.TrimSpace(r.Header.Get(acp.AuthRequestMACHeader))
+	if len(keyID) != 64 || len(nonce) != 64 || len(candidateMAC) != 64 {
+		return r, "", "", false
+	}
+	var token string
+	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
+		credential, secret, ok := acp.MatchEnterpriseCredentialKeyID(a.scannerCfg.DataDir, keyID)
+		if !ok {
+			return r, "", "", false
+		}
+		token = secret
+		r = r.WithContext(withACPEnterpriseCredential(r.Context(), credential))
+	} else {
+		var ok bool
+		token, ok = a.loadACPAPIToken()
+		if !ok || !constantTimeStringMatch(acp.HTTPAuthKeyID(token), keyID) {
+			return r, "", "", false
+		}
+	}
+	limited := io.LimitReader(r.Body, acp.MaxTurnEvaluationBytes+(64<<10)+1)
+	body, err := io.ReadAll(limited)
+	if err != nil || len(body) > acp.MaxTurnEvaluationBytes+(64<<10) {
+		return r, "", "", false
+	}
+	_ = r.Body.Close()
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	if !acp.VerifyHTTPRequestMAC(token, keyID, nonce, r.Method, r.URL.Path, body, candidateMAC) {
+		return r, "", "", false
+	}
+	r.Header.Set(acp.AuthKeyIDHeader, keyID)
+	r.Header.Set(acp.AuthNonceHeader, nonce)
+	return r, token, nonce, true
+}
+
+type acpSignedResponse struct {
+	header http.Header
+	body   bytes.Buffer
+	status int
+}
+
+func (w *acpSignedResponse) Header() http.Header { return w.header }
+
+func (w *acpSignedResponse) WriteHeader(status int) {
+	if w.status == 0 {
+		w.status = status
+	}
+}
+
+func (w *acpSignedResponse) Write(body []byte) (int, error) {
+	if w.status == 0 {
+		w.status = http.StatusOK
+	}
+	if w.body.Len()+len(body) > 64<<10 {
+		return 0, errors.New("ACP signed response exceeds its size bound")
+	}
+	return w.body.Write(body)
+}
+
+func serveACPSignedResponse(w http.ResponseWriter, r *http.Request, next http.Handler, token, nonce string) {
+	capture := &acpSignedResponse{header: w.Header().Clone()}
+	next.ServeHTTP(capture, r)
+	if capture.status == 0 {
+		capture.status = http.StatusOK
+	}
+	keyID := r.Header.Get(acp.AuthKeyIDHeader)
+	capture.header.Set(acp.AuthResponseMACHeader, acp.HTTPResponseMAC(token, keyID, nonce, capture.status, capture.body.Bytes()))
+	for name := range w.Header() {
+		w.Header().Del(name)
+	}
+	for name, values := range capture.header {
+		for _, value := range values {
+			w.Header().Add(name, value)
+		}
+	}
+	w.WriteHeader(capture.status)
+	_, _ = w.Write(capture.body.Bytes())
+}
+
 // acpAPITokenMatches authenticates the guard with a credential that has no
 // authority outside ACP routes. The token stays in a mode-0600 sidecar rather
 // than IDE JSON or config.yaml.
@@ -265,30 +348,52 @@ func (a *APIServer) acpAPITokenMatches(candidate string) bool {
 	if a == nil || a.scannerCfg == nil || candidate == "" {
 		return false
 	}
+	expected, ok := a.loadACPAPIToken()
+	return ok && constantTimeStringMatch(expected, candidate)
+}
+
+func (a *APIServer) loadACPAPIToken() (string, bool) {
+	if a == nil || a.scannerCfg == nil {
+		return "", false
+	}
 	path := filepath.Join(a.scannerCfg.DataDir, "acp", ".token")
 	info, err := os.Lstat(path)
 	if err != nil || !info.Mode().IsRegular() || info.Size() <= 0 || info.Size() > 16<<10 {
-		return false
+		return "", false
 	}
 	if runtime.GOOS != "windows" && info.Mode().Perm()&0o077 != 0 {
-		return false
+		return "", false
 	}
 	if err := safefile.ValidatePrivateFile(path); err != nil {
-		return false
+		return "", false
 	}
 	body, err := safefile.ReadRegularFileBounded(path, 16<<10)
 	if err != nil {
-		return false
+		return "", false
 	}
-	expectedHash := sha256.Sum256([]byte(strings.TrimSpace(string(body))))
-	candidateHash := sha256.Sum256([]byte(candidate))
-	return subtle.ConstantTimeCompare(expectedHash[:], candidateHash[:]) == 1
+	token := strings.TrimSpace(string(body))
+	return token, token != ""
 }
 
 func (a *APIServer) acpScopedTokenReady() bool {
 	if a == nil || a.scannerCfg == nil {
 		return false
 	}
+	key := a.scannerCfg.DeploymentMode + "\x00" + a.scannerCfg.DataDir
+	now := time.Now()
+	a.acpReadinessMu.Lock()
+	defer a.acpReadinessMu.Unlock()
+	if key == a.acpReadinessKey && now.Sub(a.acpReadinessCheckedAt) < 500*time.Millisecond {
+		return a.acpReadinessValue
+	}
+	ready := a.acpScopedTokenReadyUncached()
+	a.acpReadinessKey = key
+	a.acpReadinessCheckedAt = now
+	a.acpReadinessValue = ready
+	return ready
+}
+
+func (a *APIServer) acpScopedTokenReadyUncached() bool {
 	if managed.IsManagedEnterprise(a.scannerCfg.DeploymentMode) {
 		return acp.EnterpriseCredentialsReady(a.scannerCfg.DataDir)
 	}

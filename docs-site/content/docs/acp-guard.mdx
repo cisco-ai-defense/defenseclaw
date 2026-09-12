@@ -58,9 +58,11 @@ lock. A failed config write rolls all three changes back.
 
 Managed deployments keep ACP policy and credential authority in the protected
 machine data directory. Each enrollment receives a unique credential scoped to
-one OS principal, client, agent, and profile. The gateway accepts that bearer
-only on loopback ACP routes and rejects a request whose declared binding differs
-from the machine-owned enrollment record.
+one OS principal, client, agent, and profile. The guard proves possession with
+a fresh nonce-bound HMAC request and the gateway signs the exact status and
+response body; the credential itself never crosses the loopback socket. The
+gateway rejects a request whose declared binding differs from the machine-owned
+enrollment record.
 
 An administrator or guardian first provisions the service record and the
 target user's private copy:
@@ -104,7 +106,7 @@ install it beside `defenseclaw-gateway` under `/opt/defenseclaw/bin`.
 | --- | --- | --- |
 | Policy owner | User config | Administrator-owned config; runtime mutation denied |
 | Setup | One `defenseclaw acp setup` command or the ACP TUI panel | Admin `enterprise acp enroll`, then the reported user-side `acp setup --managed` command or MDM equivalent |
-| Bearer | One private local ACP token | Unique principal + client + agent + profile credential, with a private per-user copy |
+| Credential | One private local ACP token | Unique principal + client + agent + profile credential, with a private per-user copy |
 | Enforcement rollout | Observe by default; `--activate` selects action | Central profile chooses observe/action; the user cannot activate or downgrade it |
 | Revocation | Remove the guarded editor entry | Remove service authority first, then the user copy; stale bearers fail immediately |
 | Readiness | Private local token and configured binding | Complete bounded record/index inventory and configured binding |
@@ -121,9 +123,13 @@ install it beside `defenseclaw-gateway` under `/opt/defenseclaw/bin`.
 | Terminal | `terminal/*` | Bidirectional content/method policy |
 | Extensions | for example `cursor/*` | Preserved as ACP extensions and evaluated as tool traffic |
 
-The guard launches the agent with literal argv—never a shell. It authenticates
-only to loopback with an ACP-scoped token that has no authority on other API
-routes. The contract lock pins the selected guard and agent executable paths
+The guard launches the agent with literal argv—never a shell. It connects only
+to a literal loopback address, disables environment proxying and redirects,
+and uses nonce-bound HMAC request/response authentication with an ACP-scoped
+credential that has no authority on other API routes. A process that wins the
+configured loopback port sees neither the credential nor an acceptable verdict
+signature, so the guard fails closed instead of trusting an impersonated
+gateway. The contract lock pins the selected guard and agent executable paths
 and SHA-256 digests, the exact client configuration path and digest, plus ACP
 [schema-v1.21.0](https://github.com/agentclientprotocol/agent-client-protocol/releases/tag/schema-v1.21.0).
 Normal upgrades replace the guard and rebind every matching user-owned lock in
@@ -228,7 +234,7 @@ it.
 
 | Endpoint | Purpose |
 | --- | --- |
-| `POST /api/v1/acp/evaluate` | Scoped, loopback-only frame evaluation |
+| `POST /api/v1/acp/evaluate` | Scoped, loopback-only, mutually authenticated frame evaluation |
 | `GET /v1/acp/catalog` | Compiled client/agent catalog |
 | `GET /v1/acp/profiles` | Effective profile inventory |
 | `GET /health` | ACP enabled/mode/schema/configuration/token readiness |

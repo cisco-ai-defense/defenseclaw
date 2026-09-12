@@ -171,6 +171,7 @@ RESOLVER_ASSETS = {
 }
 RELEASE_CHANNEL_BOOTSTRAP_START_VERSION = (0, 8, 8)
 SANDBOX_INSTALLER_ASSET_START_VERSION = (0, 8, 11)
+ACP_GUARD_START_VERSION = (0, 8, 11)
 MAX_RESOLVER_BYTES = 4 * 1024 * 1024
 MAX_INSTALLER_BYTES = 4 * 1024 * 1024
 INSTALLER_ASSETS = {
@@ -3644,6 +3645,7 @@ def _validate_windows_gateway_zip_payload(
     commit: str | None,
     archive_name: str,
 ) -> None:
+    requires_acp = tuple(map(int, version.split("."))) >= ACP_GUARD_START_VERSION
     try:
         with zipfile.ZipFile(io.BytesIO(payload)) as archive:
             seen: set[PurePosixPath] = set()
@@ -3677,10 +3679,8 @@ def _validate_windows_gateway_zip_payload(
         raise CandidateError(f"invalid gateway archive {archive_name}: {exc}") from exc
     if len(gateway_payloads) != 1:
         raise CandidateError(f"gateway archive {archive_name} must contain exactly one root defenseclaw.exe binary")
-    if len(acp_payloads) != 1:
-        raise CandidateError(
-            f"gateway archive {archive_name} must contain exactly one root defenseclaw-acp.exe binary"
-        )
+    if len(acp_payloads) > 1 or (requires_acp and len(acp_payloads) != 1):
+        raise CandidateError(f"gateway archive {archive_name} must contain exactly one root defenseclaw-acp.exe binary")
     _validate_gateway_binary(
         gateway_payloads[0],
         os_name="windows",
@@ -3689,14 +3689,15 @@ def _validate_windows_gateway_zip_payload(
         commit=commit,
         archive_name=archive_name,
     )
-    _validate_gateway_binary(
-        acp_payloads[0],
-        os_name="windows",
-        arch=arch,
-        version=version,
-        commit=commit,
-        archive_name=archive_name,
-    )
+    if acp_payloads:
+        _validate_gateway_binary(
+            acp_payloads[0],
+            os_name="windows",
+            arch=arch,
+            version=version,
+            commit=commit,
+            archive_name=archive_name,
+        )
 
 
 def _validate_gateway_archives(
@@ -3706,6 +3707,7 @@ def _validate_gateway_archives(
     commit: str | None = None,
 ) -> None:
     artifacts = _expected_release_artifacts(version)
+    requires_acp = tuple(map(int, version.split("."))) >= ACP_GUARD_START_VERSION
     for os_name in ("darwin", "linux"):
         for arch in ("amd64", "arm64"):
             path = directory / artifacts["gateways"][os_name][arch]
@@ -3741,7 +3743,7 @@ def _validate_gateway_archives(
                 raise CandidateError(f"invalid gateway archive {path}: {exc}") from exc
             if len(gateway_payloads) != 1:
                 raise CandidateError(f"gateway archive {path.name} must contain exactly one root defenseclaw binary")
-            if len(acp_payloads) != 1:
+            if len(acp_payloads) > 1 or (requires_acp and len(acp_payloads) != 1):
                 raise CandidateError(
                     f"gateway archive {path.name} must contain exactly one root defenseclaw-acp binary"
                 )
@@ -3753,14 +3755,15 @@ def _validate_gateway_archives(
                 commit=commit,
                 archive_name=path.name,
             )
-            _validate_gateway_binary(
-                acp_payloads[0],
-                os_name=os_name,
-                arch=arch,
-                version=version,
-                commit=commit,
-                archive_name=path.name,
-            )
+            if acp_payloads:
+                _validate_gateway_binary(
+                    acp_payloads[0],
+                    os_name=os_name,
+                    arch=arch,
+                    version=version,
+                    commit=commit,
+                    archive_name=path.name,
+                )
 
     for arch in ("amd64", "arm64"):
         path = directory / artifacts["gateways"]["windows"][arch]
@@ -3929,9 +3932,7 @@ def extract_gateway(
             if len(matches) != 1:
                 raise CandidateError(f"gateway archive must contain exactly one gateway, got {len(matches)}")
             if acp_output is not None and len(acp_matches) != 1:
-                raise CandidateError(
-                    f"gateway archive must contain exactly one ACP guard, got {len(acp_matches)}"
-                )
+                raise CandidateError(f"gateway archive must contain exactly one ACP guard, got {len(acp_matches)}")
             if output.exists() or output.is_symlink():
                 raise CandidateError(f"gateway extraction output already exists: {output}")
             if acp_output is not None and (acp_output.exists() or acp_output.is_symlink()):
@@ -3949,10 +3950,10 @@ def extract_gateway(
             output.parent.mkdir(parents=True, exist_ok=True)
             _write_exclusive_file(output, gateway_payload, mode=0o755)
             if acp_output is not None:
-                acp_output.parent.mkdir(parents=True, exist_ok=True)
                 try:
+                    acp_output.parent.mkdir(parents=True, exist_ok=True)
                     _write_exclusive_file(acp_output, acp_payload or b"", mode=0o755)
-                except CandidateError:
+                except (CandidateError, OSError):
                     output.unlink(missing_ok=True)
                     raise
     except CandidateError:
@@ -4517,8 +4518,10 @@ def _validate_windows_setup_provenance(
         or toolchain.get("vc_runtime_source_sha256") != WINDOWS_VC_RUNTIME_SOURCE_SHA256
         or toolchain.get("vc_runtime_source_sha256") != inputs.get("vc_runtime_source_sha256")
         or toolchain.get("vc_runtime_license") != "Microsoft Visual Studio 2022 license and REDIST list"
-        or toolchain.get("vc_runtime_license_url") != "https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/"
-        or toolchain.get("vc_runtime_redistribution_url") != "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution"
+        or toolchain.get("vc_runtime_license_url")
+        != "https://visualstudio.microsoft.com/license-terms/vs2022-ga-community/"
+        or toolchain.get("vc_runtime_redistribution_url")
+        != "https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution"
         or toolchain.get("yara_compat_sha256") != inputs.get("yara_compat_wheel_sha256")
         or toolchain.get("win_unicode_console_source_url") != WINDOWS_WIN_UNICODE_SOURCE_URL
         or toolchain.get("win_unicode_console_source_sha256") != WINDOWS_WIN_UNICODE_SOURCE_SHA256

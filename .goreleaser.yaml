@@ -86,7 +86,7 @@ builds:
         - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component hook -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
           output: true
 
-  - id: defenseclaw-acp
+  - id: defenseclaw-acp-posix
     main: ./cmd/defenseclaw-acp
     binary: defenseclaw-acp
     env:
@@ -94,9 +94,46 @@ builds:
     goos:
       - linux
       - darwin
+    goarch:
+      - amd64
+      - arm64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-acp-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component acp-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
+  - id: defenseclaw-acp-windows-amd64
+    main: ./cmd/defenseclaw-acp
+    binary: defenseclaw-acp
+    env:
+      - CGO_ENABLED=0
+    goos:
       - windows
     goarch:
       - amd64
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -buildid=defenseclaw-acp-{{.Commit}}-{{.Os}}-{{.Arch}} -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+    hooks:
+      post:
+        - cmd: go run ./internal/tools/windowsresources -target {{ .Os }}_{{ .Arch }} -executable "{{ .Path }}" -component acp-guard -version {{ .Version }} -icon macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png
+          output: true
+
+  - id: defenseclaw-acp-windows-arm64
+    main: ./cmd/defenseclaw-acp
+    binary: defenseclaw-acp
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - windows
+    goarch:
       - arm64
     flags:
       - -trimpath
@@ -112,7 +149,7 @@ archives:
   - id: default
     ids:
       - defenseclaw
-      - defenseclaw-acp
+      - defenseclaw-acp-posix
     formats:
       - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -130,7 +167,7 @@ archives:
     ids:
       - defenseclaw-windows-amd64
       - defenseclaw-hook
-      - defenseclaw-acp
+      - defenseclaw-acp-windows-amd64
     formats:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
@@ -147,7 +184,7 @@ archives:
     # manifest, but ARM64 is not part of the certified native installer.
     ids:
       - defenseclaw-windows-arm64
-      - defenseclaw-acp
+      - defenseclaw-acp-windows-arm64
     formats:
       - zip
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"

@@ -4593,7 +4593,12 @@ def _merge_acp(raw: Any) -> ACPConfig:
         }
 
     profiles: dict[str, ACPProfile] = {}
-    for name, item in (raw.get("profiles") or {}).items():
+    profiles_raw = raw.get("profiles")
+    if profiles_raw is None:
+        profiles_raw = {}
+    if not isinstance(profiles_raw, dict):
+        raise ConfigVersionError("acp.profiles must be a mapping")
+    for name, item in profiles_raw.items():
         if not isinstance(item, dict):
             continue
         profiles[str(name)] = ACPProfile(
@@ -5071,9 +5076,7 @@ def _merge_ai_discovery(raw: dict[str, Any] | None) -> AIDiscoveryConfig:
         include_env_var_names=bool(raw.get("include_env_var_names", True)),
         include_network_domains=bool(raw.get("include_network_domains", True)),
         include_user_email=_coerce_bool(raw.get("include_user_email", False)),
-        lookup_model_provenance_online=_coerce_bool(
-            raw.get("lookup_model_provenance_online", False)
-        ),
+        lookup_model_provenance_online=_coerce_bool(raw.get("lookup_model_provenance_online", False)),
         max_files_per_scan=int(raw.get("max_files_per_scan", 1000) or 1000),
         max_file_bytes=int(raw.get("max_file_bytes", 512 * 1024) or 512 * 1024),
         store_raw_local_paths=bool(raw.get("store_raw_local_paths", False)),

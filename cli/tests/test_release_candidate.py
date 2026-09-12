@@ -2663,6 +2663,39 @@ def test_gateway_archive_attestation_covers_all_six_platform_binaries(
     release_candidate._validate_gateway_archives(runtime, VERSION, commit=COMMIT)
 
 
+def test_pre_acp_gateway_archives_do_not_require_guard_binary(tmp_path: Path) -> None:
+    runtime = _runtime_dir(tmp_path)
+    for os_name in ("darwin", "linux"):
+        for arch in ("amd64", "arm64"):
+            gateway = _fake_gateway(os_name, arch)
+            member = tarfile.TarInfo("defenseclaw")
+            member.size = len(gateway)
+            _write_tar_members(runtime / RELEASE_ARTIFACTS["gateways"][os_name][arch], [(member, gateway)])
+    for arch in ("amd64", "arm64"):
+        archive_payload = io.BytesIO()
+        with zipfile.ZipFile(archive_payload, mode="w") as archive:
+            archive.writestr("defenseclaw.exe", _fake_gateway("windows", arch))
+        _write_archive_payload(runtime / RELEASE_ARTIFACTS["gateways"]["windows"][arch], archive_payload.getvalue())
+
+    release_candidate._validate_gateway_archives(runtime, VERSION, commit=COMMIT)
+
+
+def test_acp_era_windows_gateway_archive_requires_guard_binary() -> None:
+    version = "0.8.11"
+    archive_payload = io.BytesIO()
+    with zipfile.ZipFile(archive_payload, mode="w") as archive:
+        archive.writestr("defenseclaw.exe", _fake_gateway("windows", "amd64", version=version))
+
+    with pytest.raises(release_candidate.CandidateError, match="defenseclaw-acp.exe"):
+        release_candidate._validate_windows_gateway_zip_payload(
+            archive_payload.getvalue(),
+            version=version,
+            arch="amd64",
+            commit=COMMIT,
+            archive_name="fixture.zip",
+        )
+
+
 def test_gateway_archive_attestation_accepts_safe_goreleaser_directory_members(
     tmp_path: Path,
 ) -> None:

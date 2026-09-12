@@ -99,6 +99,13 @@ type APIServer struct {
 	// prove that post-cancellation worker completion cannot record a fail-open
 	// decision after the handler has already returned 504.
 	inspectToolWorkerDone func()
+	// ACP readiness is surfaced on unauthenticated /health. Cache the bounded
+	// custody probe briefly so health polling cannot force repeated protected-
+	// directory traversal. Authentication never uses this cache.
+	acpReadinessMu        sync.Mutex
+	acpReadinessCheckedAt time.Time
+	acpReadinessKey       string
+	acpReadinessValue     bool
 
 	// observabilityV8Mu protects the complete process-owned runtime capability
 	// set. Sidecar publishes or detaches all four seams atomically.
@@ -3251,6 +3258,17 @@ func (a *APIServer) tokenAuth(next http.Handler) http.Handler {
 			route = sanitizeRouteForTelemetry(r.URL.Path)
 		}
 		ctx := r.Context()
+		if r.URL.Path == "/api/v1/acp/evaluate" && connector.IsLoopback(r) && r.Header.Get(acp.AuthKeyIDHeader) != "" {
+			authenticated, token, nonce, ok := a.authenticateACPSignedRequest(r)
+			if !ok {
+				a.emitHTTPAuthFailure(ctx, r, route, gatewaylog.ErrCodeAuthInvalidToken, "invalid_acp_signed_request")
+				http.Error(w, `{"error":"unauthorized"}`, http.StatusUnauthorized)
+				return
+			}
+			authenticated = authenticated.WithContext(PromoteSessionIfAuthenticated(authenticated.Context()))
+			serveACPSignedResponse(w, authenticated, next, token, nonce)
+			return
+		}
 
 		token := ""
 		if auth := r.Header.Get("Authorization"); strings.HasPrefix(auth, "Bearer ") {

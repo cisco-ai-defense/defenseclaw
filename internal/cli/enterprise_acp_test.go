@@ -110,7 +110,11 @@ func TestEnterpriseACPEnrollVerifyRevokeLifecycle(t *testing.T) {
 
 func TestEnterpriseACPRequiresExplicitCentralAllowlist(t *testing.T) {
 	previousCfg := cfg
-	t.Cleanup(func() { cfg = previousCfg })
+	previousClient, previousAgent, previousProfile := enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile
+	t.Cleanup(func() {
+		cfg = previousCfg
+		enterpriseACPClient, enterpriseACPAgent, enterpriseACPProfile = previousClient, previousAgent, previousProfile
+	})
 	cfg = &config.Config{
 		DeploymentMode: "managed_enterprise",
 		ACP: config.ACPConfig{

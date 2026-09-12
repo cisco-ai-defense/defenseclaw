@@ -691,7 +691,7 @@ function Assert-DefenseClawWheelV8Resources(
 
 function Set-WindowsExecutableResource(
     [string]$Executable,
-    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
     [switch]$VerifyOnly
 ) {
     $arguments = @(

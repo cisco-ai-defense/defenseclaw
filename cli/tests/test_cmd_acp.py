@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 from unittest.mock import patch
 
+import defenseclaw.commands.cmd_acp as cmd_acp_module
 from click.testing import CliRunner
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS
 from defenseclaw.commands.cmd_acp import _write_token, acp_cmd
@@ -399,5 +400,43 @@ def test_remove_rolls_back_editor_lock_and_policy_on_save_failure(tmp_path, monk
         assert lock.read_bytes() == lock_before
         assert app.cfg.acp.enabled
         assert "kiro" in app.cfg.acp.agents
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_remove_reports_one_rollback_failure_and_continues_restoring(tmp_path, monkeypatch):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    app, data_dir, db_path = _app(tmp_path)
+    guard = _binary(tmp_path / "guard")
+    agent = _binary(tmp_path / "kiro-cli")
+    try:
+        runner = CliRunner()
+        result = runner.invoke(
+            acp_cmd,
+            ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard, "--agent-binary", agent],
+            obj=app,
+        )
+        assert result.exit_code == 0, result.output
+        lock = Path(data_dir) / "acp" / "zed-kiro.contract-lock.json"
+        lock_before = lock.read_bytes()
+        original_restore = cmd_acp_module._restore
+        restore_calls = 0
+
+        def partially_failing_restore(path, snapshot):
+            nonlocal restore_calls
+            restore_calls += 1
+            if restore_calls == 1:
+                raise OSError("forced restore failure")
+            original_restore(path, snapshot)
+
+        with (
+            patch.object(app.cfg, "save", side_effect=OSError("forced save failure")),
+            patch("defenseclaw.commands.cmd_acp._restore", side_effect=partially_failing_restore),
+        ):
+            result = runner.invoke(acp_cmd, ["remove", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert result.exit_code != 0
+        assert restore_calls >= 2
+        assert "rollback problems:" in result.output
+        assert lock.read_bytes() == lock_before
     finally:
         cleanup_app(app, db_path, data_dir)

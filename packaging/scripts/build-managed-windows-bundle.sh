@@ -272,7 +272,7 @@ LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 
 # -H=windowsgui for the same reason the broker uses it: this runs under the
 # SCM with no console, and a console subsystem binary flashes a window.
 LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
-LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64"
+LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw.exe (windows/amd64 tags=cmid)"
