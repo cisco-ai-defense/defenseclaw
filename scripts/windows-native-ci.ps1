@@ -146,7 +146,7 @@ function Get-WorkspacePackageVersion {
 
 function Assert-WindowsExecutableResource(
     [string]$Path,
-    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
     [string]$Version,
     [switch]$Apply
 ) {
