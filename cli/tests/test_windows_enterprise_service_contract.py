@@ -2185,13 +2185,14 @@ def test_execute_requires_a_separately_built_successful_upgrade() -> None:
 
     assert "full execution requires -UpgradeBrokerBinary" in harness
     assert "-UpgradeGatewayBinary" in harness
-    assert "full execution requires all five -Upgrade*Binary inputs" in upgrade
+    assert "-UpgradeACPBinary" in harness
+    assert "full execution requires all six -Upgrade*Binary inputs" in upgrade
     assert "Add-SkippedResult" not in upgrade
     assert "external-release-public-cli-versioned-upgrade" in upgrade
     assert "Invoke-PublicEnterpriseLifecycleCLIJSON" in upgrade
     assert "-FilePath $script:UpgradeCLISource" in upgrade
     assert "separately version-stamped upgrade $name bytes do not" in upgrade
-    for name in ("broker", "gateway", "hook", "sensor_helper", "cli"):
+    for name in ("broker", "gateway", "acp", "hook", "sensor_helper", "cli"):
         assert f"{name} = [string]$script:SourceDigests['upgrade_{name}']" in upgrade
         assert f"exact_{name}_sha256 = $true" in upgrade
     assert "versioned public Upgrade installed the wrong $name bytes" in upgrade
@@ -2224,7 +2225,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     assert "@('ProviderLibrary', $ProviderLibrary)" in module
     assert (
         "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, "
-        "-HookBinary, and -SensorHelperBinary" in module
+        "-ACPBinary, -HookBinary, and -SensorHelperBinary" in module
     )
     assert "@('sensor_helper', $SensorHelperBinary" in module
     assert "'privs', $sensorHelperServiceName, 'SeChangeNotifyPrivilege'" in module
@@ -2238,8 +2239,10 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     for parameter in (
         "[string]$BrokerBinary",
         "[string]$ProviderLibrary",
+        "[string]$ACPBinary",
         "[string]$SensorHelperBinary",
         "[string]$UpgradeBrokerBinary",
+        "[string]$UpgradeACPBinary",
         "[string]$UpgradeSensorHelperBinary",
     ):
         assert parameter in parameter_block
@@ -2258,6 +2261,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
         "$ProviderLibrary" in source_initialization
     )
     assert "broker = Get-FileDigest $script:OriginalBrokerSource" in source_initialization
+    assert "acp = Get-FileDigest $script:OriginalACPSource" in source_initialization
     assert (
         "sensor_helper = Get-FileDigest $script:OriginalSensorHelperSource"
         in source_initialization
@@ -2342,7 +2346,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     for parameter in ("[string]$BrokerSource", "[string]$ProviderLibrarySource"):
         assert parameter in direct_arguments
     assert "if ($Action -in @('Install', 'Upgrade'))" in direct_arguments
-    for required in ("BrokerBinary", "ProviderLibrary", "GatewayBinary", "HookBinary"):
+    for required in ("BrokerBinary", "ProviderLibrary", "GatewayBinary", "ACPBinary", "HookBinary"):
         assert f"@('{required}'," in direct_arguments
     assert "$arguments.Add('-BrokerBinary')" in direct_arguments
     assert "$arguments.Add('-ProviderLibrary')" in direct_arguments
@@ -2358,7 +2362,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     ]
     assert "[string]$BrokerSource" in public_arguments
     assert "if ($Action -in @('Install', 'Upgrade'))" in public_arguments
-    for required in ("--broker-binary", "--gateway-binary", "--hook-binary"):
+    for required in ("--broker-binary", "--gateway-binary", "--acp-binary", "--hook-binary"):
         assert f"@('{required}'," in public_arguments
     assert "@('--broker-binary', $BrokerSource)" in public_arguments
     assert "if ($Action -eq 'Install'" in public_arguments
@@ -2424,6 +2428,7 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
         "BrokerSource",
         "ProviderLibrarySource",
         "GatewaySource",
+        "ACPSource",
         "HookSource",
         "SensorHelperSource",
         "CLISource",
@@ -2507,8 +2512,10 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
     for parameter in (
         "-BrokerBinary",
         "-ProviderLibrary",
+        "-ACPBinary",
         "-SensorHelperBinary",
         "-UpgradeBrokerBinary",
+        "-UpgradeACPBinary",
         "-UpgradeSensorHelperBinary",
     ):
         assert parameter in certification_invocation
@@ -2517,6 +2524,7 @@ def test_certification_broker_collision_cleanup_and_docs_stay_complete() -> None
         deployment_doc.index("Running the installed CLI is still valid")
     ]
     assert "--broker-binary" in public_upgrade
+    assert "--acp-binary" in public_upgrade
     assert "--sensor-helper-binary" in public_upgrade
     repair = deployment_doc[
         deployment_doc.index("-Action Repair") : deployment_doc.index(
