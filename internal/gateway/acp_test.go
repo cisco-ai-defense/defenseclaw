@@ -183,17 +183,8 @@ func TestACPEvaluateRejectsManagedRequestWithoutCredential(t *testing.T) {
 }
 
 func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
+	dataDir := writePrivateACPToken(t, "scoped-token")
 	path := filepath.Join(dataDir, "acp", ".token")
-	if err := safefile.ProtectDirectory(filepath.Dir(path)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("scoped-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := safefile.ProtectFile(path); err != nil {
-		t.Fatal(err)
-	}
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
 	if !api.acpAPITokenMatches("scoped-token") || api.acpAPITokenMatches("wrong") {
 		t.Fatal("scoped ACP token comparison failed")
@@ -209,17 +200,8 @@ func TestACPScopedTokenRequiresPrivateRegularFile(t *testing.T) {
 }
 
 func TestACPReadinessCachesOnlyHealthProbe(t *testing.T) {
-	dataDir := testenv.PrivateTempDir(t)
+	dataDir := writePrivateACPToken(t, "scoped-token")
 	path := filepath.Join(dataDir, "acp", ".token")
-	if err := safefile.ProtectDirectory(filepath.Dir(path)); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(path, []byte("scoped-token\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if err := safefile.ProtectFile(path); err != nil {
-		t.Fatal(err)
-	}
 	api := &APIServer{scannerCfg: &config.Config{DataDir: dataDir}}
 	if !api.acpScopedTokenReady() {
 		t.Fatal("fresh private token was not ready")
@@ -293,15 +275,8 @@ func TestACPEnterpriseCredentialPinsRequestBinding(t *testing.T) {
 }
 
 func TestACPSignedEvaluatorRoundTripNormal(t *testing.T) {
-	dataDir := t.TempDir()
 	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	tokenPath := filepath.Join(dataDir, "acp", ".token")
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dataDir := writePrivateACPToken(t, token)
 	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
 	server := httptest.NewServer(acpAuthenticatedTestHandler(api))
 	defer server.Close()
@@ -319,15 +294,8 @@ func TestACPSignedEvaluatorRoundTripNormal(t *testing.T) {
 }
 
 func TestACPAuthenticatedTransportRejectsSignedPlaintext(t *testing.T) {
-	dataDir := t.TempDir()
 	token := "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-	tokenPath := filepath.Join(dataDir, "acp", ".token")
-	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	dataDir := writePrivateACPToken(t, token)
 	api := &APIServer{scannerCfg: acpGatewayTestConfig(dataDir, "")}
 	var handlerReached atomic.Bool
 	server := httptest.NewServer(api.tokenAuth(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
@@ -392,6 +360,22 @@ func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 			http.NotFound(w, r)
 		}
 	}))
+}
+
+func writePrivateACPToken(t *testing.T, token string) string {
+	t.Helper()
+	dataDir := testenv.PrivateTempDir(t)
+	tokenPath := filepath.Join(dataDir, "acp", ".token")
+	if err := safefile.ProtectDirectory(filepath.Dir(tokenPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := safefile.ProtectFile(tokenPath); err != nil {
+		t.Fatal(err)
+	}
+	return dataDir
 }
 
 func acpGatewayTestConfig(dataDir, deploymentMode string) *config.Config {
