@@ -973,6 +973,21 @@
         "real-tool-results"
       ]
     },
+    "nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "terminal",
+        "verifier-passing-trajectory",
+        "real-tool-arguments"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "Trajectory-level verifier success supplies benign task context, but individual command outcomes are unavailable and remain unknown."
+      ]
+    },
     "few-sh/terminal-wrench-trajectories": {
       "intended_use": [
         "action",

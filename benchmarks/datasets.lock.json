@@ -1021,6 +1021,29 @@
       "enabled": true
     },
     {
+      "id": "nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "terminal",
+        "verifier-passing-trajectory",
+        "real-tool-arguments"
+      ],
+      "source_url": "https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1",
+      "revision": "eaef26944643644c8a3dbbf361ce6128142f5976",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "atcb_terminal_pivot_release_final_v2.jsonl"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
       "id": "infraset/infraset",
       "purpose": [
         "action",
