@@ -370,6 +370,12 @@ type exactFallbackContract struct {
 }
 
 var exactFallbackContracts = map[string]exactFallbackContract{
+	"impact.unbounded_cpu_fanout": {
+		proves:                      exactUnboundedCPUFanoutAction,
+		boundedSubgraphProves:       exactUnboundedCPUFanoutAction,
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
 	"integrity.dpkg_status_direct_mutation": {
 		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactPOSIXDPKGStatusMutation(facts) ||
@@ -966,6 +972,21 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return sshAuthorizedKeysCommandPrerequisite(facts)
 		},
 	},
+}
+
+func exactUnboundedCPUFanoutAction(
+	input actionfacts.Input,
+	_ actionfacts.Facts,
+) bool {
+	// The dedicated extractor reparses the complete trusted command with its
+	// own bounded POSIX grammar. Generic ActionFacts intentionally marks loop
+	// syntax partial, so this is an independently complete subgraph proof rather
+	// than a promotion of generic partial facts.
+	if strings.TrimSpace(input.Command) == "" {
+		return false
+	}
+	_, ok := actionfacts.ExtractExactPOSIXUnboundedCPUFanout(input.Command)
+	return ok
 }
 
 type trustedLegacyProvenCommandDetectionOnlyContract struct {

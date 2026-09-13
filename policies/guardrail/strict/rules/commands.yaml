@@ -1325,6 +1325,14 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [impact, denial-of-service]
+  - id: impact.unbounded_cpu_fanout
+    tool_call_only: true
+    # Code-owned ActionFacts grammar; the regex is an inert catalog anchor.
+    pattern: 'a^'
+    title: "Unbounded high-CPU worker fanout"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, denial-of-service, resource-exhaustion, cpu, exact-actionfacts]
   - id: impact.mass_process_termination
     tool_call_only: true
     expression: >-
