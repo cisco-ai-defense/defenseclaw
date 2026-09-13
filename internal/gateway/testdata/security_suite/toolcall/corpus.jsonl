@@ -7,6 +7,8 @@
 {"id":"aws-creds-fixture","rule_id":"PATH-AWS-CREDS","command":"cat /repo/.aws/credentials","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"structured-aws-creds-read","rule_id":"PATH-AWS-CREDS","tool":"read_file","args":{"path":"/home/alice/.aws/credentials"},"active_home":"/home/alice","is_attack":true,"expect_route":"semantic","detection_only":true,"no_other_finding":true}
 {"id":"structured-aws-creds-fixture","rule_id":"PATH-AWS-CREDS","tool":"read_file","args":{"path":"/repo/fixtures/.aws/credentials"},"active_home":"/home/alice","is_attack":false,"expect_route":"none","no_other_finding":true}
+{"id":"password-cracker-potfile-read","rule_id":"PATH-PASSWORD-CRACKER-POTFILE","command":"cat /root/.local/share/hashcat/hashcat.potfile","active_home":"/root","is_attack":true,"expect_route":"semantic","detection_only":true,"no_other_finding":true}
+{"id":"password-cracker-potfile-fixture","rule_id":"PATH-PASSWORD-CRACKER-POTFILE","command":"cat /repo/fixtures/.local/share/hashcat/hashcat.potfile","active_home":"/root","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"kubeconfig-read","rule_id":"PATH-KUBE","command":"cat /home/alice/.kube/config","is_attack":true,"expect_route":"semantic","detection_only":true,"no_other_finding":true}
 {"id":"kubeconfig-fixture","rule_id":"PATH-KUBE","command":"cat /repo/.kube/config","is_attack":false,"expect_route":"none","no_other_finding":true}
 {"id":"package-credential-read","rule_id":"PATH-DOCKER","command":"cat /home/alice/.npmrc","is_attack":true,"expect_route":"semantic","detection_only":true,"no_other_finding":true}
