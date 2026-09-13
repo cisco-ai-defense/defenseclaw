@@ -907,7 +907,7 @@ func (f Facts) EnforcementEligible() bool {
 		return validSQLMutation || validDirectEgress || validAWSBulkTermination
 	}
 	for _, command := range f.Commands {
-		if command.Effect != EffectExecute {
+		if command.Effect != EffectExecute || command.ControlFlowUncertain {
 			return false
 		}
 		switch command.Kind {

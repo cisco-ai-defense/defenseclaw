@@ -67,6 +67,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	}
 
 	pipelines := posixPipelineRelations(file)
+	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -97,6 +98,9 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		case *syntax.BinaryCmd:
 			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt ||
 				typed.Op == syntax.PipeAll {
+				if _, represented := representedFallbacks[typed]; represented {
+					break
+				}
 				// Short-circuit reachability and stderr-inclusive pipelines
 				// cannot be represented by the current fact contract.
 				out.markPartial(IssueUnsupportedConstruct)
@@ -118,6 +122,54 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
 	return out
+}
+
+// exactStandalonePOSIXAbsoluteCDFallbacks returns every OR node in one closed
+// top-level fallback list such as `cd /tmp || cd /var/run || cd /`. The
+// individual attempts remain ControlFlowUncertain; this proof only establishes
+// that the complete static list is represented. Requiring the list to consume
+// the entire file prevents an unresolved selected directory from affecting the
+// interpretation of later relative paths.
+func exactStandalonePOSIXAbsoluteCDFallbacks(
+	file *syntax.File,
+) map[*syntax.BinaryCmd]struct{} {
+	represented := make(map[*syntax.BinaryCmd]struct{})
+	if file == nil || len(file.Stmts) != 1 ||
+		posixStatementHasUnsupportedControl(file.Stmts[0]) {
+		return represented
+	}
+	if _, ok := file.Stmts[0].Cmd.(*syntax.BinaryCmd); !ok ||
+		!collectExactPOSIXAbsoluteCDFallback(file.Stmts[0], represented) {
+		return map[*syntax.BinaryCmd]struct{}{}
+	}
+	return represented
+}
+
+func collectExactPOSIXAbsoluteCDFallback(
+	stmt *syntax.Stmt,
+	represented map[*syntax.BinaryCmd]struct{},
+) bool {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) ||
+		len(stmt.Redirs) != 0 {
+		return false
+	}
+	if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+		if binary.Op != syntax.OrStmt ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.X, represented) ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.Y, represented) {
+			return false
+		}
+		represented[binary] = struct{}{}
+		return true
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return false
+	}
+	program := projectPOSIXWord(call.Args[0])
+	target := projectPOSIXWord(call.Args[1])
+	return !program.Expands && program.Value == "cd" &&
+		!target.Expands && strings.HasPrefix(target.Value, "/")
 }
 
 // normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
