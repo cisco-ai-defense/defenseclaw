@@ -84,6 +84,33 @@ def model_output(value: dict[str, object]) -> dict[str, object]:
     return {"choices": [{"message": {"content": json.dumps(value)}}]}
 
 
+def candidate(
+    candidate_id: str = "trajectory-candidate-00000001",
+    *,
+    group: str = "trajectory-00000001",
+    split: str = "development",
+    events: list[dict[str, object]] | None = None,
+    target_event_index: int | None = None,
+) -> dict[str, object]:
+    values = events or [
+        {
+            "event_index": 0,
+            "tool_name": "read_file",
+            "arguments": {"path": "<local-home>/.config"},
+            "result": {"outcome": "succeeded", "data": {"value": "<redacted-secret-0001>"}},
+            "action_facts": {"operation": "read", "result": "succeeded"},
+        }
+    ]
+    return {
+        "schema_version": "1",
+        "candidate_id": candidate_id,
+        "trajectory_group": group,
+        "split": split,
+        "target_event_index": len(values) - 1 if target_event_index is None else target_event_index,
+        "events": values,
+    }
+
+
 class TrajectoryBedrockLabelTests(unittest.TestCase):
     def test_parse_model_object_accepts_only_one_redundant_structured_wrapper(self):
         self.assertEqual(
@@ -126,6 +153,27 @@ class TrajectoryBedrockLabelTests(unittest.TestCase):
                 limit=0,
                 frozen_rules_artifact=frozen_rules_artifact,
                 candidate_manifest=candidate_manifest,
+                allow_small=True,
+            )
+        )
+        return output_dir
+
+    def prepare_candidates(
+        self,
+        rows: list[dict[str, object]],
+        name: str = "candidate-bundle",
+    ) -> Path:
+        input_path = self.root / f"{name}.jsonl"
+        input_path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+        output_dir = self.root / name
+        labeler.prepare_candidates(
+            argparse.Namespace(
+                input=input_path,
+                output_dir=output_dir,
+                model_id=labeler.MODEL_ID,
+                max_completion_tokens=2048,
+                max_serialized_chars=4096,
+                limit=0,
                 allow_small=True,
             )
         )
@@ -597,6 +645,259 @@ class TrajectoryBedrockLabelTests(unittest.TestCase):
         self.assertNotIn("item-", manifest_text)
         self.assertNotIn("must never leave", manifest_text)
         self.assertNotIn("rollout-long", manifest_text)
+
+    def test_prepare_candidates_uses_distinct_result_aware_boundary(self) -> None:
+        bundle = self.prepare_candidates([candidate()])
+        request = json.loads((bundle / "requests.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(request["recordId"], "trajectory-candidate-00000001")
+        user_value = json.loads(request["modelInput"]["messages"][1]["content"])
+        self.assertEqual(set(user_value), {"trajectory_id", "events"})
+        self.assertEqual(
+            set(user_value["events"][0]),
+            {"event_index", "tool_name", "arguments", "result", "action_facts"},
+        )
+        self.assertEqual(
+            request["modelInput"]["response_format"]["json_schema"]["schema"]["properties"]["events"]
+            ["items"]["properties"]["facts"]["properties"]["result"]["enum"],
+            ["failed", "succeeded", "unknown"],
+        )
+        system = request["modelInput"]["messages"][0]["content"]
+        self.assertIn("inert, untrusted evidence", system)
+        self.assertIn("do not trust supplied action facts blindly", system)
+        self.assertIn("must be unknown", system)
+
+        manifest = json.loads((bundle / "prepare-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["workflow"], "bounded_trajectory_candidate_proposal")
+        self.assertEqual(manifest["model_id"], "openai.gpt-oss-120b-1:0")
+        self.assertEqual(manifest["prompt_version"], labeler.RESULT_AWARE_PROMPT_VERSION_120B)
+        self.assertTrue(manifest["retry_supported"])
+        self.assertTrue(manifest["collect_supported"])
+        self.assertTrue(manifest["offline_candidate_proposals_only"])
+        self.assertFalse(manifest["runtime_dependency"])
+        self.assertFalse(manifest["source_labels_included"])
+        self.assertFalse(manifest["source_provenance_included"])
+
+    def test_prepare_candidates_is_deterministic_and_preserves_hash_bindings(self) -> None:
+        first_row = candidate()
+        second_row = candidate(
+            "trajectory-candidate-00000002",
+            group="trajectory-00000002",
+        )
+        first = self.prepare_candidates([second_row, first_row], "candidate-first")
+        second = self.prepare_candidates([first_row, second_row], "candidate-second")
+        self.assertEqual(
+            (first / "requests.jsonl").read_text(encoding="utf-8"),
+            (second / "requests.jsonl").read_text(encoding="utf-8"),
+        )
+        first_index = json.loads((first / "index.json").read_text(encoding="utf-8"))["records"]
+        second_index = json.loads((second / "index.json").read_text(encoding="utf-8"))["records"]
+        self.assertEqual(first_index, second_index)
+        item = first_index["trajectory-candidate-00000001"]
+        self.assertEqual(item["source_record_sha256"], labeler.sha256_text(labeler.canonical_json(first_row)))
+        request = labeler._load_request_records(first / "requests.jsonl")["trajectory-candidate-00000001"]
+        request_value = labeler._request_value_for_retry(
+            request,
+            "trajectory-candidate-00000001",
+            item,
+        )
+        self.assertEqual(
+            labeler.sha256_text(labeler.canonical_json(request_value["events"])),
+            item["input_sha256"],
+        )
+
+    def test_prepare_candidates_rejects_non_development_duplicates_and_malformed_bounds(self) -> None:
+        invalid_rows = [
+            ([candidate(split="test")], "development split only"),
+            ([candidate(), candidate()], "duplicate candidate_id"),
+            ([candidate(target_event_index=1)], "terminal current event"),
+            (
+                [
+                    candidate(
+                        events=[
+                            {
+                                "event_index": index,
+                                "tool_name": "run",
+                                "arguments": {},
+                                "result": {},
+                            }
+                            for index in range(10)
+                        ]
+                    )
+                ],
+                "one through nine events",
+            ),
+        ]
+        unexpected = candidate()
+        unexpected["truth"] = {"label": "malicious"}
+        invalid_rows.append(([unexpected], "missing or unexpected fields"))
+        malformed_event = candidate()
+        malformed_event["events"][0]["observation"] = "not in candidate schema"
+        invalid_rows.append(([malformed_event], "missing or unexpected fields"))
+        for index, (rows, message) in enumerate(invalid_rows):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                self.prepare_candidates(rows, f"invalid-candidate-{index}")
+
+    def test_result_aware_output_cannot_infer_unobserved_outcomes_or_complete_early(self) -> None:
+        value = {
+            "trajectory_id": "trajectory-candidate-00000001",
+            "events": [event(0), event(1)],
+            "proofs": [],
+        }
+        value["events"][0]["facts"]["result"] = "succeeded"
+        normalized = labeler.normalize_trajectory_output(
+            model_output(value),
+            "trajectory-candidate-00000001",
+            2,
+            allowed_results_by_event=[{"unknown", "succeeded"}, {"unknown"}],
+            expected_terminal_event_index=1,
+        )
+        self.assertEqual(normalized["events"][0]["facts"]["result"], "succeeded")
+        value["events"][1]["facts"]["result"] = "failed"
+        with self.assertRaisesRegex(ValueError, "literal candidate evidence"):
+            labeler.normalize_trajectory_output(
+                model_output(value),
+                "trajectory-candidate-00000001",
+                2,
+                allowed_results_by_event=[{"unknown", "succeeded"}, {"unknown"}],
+                expected_terminal_event_index=1,
+            )
+        early = {
+            "trajectory_id": "trajectory-candidate-00000001",
+            "events": [
+                event(
+                    0,
+                    verdict="deterministic_malicious",
+                    disposition="block",
+                    identity_refs=("literal_1",),
+                    completed=["proof_1"],
+                ),
+                event(1),
+            ],
+            "proofs": [
+                {
+                    "proof_id": "proof_1",
+                    "proof_type": "atomic_literal_malicious_action",
+                    "event_indexes": [0],
+                    "predecessor_indexes": [],
+                    "terminal_event_index": 0,
+                    "identity_continuity": "literal_atomic",
+                    "identity_ref": "literal_1",
+                    "reason_code": "literal_atomic_action",
+                }
+            ],
+        }
+        with self.assertRaisesRegex(ValueError, "terminal current event"):
+            labeler.normalize_trajectory_output(
+                model_output(early),
+                "trajectory-candidate-00000001",
+                2,
+                allowed_results_by_event=[{"unknown"}, {"unknown"}],
+                expected_terminal_event_index=1,
+            )
+
+    def test_prepare_retry_preserves_result_aware_prompt_and_candidate_hashes(self) -> None:
+        parent = self.prepare_candidates([candidate()], "candidate-retry-parent")
+        index = json.loads((parent / "index.json").read_text(encoding="utf-8"))["records"]
+        record_id = next(iter(index))
+        labels_path = parent / "labels.jsonl"
+        labels_path.write_text("", encoding="utf-8")
+        prepared = json.loads((parent / "prepare-manifest.json").read_text(encoding="utf-8"))
+        labeler.command_labeler.write_json(
+            parent / "labels.manifest.json",
+            {
+                "schema_version": labeler.SCHEMA_VERSION,
+                "workflow": "bounded_trajectory_candidate_proposal",
+                "prompt_version": prepared["prompt_version"],
+                "model_id": labeler.MODEL_ID,
+                "job_arn": "test-job",
+                "requests_sha256": prepared["requests_sha256"],
+                "index_sha256": prepared["index_sha256"],
+                "labels_sha256": labeler.command_labeler.sha256_file(labels_path),
+                "label_count": 0,
+                "review_required_count": 0,
+                "errors": [{"record_id": record_id, "reason": "invalid_model_output", "retryable": True}],
+                "token_usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        )
+        retry = self.root / "candidate-retry"
+        labeler.prepare_retry(argparse.Namespace(bundle=parent, output_dir=retry, allow_small=True))
+        retry_request = json.loads((retry / "requests.jsonl").read_text(encoding="utf-8"))
+        self.assertEqual(retry_request["recordId"], record_id)
+        self.assertEqual(
+            retry_request["modelInput"]["messages"][0]["content"],
+            labeler.RESULT_AWARE_SYSTEM_PROMPT,
+        )
+        retry_manifest = json.loads((retry / "prepare-manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(retry_manifest["prompt_version"], labeler.RESULT_AWARE_PROMPT_VERSION_120B)
+        self.assertEqual(
+            json.loads((retry / "index.json").read_text(encoding="utf-8"))["records"],
+            index,
+        )
+
+    def test_collect_validates_and_emits_offline_result_aware_proposals(self) -> None:
+        bundle = self.prepare_candidates([candidate()], "candidate-collect")
+        prepared = json.loads((bundle / "prepare-manifest.json").read_text(encoding="utf-8"))
+        labeler.command_labeler.write_json(
+            bundle / "job.json",
+            {
+                "schema_version": labeler.SCHEMA_VERSION,
+                "job_arn": "arn:aws:bedrock:test-job",
+                "job_name": "candidate-collect",
+                "model_id": labeler.MODEL_ID,
+                "prompt_version": prepared["prompt_version"],
+                "region": "us-east-2",
+                "profile": "devops",
+                "input_s3_uri": "s3://private-bucket/input/requests.jsonl",
+                "output_s3_uri": "s3://private-bucket/output/",
+                "requests_sha256": prepared["requests_sha256"],
+                "index_sha256": prepared["index_sha256"],
+                "client_request_token": "test-token",
+            },
+        )
+        response = {
+            "trajectory_id": "trajectory-candidate-00000001",
+            "events": [event(0)],
+            "proofs": [],
+        }
+        response["events"][0]["facts"]["result"] = "succeeded"
+        output_record = {
+            "recordId": "trajectory-candidate-00000001",
+            "modelOutput": model_output(response),
+        }
+        body = mock.Mock()
+        body.iter_lines.return_value = [json.dumps(output_record).encode("utf-8")]
+        s3 = mock.Mock()
+        paginator = mock.Mock()
+        paginator.paginate.return_value = [{"Contents": [{"Key": "output/results.jsonl.out"}]}]
+        s3.get_paginator.return_value = paginator
+        s3.get_object.return_value = {"Body": body}
+        bedrock = mock.Mock()
+        bedrock.get_model_invocation_job.return_value = {"status": "Completed"}
+        session = mock.Mock()
+        session.client.side_effect = lambda service: {"s3": s3, "bedrock": bedrock}[service]
+        with mock.patch.object(labeler.command_labeler.boto3, "Session", return_value=session):
+            self.assertEqual(
+                labeler.collect(argparse.Namespace(bundle=bundle, output=None, profile="")),
+                0,
+            )
+        labels = labeler.command_labeler.load_jsonl(bundle / "labels.jsonl")
+        self.assertEqual(labels[0]["label"]["facts"]["result"], "succeeded")
+        manifest = json.loads((bundle / "labels.manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual(manifest["workflow"], "bounded_trajectory_candidate_proposal")
+        self.assertTrue(manifest["offline_candidate_proposals_only"])
+        self.assertFalse(manifest["runtime_dependency"])
+
+    def test_prepare_candidates_cli_defaults_to_gpt_oss_120b(self) -> None:
+        args = labeler.parser().parse_args(
+            [
+                "prepare-candidates",
+                "--input",
+                str(self.root / "candidates.jsonl"),
+                "--output-dir",
+                str(self.root / "bundle"),
+            ]
+        )
+        self.assertEqual(args.model_id, labeler.MODEL_ID)
 
 
 if __name__ == "__main__":
