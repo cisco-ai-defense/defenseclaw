@@ -90,6 +90,21 @@ func TestExactKerberosTicketForgerySourceStructuredArgv(t *testing.T) {
 	}
 }
 
+func TestExactKerberosTicketForgerySourceAllowsObservedOptionAfterPrincipal(t *testing.T) {
+	const principal = "administrator"
+	facts := Analyze(Input{
+		Tool: "execute_command",
+		Command: "impacket-ticketer -nthash " + strings.Repeat("e5", 16) +
+			" -domain-sid S-1-5-21-6001-6002-6003 -domain lab.example " +
+			principal + " -user-id 500",
+	})
+	fact, ok := ExactKerberosTicketForgerySource(facts)
+	if !ok || !facts.Authoritative() || fact.ExpectedArtifactIdentityDigest !=
+		KerberosTicketArtifactIdentity(principal+".ccache") {
+		t.Fatalf("fact=%+v ok=%t parse=%+v", fact, ok, facts.Parse)
+	}
+}
+
 func TestExactKerberosTicketForgerySourceHardNegatives(t *testing.T) {
 	key := strings.Repeat("e5", 16)
 	aes := strings.Repeat("f6", 32)
@@ -116,7 +131,6 @@ func TestExactKerberosTicketForgerySourceHardNegatives(t *testing.T) {
 		{name: "dynamic domain", command: strings.Replace(base, "lab.example", "${DOMAIN}", 1)},
 		{name: "missing principal", command: strings.TrimSuffix(base, " Administrator")},
 		{name: "second positional", command: base + " OtherUser"},
-		{name: "option after principal", command: base + " -user-id 500"},
 		{name: "dynamic principal", command: strings.Replace(base, "Administrator", "${USER}", 1)},
 		{name: "principal path", command: strings.Replace(base, "Administrator", "dir/Administrator", 1)},
 		{name: "duplicate extra sid", command: strings.Replace(base, " Administrator", " -extra-sid S-1-5-21-7001-7002-7003-519 -extra-sid S-1-5-21-7001-7002-7003-519 Administrator", 1)},

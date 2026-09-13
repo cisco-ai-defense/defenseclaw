@@ -62,10 +62,10 @@ func exactKerberosTicketForgeryCommand(
 	for index := 1; index < len(command.Argv); {
 		argument := command.Argv[index]
 		if !strings.HasPrefix(argument, "-") {
-			// Argparse permits options after positionals, but requiring the only
-			// positional principal to be final removes ambiguous result lineage.
-			if index != len(command.Argv)-1 ||
-				!validKerberosTicketPrincipal(argument) {
+			// Argparse permits closed options after the positional. Identity is
+			// still exact because this grammar accepts exactly one principal and
+			// every recognized option consumes exactly one bounded value.
+			if principal != "" || !validKerberosTicketPrincipal(argument) {
 				return KerberosTicketForgeryFact{}, false
 			}
 			principal = argument
