@@ -16,6 +16,11 @@ var cloudAuditOuterKeys = map[string]bool{
 	"request_id": true, "technique": true,
 }
 
+var worldwideSSHParameterKeys = map[string]bool{
+	"cidrIp": true, "fromPort": true, "groupId": true,
+	"ipPermissions": true, "ipProtocol": true, "toPort": true,
+}
+
 // ExactCloudAuditSecurityOperations returns validated, value-free audit facts.
 func ExactCloudAuditSecurityOperations(facts Facts) []CloudAuditSecurityOperationFact {
 	result := make([]CloudAuditSecurityOperationFact, 0, len(facts.CloudAuditSecurityOperations))
@@ -99,9 +104,16 @@ func exactCloudAuditOperation(source, name string, parameters map[string]any, pr
 		if exactReadOnlyEventSelectorDisable(parameters) {
 			return CloudAuditTelemetryDisable, true
 		}
-	case "ec2.amazonaws.com:ModifySnapshotAttribute", "ec2.amazonaws.com:ModifyImageAttribute",
-		"rds.amazonaws.com:ModifyDBSnapshotAttribute":
-		if exactExternalSnapshotShare(parameters, principal) {
+	case "ec2.amazonaws.com:ModifySnapshotAttribute":
+		if exactExternalEC2SnapshotShare(parameters, principal) {
+			return CloudAuditExternalSnapshotShare, true
+		}
+	case "ec2.amazonaws.com:ModifyImageAttribute":
+		if exactExternalEC2ImageShare(parameters, principal) {
+			return CloudAuditExternalSnapshotShare, true
+		}
+	case "rds.amazonaws.com:ModifyDBSnapshotAttribute":
+		if exactExternalRDSDBSnapshotShare(parameters, principal) {
 			return CloudAuditExternalSnapshotShare, true
 		}
 	case "ec2.amazonaws.com:AuthorizeSecurityGroupIngress":
@@ -128,6 +140,9 @@ func exactBoundedCloudIdentity(value any) bool {
 }
 
 func exactReadOnlyEventSelectorDisable(parameters map[string]any) bool {
+	if len(parameters) != 2 || !exactBoundedCloudIdentity(parameters["trailName"]) {
+		return false
+	}
 	selectors, ok := parameters["eventSelectors"].([]any)
 	if !ok || len(selectors) != 1 {
 		return false
@@ -140,49 +155,155 @@ func exactReadOnlyEventSelectorDisable(parameters map[string]any) bool {
 	return ok && !include
 }
 
-func exactExternalSnapshotShare(parameters map[string]any, principal any) bool {
-	principalObject, ok := principal.(map[string]any)
+func exactExternalEC2SnapshotShare(parameters map[string]any, principal any) bool {
+	if len(parameters) != 3 || exactString(parameters["attributeType"]) != "CREATE_VOLUME_PERMISSION" ||
+		!exactEC2ResourceID(parameters["snapshotId"], "snap") {
+		return false
+	}
+	return exactExternalAccountPermission(parameters["createVolumePermission"], principal)
+}
+
+func exactExternalEC2ImageShare(parameters map[string]any, principal any) bool {
+	if len(parameters) != 3 || exactString(parameters["attributeType"]) != "launchPermission" ||
+		!exactEC2ResourceID(parameters["imageId"], "ami") {
+		return false
+	}
+	return exactExternalAccountPermission(parameters["launchPermission"], principal)
+}
+
+func exactExternalRDSDBSnapshotShare(parameters map[string]any, principal any) bool {
+	if len(parameters) != 3 || exactString(parameters["attributeName"]) != "restore" ||
+		!exactRDSDBSnapshotIdentifier(parameters["dBSnapshotIdentifier"]) {
+		return false
+	}
+	owner, ok := exactCloudAccountID(principal)
 	if !ok {
 		return false
 	}
-	owner := exactString(principalObject["account_id"])
-	if len(owner) != 12 {
+	accounts, ok := parameters["valuesToAdd"].([]any)
+	if !ok || len(accounts) == 0 {
 		return false
 	}
-	var candidates []any
-	if values, ok := parameters["valuesToAdd"].([]any); ok {
-		candidates = values
+	external := false
+	for _, candidate := range accounts {
+		account := exactString(candidate)
+		if !validAWSAccountID(account) {
+			return false
+		}
+		external = external || account != owner
 	}
-	for _, key := range []string{"createVolumePermission", "launchPermission"} {
-		permission, ok := parameters[key].(map[string]any)
-		if !ok {
-			continue
+	return external
+}
+
+func exactExternalAccountPermission(value, principal any) bool {
+	owner, ok := exactCloudAccountID(principal)
+	if !ok {
+		return false
+	}
+	permission, ok := value.(map[string]any)
+	if !ok || len(permission) != 1 {
+		return false
+	}
+	add, ok := permission["add"].(map[string]any)
+	if !ok || len(add) != 1 {
+		return false
+	}
+	items, ok := add["items"].([]any)
+	if !ok || len(items) == 0 {
+		return false
+	}
+	external := false
+	for _, item := range items {
+		itemObject, ok := item.(map[string]any)
+		if !ok || len(itemObject) != 1 {
+			return false
 		}
-		add, ok := permission["add"].(map[string]any)
-		if !ok {
-			continue
+		account := exactString(itemObject["userId"])
+		if !validAWSAccountID(account) {
+			return false
 		}
-		if items, ok := add["items"].([]any); ok {
-			for _, item := range items {
-				if itemObject, ok := item.(map[string]any); ok {
-					candidates = append(candidates, itemObject["userId"])
-				}
+		external = external || account != owner
+	}
+	return external
+}
+
+func exactCloudAccountID(principal any) (string, bool) {
+	principalObject, ok := principal.(map[string]any)
+	if !ok {
+		return "", false
+	}
+	owner := exactString(principalObject["account_id"])
+	return owner, validAWSAccountID(owner)
+}
+
+func validAWSAccountID(account string) bool {
+	if len(account) != 12 {
+		return false
+	}
+	for index := range account {
+		if account[index] < '0' || account[index] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
+func exactEC2ResourceID(value any, prefix string) bool {
+	identity := exactString(value)
+	if !strings.HasPrefix(identity, prefix+"-") {
+		return false
+	}
+	suffix := identity[len(prefix)+1:]
+	if len(suffix) != 8 && len(suffix) != 17 {
+		return false
+	}
+	for index := range suffix {
+		character := suffix[index]
+		if character < '0' || character > '9' {
+			lower := character | 0x20
+			if lower < 'a' || lower > 'f' {
+				return false
 			}
 		}
 	}
-	for _, candidate := range candidates {
-		account := exactString(candidate)
-		if len(account) == 12 && account != owner {
-			return true
+	return true
+}
+
+func exactRDSDBSnapshotIdentifier(value any) bool {
+	identity := exactString(value)
+	if len(identity) == 0 || len(identity) > 255 || !asciiLetter(identity[0]) ||
+		identity[len(identity)-1] == '-' || strings.Contains(identity, "--") {
+		return false
+	}
+	for index := range identity {
+		character := identity[index]
+		if !asciiLetter(character) && (character < '0' || character > '9') && character != '-' {
+			return false
 		}
 	}
-	return false
+	return true
+}
+
+func asciiLetter(character byte) bool {
+	lower := character | 0x20
+	return lower >= 'a' && lower <= 'z'
 }
 
 func exactWorldwideSSHIngress(parameters map[string]any) bool {
-	if exactString(parameters["ipProtocol"]) != "tcp" || exactInteger(parameters["fromPort"]) != 22 ||
+	if (len(parameters) != 5 && len(parameters) != 6) ||
+		!exactObjectKeys(parameters, worldwideSSHParameterKeys) {
+		return false
+	}
+	if !exactEC2ResourceID(parameters["groupId"], "sg") || exactString(parameters["ipProtocol"]) != "tcp" ||
+		exactInteger(parameters["fromPort"]) != 22 ||
 		exactInteger(parameters["toPort"]) != 22 {
 		return false
+	}
+	if nested, present := parameters["ipPermissions"]; present {
+		permission, ok := nested.(map[string]any)
+		if !ok || len(permission) != 0 {
+			return false
+		}
 	}
 	prefix, err := netip.ParsePrefix(exactString(parameters["cidrIp"]))
 	return err == nil && prefix.Addr().Is4() && prefix.Bits() == 0
