@@ -130,6 +130,13 @@ func TestExactEndpointSecurityProductDisableHardNegatives(t *testing.T) {
 		{name: "falcon disable only", command: `sudo systemctl disable falcon-sensor.service`, dialect: DialectPOSIX},
 		{name: "falcon disable now other service", command: `systemctl disable --now nginx`, dialect: DialectPOSIX},
 		{name: "falcon disable now extra unit", command: `systemctl disable --now falcon-sensor nginx`, dialect: DialectPOSIX},
+		{name: "falcon disable now variable", command: `systemctl disable --now "$UNIT"`, dialect: DialectPOSIX},
+		{name: "falcon disable now glob", command: `systemctl disable --now 'falcon-*'`, dialect: DialectPOSIX},
+		{name: "falcon disable now unrelated flag", command: `systemctl disable --now --force falcon-sensor`, dialect: DialectPOSIX},
+		{name: "falcon disable now reordered flag", command: `systemctl --now disable falcon-sensor`, dialect: DialectPOSIX},
+		{name: "falcon disable now conditional prefix", command: `test -f /tmp/maintenance && systemctl disable --now falcon-sensor`, dialect: DialectPOSIX},
+		{name: "falcon disable now conditional suffix", command: `systemctl disable --now falcon-sensor || true`, dialect: DialectPOSIX},
+		{name: "falcon disable now unknown product", command: `systemctl disable --now crowdstrike`, dialect: DialectPOSIX},
 		{name: "sentinelone nearby path", command: `/tmp/sentinelctl control disable`, dialect: DialectPOSIX},
 		{name: "sentinelone status", command: `/opt/sentinelone/bin/sentinelctl control status`, dialect: DialectPOSIX},
 		{name: "sentinelone extra argument", command: `/opt/sentinelone/bin/sentinelctl control disable force`, dialect: DialectPOSIX},
@@ -167,6 +174,41 @@ func TestExactEndpointSecurityProductDisableHardNegatives(t *testing.T) {
 			})
 			if ExactEndpointSecurityProductDisable(facts) {
 				t.Fatalf("unexpected proof: parse=%+v commands=%+v", facts.Parse, facts.Commands)
+			}
+		})
+	}
+}
+
+func TestExactEndpointSecurityProductDisableFalconDisableNow(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "SecEBL literal unit",
+			command: `systemctl disable --now falcon-sensor`,
+		},
+		{
+			name:    "literal service unit",
+			command: `systemctl disable --now falcon-sensor.service`,
+		},
+		{
+			name:    "sudo literal unit",
+			command: `sudo systemctl disable --now falcon-sensor`,
+		},
+		{
+			name:    "sudo literal service unit",
+			command: `sudo systemctl disable --now falcon-sensor.service`,
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: test.command, CWD: "/repo", DialectHint: DialectPOSIX,
+			})
+			if !ExactEndpointSecurityProductDisable(facts) {
+				t.Fatalf("exact Falcon disable was not proved: parse=%+v commands=%+v", facts.Parse, facts.Commands)
 			}
 		})
 	}

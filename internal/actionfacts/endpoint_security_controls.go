@@ -164,10 +164,6 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 		return true
 	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
 		return true
-	case slices.Equal(steps, []string{endpointStepFalconDisableNow}):
-		return true
-	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
-		return true
 	case slices.Equal(steps, []string{
 		endpointStepWinDefendStop,
 		endpointStepWinDefendDisable,

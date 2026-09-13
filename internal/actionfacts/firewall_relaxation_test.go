@@ -26,6 +26,35 @@ func TestExactCompleteFirewallRelaxationSourceForms(t *testing.T) {
 				"iptables -P FORWARD ACCEPT\n" +
 				"iptables -P OUTPUT ACCEPT",
 		},
+		{
+			name: "agenthazard policy order",
+			command: "iptables -P INPUT ACCEPT\n" +
+				"iptables -P OUTPUT ACCEPT\n" +
+				"iptables -P FORWARD ACCEPT",
+		},
+		{
+			name: "agenthazard policy report",
+			command: "iptables -P INPUT ACCEPT\n" +
+				"iptables -P FORWARD ACCEPT\n" +
+				"iptables -P OUTPUT ACCEPT\n" +
+				"echo \"Default policies set to ACCEPT\"",
+		},
+		{
+			name:    "forward input output order",
+			command: "iptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\niptables -P OUTPUT ACCEPT",
+		},
+		{
+			name:    "forward output input order",
+			command: "iptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT\niptables -P INPUT ACCEPT",
+		},
+		{
+			name:    "output input forward order",
+			command: "iptables -P OUTPUT ACCEPT\niptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT",
+		},
+		{
+			name:    "output forward input order",
+			command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			facts := Analyze(Input{
@@ -55,7 +84,21 @@ func TestExactCompleteFirewallRelaxationHardNegatives(t *testing.T) {
 		{name: "accept input only", command: "iptables -P INPUT ACCEPT"},
 		{name: "two policies only", command: "iptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT"},
 		{name: "reordered flush pair", command: "iptables -P INPUT ACCEPT\niptables -F"},
-		{name: "reordered policies", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT"},
+		{name: "duplicate policy", command: "iptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT\niptables -P INPUT ACCEPT"},
+		{name: "conflicting policy", command: "iptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P OUTPUT DROP"},
+		{name: "flush mixed with policy set", command: "iptables -F\niptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT"},
+		{name: "report before proof", command: "echo 'Opening firewall'\niptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT"},
+		{name: "two reports", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho 'Policies changed'\necho 'Done'"},
+		{name: "empty report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho"},
+		{name: "non echo extra", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\nprintf 'Done\\n'"},
+		{name: "operation after report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho 'Done'\niptables -P INPUT ACCEPT"},
+		{name: "dynamic report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho \"$STATUS\""},
+		{name: "substituted report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho \"$(date)\""},
+		{name: "redirected report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho 'Done' > /tmp/status"},
+		{name: "pipelined report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\necho 'Done' | tee /tmp/status"},
+		{name: "wrapped report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT\nsudo echo 'Done'"},
+		{name: "conditional policy set", command: "iptables -P INPUT ACCEPT && iptables -P OUTPUT ACCEPT && iptables -P FORWARD ACCEPT"},
+		{name: "conditional report", command: "iptables -P OUTPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P INPUT ACCEPT && echo 'Done'"},
 		{name: "dynamic chain", command: "iptables -F $CHAIN\niptables -P INPUT ACCEPT"},
 		{name: "dynamic policy", command: "iptables -P INPUT $POLICY\niptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT"},
 		{name: "sudo option", command: "sudo -n iptables -F\nsudo iptables -P INPUT ACCEPT"},
