@@ -1712,7 +1712,8 @@ func unrestrictedSudoersGrantPrerequisite(facts actionfacts.Facts) bool {
 	// A dedicated closed terminal envelope may prove this fact even though the
 	// generic shell parser conservatively marks redirected terminal input as
 	// partial. No generic or malformed input can project the fact.
-	if actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) {
+	if actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) ||
+		actionfacts.ExactPOSIXNestedChrootUnrestrictedSudoersGrant(facts) {
 		return true
 	}
 	if !facts.Authoritative() || !facts.EnforcementEligible() {

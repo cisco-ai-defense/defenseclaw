@@ -410,10 +410,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"privilege.sudoers_unrestricted_nopasswd": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts)
+			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) ||
+				actionfacts.ExactPOSIXNestedChrootUnrestrictedSudoersGrant(facts)
 		},
 		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts)
+			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) ||
+				actionfacts.ExactPOSIXNestedChrootUnrestrictedSudoersGrant(facts)
 		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
