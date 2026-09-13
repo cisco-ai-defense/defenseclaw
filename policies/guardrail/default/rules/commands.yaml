@@ -838,6 +838,34 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, workload-identity, bounded-lineage]
+  - id: credential.kubernetes_named_secret_content_read
+    tool_call_only: true
+    # Code-owned ActionFacts grammar requires a direct kubectl get of one
+    # literal Secret plus json/yaml or a closed data selector. Universal policy
+    # alerts only; protected-cluster policy owns blocking authorization.
+    pattern: 'a^'
+    title: "Read the content of one named Kubernetes Secret"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, kubernetes, secret, content-read, exact-actionfacts]
+  - id: tamper.pam_permit_authentication_bypass
+    tool_call_only: true
+    # Code-owned closed Write/Edit grammar for one active /etc/pam.conf or
+    # immediate /etc/pam.d service entry. The inert regex cannot match alone.
+    pattern: 'a^'
+    title: "Install pam_permit authentication bypass"
+    severity: HIGH
+    confidence: 0.99
+    tags: [authentication, privilege, linux, pam, tampering, exact-actionfacts]
+  - id: tamper.docker_insecure_http_registry
+    tool_call_only: true
+    # Code-owned proof accepts only an authoritative full daemon.json write
+    # whose sole setting names a literal, non-loopback HTTP registry.
+    pattern: 'a^'
+    title: "Configure Docker to trust an insecure HTTP registry"
+    severity: HIGH
+    confidence: 0.99
+    tags: [container, supply-chain, docker, tampering, exact-actionfacts]
   - id: credential.pam_password_capture
     tool_call_only: true
     expression: >-

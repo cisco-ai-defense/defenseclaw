@@ -370,9 +370,59 @@ type exactFallbackContract struct {
 }
 
 var exactFallbackContracts = map[string]exactFallbackContract{
+	"credential.kubernetes_named_secret_content_read": {
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
+			return ok
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
+			return ok
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		// A named Secret content read is high-value credential access, but
+		// administrators also perform it legitimately. Universal profiles alert;
+		// the protected-cluster rule below is the explicit blocking boundary.
+		alertOnly: true,
+	},
+	"credential.protected_kubernetes_named_secret_content_read": {
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
+			return ok
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesSecretContentRead(input, facts)
+			return ok
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
 	"impact.unbounded_cpu_fanout": {
 		proves:                      exactUnboundedCPUFanoutAction,
 		boundedSubgraphProves:       exactUnboundedCPUFanoutAction,
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
+	"tamper.docker_insecure_http_registry": {
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactDockerInsecureRegistryWrite(input, facts)
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactDockerInsecureRegistryWrite(input, facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
+	"tamper.pam_permit_authentication_bypass": {
+		proves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+			return ok
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactPAMAuthenticationBypass(input)
+			return ok
+		},
 		requiresExactDetectionProof: true,
 		codeOwnedDetection:          true,
 	},
