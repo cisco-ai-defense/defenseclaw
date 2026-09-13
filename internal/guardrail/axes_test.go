@@ -116,6 +116,7 @@ func TestAxesForRuleID_CoversRealScannerRules(t *testing.T) {
 		"source.git_remote_tamper":                               nil,
 		"chain.secret_read_then_egress":                          {AxisSensitiveAccess, AxisEgressExternal},
 		"chain.adcs_certificate_request_then_pfx_authentication": {AxisSensitiveAccess},
+		"chain.s4u_ticket_then_kerberos_secretsdump_same_cache":  {AxisSensitiveAccess},
 		// Cloud metadata C2 endpoints (dual axis)
 		"C2-METADATA-AWS": {AxisSensitiveAccess, AxisEgressExternal},
 		// SRC-* network members

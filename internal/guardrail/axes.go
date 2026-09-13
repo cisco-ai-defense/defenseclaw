@@ -39,7 +39,8 @@ func AxesForRuleID(ruleID string) []DataAxis {
 	// This fixed chain is assigned directly because its append-only catalog
 	// entry is intentionally scoped to the guardrail package. The public docs
 	// snapshot remains unchanged until the gateway integration is published.
-	if ruleID == ToolChainADCSCertificateRequestThenPFXAuth {
+	if ruleID == ToolChainADCSCertificateRequestThenPFXAuth ||
+		ruleID == ToolChainS4UTicketThenKerberosSecretsdump {
 		return []DataAxis{AxisSensitiveAccess}
 	}
 	if axes, ok := ruleAxes[ruleID]; ok {

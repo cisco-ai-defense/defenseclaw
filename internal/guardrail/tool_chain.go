@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 23
+	ToolChainCount       = 24
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -74,6 +74,7 @@ const (
 	ToolChainSensitiveSQLValueCrossResourcePersist = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
 	ToolChainCompromisedCredentialThenAuthenticate = "chain.compromised_credential_then_successful_authentication"
 	ToolChainADCSCertificateRequestThenPFXAuth     = "chain.adcs_certificate_request_then_pfx_authentication"
+	ToolChainS4UTicketThenKerberosSecretsdump      = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
 	ToolChainMaxValueJoinDigests                   = 16
 	toolChainProjectionFingerprintDomain           = "defenseclaw.tool-chain.projection.v2"
 	toolChainWideProjectionFingerprintDomain       = "defenseclaw.tool-chain.projection.v3-wide"
@@ -375,6 +376,16 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		Severity:    "HIGH",
 		EventWindow: 9, TimeWindow: 30 * time.Minute,
 		Revision:                "public-cochise-certipy-identity-override-pfx-write-to-exact-artifact-authentication-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		DetectionOnly:           false,
+	},
+	{
+		ID: ToolChainS4UTicketThenKerberosSecretsdump, Version: "1.0",
+		Title:       "Result-backed S4U ticket used for Kerberos-only secretsdump",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "public-cochise-result-backed-s4u-ticket-to-exact-cache-kerberos-secretsdump-bounded8-v1",
 		RequiresExactJoin:       true,
 		RequiresTerminalSuccess: false,
 		DetectionOnly:           false,
