@@ -22,6 +22,9 @@ func TestCloudAuditControlDestructionProfilePosture(t *testing.T) {
 	}{
 		{name: "aws stop logging", command: "aws cloudtrail stop-logging --name production-trail --region us-east-1"},
 		{name: "aws delete trail", command: "aws cloudtrail delete-trail --name production-trail --region us-east-1"},
+		{name: "aws delete flow log", command: "aws ec2 delete-flow-logs --flow-log-ids fl-0e17aa62a21d4bbfe"},
+		{name: "aws delete resolver query log", command: "aws route53resolver delete-resolver-query-log-config --resolver-query-log-config-id rqlc-4473f20ca554c07"},
+		{name: "aws disable management events", command: `aws cloudtrail put-event-selectors --trail-name production-trail --event-selectors '[{"ReadWriteType":"ReadOnly","IncludeManagementEvents":false}]'`},
 		{name: "gcp delete audit activity", command: "gcloud logging logs delete projects/security-prod-123/logs/cloudaudit.googleapis.com%2Factivity --quiet"},
 	}
 	profiles := []struct {
@@ -126,6 +129,9 @@ func TestCloudAuditControlDestructionProtectedCloudPolicyBlocks(t *testing.T) {
 	for _, command := range []string{
 		"aws cloudtrail stop-logging --name production-trail --region us-east-1",
 		"aws cloudtrail delete-trail --name production-trail --region us-east-1",
+		"aws ec2 delete-flow-logs --flow-log-ids fl-0e17aa62a21d4bbfe",
+		"aws route53resolver delete-resolver-query-log-config --resolver-query-log-config-id rqlc-4473f20ca554c07",
+		`aws cloudtrail put-event-selectors --trail-name production-trail --event-selectors '[{"ReadWriteType":"ReadOnly","IncludeManagementEvents":false}]'`,
 		"gcloud logging logs delete projects/security-prod-123/logs/cloudaudit.googleapis.com%2Factivity --quiet",
 	} {
 		got := EvaluateDeterministicAction(
@@ -149,6 +155,9 @@ func TestCloudAuditControlDestructionOwnerRejectsNearMisses(t *testing.T) {
 		"aws cloudtrail delete-trail --name #{cloudtrail_name} --region #{region}",
 		`aws cloudtrail delete-trail --name "$TRAIL" --region us-east-1`,
 		"aws cloudtrail delete-trail --name production-trail --region us-east-1 --profile production",
+		"aws ec2 delete-flow-logs --flow-log-ids fl-production",
+		"aws route53resolver delete-resolver-query-log-config --resolver-query-log-config-id rqlc-production",
+		`aws cloudtrail put-event-selectors --trail-name production-trail --event-selectors '[{"ReadWriteType":"ReadOnly","IncludeManagementEvents":true}]'`,
 		"aws cloudtrail delete-trail --name production-trail --region us-east-1\nwhoami",
 		"gcloud logging logs delete projects/security-prod-123/logs/application --quiet",
 		"gcloud logging logs delete projects/#{project-id}/logs/cloudaudit.googleapis.com%2Factivity --quiet",

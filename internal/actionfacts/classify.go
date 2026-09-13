@@ -10731,7 +10731,8 @@ func classifyCredentialCLI(
 	case "aws", "aws.exe", "aws.cmd":
 		valueOptions := exactOptionSet(
 			"--bucket", "--key", "--db-instance-identifier", "--delete",
-			"--instance-ids", "--stack-name", "--table-name",
+			"--event-selectors", "--flow-log-ids", "--instance-ids",
+			"--resolver-query-log-config-id", "--stack-name", "--table-name",
 			"--ca-bundle", "--cli-connect-timeout", "--cli-read-timeout",
 			"--cli-binary-format", "--cli-input-json", "--cli-input-yaml",
 			"--color", "--endpoint-url", "--output", "--profile", "--query",
@@ -10742,7 +10743,7 @@ func classifyCredentialCLI(
 			"--role-session-name", "--secret-id", "--secret-id-list",
 			"--serial-number", "--source-identity", "--starting-token",
 			"--tags", "--token-code", "--transitive-tag-keys",
-			"--user-name", "--role-name", "--path",
+			"--user-name", "--role-name", "--path", "--trail-name",
 			"--assume-role-policy-document", "--policy-arn", "--policy-name",
 			"--policy-document",
 			"--version-id", "--version-stage", "--web-identity-token",
