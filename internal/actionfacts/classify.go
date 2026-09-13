@@ -11236,6 +11236,12 @@ func classifyOpenSSLDecode(out *parseOutput, command *CommandFact) {
 	}
 	switch command.Argv[1] {
 	case "base64", "enc":
+	case "pkcs12":
+		if classifyOpenSSLPKCS12PrivateKeyExtraction(out, command) {
+			return
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 		return

@@ -461,6 +461,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return actionfacts.ExactDirectoryCredentialAcquisition(facts)
 		},
 	},
+	"credential.pkcs12_private_key_extract": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactOpenSSLPKCS12PrivateKeyExtraction(facts)
+		},
+		detectionOnly: true,
+	},
 	"impact.windows_delete_all_shadow_copies": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactWindowsVSSDeleteAllShadows(facts)

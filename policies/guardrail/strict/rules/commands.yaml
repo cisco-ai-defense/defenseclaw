@@ -276,6 +276,16 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [credential, active-directory, credential-dumping, bounded-grammar]
+  - id: credential.pkcs12_private_key_extract
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['openssl', 'openssl.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: '(?i)\bopenssl(?:\.exe)?\s+pkcs12\b[^\r\n]{0,260}\s-nodes(?:\s|$)'
+    title: "Extract an unencrypted private key from a PKCS#12 bundle"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, private-key, pkcs12, bounded-grammar]
   - id: credential.structured_directory_acquisition
     tool_call_only: true
     expression: "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']"

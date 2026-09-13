@@ -64,6 +64,12 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     actionfacts.ExactDirectoryCredentialAcquisition,
 		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
 	},
+	"credential.pkcs12_private_key_extract": {
+		prerequisite: actionfacts.ExactOpenSSLPKCS12PrivateKeyExtraction,
+		// Exporting an unencrypted private key is high-confidence telemetry,
+		// but authorized certificate migration remains a legitimate workflow.
+		detectionOnly: true,
+	},
 	"credential.windows_ntds_ifm_dump": {
 		prerequisite:     actionfacts.ExactWindowsNTDSIFMDump,
 		suppressFallback: authoritativeSemanticSafeNegative,
