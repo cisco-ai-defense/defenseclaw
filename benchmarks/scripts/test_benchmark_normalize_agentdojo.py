@@ -118,6 +118,7 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         self.assertEqual("record-0", actions[0]["payload"]["args"]["query"])
         self.assertNotIn("delete_everything", json.dumps(cases))
         self.assertEqual(1, manifest["statistics"]["unobserved_emitted_calls"])
+        self.assertEqual(3, manifest["statistics"]["result_join_exact_id"])
 
     def test_preserves_linked_results_errors_and_run_outcomes_without_prompts(
         self,
@@ -147,6 +148,10 @@ class AgentDojoNormalizerTests(unittest.TestCase):
             evidence["linked_results"][0]["result"]["marker"],
         )
         self.assertEqual("", evidence["linked_results"][0]["call_ref"])
+        self.assertEqual(
+            ["message-local", "exact-id", "exact-id"],
+            [item["result_join_authority"] for item in evidence["linked_results"]],
+        )
         serialized = json.dumps(cases)
         self.assertNotIn("PRIVATE_SYSTEM_MARKER", serialized)
         self.assertNotIn("PRIVATE_PROMPT_MARKER", serialized)

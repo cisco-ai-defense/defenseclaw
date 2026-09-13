@@ -81,6 +81,7 @@ class WildClawBenchNormalizerTest(unittest.TestCase):
         self.assertTrue(all(case["truth"]["expected_disposition"] == "allow" for case in cases))
         self.assertTrue(all(case["strata"]["hard_negative"] for case in cases))
         self.assertEqual(1, manifest["counts"]["selected_english_trajectories"])
+        self.assertEqual(2, manifest["counts"]["result_join_exact_id"])
 
     def test_exact_names_arguments_and_paired_outcomes_are_preserved(self) -> None:
         cases, _ = MODULE.normalize(
@@ -98,6 +99,11 @@ class WildClawBenchNormalizerTest(unittest.TestCase):
             ["succeeded", "unknown"],
             [event["outcome"] for event in stateful["payload"]["events"]],
         )
+        joins = stateful["payload"]["args"]["_wildclawbench_evidence"]["result_joins"]
+        self.assertEqual(["exact-id", "none"], [item["result_join_authority"] for item in joins])
+        self.assertEqual(["succeeded", "unknown"], [item["outcome"] for item in joins])
+        self.assertEqual([0, 1], [item["event_index"] for item in joins])
+        self.assertTrue(all(len(item["call_ref"]) == 24 for item in joins))
 
     def test_prompts_reasoning_prose_and_results_are_excluded(self) -> None:
         cases, _ = MODULE.normalize(

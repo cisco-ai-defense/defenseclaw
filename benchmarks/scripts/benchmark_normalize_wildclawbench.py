@@ -187,9 +187,10 @@ def result_statuses(messages: Sequence[Mapping[str, Any]]) -> tuple[dict[str, st
 
 def projected_events(
     messages: Sequence[Mapping[str, Any]],
-) -> tuple[list[dict[str, Any]], Counter[str], set[str]]:
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], Counter[str], set[str]]:
     statuses, _ = result_statuses(messages)
     events: list[dict[str, Any]] = []
+    result_joins: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     call_ids: set[str] = set()
     for message in messages:
@@ -228,9 +229,22 @@ def projected_events(
                 event["command"] = command
                 event["dialect"] = "posix"
             events.append(event)
+            result_joins.append(
+                {
+                    "event_index": len(events) - 1,
+                    "call_ref": digest("wildclawbench-call-v1", call_id)[:24],
+                    "result_join_authority": (
+                        "exact-id" if call_id in statuses else "none"
+                    ),
+                    "outcome": outcome,
+                }
+            )
+            counts[
+                "result_join_exact_id" if call_id in statuses else "result_join_none"
+            ] += 1
             counts[f"source_calls_{outcome}"] += 1
     counts["orphan_tool_results"] = len(set(statuses) - call_ids)
-    return events, counts, call_ids
+    return events, result_joins, counts, call_ids
 
 
 def bounded_windows(event_count: int) -> Iterable[tuple[int, int]]:
@@ -302,7 +316,7 @@ def project_row(
     if not is_english_task(task_id):
         raise ProjectionError("non_english")
     messages = decode_trajectory(row.get("trajectory"))
-    events, event_counts, _ = projected_events(messages)
+    events, result_joins, event_counts, _ = projected_events(messages)
     identity = digest(DATASET_ID, revision, model, task_id)
     base = {
         "schema_version": SCHEMA_VERSION,
@@ -357,6 +371,10 @@ def project_row(
                             },
                             "task_category": category,
                             "safety_score_joined": False,
+                            "result_joins": [
+                                {**joined, "event_index": joined["event_index"] - start}
+                                for joined in result_joins[start:end]
+                            ],
                         }
                     },
                 },

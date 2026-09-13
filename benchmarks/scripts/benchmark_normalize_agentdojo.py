@@ -210,9 +210,11 @@ def executed_event(message: Mapping[str, Any], ordinal: int) -> tuple[dict[str, 
         "outcome": "failed" if error else "succeeded",
         "offset_seconds": ordinal,
     }
+    call_ref = call_reference(call, message)
     evidence: dict[str, Any] = {
         "event_index": ordinal,
-        "call_ref": call_reference(call, message),
+        "call_ref": call_ref,
+        "result_join_authority": "exact-id" if call_ref else "message-local",
         "result": result,
         "error": error,
     }
@@ -417,6 +419,12 @@ def project_record(
             )
     return cases, {
         "executed_calls": len(events),
+        "result_join_exact_id": sum(
+            item["result_join_authority"] == "exact-id" for item in evidence
+        ),
+        "result_join_message_local": sum(
+            item["result_join_authority"] == "message-local" for item in evidence
+        ),
         "unobserved_emitted_calls": unobserved,
     }
 
