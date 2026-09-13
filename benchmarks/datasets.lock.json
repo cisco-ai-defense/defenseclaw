@@ -1062,9 +1062,10 @@
       "fetch": "manual",
       "include_paths": [
         "README.md",
-        "**/metadata.json",
-        "**/red_team/solve_out_sanitized.json",
-        "**/blue_team/*/results.json"
+        "cuda_kernel",
+        "inference_optimization",
+        "safety_finetuning",
+        "utility_finetuning"
       ],
       "license": "Apache-2.0",
       "license_status": "approved",
