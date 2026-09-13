@@ -1301,3 +1301,16 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, system-binary, shell, binary-hijacking, bounded-grammar]
+  - id: integrity.posix_system_interpreter_wrapper
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE &&
+      p.normalized.startsWith('/usr/bin/python3.'))
+    # The semantic owner requires a matching versioned interpreter backup,
+    # literal four-line PYTHONPATH wrapper, exact `.real` delegation, and one
+    # unconditional atomic replacement from the same /usr/bin staging path.
+    pattern: '(?mi)^[ \t]*mv[ \t]+-f[ \t]+/usr/bin/\.python3\.[0-9]{1,2}\.wrap[ \t]+/usr/bin/python3\.[0-9]{1,2}[ \t]*$'
+    title: "Replace a versioned system Python interpreter with an environment wrapper"
+    severity: HIGH
+    confidence: 0.99
+    tags: [integrity, system-binary, python, binary-hijacking, bounded-grammar]

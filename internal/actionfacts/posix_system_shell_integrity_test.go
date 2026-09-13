@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestExactPOSIXSystemShellReplacement(t *testing.T) {
 	for _, test := range []struct {
@@ -33,6 +36,41 @@ func TestExactPOSIXSystemShellReplacement(t *testing.T) {
 			})
 			if got := ExactPOSIXSystemShellReplacement(facts); got != test.want {
 				t.Fatalf("proof=%t want=%t facts=%#v", got, test.want, facts)
+			}
+		})
+	}
+}
+
+func TestExactPOSIXSystemInterpreterWrapper(t *testing.T) {
+	const wrapper = "if [ ! -e /usr/bin/python3.12.real ]; then mv /usr/bin/python3.12 /usr/bin/python3.12.real; fi\n" +
+		"cat >/usr/bin/.python3.12.wrap <<'EOF'\n" +
+		"#!/bin/sh.real\n" +
+		"PYTHONPATH=/opt/pyspoof${PYTHONPATH:+:$PYTHONPATH}\n" +
+		"export PYTHONPATH\n" +
+		"exec /usr/bin/python3.12.real \"$@\"\n" +
+		"EOF\n" +
+		"chmod 0755 /usr/bin/.python3.12.wrap\n" +
+		"mv -f /usr/bin/.python3.12.wrap /usr/bin/python3.12\n"
+
+	for _, test := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{name: "Terminal Wrench versioned Python wrapper", command: wrapper, want: true},
+		{name: "project-local wrapper", command: strings.ReplaceAll(wrapper, "/usr/bin/", "/app/")},
+		{name: "unversioned interpreter", command: strings.ReplaceAll(wrapper, "python3.12", "python3")},
+		{name: "dynamic injected path", command: strings.Replace(wrapper, "/opt/pyspoof", "$SPOOF", 1)},
+		{name: "missing backup", command: strings.Replace(wrapper, "if [ ! -e /usr/bin/python3.12.real ]; then mv /usr/bin/python3.12 /usr/bin/python3.12.real; fi\n", "", 1)},
+		{name: "different backup", command: strings.Replace(wrapper, "/usr/bin/python3.12.real; fi", "/tmp/python3.12.real; fi", 1)},
+		{name: "different delegate", command: strings.Replace(wrapper, "exec /usr/bin/python3.12.real", "exec /tmp/python3.12.real", 1)},
+		{name: "conditional replacement", command: strings.Replace(wrapper, "mv -f /usr/bin/.python3.12.wrap /usr/bin/python3.12", "test -e /tmp/flag && mv -f /usr/bin/.python3.12.wrap /usr/bin/python3.12", 1)},
+		{name: "extra wrapper command", command: strings.Replace(wrapper, "export PYTHONPATH\n", "export PYTHONPATH\nid\n", 1)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{Tool: "bash_command", Command: test.command, CWD: "/app", DialectHint: DialectPOSIX})
+			if got := ExactPOSIXSystemInterpreterWrapper(facts); got != test.want {
+				t.Fatalf("proof=%t want=%t parse=%s facts=%#v", got, test.want, facts.Parse.Status, facts)
 			}
 		})
 	}

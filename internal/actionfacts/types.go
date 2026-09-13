@@ -292,6 +292,12 @@ type Facts struct {
 	// exact executable, made root-owned, and assigned a setuid executable mode.
 	// Source text and paths are discarded after the identity joins complete.
 	CustomRootSUIDImplants []CustomRootSUIDImplantFact `json:"-"`
+	// POSIXSystemInterpreterWrappers records a value-free same-action proof that
+	// a versioned /usr/bin Python interpreter is backed up to the matching
+	// `.real` path and replaced atomically by a literal environment-injecting
+	// wrapper which delegates to that exact backup. Wrapper bytes and paths are
+	// discarded after the identity joins complete.
+	POSIXSystemInterpreterWrappers []POSIXSystemInterpreterWrapperFact `json:"-"`
 	// PKRootSetuidShells records a value-free proof of one closed shell input
 	// that invokes a literal temporary pkroot/run executable with an exactly
 	// quoted payload creating /tmp/.pksh as a 4755 copy of /bin/bash.

@@ -281,6 +281,8 @@ func analyze(input Input) Facts {
 	facts.PowerShellTCPCommandLoops = projectPowerShellTCPCommandLoops(input, facts)
 	facts.MaliciousPersistencePayloads = projectMaliciousPersistencePayloads(input)
 	facts.CustomRootSUIDImplants = projectCustomRootSUIDImplants(input)
+	facts.POSIXSystemInterpreterWrappers =
+		projectPOSIXSystemInterpreterWrappers(facts)
 	facts.PKRootSetuidShells = projectPKRootSetuidShells(input)
 	facts.ResourceReads, facts.ArtifactTransfers =
 		projectStructuredResourceArtifactFacts(input)

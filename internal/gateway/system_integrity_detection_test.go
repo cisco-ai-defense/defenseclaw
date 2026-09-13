@@ -11,10 +11,11 @@ import (
 )
 
 const (
-	dpkgStatusMutationRuleID      = "integrity.dpkg_status_direct_mutation"
-	posixSystemShellReplacementID = "integrity.posix_system_shell_replacement"
-	kernelBindTelemetryRuleID     = "integrity.kernel_control_bind_override"
-	protectedKernelBindOverrideID = "impact.protected_kernel_control_bind_override"
+	dpkgStatusMutationRuleID        = "integrity.dpkg_status_direct_mutation"
+	posixSystemShellReplacementID   = "integrity.posix_system_shell_replacement"
+	posixSystemInterpreterWrapperID = "integrity.posix_system_interpreter_wrapper"
+	kernelBindTelemetryRuleID       = "integrity.kernel_control_bind_override"
+	protectedKernelBindOverrideID   = "impact.protected_kernel_control_bind_override"
 )
 
 func TestPOSIXSystemShellReplacementProfilePosture(t *testing.T) {
@@ -36,6 +37,84 @@ func TestPOSIXSystemShellReplacementProfilePosture(t *testing.T) {
 		}
 		if !slices.Contains(result.RuleIDs, posixSystemShellReplacementID) {
 			t.Fatalf("profile=%s result=%+v missing %s", profile, result, posixSystemShellReplacementID)
+		}
+	}
+}
+
+func TestPOSIXSystemInterpreterWrapperProfilePosture(t *testing.T) {
+	const command = "mv /usr/bin/python3.12 /usr/bin/python3.12.real\n" +
+		"cat >/usr/bin/.python3.12.wrap <<'EOF'\n" +
+		"#!/bin/sh.real\n" +
+		"PYTHONPATH=/opt/pyspoof${PYTHONPATH:+:$PYTHONPATH}\n" +
+		"export PYTHONPATH\n" +
+		"exec /usr/bin/python3.12.real \"$@\"\n" +
+		"EOF\n" +
+		"chmod 0755 /usr/bin/.python3.12.wrap\n" +
+		"mv -f /usr/bin/.python3.12.wrap /usr/bin/python3.12\n"
+	for profile, wantAction := range map[string]string{
+		"default": "alert", "permissive": "alert", "strict": "block",
+	} {
+		connector := "system-interpreter-wrapper-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		result := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "bash_command", Command: command, CWD: "/app"},
+			command,
+			connector,
+			profile,
+		)
+		if result.Action != wantAction ||
+			!slices.Contains(result.RuleIDs, posixSystemInterpreterWrapperID) {
+			t.Fatalf("profile=%s result=%+v want_action=%s", profile, result, wantAction)
+		}
+	}
+}
+
+func TestPOSIXSystemInterpreterWrapperPartialShellRetainsDetectionOnly(t *testing.T) {
+	const command = "if [ ! -e /usr/bin/python3.12.real ]; then mv /usr/bin/python3.12 /usr/bin/python3.12.real; fi\n" +
+		"cat >/usr/bin/.python3.12.wrap <<'EOF'\n" +
+		"#!/bin/sh.real\n" +
+		"PYTHONPATH=/opt/pyspoof${PYTHONPATH:+:$PYTHONPATH}\n" +
+		"export PYTHONPATH\n" +
+		"exec /usr/bin/python3.12.real \"$@\"\n" +
+		"EOF\n" +
+		"chmod 0755 /usr/bin/.python3.12.wrap\n" +
+		"mv -f /usr/bin/.python3.12.wrap /usr/bin/python3.12\n"
+	connector := "system-interpreter-wrapper-partial"
+	installToolCallCorpusProfileConnector(t, connector, "strict")
+	result := EvaluateDeterministicAction(
+		t.Context(),
+		actionfacts.Input{Tool: "bash_command", Command: command, CWD: "/app"},
+		command,
+		connector,
+		"strict",
+	)
+	if result.Action != "allow" || result.ParseStatus != string(actionfacts.StatusPartial) ||
+		!slices.Contains(result.RuleIDs, posixSystemInterpreterWrapperID) ||
+		len(result.Findings) != 1 || result.Findings[0].Disposition != "detect_only" ||
+		result.Findings[0].ContributesToEnforcement {
+		t.Fatalf("result=%+v, want partial detection-only finding", result)
+	}
+}
+
+func TestPOSIXSystemInterpreterWrapperHardNegativesStayQuiet(t *testing.T) {
+	connector := "system-interpreter-wrapper-negatives"
+	installToolCallCorpusProfileConnector(t, connector, "strict")
+	for _, command := range []string{
+		"mv /usr/bin/python3.12 /usr/bin/python3.12.real\n",
+		"cp /usr/bin/python3.12 /tmp/python3.12\n",
+		"cat >/usr/bin/python3.12 <<'EOF'\n#!/bin/sh\nexec /usr/bin/python3.12.real \"$@\"\nEOF\n",
+		"cat >/app/.python3.12.wrap <<'EOF'\n#!/bin/sh.real\nPYTHONPATH=/opt/tool${PYTHONPATH:+:$PYTHONPATH}\nexport PYTHONPATH\nexec /app/python3.12.real \"$@\"\nEOF\nmv -f /app/.python3.12.wrap /app/python3.12\n",
+	} {
+		result := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "bash_command", Command: command, CWD: "/app"},
+			command,
+			connector,
+			"strict",
+		)
+		if slices.Contains(result.RuleIDs, posixSystemInterpreterWrapperID) {
+			t.Fatalf("command=%q result=%+v", command, result)
 		}
 	}
 }
