@@ -660,6 +660,20 @@ def atomic_write(path: Path, data: bytes) -> None:
 def main() -> int:
     args = parse_args()
     cases, manifest = normalize_rows(parquet_rows(args.input), args.revision)
+    manifest = {
+        **manifest,
+        "source": {
+            "dataset": DATASET,
+            "revision": args.revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": REDISTRIBUTION,
+            "path": "data/train-00000-of-00001.parquet",
+            "bytes": args.input.stat().st_size,
+            "files": 1,
+            "sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+            "source_url": SOURCE_URL,
+        },
+    }
     validate_cases(cases, args.schema)
     output = "".join(canonical_json(case) + "\n" for case in cases).encode("utf-8")
     atomic_write(args.output, output)
