@@ -950,8 +950,6 @@ def truth(proof: str | None) -> dict[str, Any]:
     if proof == "named_kubernetes_secret_content_read":
         return {
             "source_truth": "sensitive",
-            "label_confidence": "high",
-            "label_source": "adapter:synthetic-sensitive-actionfacts-v1",
             "applicability": "in_scope",
             "expected_disposition": "detect_only",
             "categories": [
