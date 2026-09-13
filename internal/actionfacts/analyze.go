@@ -235,6 +235,7 @@ func analyze(input Input) Facts {
 	facts.SQLSensitiveServerFileReads =
 		projectSQLSensitiveServerFileReads(input)
 	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
+	facts.SQLDirectExternalEgresses = projectSQLDirectExternalEgresses(input)
 	facts.StructuredLiteralPersistences =
 		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)

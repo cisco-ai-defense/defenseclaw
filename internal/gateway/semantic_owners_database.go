@@ -9,6 +9,8 @@ const semanticPostgreSQLCopyProgramExpression = `f.tool == 'sql_query'`
 
 const semanticSQLSensitiveServerFileReadExpression = `f.tool == 'sql_query'`
 
+const semanticSQLCredentialExternalOutputExpression = `f.tool == 'db.query'`
+
 const semanticSQLCommandUDFCreateExpression = `f.tool in ['sql_query', 'execute_command']`
 
 const semanticSQLServerXPCommandShellExpression = `f.tool == 'sql_query'`
@@ -69,6 +71,15 @@ var semanticDatabaseOwners = map[string]semanticOwner{
 		// database administration and recovery are possible without protected-
 		// database policy context.
 		alertOnly: true,
+	},
+	"exfil.sql_credential_external_output": {
+		prerequisite:     sqlCredentialExternalOutputPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Unlike a sensitive read by itself, this exact proof binds a reviewed
+		// credential-bearing SELECT directly to a literal non-local HTTP(S)
+		// result sink in one authenticated, closed-schema action. HIGH therefore
+		// follows the built-in posture matrix: alert in default/permissive and
+		// block in strict.
 	},
 	"exec.sql_command_udf_create": {
 		prerequisite:     sqlCommandUDFCreatePrerequisite,
@@ -174,6 +185,10 @@ func postgreSQLCopyProgramPrerequisite(facts actionfacts.Facts) bool {
 func sqlSensitiveServerFileReadPrerequisite(facts actionfacts.Facts) bool {
 	_, ok := actionfacts.ExactSQLSensitiveServerFileRead(facts)
 	return ok
+}
+
+func sqlCredentialExternalOutputPrerequisite(facts actionfacts.Facts) bool {
+	return actionfacts.ExactSQLDirectExternalEgress(facts)
 }
 
 func sqlCommandUDFCreatePrerequisite(facts actionfacts.Facts) bool {

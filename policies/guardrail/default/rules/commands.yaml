@@ -614,6 +614,17 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, database, mysql, postgresql, server-side, bounded-lineage]
+  - id: exfil.sql_credential_external_output
+    tool_call_only: true
+    expression: "f.tool == 'db.query'"
+    # Candidate selection only. The semantic owner requires an authenticated
+    # MCP resource plus the exact two-key db.query schema, a bounded static
+    # credential-bearing SELECT, and one literal external HTTP(S) output URL.
+    pattern: 'a^'
+    title: "Direct SQL credential rowset output to an external destination"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, exfiltration, database, external-output, bounded-grammar]
   - id: impact.sql_destructive_mutation
     tool_call_only: true
     expression: >-

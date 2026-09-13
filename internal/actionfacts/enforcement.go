@@ -59,6 +59,10 @@ func (f Facts) EnforcementProjection() Facts {
 			[]SQLMutationFact(nil),
 			f.SQLMutations...,
 		),
+		SQLDirectExternalEgresses: append(
+			[]SQLDirectExternalEgressFact(nil),
+			f.SQLDirectExternalEgresses...,
+		),
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,

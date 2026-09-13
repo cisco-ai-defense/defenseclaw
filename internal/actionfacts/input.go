@@ -196,6 +196,15 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 		}
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
+	if tool == "db.query" {
+		if _, _, ok := exactSQLDirectExternalEgressArgs(raw); ok {
+			// This exact schema binds a reviewed credential-bearing SELECT to a
+			// literal external result destination. SQL and URL text remain private
+			// to the recognizer and never enter generic command/network facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if tool == "write_query" {
 		if _, ok := exactSQLiteWriteQueryArgs(raw); ok {
 			// The reviewed SQLite mutation recognizer owns this closed schema.

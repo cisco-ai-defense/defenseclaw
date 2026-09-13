@@ -588,6 +588,16 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, database, mysql, postgresql, server-side, bounded-lineage]
+  - id: exfil.sql_credential_external_output
+    tool_call_only: true
+    expression: "f.tool == 'db.query'"
+    # Exact semantic proof only. HIGH remains an alert in permissive posture;
+    # malformed, dynamic, internal, private, and open-schema inputs abstain.
+    pattern: 'a^'
+    title: "Direct SQL credential rowset output to an external destination"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, exfiltration, database, external-output, bounded-grammar]
   - id: impact.sql_destructive_mutation
     tool_call_only: true
     expression: >-

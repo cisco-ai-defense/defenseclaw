@@ -146,6 +146,11 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// successful read result and bounded database/table join are exercised by
 	// the dedicated chain conformance tests rather than one atomic corpus row.
 	coveredExpressions[semanticSensitiveSQLiteReadDeleteExpression] = struct{}{}
+	// This expression is reachable only when the authenticated hook boundary
+	// supplies a private MCP resource identity. The public ActionFacts corpus
+	// cannot manufacture that authority; exact CEL, owner, and all-profile
+	// coverage lives in sql_credential_external_output_test.go.
+	coveredExpressions[semanticSQLCredentialExternalOutputExpression] = struct{}{}
 	// The exact account and credential roles are private ActionFacts projected
 	// only when a process HMAC key is present. Lifecycle tests own this inert
 	// catalog expression because a single public corpus row cannot complete it.

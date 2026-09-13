@@ -125,6 +125,12 @@ type Facts struct {
 	// text, selected values, connection strings, and raw resource identity are
 	// discarded before Facts crosses the ActionFacts boundary.
 	SensitiveSQLRowsetReads []SensitiveSQLRowsetReadFact `json:"-"`
+	// SQLDirectExternalEgresses records only that one authenticated db.query
+	// call selects a reviewed credential/secret field and directs the result to
+	// one literal external HTTP(S) destination. SQL, field and table names,
+	// URLs, and trusted resource identities are discarded before Facts crosses
+	// the ActionFacts boundary.
+	SQLDirectExternalEgresses []SQLDirectExternalEgressFact `json:"-"`
 	// StructuredLiteralPersistences contains only a closed sink class and a
 	// domain-separated digest binding trusted connector resource identity to an
 	// exact literal sink target. Content, observations, target names, paths, and
@@ -476,6 +482,13 @@ type SensitiveSQLRowsetReadFact struct {
 	DatabaseIdentityDigest string
 	TableIdentityDigest    string
 	Exact                  bool
+}
+
+// SQLDirectExternalEgressFact is a value-free proof that one closed db.query
+// action binds a high-confidence SQL credential source directly to an
+// external HTTP(S) result sink.
+type SQLDirectExternalEgressFact struct {
+	Exact bool
 }
 
 // StructuredLiteralPersistenceSink is the closed set of literal persistence
@@ -874,8 +887,11 @@ func (f Facts) EnforcementEligible() bool {
 		// command facts. An exact destructive mutation may still be enforced by
 		// an explicitly enabled protective policy; standard owners remain
 		// alert-only. Validate every private fact before granting eligibility.
-		return len(f.SQLMutations) != 0 &&
+		validSQLMutation := len(f.SQLMutations) != 0 &&
 			len(ExactSQLMutations(f)) == len(f.SQLMutations)
+		validDirectEgress := len(f.SQLDirectExternalEgresses) == 1 &&
+			ExactSQLDirectExternalEgress(f)
+		return validSQLMutation || validDirectEgress
 	}
 	for _, command := range f.Commands {
 		if command.Effect != EffectExecute {
