@@ -16,8 +16,8 @@ hf download AI-Secure/DTap-Bench-Agent-Trajectories \
 python3 benchmarks/scripts/benchmark_normalize_dtap.py \
   --root /path/to/dtap \
   --revision 836caf2fdd78b888ddd14fb62dc038e932e17898 \
-  --output generated/dtap-v2/cases.jsonl \
-  --manifest generated/dtap-v2/cases.manifest.json
+  --output generated/dtap-v3-reproducible/cases.jsonl \
+  --manifest generated/dtap-v3-reproducible/manifest.json
 ```
 
 The pinned release produces 6,540 bounded cases: 423 atomic action cases and
@@ -31,10 +31,16 @@ The only continuity keys are the exact source path, source domain/task ID, and
 matching tool name; the normalizer does not infer authority from a trajectory
 label or from agent/evaluator text.
 
-The benign/malicious path and the source deterministic-environment judge are
-candidate trajectory truth, not deterministic proof of every constituent
-action. Prompts, agent prose, evaluator prose, judge text, and tool-result
-content are not authoritative action evidence. The projection therefore does
-not claim that every call in a source-labeled malicious trajectory is
-malicious; it is suitable for bounded trajectory candidates and hard-negative
-coverage, not unconditional atomic policy truth.
+Successful benign trajectories produce 4,692 in-scope benign cases for FPR
+measurement. The source `attack_success` judge proves the complete malicious
+trajectory, not any particular emitted chunk. Accordingly, all 1,848
+malicious-source chunks retain `source_truth=malicious` but use
+`deterministic_truth=contextual_or_dual_use`, `expected_disposition=detect_only`,
+and `applicability=out_of_scope`. They are categorized as
+`trajectory_success_candidate` and `proof_pending`, with an explicit exclusion
+reason. This adapter has no independent exact proof verifier and therefore
+emits no deterministic malicious positives.
+
+Prompts, agent prose, evaluator prose, judge text, and tool-result content are
+not authoritative action evidence. The malicious projection is suitable for
+candidate coverage and later proof work, not scored deterministic policy truth.
