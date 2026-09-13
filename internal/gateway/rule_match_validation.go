@@ -10,6 +10,7 @@ import (
 	"encoding/csv"
 	"io"
 	"math"
+	"net/netip"
 	"regexp"
 	"strings"
 	"unicode"
@@ -18,6 +19,27 @@ import (
 )
 
 var ssnListCandidatePattern = regexp.MustCompile(`\b(?:\d{3}-\d{2}-\d{4}|\d{9})\b`)
+
+var literalHTTPIPv4Pattern = regexp.MustCompile(`(?i)https?://((?:[0-9]{1,3}\.){3}[0-9]{1,3})(?::[0-9]+)?/`)
+
+var nonPublicLiteralIPv4Blocks = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("10.0.0.0/8"),
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("172.16.0.0/12"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("192.168.0.0/16"),
+	netip.MustParsePrefix("192.88.99.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("255.255.255.255/32"),
+}
 
 var (
 	nodeEvalInvocationPattern    = regexp.MustCompile(`(?i)\bnode(?:js)?\s+(?:-e|--eval)(?:\s+|=)`)
@@ -184,6 +206,29 @@ func acceptedRuleMatchAt(ruleID, text, match string, start, end int) bool {
 			}
 		}
 		return false
+	case "exec.remote_ip_download_execute_same_artifact":
+		return acceptedPublicIPv4Download(match)
+	}
+	return true
+}
+
+// acceptedPublicIPv4Download keeps the parser-fallback rule aligned with its
+// semantic owner. A syntactically complete same-artifact chain is not a remote
+// public-IP chain when its URL names loopback, private, link-local, benchmark,
+// documentation, multicast, or otherwise reserved address space.
+func acceptedPublicIPv4Download(match string) bool {
+	parts := literalHTTPIPv4Pattern.FindStringSubmatch(match)
+	if len(parts) != 2 {
+		return false
+	}
+	address, err := netip.ParseAddr(parts[1])
+	if err != nil || !address.Is4() || !address.IsGlobalUnicast() {
+		return false
+	}
+	for _, prefix := range nonPublicLiteralIPv4Blocks {
+		if prefix.Contains(address) {
+			return false
+		}
 	}
 	return true
 }
