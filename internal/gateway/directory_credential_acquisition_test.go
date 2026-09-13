@@ -4,6 +4,7 @@
 package gateway
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
@@ -34,6 +35,28 @@ func TestDirectoryCredentialAcquisitionSemanticOwner(t *testing.T) {
 	matched := findingWithID(findings, directoryCredentialAcquisitionRuleID)
 	if matched == nil || matched.Severity != "HIGH" || matched.Evidence != "" {
 		t.Fatalf("semantic finding = %+v; all = %v", matched, FindingStrings(findings))
+	}
+}
+
+func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.T) {
+	t.Parallel()
+	command := `bash -lc 'mkdir -p /tmp/enum && impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user; cat /tmp/enum/out'`
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		evaluation := EvaluateDeterministicAction(
+			context.Background(),
+			actionfacts.Input{Tool: "execute_command", Command: command},
+			command,
+			"benchmark-"+profile,
+			profile,
+		)
+		if len(evaluation.Findings) != 1 ||
+			evaluation.Findings[0].RuleID != directoryCredentialAcquisitionRuleID ||
+			evaluation.Findings[0].ContributesToEnforcement ||
+			evaluation.Route != "fallback" || evaluation.Authoritative ||
+			evaluation.EnforcementEligible || evaluation.Action == guardrailActionBlock ||
+			evaluation.Action == guardrailActionConfirm {
+			t.Fatalf("profile=%s escaped detection-only boundary: %+v", profile, evaluation)
+		}
 	}
 }
 

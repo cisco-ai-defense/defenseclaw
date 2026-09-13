@@ -87,6 +87,53 @@ func projectDirectoryCredentialAcquisitions(
 			Operation: operation,
 		})
 	}
+	// A literal `bash -lc` body is useful detection evidence even though login
+	// startup files make the wrapper non-authoritative. Parse only the bounded,
+	// statically quoted body and project only this closed acquisition vocabulary;
+	// never publish generic nested command/path/network facts or enforcement
+	// authority from this compatibility path.
+	if len(result) == 0 {
+		result = append(result, detectionOnlyBashLoginCredentialAcquisitions(facts)...)
+	}
+	return result
+}
+
+func detectionOnlyBashLoginCredentialAcquisitions(
+	facts *Facts,
+) []DirectoryCredentialAcquisitionFact {
+	if facts == nil || len(facts.Commands) != 1 {
+		return nil
+	}
+	owner := facts.Commands[0]
+	if owner.Program != "bash" || !owner.ArgvComplete || len(owner.Argv) != 3 ||
+		owner.Argv[1] != "-lc" || strings.TrimSpace(owner.Argv[2]) == "" ||
+		owner.ParentCommandID != 0 || owner.PipelineID != 0 ||
+		owner.ControlFlowUncertain || owner.Effect != EffectExecute ||
+		len(owner.Redirects) != 0 || len(owner.Wrappers) != 0 ||
+		!staticArguments(owner.Arguments) ||
+		!exactPOSIXProgramIdentity(owner.Executable, owner.Program) {
+		return nil
+	}
+	child := parsePOSIX(owner.Argv[2], 1, 1)
+	if child.status == StatusInvalid || child.status == StatusLimitExceeded {
+		return nil
+	}
+	result := make([]DirectoryCredentialAcquisitionFact, 0, 1)
+	seen := make(map[DirectoryCredentialAcquisition]struct{}, 3)
+	for _, command := range child.commands {
+		operation, ok := exactDirectoryCredentialCommand(command)
+		if !ok {
+			continue
+		}
+		if _, duplicate := seen[operation]; duplicate {
+			continue
+		}
+		seen[operation] = struct{}{}
+		result = append(result, DirectoryCredentialAcquisitionFact{
+			CommandID: owner.ID,
+			Operation: operation,
+		})
+	}
 	return result
 }
 
