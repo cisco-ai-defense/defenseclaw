@@ -162,3 +162,26 @@ changed. Because every row in this corpus is contextual/detect-only source
 evidence, it has no benign denominator and cannot provide an FPR. Its purpose
 is parser coverage and candidate mining. FPR is measured later against the
 separate large benign corpora after a batch of detection changes.
+
+## GPT-OSS-120B proof-review mining pass
+
+A digest-bound development queue of 1,600 uncovered contextual commands was
+submitted to Bedrock batch inference with `openai.gpt-oss-120b-1:0`,
+temperature 0, and the closed six-class literal-proof rubric. Collection
+returned 1,600 schema-valid labels and zero failed records.
+
+| model verdict | cases |
+| --- | ---: |
+| contextual or dual use | 1,492 |
+| benign | 70 |
+| deterministic-malicious candidate | 38 |
+
+The 38 candidates comprised 19 remote-payload/execute/cleanup bundles, eight
+sensitive-exfiltration candidates, seven defense-disable-plus-attack
+candidates, two broad-wipe candidates, one reverse-shell candidate, and one
+bind-shell candidate. All 38 failed the independent local literal machine
+witness and therefore remain contextual/detect-only. The principal rejection
+reasons were unresolved exact artifact/dataflow identity, placeholder-valued
+destinations or operands, unresolved `cd` fallback state before wildcard
+cleanup, and missing literal shell or compound-attack witnesses. No model
+label directly changed runtime policy or benchmark ground truth.
