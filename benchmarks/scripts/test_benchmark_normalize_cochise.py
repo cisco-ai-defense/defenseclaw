@@ -143,6 +143,9 @@ class CochiseNormalizerTests(unittest.TestCase):
         chains = [row for row in cases if row["surface"] == "stateful"]
         self.assertEqual(len(chains), 1)
         self.assertEqual(chains[0]["truth"]["categories"][-1], "credential_authentication")
+        self.assertEqual(chains[0]["truth"]["expected_disposition"], "detect_only")
+        self.assertEqual(chains[0]["truth"]["stateful_lens"], "bounded_completed")
+        self.assertEqual(chains[0]["truth"]["rule_ids"], [adapter.CREDENTIAL_AUTHENTICATION_CHAIN])
         self.assertEqual([item["outcome"] for item in chains[0]["payload"]["events"]], ["succeeded", "succeeded"])
         self.assertTrue(all("offset_seconds" not in item for item in chains[0]["payload"]["events"]))
         self.assertNotIn(secret, json.dumps(chains, sort_keys=True))

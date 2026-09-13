@@ -53,6 +53,7 @@ MAX_DEPTH = 24
 MAX_CHAIN_CALLS = 8
 MAX_TOOL_NAME = 240
 MAX_ID = 240
+CREDENTIAL_AUTHENTICATION_CHAIN = "chain.compromised_credential_then_successful_authentication"
 
 TOOL_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:/-]{0,239}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@/-]{0,239}$")
@@ -540,6 +541,9 @@ def build_corpus(
                     )
                     first = payload_for_call(fact.call, outcome="succeeded")
                     second = payload_for_call(candidate.call, outcome="succeeded")
+                    base["truth"]["expected_disposition"] = "detect_only"
+                    base["truth"]["stateful_lens"] = "bounded_completed"
+                    base["truth"]["rule_ids"] = [CREDENTIAL_AUTHENTICATION_CHAIN]
                     base["surface"] = "stateful"
                     base["payload"] = {"direction": "tool_call", "events": [first, second]}
                     rows.append(base)
