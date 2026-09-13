@@ -107,7 +107,25 @@ COMMAND_SECRET_RE = re.compile(
     r"(?:['\"]([^'\"]{4,})['\"]|([^\s]{4,}))"
 )
 SHORT_PASSWORD_RE = re.compile(r"(?i)(?:^|\s)-p\s+(?:['\"]([^'\"]{4,})['\"]|([^\s]{4,}))")
-SHORT_PASSWORD_PROGRAMS = NETEXEC_PROGRAMS | frozenset({"sshpass"})
+SHORT_PASSWORD_PROGRAMS = NETEXEC_PROGRAMS | frozenset(
+    {
+        "bloodhound-python",
+        "certipy",
+        "certipy-ad",
+        "evil-winrm",
+        "hydra",
+        "medusa",
+        "smbmap",
+        "sshpass",
+    }
+)
+SHORT_PASSWORD_PROGRAM_ALTERNATION = "|".join(
+    re.escape(program) for program in sorted(SHORT_PASSWORD_PROGRAMS, key=len, reverse=True)
+)
+SHORT_PASSWORD_COMMAND_RE = re.compile(
+    rf"(?is)(?<![\w.-])(?:[A-Za-z0-9_./-]*/)?(?:{SHORT_PASSWORD_PROGRAM_ALTERNATION})"
+    r"\b(?P<arguments>[^;&|\n]*)"
+)
 ACCOUNT_SECRET_RE = re.compile(
     r"(?i)(?:[A-Za-z0-9_.-]+[/\\])?(?P<account>[A-Za-z0-9_.-]+):"
     r"(?P<secret>[^\s@'\"]{4,})(?=@|\s|$)"
@@ -320,13 +338,13 @@ def join_calls(records: Iterable[Record], stats: Counter[str]) -> list[JoinedCal
     return joined
 
 
-def command_uses_short_password_option(command: str) -> bool:
-    """Return whether ``-p`` belongs to a closed password-taking program."""
-    try:
-        argv = shlex.split(command, posix=True)
-    except ValueError:
-        return False
-    return any(Path(token).name.lower() in SHORT_PASSWORD_PROGRAMS for token in argv)
+def short_password_values(command: str) -> set[str]:
+    """Return ``-p`` values bound to a closed password-taking command segment."""
+    found: set[str] = set()
+    for invocation in SHORT_PASSWORD_COMMAND_RE.finditer(command):
+        for match in SHORT_PASSWORD_RE.finditer(invocation.group("arguments")):
+            found.add(match.group(1) or match.group(2))
+    return found
 
 
 def python_slice_false_positive(match: re.Match[str]) -> bool:
@@ -345,9 +363,7 @@ def sensitive_values(value: object, key: str = "") -> set[str]:
         if lowered in {"command", "cmd"}:
             for match in COMMAND_SECRET_RE.finditer(value):
                 found.add(match.group(1) or match.group(2))
-            if command_uses_short_password_option(value):
-                for match in SHORT_PASSWORD_RE.finditer(value):
-                    found.add(match.group(1) or match.group(2))
+            found.update(short_password_values(value))
             for match in ACCOUNT_SECRET_RE.finditer(value):
                 if not python_slice_false_positive(match):
                     found.add(match.group("secret"))

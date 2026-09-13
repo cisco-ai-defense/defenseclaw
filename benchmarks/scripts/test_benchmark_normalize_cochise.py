@@ -322,21 +322,35 @@ class CochiseNormalizerTests(unittest.TestCase):
         self.assertNotRegex(projected, r"REDACTED_SECRET_[0-9a-f]{64}")
 
     def test_mkdir_parents_option_and_python_slices_are_not_redacted(self) -> None:
-        commands = (
-            "mkdir -p /tmp/cochise-results",
-            "i:i+25",
-            "for chunk in rows[i:i+25]: pass",
-        )
-        for command in commands:
+        unchanged = ("mkdir -p /tmp/cochise-results", "i:i+25", "for chunk in rows[i:i+25]: pass")
+        for command in unchanged:
             with self.subTest(command=command):
                 self.assertEqual(adapter.projected_args({"command": command})["command"], command)
 
+        compound = "mkdir -p /tmp/cochise-results && nxc smb host -u user -p password"
+        projected = adapter.projected_args({"command": compound})["command"]
+        self.assertIn("mkdir -p /tmp/cochise-results", projected)
+        self.assertNotIn("password", projected)
+
+        port_scan = "nmap -Pn -p 445 host && nxc smb host -u user -p password"
+        projected = adapter.projected_args({"command": port_scan})["command"]
+        self.assertIn("nmap -Pn -p 445", projected)
+        self.assertNotIn("password", projected)
+
     def test_real_short_password_flags_and_account_secrets_remain_redacted(self) -> None:
-        secrets = ("nxc-password", "sshpass-password", "actual+25")
+        secrets = (
+            "nxc-password",
+            "sshpass-password",
+            "bloodhound-password",
+            "certipy-password",
+            "actual+25",
+        )
         command = (
             f"nxc smb host -u user -p '{secrets[0]}' && "
             f"sshpass -p {secrets[1]} ssh host && "
-            f"impacket-tool domain/user:{secrets[2]}@host"
+            f"bloodhound-python -u user -p {secrets[2]} -d example.test && "
+            f"certipy-ad find -u user@example.test -p {secrets[3]} && "
+            f"impacket-tool domain/user:{secrets[4]}@host"
         )
         projected = adapter.projected_args({"command": command})["command"]
         for secret in secrets:
