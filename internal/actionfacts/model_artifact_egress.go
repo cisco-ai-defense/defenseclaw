@@ -80,10 +80,9 @@ type ModelArtifactEgressFact struct {
 // parse state because this parser, rather than the generic shell classifier,
 // owns the complete Python grammar. It never evaluates source or performs DNS.
 func ExactRecursiveModelArtifactMultipartEgress(
-	input Input,
 	facts Facts,
 ) (ModelArtifactEgressFact, bool) {
-	command, source, ok := exactModelArtifactPythonInvocation(input, facts)
+	command, source, ok := exactModelArtifactPythonInvocation(facts)
 	if !ok {
 		return ModelArtifactEgressFact{}, false
 	}
@@ -142,26 +141,10 @@ func ModelArtifactDestinationIdentityDigest(destination string) string {
 }
 
 func exactModelArtifactPythonInvocation(
-	input Input,
 	facts Facts,
 ) (CommandFact, string, bool) {
-	if strings.ToLower(strings.TrimSpace(input.Tool)) != facts.Tool ||
-		facts.Parse.Dialect != DialectPOSIX || len(facts.Commands) != 1 {
-		return CommandFact{}, "", false
-	}
-	derived := Analyze(input)
-	if derived.Tool != facts.Tool || derived.CWD != facts.CWD ||
-		derived.ActiveHome != facts.ActiveHome || derived.Parse.Status != facts.Parse.Status ||
-		derived.Parse.Dialect != facts.Parse.Dialect || len(derived.Parse.Issues) != len(facts.Parse.Issues) ||
-		len(derived.Commands) != 1 || !equalModelArtifactCommand(derived.Commands[0], facts.Commands[0]) {
-		return CommandFact{}, "", false
-	}
-	for index := range derived.Parse.Issues {
-		if derived.Parse.Issues[index] != facts.Parse.Issues[index] {
-			return CommandFact{}, "", false
-		}
-	}
-	if !modelArtifactPythonParseEligible(facts.Parse) {
+	if facts.Parse.Dialect != DialectPOSIX || len(facts.Commands) != 1 ||
+		!modelArtifactPythonParseEligible(facts.Parse) {
 		return CommandFact{}, "", false
 	}
 	command := facts.Commands[0]
@@ -188,28 +171,6 @@ func modelArtifactPythonParseEligible(parse ParseResult) bool {
 	return len(parse.Issues) == 1 && parse.Issues[0] == IssueOpaqueArtifact ||
 		len(parse.Issues) == 2 && parse.Issues[0] == IssueUnsupportedConstruct &&
 			parse.Issues[1] == IssueOpaqueArtifact
-}
-
-func equalModelArtifactCommand(left, right CommandFact) bool {
-	if left.ID != right.ID || left.ParentCommandID != right.ParentCommandID ||
-		left.PipelineID != right.PipelineID || left.ControlFlowUncertain != right.ControlFlowUncertain ||
-		left.Kind != right.Kind || left.Dialect != right.Dialect || left.Effect != right.Effect ||
-		left.Executable != right.Executable || left.Program != right.Program ||
-		left.ArgvComplete != right.ArgvComplete || len(left.Argv) != len(right.Argv) ||
-		len(left.Wrappers) != len(right.Wrappers) || len(left.Redirects) != len(right.Redirects) {
-		return false
-	}
-	for index := range left.Argv {
-		if left.Argv[index] != right.Argv[index] {
-			return false
-		}
-	}
-	for index := range left.Redirects {
-		if left.Redirects[index] != right.Redirects[index] {
-			return false
-		}
-	}
-	return true
 }
 
 func exactModelArtifactRedirects(redirects []RedirectFact) bool {
@@ -239,7 +200,8 @@ func exactModelArtifactDestination(raw string) (string, NetworkScope, bool) {
 	}
 	normalizedHost, scope, kind, _ := deriveNetworkTarget(host)
 	if normalizedHost == "" || kind != NetworkTargetSingleHost ||
-		scope == NetworkScopeLoopback {
+		scope == NetworkScopeLoopback || scope == NetworkScopePrivate ||
+		scope == NetworkScopeLinkLocal {
 		return "", "", false
 	}
 	parsed.Scheme = strings.ToLower(parsed.Scheme)

@@ -741,12 +741,12 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		detectionOnly: true,
 	},
 	"exfiltration.recursive_model_artifact_external_multipart": {
-		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(input, facts)
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(facts)
 			return ok
 		},
-		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
-			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(input, facts)
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(facts)
 			return ok
 		},
 		// The Python source grammar, recursive traversal, exact opened-path to

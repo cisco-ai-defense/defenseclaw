@@ -50,7 +50,7 @@ func TestExactRecursiveModelArtifactMultipartEgressFunctionProof(t *testing.T) {
 		t.Fatalf("unexpected generic parse state: %+v", facts.Parse)
 	}
 
-	fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, facts)
+	fact, ok := ExactRecursiveModelArtifactMultipartEgress(facts)
 	if !ok {
 		t.Fatalf("exact recursive egress proof not recognized: %+v", facts)
 	}
@@ -78,7 +78,7 @@ func TestExactRecursiveModelArtifactMultipartEgressRawCommandWithStderrMerge(t *
 	}
 	facts := Analyze(input)
 	assertFactsInvariants(t, facts)
-	fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, facts)
+	fact, ok := ExactRecursiveModelArtifactMultipartEgress(facts)
 	if !ok {
 		t.Fatalf("direct raw command with stderr merge not recognized: parse=%+v commands=%+v", facts.Parse, facts.Commands)
 	}
@@ -106,7 +106,7 @@ print('total', count)
 	for _, program := range []string{"python", "python3"} {
 		t.Run(program, func(t *testing.T) {
 			input := modelArtifactArgvInput(program, source)
-			fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, Analyze(input))
+			fact, ok := ExactRecursiveModelArtifactMultipartEgress(Analyze(input))
 			if !ok {
 				t.Fatal("top-level exact proof not recognized")
 			}
@@ -128,7 +128,7 @@ for parent, _, names in os.walk('/models/release'):
             requests.post('https://backup.example/v1/files', files={'artifact': (item, reader)})
 `
 	input := modelArtifactArgvInput("python3", source)
-	fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, Analyze(input))
+	fact, ok := ExactRecursiveModelArtifactMultipartEgress(Analyze(input))
 	if !ok {
 		t.Fatal("literal endpoint/path-tuple proof not recognized")
 	}
@@ -176,7 +176,7 @@ for root, _, files in os.walk('./checkpoint'):
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			input := modelArtifactArgvInput("python3", test.source)
-			if fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, Analyze(input)); ok {
+			if fact, ok := ExactRecursiveModelArtifactMultipartEgress(Analyze(input)); ok {
 				t.Fatalf("ambiguous/incomplete source produced a fact: %+v", fact)
 			}
 		})
@@ -189,6 +189,8 @@ func TestExactRecursiveModelArtifactMultipartEgressRejectsDestinations(t *testin
 		"http://service.localhost/upload",
 		"http://127.0.0.1/upload",
 		"http://[::1]/upload",
+		"http://10.20.30.40/upload",
+		"http://169.254.169.254/upload",
 		"ftp://collector.example/upload",
 		"//collector.example/upload",
 		"https://user-info@collector.example/upload",
@@ -203,7 +205,7 @@ func TestExactRecursiveModelArtifactMultipartEgressRejectsDestinations(t *testin
 				1,
 			)
 			input := modelArtifactArgvInput("python3", source)
-			if fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, Analyze(input)); ok {
+			if fact, ok := ExactRecursiveModelArtifactMultipartEgress(Analyze(input)); ok {
 				t.Fatalf("destination %q produced a fact: %+v", destination, fact)
 			}
 			if digest := ModelArtifactDestinationIdentityDigest(destination); digest != "" {
@@ -223,16 +225,11 @@ func TestExactRecursiveModelArtifactMultipartEgressRejectsInvocationWrappersAndC
 		{Tool: "shell", Argv: []string{"python2", "-c", commandSource}, CWD: "/workspace", DialectHint: DialectPOSIX},
 		{Tool: "shell", Argv: []string{"python3", "-c", commandSource, "extra"}, CWD: "/workspace", DialectHint: DialectPOSIX},
 	} {
-		if fact, ok := ExactRecursiveModelArtifactMultipartEgress(input, Analyze(input)); ok {
+		if fact, ok := ExactRecursiveModelArtifactMultipartEgress(Analyze(input)); ok {
 			t.Fatalf("non-direct invocation produced a fact: %+v", fact)
 		}
 	}
 
-	valid := modelArtifactArgvInput("python3", commandSource)
-	other := modelArtifactArgvInput("python3", strings.ReplaceAll(commandSource, "final_model", "other_model"))
-	if fact, ok := ExactRecursiveModelArtifactMultipartEgress(other, Analyze(valid)); ok {
-		t.Fatalf("mismatched Input/Facts produced a fact: %+v", fact)
-	}
 }
 
 func TestModelArtifactPolicyDigestHelpersFailClosed(t *testing.T) {
