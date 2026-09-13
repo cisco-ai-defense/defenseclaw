@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
 	"net/url"
 	"sort"
 	"strings"
@@ -48,6 +49,10 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 	}
 	switch fact.Engine {
 	case "postgresql", "mysql", "sqlserver":
+	case "sqlite":
+		return fact.QuerySource == SQLMutationQueryStructured &&
+			fact.Operation == SQLMutationDeleteUnbounded &&
+			fact.Scope == SQLMutationScopeTable
 	default:
 		return false
 	}
@@ -81,6 +86,11 @@ func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
 	mutations := make([]SQLMutationFact, 0, len(inputs))
 	for _, candidate := range inputs {
 		operation, scope, object, ok := exactSQLMutation(candidate.engine, candidate.query)
+		if candidate.engine == "sqlite" {
+			object, ok = exactSQLiteUnboundedDelete(candidate.query)
+			operation = SQLMutationDeleteUnbounded
+			scope = SQLMutationScopeTable
+		}
 		if !ok {
 			continue
 		}
@@ -96,17 +106,28 @@ func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
 		if databaseIdentity == "" {
 			databaseIdentity = "implicit"
 		}
+		databaseDigest := sqlMutationDigest(
+			sqlMutationDatabaseDigestDomain,
+			candidate.engine,
+			databaseIdentity,
+		)
+		if candidate.engine == "sqlite" {
+			// MCP SQLite read_query and write_query calls name their database only
+			// through authenticated connector context. Reuse the rowset resource
+			// digest so a later bounded chain can prove the same database without
+			// retaining or trusting an argument-supplied identity.
+			databaseDigest = framedPrivateDigest(
+				sensitiveSQLRowsetIdentityDomain,
+				candidate.databaseIdentity,
+			)
+		}
 		fact := SQLMutationFact{
 			Engine:                   candidate.engine,
 			Operation:                operation,
 			Scope:                    scope,
 			QuerySource:              candidate.source,
 			ConnectionIdentityDigest: connectionDigest,
-			DatabaseIdentityDigest: sqlMutationDigest(
-				sqlMutationDatabaseDigestDomain,
-				candidate.engine,
-				databaseIdentity,
-			),
+			DatabaseIdentityDigest:   databaseDigest,
 			ObjectIdentityDigest: sqlMutationDigest(
 				sqlMutationObjectDigestDomain,
 				candidate.engine,
@@ -122,6 +143,15 @@ func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
 }
 
 func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
+	if query, ok := exactSQLiteWriteQueryInput(input); ok {
+		return []exactSQLMutationInput{{
+			engine:             "sqlite",
+			query:              query,
+			source:             SQLMutationQueryStructured,
+			connectionIdentity: input.ToolResourceIdentity,
+			databaseIdentity:   input.ToolResourceIdentity,
+		}}
+	}
 	if connection, database, query, ok := exactSQLQueryInput(input); ok {
 		engine, derivedDatabase, ok := exactStructuredSQLMutationTarget(connection, database)
 		if !ok {
@@ -143,6 +173,37 @@ func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
 		return nil
 	}
 	return []exactSQLMutationInput{candidate}
+}
+
+func exactSQLiteWriteQueryInput(input Input) (string, bool) {
+	if input.Tool != "write_query" || input.Command != "" || len(input.Argv) != 0 ||
+		!validTrustedToolResourceIdentity(input.ToolResourceIdentity) {
+		return "", false
+	}
+	return exactSQLiteWriteQueryArgs(input.Args)
+}
+
+func exactSQLiteWriteQueryArgs(raw json.RawMessage) (string, bool) {
+	return exactSensitiveSQLReadQueryArgs(raw)
+}
+
+func exactSQLiteUnboundedDelete(query string) (string, bool) {
+	if query == "" || strings.TrimSpace(query) != query {
+		return "", false
+	}
+	statement := query
+	if strings.HasSuffix(statement, ";") {
+		statement = strings.TrimSuffix(statement, ";")
+	}
+	if statement == "" || strings.ContainsRune(statement, ';') {
+		return "", false
+	}
+	operation, scope, object, ok := exactSQLMutation("sqlite", statement)
+	if !ok || operation != SQLMutationDeleteUnbounded || scope != SQLMutationScopeTable ||
+		!exactSQLRowsetIdentifier(object) {
+		return "", false
+	}
+	return strings.ToLower(object), true
 }
 
 func exactStructuredSQLMutationTarget(connection, database string) (string, string, bool) {

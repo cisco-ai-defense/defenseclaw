@@ -194,6 +194,15 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 		}
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
+	if tool == "write_query" {
+		if _, ok := exactSQLiteWriteQueryArgs(raw); ok {
+			// The reviewed SQLite mutation recognizer owns this closed schema.
+			// Query text remains private and is never projected into generic
+			// command facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if tool == "create_entities" {
 		if _, ok := exactStructuredEntityPersistenceArgs(raw); ok {
 			// The reviewed persistence recognizer owns this closed schema.

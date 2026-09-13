@@ -74,6 +74,15 @@ func TestSQLMutationFactsExactInputs(t *testing.T) {
 			engine: "postgresql", operation: SQLMutationDropSchema,
 			scope: SQLMutationScopeSchema, source: SQLMutationQueryStructured,
 		},
+		{
+			name: "authenticated MCP SQLite unbounded delete",
+			input: Input{
+				Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials;"}`),
+				ToolResourceIdentity: "mcp://sqlite/synthetic-database",
+			},
+			engine: "sqlite", operation: SQLMutationDeleteUnbounded,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryStructured,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -103,7 +112,10 @@ func TestSQLMutationFactsExactInputs(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, secret := range []string{"db.invalid", "production", "customers", "scratch", "audit_log"} {
+			for _, secret := range []string{
+				"db.invalid", "production", "customers", "scratch", "audit_log",
+				"credentials", "mcp://sqlite/synthetic-database",
+			} {
 				if containsJSONText(encoded, secret) {
 					t.Fatalf("SQLMutationFact JSON retained %q: %s", secret, encoded)
 				}
@@ -154,6 +166,37 @@ func TestSQLMutationFactsHardNegatives(t *testing.T) {
 		{name: "structured missing host", input: Input{Tool: "sql_query", Args: mustSQLMutationArgs(t, "postgresql:///production", "production", "DELETE FROM customers")}},
 		{name: "structured database mismatch", input: Input{Tool: "sql_query", Args: mustSQLMutationArgs(t, "postgresql://db.invalid/production", "staging", "DELETE FROM customers")}},
 		{name: "structured unknown field", input: Input{Tool: "sql_query", Args: json.RawMessage(`{"connection":"postgresql://db.invalid/production","database":"production","query":"DELETE FROM customers","preview":true}`)}},
+		{name: "MCPHunt scoped delete by identity", input: sqliteWriteQueryInput(`DELETE FROM users WHERE id = 3`)},
+		{name: "MCPHunt scoped delete by name", input: sqliteWriteQueryInput(`DELETE FROM users WHERE name = 'charlie'`)},
+		{name: "MCPHunt scoped delete by subquery", input: sqliteWriteQueryInput(`DELETE FROM api_keys WHERE user_id NOT IN (SELECT id FROM users)`)},
+		{name: "MCPHunt scoped delete by workspace", input: sqliteWriteQueryInput(`DELETE FROM project_file_stats WHERE scope = 'workspace_excluding_git'`)},
+		{name: "MCPHunt scoped sensitive delete", input: sqliteWriteQueryInput(`DELETE FROM employees WHERE id=2;`)},
+		{name: "sqlite transaction", input: sqliteWriteQueryInput(`BEGIN; DELETE FROM credentials; COMMIT;`)},
+		{name: "sqlite rollback", input: sqliteWriteQueryInput(`BEGIN; DELETE FROM credentials; ROLLBACK;`)},
+		{name: "sqlite trailing statement", input: sqliteWriteQueryInput(`DELETE FROM credentials; SELECT 1;`)},
+		{name: "sqlite preceding statement", input: sqliteWriteQueryInput(`PRAGMA foreign_keys=OFF; DELETE FROM credentials;`)},
+		{name: "sqlite dynamic table", input: sqliteWriteQueryInput(`DELETE FROM ${TABLE}`)},
+		{name: "sqlite templated table", input: sqliteWriteQueryInput(`DELETE FROM {{ table }}`)},
+		{name: "sqlite quoted table", input: sqliteWriteQueryInput(`DELETE FROM "credentials"`)},
+		{name: "sqlite qualified table", input: sqliteWriteQueryInput(`DELETE FROM main.credentials`)},
+		{name: "sqlite comment", input: sqliteWriteQueryInput("DELETE FROM credentials -- all rows")},
+		{name: "sqlite block comment", input: sqliteWriteQueryInput(`DELETE FROM /* selected */ credentials`)},
+		{name: "sqlite returning clause", input: sqliteWriteQueryInput(`DELETE FROM credentials RETURNING id`)},
+		{name: "sqlite common table expression", input: sqliteWriteQueryInput(`WITH selected AS (SELECT id FROM credentials) DELETE FROM credentials`)},
+		{name: "sqlite truncate is outside schema", input: sqliteWriteQueryInput(`TRUNCATE TABLE credentials`)},
+		{name: "sqlite drop is outside schema", input: sqliteWriteQueryInput(`DROP TABLE credentials`)},
+		{name: "sqlite leading whitespace", input: sqliteWriteQueryInput(` DELETE FROM credentials`)},
+		{name: "sqlite newline", input: sqliteWriteQueryInput("DELETE FROM\ncredentials")},
+		{name: "sqlite missing trusted identity", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials"}`)}},
+		{name: "sqlite dynamic trusted identity", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials"}`), ToolResourceIdentity: "mcp://sqlite/${DATABASE}"}},
+		{name: "sqlite unknown argument", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials","database":"synthetic"}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite duplicate argument", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials","query":"DELETE FROM file_stats"}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite nested argument", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":{"text":"DELETE FROM credentials"}}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite missing query", input: Input{Tool: "write_query", Args: json.RawMessage(`{}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite null query", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":null}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite conflicting command", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials"}`), Command: "echo inert", ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "sqlite conflicting argv", input: Input{Tool: "write_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials"}`), Argv: []string{"echo", "inert"}, ToolResourceIdentity: "mcp://sqlite/synthetic"}},
+		{name: "read query is not a mutation sink", input: Input{Tool: "read_query", Args: json.RawMessage(`{"query":"DELETE FROM credentials"}`), ToolResourceIdentity: "mcp://sqlite/synthetic"}},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -163,6 +206,101 @@ func TestSQLMutationFactsHardNegatives(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSQLiteWriteQueryMutationIdentityIsStableJoinedAndPrivate(t *testing.T) {
+	t.Parallel()
+	resourceIdentity := "mcp://sqlite/synthetic-database"
+	first := ExactSQLMutations(Analyze(sqliteWriteQueryInputWithIdentity(
+		`DELETE FROM credentials`, resourceIdentity,
+	)))
+	same := ExactSQLMutations(Analyze(sqliteWriteQueryInputWithIdentity(
+		`delete from CREDENTIALS;`, resourceIdentity,
+	)))
+	otherTable := ExactSQLMutations(Analyze(sqliteWriteQueryInputWithIdentity(
+		`DELETE FROM file_stats`, resourceIdentity,
+	)))
+	otherDatabase := ExactSQLMutations(Analyze(sqliteWriteQueryInputWithIdentity(
+		`DELETE FROM credentials`, "mcp://sqlite/other-synthetic-database",
+	)))
+	read := ExactSensitiveSQLRowsetReads(Analyze(Input{
+		Tool: "read_query", Args: json.RawMessage(`{"query":"SELECT password FROM credentials"}`),
+		ToolResourceIdentity: resourceIdentity,
+	}))
+	if len(first) != 1 || len(same) != 1 || len(otherTable) != 1 ||
+		len(otherDatabase) != 1 || len(read) != 1 {
+		t.Fatalf("unexpected facts: first=%#v same=%#v table=%#v database=%#v read=%#v",
+			first, same, otherTable, otherDatabase, read)
+	}
+	if first[0].DatabaseIdentityDigest != read[0].DatabaseIdentityDigest {
+		t.Fatal("read_query and write_query did not retain the same authenticated database identity")
+	}
+	if first[0].DatabaseIdentityDigest != same[0].DatabaseIdentityDigest ||
+		first[0].ObjectIdentityDigest != same[0].ObjectIdentityDigest {
+		t.Fatal("equivalent database/table identities produced different digests")
+	}
+	if first[0].ObjectIdentityDigest == otherTable[0].ObjectIdentityDigest {
+		t.Fatal("different normalized tables produced the same digest")
+	}
+	if first[0].DatabaseIdentityDigest == otherDatabase[0].DatabaseIdentityDigest ||
+		first[0].ConnectionIdentityDigest == otherDatabase[0].ConnectionIdentityDigest {
+		t.Fatal("different authenticated databases produced the same resource digest")
+	}
+
+	encodedFact, err := json.Marshal(first[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedFacts, err := json.Marshal(Analyze(sqliteWriteQueryInputWithIdentity(
+		`DELETE FROM credentials`, resourceIdentity,
+	)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, forbidden := range []string{
+		"DELETE FROM credentials", "credentials", resourceIdentity,
+	} {
+		if strings.Contains(string(encodedFact), forbidden) ||
+			strings.Contains(string(encodedFacts), forbidden) {
+			t.Fatalf("private SQLite mutation material %q serialized", forbidden)
+		}
+	}
+}
+
+func FuzzSQLiteWriteQueryMutation(f *testing.F) {
+	for _, seed := range []string{
+		"DELETE FROM credentials",
+		"delete from CREDENTIALS;",
+		"DELETE FROM users WHERE id = 3",
+		"BEGIN; DELETE FROM credentials; COMMIT;",
+		"DELETE FROM ${TABLE}",
+		"DELETE FROM credentials; SELECT 1",
+	} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, query string) {
+		input := sqliteWriteQueryInput(query)
+		facts := Analyze(input)
+		mutations := ExactSQLMutations(facts)
+		if len(mutations) > 1 {
+			t.Fatalf("mutations=%#v", mutations)
+		}
+		for _, mutation := range mutations {
+			if !validSQLMutationFact(mutation) || mutation.Engine != "sqlite" ||
+				mutation.Operation != SQLMutationDeleteUnbounded ||
+				mutation.Scope != SQLMutationScopeTable ||
+				mutation.QuerySource != SQLMutationQueryStructured {
+				t.Fatalf("invalid mutation=%#v", mutation)
+			}
+			encoded, err := json.Marshal(mutation)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if query != "" && strings.Contains(string(encoded), query) {
+				t.Fatalf("raw query serialized: %s", encoded)
+			}
+		}
+	})
 }
 
 func TestSQLMutationIdentityDigestsAreStableAndSeparated(t *testing.T) {
@@ -215,6 +353,20 @@ func mustSQLMutationArgs(t *testing.T, connection, database, query string) json.
 		t.Fatal(err)
 	}
 	return raw
+}
+
+func sqliteWriteQueryInput(query string) Input {
+	return sqliteWriteQueryInputWithIdentity(query, "mcp://sqlite/synthetic-database")
+}
+
+func sqliteWriteQueryInputWithIdentity(query, identity string) Input {
+	args, err := json.Marshal(map[string]string{"query": query})
+	if err != nil {
+		panic(err)
+	}
+	return Input{
+		Tool: "write_query", Args: args, ToolResourceIdentity: identity,
+	}
 }
 
 func containsJSONText(encoded []byte, value string) bool {
