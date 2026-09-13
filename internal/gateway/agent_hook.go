@@ -1888,11 +1888,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:                 actionTool,
-				Args:                 req.ToolArgs,
-				CWD:                  req.CWD,
-				ActiveHome:           trustedSameHostHome(),
-				ToolResourceIdentity: resourceIdentity,
+				Tool:                     actionTool,
+				Args:                     req.ToolArgs,
+				CWD:                      req.CWD,
+				ActiveHome:               trustedSameHostHome(),
+				ToolResourceIdentity:     resourceIdentity,
+				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
 			LegacyText:         string(req.ToolArgs),
 			Connector:          req.ConnectorName,

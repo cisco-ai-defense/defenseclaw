@@ -261,6 +261,8 @@ func analyze(input Input) Facts {
 	facts.WindowsSecurityControlMutations = projectWindowsSecurityControlMutations(facts)
 	facts.CredentialRemoteExecutionOperations =
 		projectCredentialRemoteExecutionOperations(input)
+	facts.CompromisedCredentialAuthentications =
+		projectCompromisedCredentialAuthentications(input, facts)
 	facts.DirectoryCredentialAcquisitions =
 		projectDirectoryCredentialAcquisitions(input, &facts)
 	facts.StagedPayloadPersistenceOperations =

@@ -254,6 +254,38 @@ export const BOUNDED_CHAINS = [
     timeWindowMinutes: 30,
     mode: 'enforcement-capable',
   },
+  {
+    id: 'chain.endpoint_security_control_request_then_completed_same_process',
+    title: 'Endpoint security-control mutation observed for the same process',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.sensitive_read_value_then_external_literal_transmit',
+    title: 'Sensitive read value transmitted literally to an external destination',
+    severity: 'CRITICAL',
+    eventWindow: 5,
+    timeWindowMinutes: 10,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.sensitive_sql_value_then_cross_resource_literal_persistence',
+    title: 'Sensitive SQL value persisted literally to a distinct MCP resource',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.compromised_credential_then_successful_authentication',
+    title: 'Recorded compromised credential used for successful authentication',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
 ] as const satisfies readonly BoundedChain[];
 
 export const YARA_RULES = [
@@ -282,6 +314,31 @@ export const YARA_RULES = [
     description: 'Replacement of multiple sensitive profile attributes',
     category: 'Profile tampering',
   },
+  {
+    id: 'defenseclaw_addressed_edit_access_grant',
+    description: 'Concrete edit-access grant to an addressed principal',
+    category: 'Access control change',
+  },
+  {
+    id: 'defenseclaw_sensitive_health_data_change',
+    description: 'Concrete genetic-data tamper or addressed health-application share',
+    category: 'Sensitive health data change',
+  },
+  {
+    id: 'defenseclaw_traffic_control_override',
+    description: 'Bounded emergency-priority or individual traffic-light override',
+    category: 'Traffic control override',
+  },
+  {
+    id: 'defenseclaw_physical_access_change',
+    description: 'Concrete smart-lock guest grant or owned-door unlock request',
+    category: 'Physical access change',
+  },
+  {
+    id: 'defenseclaw_network_security_policy_change',
+    description: 'Concrete allowlist or business-service denylist policy change',
+    category: 'Network security policy change',
+  },
 ] as const satisfies readonly YaraRule[];
 
 export const HIGH_ASSURANCE_PACKS = [
@@ -296,7 +353,7 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'cloud-production-protection',
     title: 'Cloud production protection',
     status: 'selectable',
-    ruleCount: 3,
+    ruleCount: 4,
     coverage: 'Closed destructive AWS, Google Cloud, Azure, and cloud-audit-control operations.',
   },
   {
@@ -310,8 +367,8 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'infrastructure-destruction-protection',
     title: 'Infrastructure destruction protection',
     status: 'selectable',
-    ruleCount: 1,
-    coverage: 'Full Terraform, OpenTofu, and Pulumi destruction.',
+    ruleCount: 5,
+    coverage: 'Full Terraform, OpenTofu, Pulumi, Ansible, and Chef infrastructure destruction.',
   },
   {
     id: 'kubernetes-production-protection',

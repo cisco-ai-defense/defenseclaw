@@ -67,7 +67,10 @@ type DeterministicActionEvaluation struct {
 	EnforcementStepMask          uint64
 	EnforcementJoinDigests       [guardrail.ToolChainCount]string
 	EnforcementOutputJoinDigests [guardrail.ToolChainCount]string
-	CELEvaluationStatus          string
+	// ValueJoinDigests is an in-memory, value-free projection used by the
+	// stateful benchmark runner. It is never copied into a Prediction.
+	ValueJoinDigests    [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
+	CELEvaluationStatus string
 }
 
 // DeterministicHTTPMessageEvaluation is the value-safe projection returned by
@@ -188,6 +191,7 @@ func EvaluateDeterministicAction(
 	result.EnforcementStepMask = projection.EnforcementStepMask
 	result.EnforcementJoinDigests = projection.EnforcementJoinDigests
 	result.EnforcementOutputJoinDigests = projection.EnforcementOutputJoinDigests
+	result.ValueJoinDigests = projection.ValueJoinDigests
 	result.CELEvaluationStatus = deterministicCELEvaluationStatus(connector, captured)
 	for _, issue := range captured.Parse.Issues {
 		result.IssueCodes = append(result.IssueCodes, string(issue))

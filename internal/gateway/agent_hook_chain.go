@@ -1118,6 +1118,7 @@ func projectTrustedActionChainSteps(
 	projectPrivilegedKubernetesChainSteps(projection, facts)
 	projectWirelessCaptureDeauthChainSteps(projection, facts)
 	projectCredentialRemoteExecutionChainSteps(projection, facts)
+	projectCompromisedCredentialAuthenticationChainSteps(projection, facts)
 	projectCloudIAMPrincipalAdminChainSteps(projection, facts)
 	projectKubernetesPrivilegedCronJobChainSteps(projection, facts)
 	projectSQLCommandUDFChainSteps(projection, facts)
@@ -1127,6 +1128,38 @@ func projectTrustedActionChainSteps(
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
 	}
+}
+
+func projectCompromisedCredentialAuthenticationChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainCompromisedCredentialThenAuthenticate
+	fact, ok := actionfacts.ExactCompromisedCredentialAuthentication(facts)
+	if !ok || fact.AccountIdentityHMAC == "" || fact.CredentialValueHMAC == "" {
+		return
+	}
+	definition, found := guardrail.ToolChainDefinitionByID(chainID)
+	index, indexed := guardrail.ToolChainIndexByID(chainID)
+	if !found || !indexed || definition.MutationBit == 0 {
+		return
+	}
+	switch fact.Operation {
+	case actionfacts.CompromisedCredentialRecorded:
+		addToolChainStep(projection, chainID, 1, true, true)
+		// A newer successful record for the same account invalidates any older
+		// account/credential lineage before a later authentication result.
+		projection.DetectionStepMask |= definition.MutationBit
+		projection.EnforcementStepMask |= definition.MutationBit
+	case actionfacts.CompromisedCredentialUsed:
+		addToolChainStep(projection, chainID, 2, true, true)
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(
+		projection, chainID, fact.AccountIdentityHMAC,
+	)
+	projection.ValueJoinDigests[index][0] = fact.CredentialValueHMAC
 }
 
 func projectEndpointSecurityControlChainSteps(

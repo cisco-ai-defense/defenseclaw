@@ -284,6 +284,18 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [credential, active-directory, credential-dumping, structured-tool, bounded-grammar]
+  - id: chain.compromised_credential_then_successful_authentication
+    tool_call_only: true
+    expression: >-
+      f.tool in ['add_compromised_account', 'update_compromised_account'] ||
+      f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])
+    # Catalog anchor only. The code-owned matcher requires successful paired
+    # results and exact process-keyed account and credential HMAC joins.
+    pattern: 'a^'
+    title: "Recorded compromised credential used for successful authentication"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, authentication, bounded-lineage, detection-only]
   - id: persistence.malicious_download_execute_payload
     tool_call_only: true
     expression: "f.tool == 'persist'"

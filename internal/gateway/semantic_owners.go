@@ -239,7 +239,18 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		// the exact bounded flow without assuming an unknown host is forbidden.
 		detectionOnly: true,
 	},
+	"chain.compromised_credential_then_successful_authentication": {
+		prerequisite:     compromisedCredentialAuthenticationCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this success-gated
+		// account-and-credential chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
 })
+
+func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
 
 func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwner {
 	registerSemanticOwners(owners, semanticReconImpactOwners)

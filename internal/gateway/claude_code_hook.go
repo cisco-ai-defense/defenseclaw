@@ -167,6 +167,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 				CWD:                                      req.CWD,
 				ActiveHome:                               trustedSameHostHome(),
 				ToolResourceIdentity:                     resourceIdentity,
+				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
 				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
 				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,

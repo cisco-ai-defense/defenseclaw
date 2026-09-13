@@ -48,6 +48,10 @@ type Runner struct {
 	EvaluateOutOfScope bool
 }
 
+var benchmarkCredentialLineageHMACKey = sha256.Sum256(
+	[]byte("defenseclaw/benchmark/credential-lineage/v1"),
+)
+
 type policyLane struct {
 	label    string
 	posture  string
@@ -199,14 +203,15 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 	routes := make(map[string]struct{})
 	for index, event := range benchmarkCase.Payload.Events {
 		input := actionfacts.Input{
-			Tool:             firstNonEmpty(event.ToolName, "shell"),
-			Args:             benchmarkRuntimeArgs(event.Args, event.Command != "" || len(event.Argv) != 0),
-			Command:          event.Command,
-			Argv:             append([]string(nil), event.Argv...),
-			CWD:              benchmarkCWD(event.CWD, event.Args),
-			ActiveHome:       firstNonEmpty(event.ActiveHome, "/home/alice"),
-			ActiveAgentFiles: append([]string(nil), event.ActiveAgentFiles...),
-			DialectHint:      benchmarkDialect(event.Dialect),
+			Tool:                     firstNonEmpty(event.ToolName, "shell"),
+			Args:                     benchmarkRuntimeArgs(event.Args, event.Command != "" || len(event.Argv) != 0),
+			Command:                  event.Command,
+			Argv:                     append([]string(nil), event.Argv...),
+			CWD:                      benchmarkCWD(event.CWD, event.Args),
+			ActiveHome:               firstNonEmpty(event.ActiveHome, "/home/alice"),
+			ActiveAgentFiles:         append([]string(nil), event.ActiveAgentFiles...),
+			DialectHint:              benchmarkDialect(event.Dialect),
+			CredentialLineageHMACKey: benchmarkCredentialLineageHMACKey,
 		}
 		result := gateway.EvaluateDeterministicAction(ctx, input, firstNonEmpty(event.Command, string(event.Args)), connector, profile)
 		prediction.IssueCodes = append(prediction.IssueCodes, result.IssueCodes...)
@@ -225,6 +230,7 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 				EnforcementStepMask:          result.EnforcementStepMask,
 				EnforcementJoinDigests:       result.EnforcementJoinDigests,
 				EnforcementOutputJoinDigests: result.EnforcementOutputJoinDigests,
+				ValueJoinDigests:             result.ValueJoinDigests,
 			},
 		}
 		switch event.Outcome {
@@ -244,6 +250,7 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 			windowEvent.Projection.EnforcementStepMask = 0
 			windowEvent.Projection.EnforcementJoinDigests = [guardrail.ToolChainCount]string{}
 			windowEvent.Projection.EnforcementOutputJoinDigests = [guardrail.ToolChainCount]string{}
+			windowEvent.Projection.ValueJoinDigests = [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests{}
 		}
 		if index > 0 {
 			matches, err := guardrail.MatchToolChains(prior, windowEvent)
@@ -414,14 +421,15 @@ func (r Runner) runText(
 func (r Runner) runAction(ctx context.Context, profile, connector string, benchmarkCase Case, prediction Prediction) Prediction {
 	prediction.Engine = "gateway-trusted-action"
 	input := actionfacts.Input{
-		Tool:             firstNonEmpty(benchmarkCase.Payload.ToolName, "shell"),
-		Args:             benchmarkRuntimeArgs(benchmarkCase.Payload.Args, benchmarkCase.Payload.Command != "" || len(benchmarkCase.Payload.Argv) != 0),
-		Command:          benchmarkCase.Payload.Command,
-		Argv:             append([]string(nil), benchmarkCase.Payload.Argv...),
-		CWD:              benchmarkCWD(benchmarkCase.Payload.CWD, benchmarkCase.Payload.Args),
-		ActiveHome:       firstNonEmpty(benchmarkCase.Payload.ActiveHome, "/home/alice"),
-		ActiveAgentFiles: append([]string(nil), benchmarkCase.Payload.ActiveAgentFiles...),
-		DialectHint:      benchmarkDialect(benchmarkCase.Payload.Dialect),
+		Tool:                     firstNonEmpty(benchmarkCase.Payload.ToolName, "shell"),
+		Args:                     benchmarkRuntimeArgs(benchmarkCase.Payload.Args, benchmarkCase.Payload.Command != "" || len(benchmarkCase.Payload.Argv) != 0),
+		Command:                  benchmarkCase.Payload.Command,
+		Argv:                     append([]string(nil), benchmarkCase.Payload.Argv...),
+		CWD:                      benchmarkCWD(benchmarkCase.Payload.CWD, benchmarkCase.Payload.Args),
+		ActiveHome:               firstNonEmpty(benchmarkCase.Payload.ActiveHome, "/home/alice"),
+		ActiveAgentFiles:         append([]string(nil), benchmarkCase.Payload.ActiveAgentFiles...),
+		DialectHint:              benchmarkDialect(benchmarkCase.Payload.Dialect),
+		CredentialLineageHMACKey: benchmarkCredentialLineageHMACKey,
 	}
 	result := gateway.EvaluateDeterministicAction(
 		ctx,

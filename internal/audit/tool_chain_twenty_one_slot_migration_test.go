@@ -21,8 +21,8 @@ func TestToolChainTwentyOneSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 	}
 	fixture := newToolChainFixture(t, ":memory:")
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"923", "14783"},
-		"guardrail_chain_pending_actions": {"923", "14783"},
+		"guardrail_chain_events":          {"967", "15487"},
+		"guardrail_chain_pending_actions": {"967", "15487"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -70,8 +70,8 @@ func TestToolChainTwentyOneSlotMigrationRebuildsLegacyDigestCapacity(t *testing.
 		t.Fatal(err)
 	}
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"923", "14783"},
-		"guardrail_chain_pending_actions": {"923", "14783"},
+		"guardrail_chain_events":          {"967", "15487"},
+		"guardrail_chain_pending_actions": {"967", "15487"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -255,8 +255,8 @@ func TestToolChainTwentyOneSlotWorstCaseValueEncodingFitsMigratedCapacity(t *tes
 		}
 	}
 	encoded := encodeToolChainValueJoinDigests(values)
-	if len(encoded) != 14783 {
-		t.Fatalf("worst-case 21-slot value width=%d want 14783", len(encoded))
+	if len(encoded) != 15487 {
+		t.Fatalf("worst-case current-slot value width=%d want 15487", len(encoded))
 	}
 	decoded, err := decodeToolChainValueJoinDigests(encoded)
 	if err != nil {
@@ -283,11 +283,11 @@ func assertStoredTwentyFirstSlot(
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(encodedResources) != 923 {
-		t.Fatalf("encoded 21-slot resource width=%d want 923", len(encodedResources))
+	if len(encodedResources) != 967 {
+		t.Fatalf("encoded current-slot resource width=%d want 967", len(encodedResources))
 	}
-	if len(encodedValues) > 14783 {
-		t.Fatalf("encoded 21-slot value width=%d exceeds 14783", len(encodedValues))
+	if len(encodedValues) > 15487 {
+		t.Fatalf("encoded current-slot value width=%d exceeds 15487", len(encodedValues))
 	}
 	resources, err := decodeToolChainJoinDigests(encodedResources)
 	if err != nil {

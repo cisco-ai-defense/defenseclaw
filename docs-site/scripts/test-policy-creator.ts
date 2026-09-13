@@ -229,7 +229,7 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
     BOUNDED_CHAINS.map((chain) => chain.id).sort(),
     sourceChainIds,
   );
-  assert.equal(sourceChainIds.length, 18);
+  assert.equal(sourceChainIds.length, 22);
 
   const yaraSource = readFileSync(
     new URL('../../policies/yara/mcp-tools/description_injection.yara', import.meta.url),
@@ -243,7 +243,7 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
     YARA_RULES.map((rule) => rule.id).sort(),
     sourceYaraIds,
   );
-  assert.equal(sourceYaraIds.length, 5);
+  assert.equal(sourceYaraIds.length, 10);
 });
 
 test('use-case packs: generated selectable rules match canonical YAML', () => {

@@ -142,6 +142,10 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// complete that proof; exact positive and negative lifecycle coverage lives
 	// in tool_value_lineage_sql_chain_test.go.
 	coveredExpressions[semanticSensitiveSQLValueCrossResourcePersistenceExpression] = struct{}{}
+	// The exact account and credential roles are private ActionFacts projected
+	// only when a process HMAC key is present. Lifecycle tests own this inert
+	// catalog expression because a single public corpus row cannot complete it.
+	coveredExpressions[semanticCompromisedCredentialAuthenticationExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {

@@ -11,11 +11,11 @@ import (
 )
 
 const (
-	fourStepFirstBit    = uint64(1 << 50)
-	fourStepSecondBit   = uint64(1 << 51)
-	fourStepThirdBit    = uint64(1 << 52)
-	fourStepTerminalBit = uint64(1 << 53)
-	fourStepMutationBit = uint64(1 << 54)
+	fourStepFirstBit    = uint64(1 << 53)
+	fourStepSecondBit   = uint64(1 << 54)
+	fourStepThirdBit    = uint64(1 << 55)
+	fourStepTerminalBit = uint64(1 << 56)
+	fourStepMutationBit = uint64(1 << 57)
 )
 
 func TestFourStepAllocationAppendsWithoutRenumberingDeployedBits(t *testing.T) {
@@ -44,7 +44,7 @@ func TestFourStepAllocationAppendsWithoutRenumberingDeployedBits(t *testing.T) {
 	} {
 		t.Fatalf("four-step allocation=%#v", got)
 	}
-	if appended.ResultBit != uint32(1<<ToolChainCount) || offset != 55 ||
+	if appended.ResultBit != uint32(1<<ToolChainCount) || offset != 58 ||
 		appended.ResultBit&ToolChainReservedResultSignBit != 0 ||
 		appended.MutationBit&ToolChainReservedSignBit != 0 ||
 		steps&fourStepTerminalBit == 0 || results&appended.ResultBit == 0 {

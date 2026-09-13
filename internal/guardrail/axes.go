@@ -228,7 +228,8 @@ var ruleAxes = map[string][]DataAxis{
 		AxisSensitiveAccess,
 		AxisEgressExternal,
 	},
-	"chain.workload_identity_then_lateral_execution": {AxisSensitiveAccess},
+	"chain.workload_identity_then_lateral_execution":              {AxisSensitiveAccess},
+	"chain.compromised_credential_then_successful_authentication": {AxisSensitiveAccess},
 
 	// Sensitive data access (credentials, PII, system secrets)
 	"CRED-AWS-FILE":       {AxisSensitiveAccess},

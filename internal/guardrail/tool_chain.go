@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 21
+	ToolChainCount       = 22
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -72,13 +72,14 @@ const (
 	ToolChainEndpointSecurityControlMutation       = "chain.endpoint_security_control_request_then_completed_same_process"
 	ToolChainSensitiveReadValueExternalTransmit    = "chain.sensitive_read_value_then_external_literal_transmit"
 	ToolChainSensitiveSQLValueCrossResourcePersist = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
+	ToolChainCompromisedCredentialThenAuthenticate = "chain.compromised_credential_then_successful_authentication"
 	ToolChainMaxValueJoinDigests                   = 16
 	toolChainProjectionFingerprintDomain           = "defenseclaw.tool-chain.projection.v2"
 	toolChainWideProjectionFingerprintDomain       = "defenseclaw.tool-chain.projection.v3-wide"
 	toolChainRulesetFingerprintDomain              = "defenseclaw.tool-chain.ruleset.v1"
 	toolChainDefinitionFingerprintDomain           = "defenseclaw.tool-chain.definition.v1"
 	toolChainCatalogFingerprintDomain              = "defenseclaw.tool-chain.catalog.v1"
-	toolChainRelevantSemanticProjection            = "actionfacts-v12-structured-credential-egress-lineage"
+	toolChainRelevantSemanticProjection            = "actionfacts-v13-compromised-credential-auth-lineage"
 	toolChainRelevantEnforcementProjection         = "enforcement-proof-v1"
 	toolChainRelevantFallbackProjection            = "owner-local-fallback-v1"
 	toolChainRelevantExternalEgressProjection      = "external-egress-v1"
@@ -105,6 +106,10 @@ type ToolChainDefinition struct {
 	RequiresEnforcementJoin bool
 	RequiresExactJoin       bool
 	RequiresValueJoin       bool
+	// ValueJoinOwnsParseProof permits a chain's closed ActionFacts projector to
+	// establish completeness for its own role even when the generic command
+	// classifier reports an otherwise harmless unknown-operand issue.
+	ValueJoinOwnsParseProof bool
 	// RequiresDistinctResourceJoin requires both roles to carry exact, non-empty
 	// trusted resource identities and rejects a same-resource pair. It is
 	// intentionally separate from value equality: the associated value HMACs
@@ -348,6 +353,21 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// justify enforcement.
 		DetectionOnly: true,
 	},
+	{
+		ID: ToolChainCompromisedCredentialThenAuthenticate, Version: "1.0",
+		Title:       "Recorded compromised credential used for successful authentication",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "successful-compromised-credential-record-to-exact-account-value-authentication-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresValueJoin:       true,
+		ValueJoinOwnsParseProof: true,
+		RequiresTerminalSuccess: true,
+		// Exact account and credential continuity proves use of a credential that
+		// the tool explicitly classified as compromised. It remains non-blocking
+		// because an authorized assessment can intentionally perform this chain.
+		DetectionOnly: true,
+	},
 }
 
 var (
@@ -408,6 +428,7 @@ func allocateToolChainBits(definitions []ToolChainDefinition, initialOffset uint
 			definitions[i].ID == ToolChainKubernetesPrivilegedCronJob ||
 			definitions[i].ID == ToolChainSQLCommandUDF ||
 			definitions[i].ID == ToolChainStagedReverseShellPersistence ||
+			definitions[i].ID == ToolChainCompromisedCredentialThenAuthenticate ||
 			definitions[i].FourStep {
 			definitions[i].MutationBit = nextStepBit()
 		}
@@ -666,8 +687,9 @@ func MatchToolChains(
 			detectionJoinPossible := true
 			if definition.RequiresValueJoin {
 				detectionJoinPossible =
-					event.Projection.ParseStatus == actionfacts.StatusComplete &&
-						final.Projection.ParseStatus == actionfacts.StatusComplete &&
+					(definition.ValueJoinOwnsParseProof ||
+						event.Projection.ParseStatus == actionfacts.StatusComplete &&
+							final.Projection.ParseStatus == actionfacts.StatusComplete) &&
 						toolChainValueJoinIntersects(
 							event.Projection.ValueJoinDigests[i],
 							final.Projection.ValueJoinDigests[i],
@@ -676,6 +698,10 @@ func MatchToolChains(
 					detectionJoinPossible = detectionJoinPossible &&
 						predecessorDigest != "" && finalDigest != "" &&
 						predecessorDigest != finalDigest
+				}
+				if definition.RequiresExactJoin {
+					detectionJoinPossible = detectionJoinPossible &&
+						predecessorDigest != "" && predecessorDigest == finalDigest
 				}
 			} else if definition.RequiresExactJoin {
 				detectionJoinPossible = predecessorDigest != "" &&
@@ -719,6 +745,10 @@ func MatchToolChains(
 				if definition.RequiresDistinctResourceJoin {
 					joinSafe = joinSafe && predecessorDigest != "" &&
 						finalDigest != "" && predecessorDigest != finalDigest
+				}
+				if definition.RequiresExactJoin {
+					joinSafe = joinSafe && predecessorDigest != "" &&
+						predecessorDigest == finalDigest
 				}
 			} else if definition.RequiresExactJoin {
 				joinSafe = joinSafe && predecessorDigest != "" &&
@@ -1136,6 +1166,11 @@ func toolChainBaseFingerprint(definition ToolChainDefinition, relevantOwnerDiges
 		fmt.Sprintf("%t", definition.DetectionOnly),
 		relevantOwnerDigest,
 	)
+	if definition.ValueJoinOwnsParseProof {
+		// Preserve deployed definition fingerprints. The opt-in chain appends its
+		// closed-projector ABI marker without changing existing receipts.
+		base = toolChainDigest(base, "value-join-owns-parse-proof")
+	}
 	if definition.RequiresDistinctResourceJoin {
 		// Preserve every deployed definition fingerprint byte-for-byte. Only the
 		// new cross-resource proof appends this ABI field.

@@ -135,7 +135,11 @@ class CochiseNormalizerTests(unittest.TestCase):
                 tool="add_compromised_account",
                 result="noted compromised account LAB/user with context: verified candidate",
             ),
-            event("tool_call", "auth", params={"command": f"nxc smb host -u user -p '{secret}'"}),
+            event(
+                "tool_call",
+                "auth",
+                params={"command": f"nxc smb host -u user -p '{secret}' -d LAB"},
+            ),
             event("tool_result", "auth", result=f"SMB host [+] LAB\\user:{secret}"),
         ]
         self.write("chain.json", rows)
@@ -166,7 +170,11 @@ class CochiseNormalizerTests(unittest.TestCase):
                 tool="add_compromised_account",
                 result="noted compromised account LAB/user",
             ),
-            event("tool_call", "auth", params={"command": f"nxc smb host -u user -p '{secret}'"}),
+            event(
+                "tool_call",
+                "auth",
+                params={"command": f"nxc smb host -u user -p '{secret}' -d LAB"},
+            ),
             event("tool_result", "auth", result="STATUS_LOGON_FAILURE"),
         ]
         self.write("failed-chain.json", rows)
@@ -219,6 +227,47 @@ class CochiseNormalizerTests(unittest.TestCase):
         cases, _ = self.normalize()
         self.assertFalse(any(row["surface"] == "stateful" for row in cases))
         self.assertTrue(all(row["truth"]["applicability"] == "out_of_scope" for row in cases))
+
+    def test_cross_domain_and_pipelined_authentication_do_not_complete_exact_chain(self) -> None:
+        secret = "generated passphrase"
+        rows = [
+            event(
+                "tool_call",
+                "fact",
+                tool="add_compromised_account",
+                params={"username": "first.example\\user", "password": secret},
+            ),
+            event(
+                "tool_result",
+                "fact",
+                tool="add_compromised_account",
+                result="noted compromised account first.example\\user",
+            ),
+            event(
+                "tool_call",
+                "cross-domain",
+                params={"command": f"nxc smb host -u user -p '{secret}' -d second.example"},
+            ),
+            event(
+                "tool_result",
+                "cross-domain",
+                result=f"[+] second.example user {secret}",
+            ),
+            event(
+                "tool_call",
+                "pipeline",
+                params={"command": f"nxc smb host -u user -p '{secret}' -d first.example | tail"},
+            ),
+            event(
+                "tool_result",
+                "pipeline",
+                result=f"[+] first.example user {secret}",
+            ),
+        ]
+        self.write("ambiguous-success.json", rows)
+        cases, manifest = self.normalize()
+        self.assertFalse(any(row["surface"] == "stateful" for row in cases))
+        self.assertEqual(adapter_stats(manifest).get("deterministic_authentication_chains", 0), 0)
 
     def test_payload_and_manifests_exclude_prompts_thoughts_and_raw_results(self) -> None:
         secret = "generated sensitive material"

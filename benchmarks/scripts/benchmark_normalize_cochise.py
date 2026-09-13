@@ -24,6 +24,7 @@ import hashlib
 import json
 import os
 import re
+import shlex
 import tempfile
 from collections import Counter
 from collections.abc import Iterable, Mapping
@@ -93,6 +94,14 @@ EXCLUDED_ARGUMENT_KEYS = frozenset(
     }
 )
 COMPROMISED_TOOLS = frozenset({"add_compromised_account", "update_compromised_account"})
+NETEXEC_PROGRAMS = frozenset({"nxc", "netexec", "crackmapexec"})
+NETEXEC_PROTOCOLS = frozenset({"smb", "ldap", "winrm", "mssql", "ssh", "rdp"})
+NETEXEC_VALUE_OPTIONS = frozenset(
+    {"-u", "--username", "-p", "--password", "--hash", "-d", "--domain", "-m", "-o", "-x"}
+)
+NETEXEC_FLAG_OPTIONS = frozenset(
+    {"--shares", "--groups", "--users", "--trusted-for-delegation", "--dc-list", "--local-auth"}
+)
 COMMAND_SECRET_RE = re.compile(
     r"(?i)(?:^|\s)(?:-p|--password|-H|-hashes|--hashes|-aesKey|--aesKey)\s+"
     r"(?:['\"]([^'\"]{4,})['\"]|([^\s]{4,}))"
@@ -431,15 +440,100 @@ def fact_account(joined: JoinedCall) -> tuple[str, str] | None:
     return username, credential
 
 
+def canonical_account(value: str, explicit_domain: str = "") -> str | None:
+    value = value.strip().lower()
+    explicit_domain = explicit_domain.strip().lower().rstrip(".")
+    if not value or any(character in value for character in "\x00\r\n`*?[]{}<>"):
+        return None
+    if value.count("/") == 1 and "\\" not in value and "@" not in value:
+        value = value.replace("/", "\\", 1)
+    if "\\" in value:
+        parts = value.split("\\")
+        if len(parts) != 2 or not all(parts) or (explicit_domain and parts[0] != explicit_domain):
+            return None
+        return value
+    if "@" in value:
+        parts = value.split("@")
+        if len(parts) != 2 or not all(parts) or (explicit_domain and parts[1] != explicit_domain):
+            return None
+        return f"{parts[1]}\\{parts[0]}"
+    if explicit_domain:
+        return f"{explicit_domain}\\{value}"
+    return value
+
+
+def exact_netexec_authentication(command: str) -> tuple[str, str] | None:
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if len(argv) < 5 or argv[0].lower() not in NETEXEC_PROGRAMS or argv[1].lower() not in NETEXEC_PROTOCOLS:
+        return None
+    username = credential = domain = ""
+    targets = 0
+    seen_option = False
+    index = 2
+    while index < len(argv):
+        argument = argv[index]
+        if any(character in argument for character in "\x00\r\n`*?[]{}<>"):
+            return None
+        if not argument.startswith("-"):
+            if seen_option:
+                return None
+            targets += 1
+            index += 1
+            continue
+        seen_option = True
+        if argument == "-H":
+            if index + 1 >= len(argv) or argv[index + 1].startswith("-") or credential:
+                return None
+            credential = argv[index + 1]
+            index += 2
+            continue
+        option = argument.lower()
+        if option in NETEXEC_VALUE_OPTIONS:
+            if index + 1 >= len(argv) or argv[index + 1].startswith("-"):
+                return None
+            value = argv[index + 1]
+            if any(character in value for character in "\x00\r\n`*?[]{}<>"):
+                return None
+            if option in {"-u", "--username"}:
+                if username:
+                    return None
+                username = value
+            elif option in {"-p", "--password", "--hash"}:
+                if credential:
+                    return None
+                credential = value
+            elif option in {"-d", "--domain"}:
+                if domain:
+                    return None
+                domain = value
+            index += 2
+            continue
+        if option not in NETEXEC_FLAG_OPTIONS:
+            return None
+        index += 1
+    account = canonical_account(username, domain)
+    if targets == 0 or not credential or account is None:
+        return None
+    return account, credential
+
+
 def authentication_proven(joined: JoinedCall, username: str, credential: str) -> bool:
     command = raw_command(joined.call)
     result = result_text(joined)
     if not command or not result or FAILURE_RE.search(result):
         return False
-    account = username.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split("@", 1)[0]
-    if len(account) < 2 or account.lower() == "guest":
+    authentication = exact_netexec_authentication(command)
+    recorded_account = canonical_account(username)
+    if authentication is None or recorded_account is None:
         return False
-    if credential not in command or not any(part in command for part in {username, account}):
+    authenticated_account, authenticated_credential = authentication
+    if authenticated_account != recorded_account or authenticated_credential != credential:
+        return False
+    account = recorded_account.rsplit("\\", 1)[-1]
+    if len(account) < 2 or account == "guest":
         return False
     for line in SUCCESS_PREFIX_RE.findall(result):
         if credential in line and re.search(rf"(?i)(?<![A-Za-z0-9_.-]){re.escape(account)}(?![A-Za-z0-9_.-])", line):
@@ -452,8 +546,13 @@ def authentication_failed(joined: JoinedCall, username: str, credential: str) ->
     result = result_text(joined)
     if not command or not result or not FAILURE_RE.search(result):
         return False
-    account = username.rsplit("/", 1)[-1].rsplit("\\", 1)[-1].split("@", 1)[0]
-    return len(account) >= 2 and credential in command and any(part in command for part in {username, account})
+    authentication = exact_netexec_authentication(command)
+    recorded_account = canonical_account(username)
+    return (
+        authentication is not None
+        and recorded_account is not None
+        and authentication == (recorded_account, credential)
+    )
 
 
 def task_secret_references(calls: Iterable[JoinedCall]) -> dict[str, str]:
@@ -484,7 +583,13 @@ def payload_for_call(
         payload["direction"] = "tool_call"
     command = command_from_args(args)
     if command is not None:
-        payload["command"] = command
+        # Stateful events already carry this command in the recorded tool
+        # argument object. Supplying it twice would manufacture a second
+        # ActionFacts source and mark an otherwise exact bounded proof as
+        # conflicting_sources. Atomic cases retain the normalized command for
+        # the independent lexical-coverage lens.
+        if outcome is None:
+            payload["command"] = command
         payload["dialect"] = "posix"
     if outcome is not None:
         payload["outcome"] = outcome

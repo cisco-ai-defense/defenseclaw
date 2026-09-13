@@ -397,8 +397,10 @@
               "rules": [
                 {
                   "id": "COG-SOUL",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)SOUL\\.md",
-                  "title": "SOUL.md access (agent identity)",
+                  "title": "SOUL.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -407,8 +409,10 @@
                 },
                 {
                   "id": "COG-IDENTITY",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)IDENTITY\\.md",
-                  "title": "IDENTITY.md access",
+                  "title": "IDENTITY.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -417,7 +421,7 @@
                 },
                 {
                   "id": "COG-MEMORY",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)MEMORY\\.md",
                   "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
@@ -428,8 +432,10 @@
                 },
                 {
                   "id": "COG-CLAUDE-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)CLAUDE\\.md",
-                  "title": "CLAUDE.md access",
+                  "title": "CLAUDE.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -438,8 +444,10 @@
                 },
                 {
                   "id": "COG-TOOLS-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)TOOLS\\.md",
-                  "title": "TOOLS.md access",
+                  "title": "TOOLS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -448,9 +456,10 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md mutation or reference",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "pattern": "a^",
+                  "title": "AGENTS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -459,7 +468,7 @@
                 },
                 {
                   "id": "COG-OPENCLAW-JSON",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)openclaw\\.json",
                   "title": "openclaw.json config access",
                   "severity": "HIGH",
@@ -470,8 +479,10 @@
                 },
                 {
                   "id": "COG-GATEWAY-JSON",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)gateway\\.json",
-                  "title": "gateway.json config access",
+                  "title": "gateway.json active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -499,8 +510,21 @@
               "category": "command",
               "rules": [
                 {
+                  "id": "CMD-REVSHELL-POWERSHELL-TCP",
+                  "tool_call_only": true,
+                  "pattern": "(?is)\\bNew-Object\\s+(?:System\\.)?Net\\.Sockets\\.TCPClient\\s*\\([^)\\r\\n]{1,512}\\)\\s*;.{0,1000}\\.GetStream\\s*\\(\\s*\\)\\s*;.{0,1000}\\.Read\\s*\\([^)\\r\\n]{1,512}\\).{0,1000}\\b(?:iex|Invoke-Expression)\\b.{0,1000}\\.Write\\s*\\(",
+                  "title": "PowerShell TCP command-execution loop",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "reverse-shell",
+                    "execution",
+                    "network"
+                  ]
+                },
+                {
                   "id": "CMD-REVSHELL-BASH",
-                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN]))",
                   "pattern": "(?i)bash\\s+-i\\s+>&\\s*/dev/tcp/",
                   "title": "Bash reverse shell",
                   "severity": "CRITICAL",
@@ -512,7 +536,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-DEVTCP",
-                  "pattern": "/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
+                  "pattern": "(?i)\\b(?:bash|sh|dash|ksh|zsh)\\b[^\\r\\n]{0,192}(?:-[A-Za-z]*i[A-Za-z]*|--interactive)\\b[^\\r\\n]{0,512}/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
                   "title": "Reverse shell via /dev/tcp",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -523,7 +547,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-NC",
-                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)",
+                  "pattern": "(?i)(?:\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)|\\bmkfifo\\b[^;\\r\\n]{1,256};[^|\\r\\n]{1,512}\\|\\s*(?:nc|ncat|netcat)\\b[^;\\r\\n]{1,256}>\\s*/(?:tmp|var/tmp|dev/shm)/)",
                   "title": "Netcat reverse shell with -e",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -634,7 +658,7 @@
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
                   "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:sudo\\s+)?(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)(?:\\s|$)",
                   "title": "Filesystem format command",
-                  "severity": "CRITICAL",
+                  "severity": "HIGH",
                   "confidence": 0.9,
                   "tags": [
                     "destructive"
@@ -649,6 +673,21 @@
                   "confidence": 0.9,
                   "tags": [
                     "destructive"
+                  ]
+                },
+                {
+                  "id": "impact.credential_file_secure_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'shred')",
+                  "pattern": "a^",
+                  "title": "Secure deletion of a credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "destructive",
+                    "credential",
+                    "bounded-grammar"
                   ]
                 },
                 {
@@ -696,8 +735,8 @@
                 },
                 {
                   "id": "CMD-ETC-WRITE",
-                  "pattern": "(?i)>\\s*/etc/",
-                  "title": "Write redirect to /etc/",
+                  "pattern": "a^",
+                  "title": "Generic write redirect to /etc/ (strict telemetry only)",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [
@@ -755,6 +794,84 @@
                   ]
                 },
                 {
+                  "id": "credential.windows_ntds_ifm_dump",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)",
+                  "pattern": "(?i)\\bntdsutil(?:\\.exe)?\\s+\"?(?:ac i|activate instance) ntds\"?\\s+\"?ifm\"?\\s+\"?create full [A-Z]:\\\\[^\"\\r\\n]+\"?\\s+q\\s+q(?:\\s|$)",
+                  "title": "Export the full Active Directory database with NTDS IFM",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "windows",
+                    "credential-dumping"
+                  ]
+                },
+                {
+                  "id": "credential.directory_credential_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-secretsdump', 'secretsdump.py', 'impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'hashcat', 'hashcat.exe', 'john', 'john.exe', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\\.py|hashcat(?:\\.exe)?|john(?:\\.exe)?\\b[^\\r\\n]*--format(?:=|\\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\\b[^\\r\\n]*(?:--ntds|-M\\s+ntdsutil))\\b",
+                  "title": "Exact directory credential acquisition",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "credential.structured_directory_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']",
+                  "pattern": "a^",
+                  "title": "Structured directory credential acquisition",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "chain.compromised_credential_then_successful_authentication",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['add_compromised_account', 'update_compromised_account'] || f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])",
+                  "pattern": "a^",
+                  "title": "Recorded compromised credential used for successful authentication",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "authentication",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "persistence.malicious_download_execute_payload",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'persist'",
+                  "pattern": "(?is)\"method\"\\s*:\\s*\"(?:cron|systemd|pam_module|registry_run|scheduled_task|wmi_subscription)\".{0,1000}\"payload\"\\s*:\\s*\".{0,1000}\\b(?:powershell(?:\\.exe)?|curl|wget|nc|ncat|netcat)\\b",
+                  "title": "Malicious persistence download-and-execute payload",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "download-exec",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "impact.windows_delete_all_shadow_copies",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['vssadmin', 'vssadmin.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
@@ -782,6 +899,22 @@
                     "tampering",
                     "windows",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_recursive_everyone_full_control",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'icacls')",
+                  "pattern": "(?i)\\bicacls(?:\\.exe)?\\b",
+                  "title": "Recursively grant Everyone inheritable full control on Windows",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "tampering",
+                    "privilege",
+                    "windows",
+                    "access-control",
+                    "recursive"
                   ]
                 },
                 {
@@ -911,7 +1044,7 @@
                   "id": "tamper.windows_telemetry_disable",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application))",
+                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog))",
                   "title": "Disable exact Windows ETW or event telemetry controls",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -956,8 +1089,8 @@
                 {
                   "id": "tamper.endpoint_security_product_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:stop|disable)\\s+falcon-sensor\\.service\\b|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sentinelctl', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:(?:stop|disable)\\s+falcon-sensor\\.service|disable\\s+--now\\s+falcon-sensor(?:\\.service)?)\\b|\\b(?:sudo\\s+)?/opt/sentinelone/bin/sentinelctl\\s+control\\s+disable(?:\\s|$)|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
                   "title": "Disable or uninstall an exact endpoint-security product",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -980,6 +1113,22 @@
                     "defense-evasion",
                     "tampering",
                     "firewall",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "tamper.complete_firewall_relaxation_attempt",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'iptables' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Attempt to completely relax the host iptables firewall",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "firewall",
+                    "conditional",
                     "bounded-lineage"
                   ]
                 },
@@ -1016,9 +1165,105 @@
                   ]
                 },
                 {
+                  "id": "secrets.sql_sensitive_server_file_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Database server read of an exact sensitive host file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mysql",
+                    "postgresql",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.sql_destructive_mutation",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
+                  "pattern": "a^",
+                  "title": "Exact destructive SQL mutation",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "database",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_sql_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Executable SQL injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "database",
+                    "sql-injection",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_command_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Literal command injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "command-injection",
+                    "execution",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_invoke",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "SQL Server xp_cmdshell operating-system command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_enable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Enable SQL Server xp_cmdshell command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "configuration",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.cloud_iam_administrator_attachment",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "expression": "f.tool == 'aws.cloudtrail_event' || f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
                   "pattern": "(?i)\\battach-(?:user|role)-policy\\s+--(?:user|role)-name\\s+[A-Za-z0-9_+=,.@-]{1,64}\\s+--policy-arn\\s+arn:aws:iam::aws:policy/AdministratorAccess(?:\\s|\"|$)",
                   "title": "Attach AWS AdministratorAccess to an exact IAM principal",
                   "severity": "HIGH",
@@ -1028,6 +1273,121 @@
                     "cloud",
                     "aws",
                     "iam",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.cloud_iam_wildcard_inline_policy",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant exact wildcard AWS IAM permissions through an inline policy",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "cloud",
+                    "aws",
+                    "iam",
+                    "wildcard",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.cloud_s3_data_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && (('s3' in c.argv) || ('s3api' in c.argv)))",
+                  "pattern": "a^",
+                  "title": "Recursively delete an exact AWS S3 prefix or bucket",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "cloud",
+                    "aws",
+                    "s3",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.cloud_security_telemetry_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Disable or delete exact AWS security telemetry",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "cloud",
+                    "aws",
+                    "audit",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exfiltration.cloud_external_snapshot_share",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Share an exact AWS snapshot or image with another account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exfiltration",
+                    "cloud",
+                    "aws",
+                    "snapshot",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exposure.cloud_worldwide_ssh",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Expose SSH to a worldwide AWS security-group CIDR",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exposure",
+                    "cloud",
+                    "aws",
+                    "network",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_exclusion",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Add an exact Microsoft Defender exclusion",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_logging_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Disable an exact Microsoft Defender logger",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "logging",
                     "bounded-lineage"
                   ]
                 },
@@ -1049,6 +1409,55 @@
                   ]
                 },
                 {
+                  "id": "exec.sqlite_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'sqlite3')",
+                  "pattern": "a^",
+                  "title": "SQLite client escaped to a local shell",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sqlite",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.mysql_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])",
+                  "pattern": "a^",
+                  "title": "MySQL client escaped to a local shell",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "mysql",
+                    "mariadb",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_cluster_admin_binding",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'kubectl' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant Kubernetes cluster-admin to an exact service account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "kubernetes",
+                    "rbac",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.kubernetes_cronjob_privileged_patch",
                   "tool_call_only": true,
                   "expression": "f.tool == 'kubectl'",
@@ -1061,6 +1470,70 @@
                     "kubernetes",
                     "cronjob",
                     "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_privileged_pod_run",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Run an exact privileged Kubernetes pod",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "kubernetes",
+                    "pod",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "persistence.kubernetes_cronjob_reverse_shell",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Create a Kubernetes CronJob with an exact reverse shell",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "reverse-shell",
+                    "kubernetes",
+                    "cronjob",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_cluster_wide_enumeration",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Enumerate Kubernetes secrets across all namespaces",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "discovery",
+                    "kubernetes",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_workload_identity_token_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Read a Kubernetes workload identity token through pod exec",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "kubernetes",
+                    "workload-identity",
                     "bounded-lineage"
                   ]
                 },
@@ -1101,8 +1574,8 @@
                 {
                   "id": "tamper.linux_security_control_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:auditctl\\s+-e\\s+0|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?)(?:\\s|$)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'service', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:(?:sudo\\s+)?auditctl\\s+(?:-e\\s+0|-D|-d\\s+(?:task|exit|user|exclude|filesystem|io_uring),(?:never|always)\\b)|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?|(?:sudo\\s+)?service\\s+auditd\\s+stop)(?:\\s|$)",
                   "title": "Disable a Linux host security control",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -1192,7 +1665,7 @@
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
                   "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|$)",
+                  "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -1201,6 +1674,53 @@
                     "tampering",
                     "posix",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "privilege.temporary_setuid_executable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?i)\\bchmod\\s+(?:--\\s+)?0?4[0-7]*[1-7][0-7]*\\s+/(?:tmp|var/tmp|dev/shm)/\\S+",
+                  "title": "Create a setuid executable in a temporary directory",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.custom_root_suid_implant",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?is)\\b(?:cc|gcc)\\s+\\S+\\.c\\s+-o\\s+\\S+.{0,512}\\bchown\\s+(?:root:root|0:0)\\s+\\S+.{0,256}\\bchmod\\s+0?4[0-7]*[1-7][0-7]*\\s+\\S+",
+                  "title": "Compile and install a custom root-setuid executable",
+                  "severity": "CRITICAL",
+                  "confidence": 0.995,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.pkroot_setuid_shell",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "(?i)^\\s*/(?:tmp|var/tmp|dev/shm)/[A-Za-z0-9._/-]*pkroot/run\\s+--cmd\\s+['\"]cp /bin/bash /tmp/\\.pksh && chmod 4755 /tmp/\\.pksh['\"]\\s*$",
+                  "title": "Create a setuid Bash copy through pkroot",
+                  "severity": "CRITICAL",
+                  "confidence": 0.999,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
                   ]
                 },
                 {
@@ -1228,12 +1748,12 @@
                 {
                   "id": "CMD-NETCAT-LISTEN",
                   "pattern": "a^",
-                  "title": "Netcat listener",
+                  "title": "Netcat network-listener exposure",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
                     "network",
-                    "reverse-shell"
+                    "listener"
                   ]
                 },
                 {
@@ -1299,7 +1819,7 @@
                   "id": "exfil.secret_read_and_egress_oneliner",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.paths.exists(p, p.command_id == src.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) && f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
-                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;\\n]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;&\\r\\n`$()]*(?:\\.env|credentials|secrets?\\.ya?ml|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|id_(?:rsa|dsa|ecdsa|ed25519)|/token)\\s*\\|(?:[^|;&\\r\\n`$()]{1,400}\\|)?(?:[^|;&\\r\\n`$()]{1,400}\\|)?\\s*(?:curl\\b[^;&\\r\\n`$()]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;&\\r\\n`$()]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;&\\r\\n`$()]*--post-(?:data|file)(?:=|\\s+)@?-)",
                   "title": "Sensitive read piped to external upload",
                   "severity": "CRITICAL",
                   "confidence": 0.96,
@@ -1307,6 +1827,21 @@
                     "credential",
                     "exfiltration",
                     "network"
+                  ]
+                },
+                {
+                  "id": "exfil.credential_file_external_upload",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "pattern": "a^",
+                  "title": "Credential file uploaded to an external destination",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "exfiltration",
+                    "exact-file",
+                    "detection-only"
                   ]
                 },
                 {
@@ -1381,7 +1916,7 @@
                   "id": "integrity.history_tamper",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
-                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:history\\s+-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|unset\\b[^;\\n]*\\bHISTFILE\\b)",
                   "title": "Shell history clear or disable",
                   "severity": "MEDIUM",
                   "confidence": 0.95,
@@ -1535,6 +2070,23 @@
                     "persistence",
                     "privilege",
                     "account"
+                  ]
+                },
+                {
+                  "id": "privilege.posix_non_root_uid_zero_account_write",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['write_file', 'write-file', 'writefile']",
+                  "pattern": "a^",
+                  "title": "Non-root UID-0 account written to /etc/passwd",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "privilege",
+                    "account",
+                    "system-file",
+                    "structured-tool",
+                    "bounded-grammar"
                   ]
                 }
               ]
@@ -1761,7 +2313,7 @@
               "rules": [
                 {
                   "id": "SEC-AWS-KEY",
-                  "pattern": "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+                  "pattern": "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b",
                   "title": "AWS access key",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -1978,6 +2530,22 @@
                   "tags": [
                     "credential"
                   ]
+                },
+                {
+                  "id": "chain.sensitive_sql_value_then_cross_resource_literal_persistence",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['write_file', 'create_entities']",
+                  "pattern": "a^",
+                  "title": "Sensitive SQL value persisted literally to a distinct MCP resource",
+                  "severity": "HIGH",
+                  "confidence": 0.98,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "persistence",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
                 }
               ]
             },
@@ -2147,8 +2715,8 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?sudoers\\b|\\betc%2Fsudoers\\b)",
+                  "expression": "false",
+                  "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -2172,7 +2740,7 @@
                   "id": "secrets.cloud_credential_read",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
-                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml|anthropic[/\\\\]keys\\.json)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
                   "title": "Cloud credential material read",
                   "severity": "CRITICAL",
                   "confidence": 0.92,
@@ -2180,6 +2748,36 @@
                     "credential",
                     "cloud",
                     "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "secrets.cloud_metadata_credential_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'cloud_metadata'",
+                  "pattern": "a^",
+                  "title": "Cloud instance-metadata credential token read",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "cloud",
+                    "metadata",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.structured_credential_extract",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'credential_extract'",
+                  "pattern": "a^",
+                  "title": "Structured credential-store extraction",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "extraction",
+                    "structured-tool",
+                    "bounded-lineage"
                   ]
                 },
                 {
@@ -3347,8 +3945,10 @@
               "rules": [
                 {
                   "id": "COG-SOUL",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)SOUL\\.md",
-                  "title": "SOUL.md access (agent identity)",
+                  "title": "SOUL.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -3357,8 +3957,10 @@
                 },
                 {
                   "id": "COG-IDENTITY",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)IDENTITY\\.md",
-                  "title": "IDENTITY.md access",
+                  "title": "IDENTITY.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -3367,7 +3969,7 @@
                 },
                 {
                   "id": "COG-MEMORY",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)MEMORY\\.md",
                   "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
@@ -3378,8 +3980,10 @@
                 },
                 {
                   "id": "COG-CLAUDE-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)CLAUDE\\.md",
-                  "title": "CLAUDE.md access",
+                  "title": "CLAUDE.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -3388,8 +3992,10 @@
                 },
                 {
                   "id": "COG-TOOLS-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)TOOLS\\.md",
-                  "title": "TOOLS.md access",
+                  "title": "TOOLS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -3398,9 +4004,10 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md mutation or reference",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "pattern": "a^",
+                  "title": "AGENTS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -3409,7 +4016,7 @@
                 },
                 {
                   "id": "COG-OPENCLAW-JSON",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)openclaw\\.json",
                   "title": "openclaw.json config access",
                   "severity": "HIGH",
@@ -3420,8 +4027,10 @@
                 },
                 {
                   "id": "COG-GATEWAY-JSON",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)gateway\\.json",
-                  "title": "gateway.json config access",
+                  "title": "gateway.json active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -3449,8 +4058,21 @@
               "category": "command",
               "rules": [
                 {
+                  "id": "CMD-REVSHELL-POWERSHELL-TCP",
+                  "tool_call_only": true,
+                  "pattern": "(?is)\\bNew-Object\\s+(?:System\\.)?Net\\.Sockets\\.TCPClient\\s*\\([^)\\r\\n]{1,512}\\)\\s*;.{0,1000}\\.GetStream\\s*\\(\\s*\\)\\s*;.{0,1000}\\.Read\\s*\\([^)\\r\\n]{1,512}\\).{0,1000}\\b(?:iex|Invoke-Expression)\\b.{0,1000}\\.Write\\s*\\(",
+                  "title": "PowerShell TCP command-execution loop",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "reverse-shell",
+                    "execution",
+                    "network"
+                  ]
+                },
+                {
                   "id": "CMD-REVSHELL-BASH",
-                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN]))",
                   "pattern": "(?i)bash\\s+-i\\s+>&\\s*/dev/tcp/",
                   "title": "Bash reverse shell",
                   "severity": "CRITICAL",
@@ -3462,7 +4084,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-DEVTCP",
-                  "pattern": "/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
+                  "pattern": "(?i)\\b(?:bash|sh|dash|ksh|zsh)\\b[^\\r\\n]{0,192}(?:-[A-Za-z]*i[A-Za-z]*|--interactive)\\b[^\\r\\n]{0,512}/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
                   "title": "Reverse shell via /dev/tcp",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3473,7 +4095,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-NC",
-                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)",
+                  "pattern": "(?i)(?:\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)|\\bmkfifo\\b[^;\\r\\n]{1,256};[^|\\r\\n]{1,512}\\|\\s*(?:nc|ncat|netcat)\\b[^;\\r\\n]{1,256}>\\s*/(?:tmp|var/tmp|dev/shm)/)",
                   "title": "Netcat reverse shell with -e",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3497,7 +4119,7 @@
                   "id": "CMD-PIPE-CURL",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
-                  "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:bash|zsh|sh|dash|ksh|python(?:[0-9.]*)?|perl|ruby)\\b|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
+                  "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\\b|python(?:[0-9.]*)?\\s+-\\b|(?:perl|ruby)\\b)|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
                   "title": "curl piped to shell",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -3602,6 +4224,21 @@
                   ]
                 },
                 {
+                  "id": "impact.credential_file_secure_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'shred')",
+                  "pattern": "a^",
+                  "title": "Secure deletion of a credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "destructive",
+                    "credential",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "CMD-DD-IF",
                   "expression": "f.commands.exists(c, c.argv_complete && c.program == 'dd' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
                   "pattern": "(?i)\\bdd\\s+if=",
@@ -3614,7 +4251,7 @@
                 },
                 {
                   "id": "CMD-CHMOD-WORLD",
-                  "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))",
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
                   "pattern": "(?i)\\bchmod\\s+[0-7]*[0-7][0-7][2367]\\s",
                   "title": "chmod world-writable",
                   "severity": "HIGH",
@@ -3635,9 +4272,9 @@
                 },
                 {
                   "id": "CMD-SUDO",
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'sudo' && ('-l' in c.argv || '--list' in c.argv || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations))",
-                  "pattern": "(?i)\\bsudo\\s+",
-                  "title": "sudo invocation",
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "sudo privilege discovery or elevated shell",
                   "severity": "LOW",
                   "confidence": 0.5,
                   "tags": [
@@ -3705,6 +4342,84 @@
                   ]
                 },
                 {
+                  "id": "credential.windows_ntds_ifm_dump",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)",
+                  "pattern": "(?i)\\bntdsutil(?:\\.exe)?\\s+\"?(?:ac i|activate instance) ntds\"?\\s+\"?ifm\"?\\s+\"?create full [A-Z]:\\\\[^\"\\r\\n]+\"?\\s+q\\s+q(?:\\s|$)",
+                  "title": "Export the full Active Directory database with NTDS IFM",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "windows",
+                    "credential-dumping"
+                  ]
+                },
+                {
+                  "id": "credential.directory_credential_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-secretsdump', 'secretsdump.py', 'impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'hashcat', 'hashcat.exe', 'john', 'john.exe', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\\.py|hashcat(?:\\.exe)?|john(?:\\.exe)?\\b[^\\r\\n]*--format(?:=|\\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\\b[^\\r\\n]*(?:--ntds|-M\\s+ntdsutil))\\b",
+                  "title": "Exact directory credential acquisition",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "credential.structured_directory_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']",
+                  "pattern": "a^",
+                  "title": "Structured directory credential acquisition",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "chain.compromised_credential_then_successful_authentication",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['add_compromised_account', 'update_compromised_account'] || f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])",
+                  "pattern": "a^",
+                  "title": "Recorded compromised credential used for successful authentication",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "authentication",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "persistence.malicious_download_execute_payload",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'persist'",
+                  "pattern": "(?is)\"method\"\\s*:\\s*\"(?:cron|systemd|pam_module|registry_run|scheduled_task|wmi_subscription)\".{0,1000}\"payload\"\\s*:\\s*\".{0,1000}\\b(?:powershell(?:\\.exe)?|curl|wget|nc|ncat|netcat)\\b",
+                  "title": "Malicious persistence download-and-execute payload",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "download-exec",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "impact.windows_delete_all_shadow_copies",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['vssadmin', 'vssadmin.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
@@ -3732,6 +4447,22 @@
                     "tampering",
                     "windows",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_recursive_everyone_full_control",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'icacls')",
+                  "pattern": "(?i)\\bicacls(?:\\.exe)?\\b",
+                  "title": "Recursively grant Everyone inheritable full control on Windows",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "tampering",
+                    "privilege",
+                    "windows",
+                    "access-control",
+                    "recursive"
                   ]
                 },
                 {
@@ -3763,6 +4494,88 @@
                     "tampering",
                     "windows",
                     "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.windows_defender_executable_exclusion",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'add-mppreference' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Add a Microsoft Defender executable exclusion",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.windows_defender_drive_root_exclusion",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'set-mppreference' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Exclude a Windows drive root from Microsoft Defender",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_audit_detailed_tracking_failure_disable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditpol', 'auditpol.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Disable Windows Detailed Tracking failure auditing",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "windows",
+                    "audit",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_audit_process_creation_success_disable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditpol', 'auditpol.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Disable Windows Process Creation success auditing",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "windows",
+                    "audit",
+                    "process-creation",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_audit_full_privilege_disable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditpol', 'auditpol.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Disable Windows full-privilege auditing",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "windows",
+                    "audit",
+                    "privilege",
+                    "detection-only"
                   ]
                 },
                 {
@@ -3861,7 +4674,7 @@
                   "id": "tamper.windows_telemetry_disable",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application))",
+                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog))",
                   "title": "Disable exact Windows ETW or event telemetry controls",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -3906,8 +4719,8 @@
                 {
                   "id": "tamper.endpoint_security_product_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:stop|disable)\\s+falcon-sensor\\.service\\b|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sentinelctl', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:(?:stop|disable)\\s+falcon-sensor\\.service|disable\\s+--now\\s+falcon-sensor(?:\\.service)?)\\b|\\b(?:sudo\\s+)?/opt/sentinelone/bin/sentinelctl\\s+control\\s+disable(?:\\s|$)|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
                   "title": "Disable or uninstall an exact endpoint-security product",
                   "severity": "CRITICAL",
                   "confidence": 0.99,
@@ -3930,6 +4743,22 @@
                     "defense-evasion",
                     "tampering",
                     "firewall",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "tamper.complete_firewall_relaxation_attempt",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'iptables' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Attempt to completely relax the host iptables firewall",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "firewall",
+                    "conditional",
                     "bounded-lineage"
                   ]
                 },
@@ -3966,9 +4795,105 @@
                   ]
                 },
                 {
+                  "id": "secrets.sql_sensitive_server_file_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Database server read of an exact sensitive host file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mysql",
+                    "postgresql",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.sql_destructive_mutation",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
+                  "pattern": "a^",
+                  "title": "Exact destructive SQL mutation",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "database",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_sql_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Executable SQL injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "database",
+                    "sql-injection",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_command_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Literal command injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "command-injection",
+                    "execution",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_invoke",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "SQL Server xp_cmdshell operating-system command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_enable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Enable SQL Server xp_cmdshell command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "configuration",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.cloud_iam_administrator_attachment",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "expression": "f.tool == 'aws.cloudtrail_event' || f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
                   "pattern": "(?i)\\battach-(?:user|role)-policy\\s+--(?:user|role)-name\\s+[A-Za-z0-9_+=,.@-]{1,64}\\s+--policy-arn\\s+arn:aws:iam::aws:policy/AdministratorAccess(?:\\s|\"|$)",
                   "title": "Attach AWS AdministratorAccess to an exact IAM principal",
                   "severity": "LOW",
@@ -3978,6 +4903,137 @@
                     "cloud",
                     "aws",
                     "iam",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.cloud_iam_wildcard_inline_policy",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant exact wildcard AWS IAM permissions through an inline policy",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "cloud",
+                    "aws",
+                    "iam",
+                    "wildcard",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.cloud_s3_data_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && (('s3' in c.argv) || ('s3api' in c.argv)))",
+                  "pattern": "a^",
+                  "title": "Recursively delete an exact AWS S3 prefix or bucket",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "cloud",
+                    "aws",
+                    "s3",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.cloud_observed_resource_delete",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['aws.cloudtrail_event', 'azure.activity_event']",
+                  "pattern": "a^",
+                  "title": "Delete an exact cloud disk or IAM binding",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "cloud",
+                    "destructive",
+                    "observed",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.cloud_security_telemetry_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Disable or delete exact AWS security telemetry",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "cloud",
+                    "aws",
+                    "audit",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exfiltration.cloud_external_snapshot_share",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Share an exact AWS snapshot or image with another account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exfiltration",
+                    "cloud",
+                    "aws",
+                    "snapshot",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exposure.cloud_worldwide_ssh",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Expose SSH to a worldwide AWS security-group CIDR",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exposure",
+                    "cloud",
+                    "aws",
+                    "network",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_exclusion",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Add an exact Microsoft Defender exclusion",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_logging_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Disable an exact Microsoft Defender logger",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "logging",
                     "bounded-lineage"
                   ]
                 },
@@ -3999,6 +5055,55 @@
                   ]
                 },
                 {
+                  "id": "exec.sqlite_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'sqlite3')",
+                  "pattern": "a^",
+                  "title": "SQLite client escaped to a local shell",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sqlite",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.mysql_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])",
+                  "pattern": "a^",
+                  "title": "MySQL client escaped to a local shell",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "mysql",
+                    "mariadb",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_cluster_admin_binding",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'kubectl' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant Kubernetes cluster-admin to an exact service account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "kubernetes",
+                    "rbac",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.kubernetes_cronjob_privileged_patch",
                   "tool_call_only": true,
                   "expression": "f.tool == 'kubectl'",
@@ -4011,6 +5116,70 @@
                     "kubernetes",
                     "cronjob",
                     "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_privileged_pod_run",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Run an exact privileged Kubernetes pod",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "kubernetes",
+                    "pod",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "persistence.kubernetes_cronjob_reverse_shell",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Create a Kubernetes CronJob with an exact reverse shell",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "reverse-shell",
+                    "kubernetes",
+                    "cronjob",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_cluster_wide_enumeration",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Enumerate Kubernetes secrets across all namespaces",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "discovery",
+                    "kubernetes",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_workload_identity_token_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Read a Kubernetes workload identity token through pod exec",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "kubernetes",
+                    "workload-identity",
                     "bounded-lineage"
                   ]
                 },
@@ -4051,8 +5220,8 @@
                 {
                   "id": "tamper.linux_security_control_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:auditctl\\s+-e\\s+0|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?)(?:\\s|$)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'service', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:(?:sudo\\s+)?auditctl\\s+(?:-e\\s+0|-D|-d\\s+(?:task|exit|user|exclude|filesystem|io_uring),(?:never|always)\\b)|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?|(?:sudo\\s+)?service\\s+auditd\\s+stop)(?:\\s|$)",
                   "title": "Disable a Linux host security control",
                   "severity": "CRITICAL",
                   "confidence": 0.99,
@@ -4142,7 +5311,7 @@
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
                   "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|$)",
+                  "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "CRITICAL",
                   "confidence": 0.99,
@@ -4151,6 +5320,53 @@
                     "tampering",
                     "posix",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "privilege.temporary_setuid_executable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?i)\\bchmod\\s+(?:--\\s+)?0?4[0-7]*[1-7][0-7]*\\s+/(?:tmp|var/tmp|dev/shm)/\\S+",
+                  "title": "Create a setuid executable in a temporary directory",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.custom_root_suid_implant",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?is)\\b(?:cc|gcc)\\s+\\S+\\.c\\s+-o\\s+\\S+.{0,512}\\bchown\\s+(?:root:root|0:0)\\s+\\S+.{0,256}\\bchmod\\s+0?4[0-7]*[1-7][0-7]*\\s+\\S+",
+                  "title": "Compile and install a custom root-setuid executable",
+                  "severity": "CRITICAL",
+                  "confidence": 0.995,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.pkroot_setuid_shell",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "(?i)^\\s*/(?:tmp|var/tmp|dev/shm)/[A-Za-z0-9._/-]*pkroot/run\\s+--cmd\\s+['\"]cp /bin/bash /tmp/\\.pksh && chmod 4755 /tmp/\\.pksh['\"]\\s*$",
+                  "title": "Create a setuid Bash copy through pkroot",
+                  "severity": "CRITICAL",
+                  "confidence": 0.999,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
                   ]
                 },
                 {
@@ -4165,13 +5381,13 @@
                 },
                 {
                   "id": "CMD-NETCAT-LISTEN",
-                  "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:nc|ncat|netcat)\\s+(?:\\S+\\s+)*(?:-[a-zA-Z]*l[a-zA-Z]*|--listen)(?:\\s|$)",
-                  "title": "Netcat listener",
+                  "pattern": "a^",
+                  "title": "Netcat network-listener exposure",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
                     "network",
-                    "reverse-shell"
+                    "listener"
                   ]
                 },
                 {
@@ -4237,7 +5453,7 @@
                   "id": "exfil.secret_read_and_egress_oneliner",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.paths.exists(p, p.command_id == src.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) && f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
-                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;\\n]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;&\\r\\n`$()]*(?:\\.env|credentials|secrets?\\.ya?ml|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|id_(?:rsa|dsa|ecdsa|ed25519)|/token)\\s*\\|(?:[^|;&\\r\\n`$()]{1,400}\\|)?(?:[^|;&\\r\\n`$()]{1,400}\\|)?\\s*(?:curl\\b[^;&\\r\\n`$()]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;&\\r\\n`$()]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;&\\r\\n`$()]*--post-(?:data|file)(?:=|\\s+)@?-)",
                   "title": "Sensitive read piped to external upload",
                   "severity": "CRITICAL",
                   "confidence": 0.96,
@@ -4245,6 +5461,66 @@
                     "credential",
                     "exfiltration",
                     "network"
+                  ]
+                },
+                {
+                  "id": "exfil.credential_file_external_upload",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "pattern": "a^",
+                  "title": "Credential file uploaded to an external destination",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "exfiltration",
+                    "exact-file",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "exfil.credential_archive_external_upload",
+                  "tool_call_only": true,
+                  "pattern": "(?i)^\\s*(?:(?:/usr/bin|/usr/local/bin)/)?curl\\b[^;&\\r\\n`$()]{0,400}(?:--upload-file|-T|--data-binary|--form|-F)\\s+(?:[^=;\\s]+=@|@)?/[^;&\\s\"'`$()]*(?:creds?(?:-[0-9]{8})?\\.tgz(?:\\.enc)?|ssh-[0-9]{8}\\.tgz|home-ssh\\.tgz|vpn-[0-9]{8}\\.tgz|cloud-keys-[0-9]{8}\\.tgz|admin\\.conf)\\b[^;&\\r\\n`$()]{0,400}\\shttps?://[A-Za-z0-9][A-Za-z0-9.-]*\\.[A-Za-z]{2,}(?::[0-9]+)?(?:/[^;&\\s`$()]*)?\\s*$",
+                  "title": "Credential archive uploaded to an external destination",
+                  "severity": "HIGH",
+                  "confidence": 0.94,
+                  "tags": [
+                    "credential",
+                    "exfiltration",
+                    "archive",
+                    "strict-posture",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "exfil.literal_sensitive_json_upload",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "Literal credential-bearing JSON upload",
+                  "severity": "HIGH",
+                  "confidence": 0.92,
+                  "tags": [
+                    "credential",
+                    "exfiltration",
+                    "exact-literal",
+                    "strict-posture"
+                  ]
+                },
+                {
+                  "id": "exfil.source_archive_external_transfer",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "Source archive streamed to an external destination",
+                  "severity": "HIGH",
+                  "confidence": 0.96,
+                  "tags": [
+                    "source-code",
+                    "exfiltration",
+                    "bounded-lineage",
+                    "strict-posture"
                   ]
                 },
                 {
@@ -4319,7 +5595,7 @@
                   "id": "integrity.history_tamper",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
-                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:history\\s+-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|unset\\b[^;\\n]*\\bHISTFILE\\b)",
                   "title": "Shell history clear or disable",
                   "severity": "MEDIUM",
                   "confidence": 0.95,
@@ -4422,8 +5698,8 @@
                 {
                   "id": "source.git_remote_tamper",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
-                  "pattern": "(?i)\\bgit\\b[^;\\n]*\\bremote\\s+(?:add|set-url)\\b[^;\\n]*(?:https?|ssh|git)://[^;\\s]+",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'git' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && 'set-url' in c.argv)",
+                  "pattern": "(?i)\\bgit\\b[^;\\n]*\\bremote\\s+set-url\\b[^;\\n]*(?:https?|ssh|git)://[^;\\s]+",
                   "title": "Git remote routing change",
                   "severity": "MEDIUM",
                   "confidence": 0.9,
@@ -4473,6 +5749,54 @@
                     "persistence",
                     "privilege",
                     "account"
+                  ]
+                },
+                {
+                  "id": "privilege.posix_non_root_uid_zero_account_write",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "Non-root UID-0 account written to /etc/passwd",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "privilege",
+                    "account",
+                    "system-file",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "integrity.dpkg_status_direct_mutation",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.normalized == '/var/lib/dpkg/status' && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND])",
+                  "pattern": "a^",
+                  "title": "Direct dpkg package database mutation",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "integrity",
+                    "package-manager",
+                    "system-file",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "integrity.kernel_control_bind_override",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'mount' && '--bind' in c.argv)",
+                  "pattern": "a^",
+                  "title": "Kernel control bind override",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "integrity",
+                    "kernel",
+                    "procfs",
+                    "mount",
+                    "bounded-grammar"
                   ]
                 }
               ]
@@ -4694,8 +6018,21 @@
               "category": "secret",
               "rules": [
                 {
+                  "id": "SEC-ENV-DUMP-REQUEST",
+                  "tool_call_only": true,
+                  "pattern": "(?i)\\b(?:open|read|cat)\\b.{0,120}\\.env\\b.{0,120}\\b(?:print|show|display|output|dump|reveal|expose)\\b.{0,80}\\b(?:every|all)\\b.{0,40}\\b(?:secret|credential|variable|line)s?\\b",
+                  "title": "Request to expose all environment-file secrets",
+                  "severity": "HIGH",
+                  "confidence": 0.9,
+                  "tags": [
+                    "credential",
+                    "intent",
+                    "strict-posture"
+                  ]
+                },
+                {
                   "id": "SEC-AWS-KEY",
-                  "pattern": "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+                  "pattern": "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b",
                   "title": "AWS access key",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -4912,6 +6249,22 @@
                   "tags": [
                     "credential"
                   ]
+                },
+                {
+                  "id": "chain.sensitive_sql_value_then_cross_resource_literal_persistence",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['write_file', 'create_entities']",
+                  "pattern": "a^",
+                  "title": "Sensitive SQL value persisted literally to a distinct MCP resource",
+                  "severity": "HIGH",
+                  "confidence": 0.98,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "persistence",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
                 }
               ]
             },
@@ -4921,9 +6274,10 @@
               "rules": [
                 {
                   "id": "PATH-SSH-DIR",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?:~|\\$\\{?HOME\\}?|/home/\\w+|/root|/Users/\\w+)/\\.ssh/",
-                  "title": "SSH directory access",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "SSH authorized_keys mutation",
                   "severity": "HIGH",
                   "confidence": 0.95,
                   "tags": [
@@ -4934,7 +6288,7 @@
                 {
                   "id": "PATH-SSH-KEY",
                   "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
-                  "pattern": "(?i)(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])",
+                  "pattern": "(?im)(?:(?:^|[;&|]\\s*)\\s*(?:cat|base64|head|tail|less|more|sed|awk|grep|rg|strings|xxd|hexdump|read|open|show|paste|print|display)\\b[^;\\n]*(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])|(?:^|[\\\\/])id_(?:rsa|ed25519|ecdsa|dsa)(?:$|[^A-Za-z0-9_.-])[^;\\n]{0,120}\\b(?:cat|base64|read|open|show|paste|print|display)\\b)",
                   "title": "SSH private key file path",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
@@ -5048,8 +6402,9 @@
                 },
                 {
                   "id": "PATH-ENV-FILE",
-                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
-                  "pattern": "(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?\\s*[\"'\\s,;\\]})]*$|(?:^|[\\s/])\\.env(?:\\.(?:local|production|staging|development))?[\"'\\s,;\\]})]",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
                   "title": "Environment file",
                   "severity": "HIGH",
                   "confidence": 0.85,
@@ -5060,8 +6415,10 @@
                 },
                 {
                   "id": "PATH-ETC-PASSWD",
-                  "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?pas{1,4}wd\\b|\\betc%2Fpas{1,4}wd\\b)",
-                  "title": "/etc/passwd access",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.normalized == '/etc/passwd' && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "pattern": "a^",
+                  "title": "/etc/passwd mutation",
                   "severity": "HIGH",
                   "confidence": 0.9,
                   "tags": [
@@ -5070,8 +6427,10 @@
                 },
                 {
                   "id": "PATH-ETC-SHADOW",
-                  "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?shadow\\b|\\betc%2Fshadow\\b)",
-                  "title": "/etc/shadow access",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.normalized == '/etc/shadow' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.program in ['cat', 'base64', 'head', 'tail', 'less', 'more', 'strings', 'xxd', 'hexdump', 'cp', 'read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
+                  "pattern": "a^",
+                  "title": "/etc/shadow credential read or mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -5081,9 +6440,10 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?sudoers\\b|\\betc%2Fsudoers\\b)",
-                  "title": "/etc/sudoers access",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "a^",
+                  "title": "/etc/sudoers mutation",
                   "severity": "HIGH",
                   "confidence": 0.9,
                   "tags": [
@@ -5106,7 +6466,7 @@
                   "id": "secrets.cloud_credential_read",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
-                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml|anthropic[/\\\\]keys\\.json)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
                   "title": "Cloud credential material read",
                   "severity": "CRITICAL",
                   "confidence": 0.92,
@@ -5114,6 +6474,36 @@
                     "credential",
                     "cloud",
                     "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "secrets.cloud_metadata_credential_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'cloud_metadata'",
+                  "pattern": "a^",
+                  "title": "Cloud instance-metadata credential token read",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "cloud",
+                    "metadata",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.structured_credential_extract",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'credential_extract'",
+                  "pattern": "a^",
+                  "title": "Structured credential-store extraction",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "extraction",
+                    "structured-tool",
+                    "bounded-lineage"
                   ]
                 },
                 {
@@ -6183,8 +7573,10 @@
               "rules": [
                 {
                   "id": "COG-SOUL",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)SOUL\\.md",
-                  "title": "SOUL.md access (agent identity)",
+                  "title": "SOUL.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -6193,8 +7585,10 @@
                 },
                 {
                   "id": "COG-IDENTITY",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)IDENTITY\\.md",
-                  "title": "IDENTITY.md access",
+                  "title": "IDENTITY.md active-file mutation",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
                   "tags": [
@@ -6203,7 +7597,7 @@
                 },
                 {
                   "id": "COG-MEMORY",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)MEMORY\\.md",
                   "title": "MEMORY.md mutation or reference",
                   "severity": "HIGH",
@@ -6214,8 +7608,10 @@
                 },
                 {
                   "id": "COG-CLAUDE-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)CLAUDE\\.md",
-                  "title": "CLAUDE.md access",
+                  "title": "CLAUDE.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
@@ -6224,8 +7620,10 @@
                 },
                 {
                   "id": "COG-TOOLS-MD",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)TOOLS\\.md",
-                  "title": "TOOLS.md access",
+                  "title": "TOOLS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -6234,9 +7632,10 @@
                 },
                 {
                   "id": "COG-AGENTS-MD",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)AGENTS\\.md",
-                  "title": "AGENTS.md mutation or reference",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+                  "pattern": "a^",
+                  "title": "AGENTS.md active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -6245,7 +7644,7 @@
                 },
                 {
                   "id": "COG-OPENCLAW-JSON",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)openclaw\\.json",
                   "title": "openclaw.json config access",
                   "severity": "HIGH",
@@ -6256,8 +7655,10 @@
                 },
                 {
                   "id": "COG-GATEWAY-JSON",
+                  "tool_call_only": true,
+                  "expression": "f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
                   "pattern": "(?i)gateway\\.json",
-                  "title": "gateway.json config access",
+                  "title": "gateway.json active-file mutation",
                   "severity": "HIGH",
                   "confidence": 0.8,
                   "tags": [
@@ -6285,8 +7686,21 @@
               "category": "command",
               "rules": [
                 {
+                  "id": "CMD-REVSHELL-POWERSHELL-TCP",
+                  "tool_call_only": true,
+                  "pattern": "(?is)\\bNew-Object\\s+(?:System\\.)?Net\\.Sockets\\.TCPClient\\s*\\([^)\\r\\n]{1,512}\\)\\s*;.{0,1000}\\.GetStream\\s*\\(\\s*\\)\\s*;.{0,1000}\\.Read\\s*\\([^)\\r\\n]{1,512}\\).{0,1000}\\b(?:iex|Invoke-Expression)\\b.{0,1000}\\.Write\\s*\\(",
+                  "title": "PowerShell TCP command-execution loop",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "reverse-shell",
+                    "execution",
+                    "network"
+                  ]
+                },
+                {
                   "id": "CMD-REVSHELL-BASH",
-                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "expression": "f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONNECT in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_LISTEN in c.operations) && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) && f.network.exists(n, n.command_id == c.id && n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT, defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN]))",
                   "pattern": "(?i)bash\\s+-i\\s+>&\\s*/dev/tcp/",
                   "title": "Bash reverse shell",
                   "severity": "CRITICAL",
@@ -6298,7 +7712,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-DEVTCP",
-                  "pattern": "/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
+                  "pattern": "(?i)\\b(?:bash|sh|dash|ksh|zsh)\\b[^\\r\\n]{0,192}(?:-[A-Za-z]*i[A-Za-z]*|--interactive)\\b[^\\r\\n]{0,512}/dev/tcp/(?:\\d{1,3}\\.\\d{1,3}|[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)+)/\\d+\\b",
                   "title": "Reverse shell via /dev/tcp",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -6309,7 +7723,7 @@
                 },
                 {
                   "id": "CMD-REVSHELL-NC",
-                  "pattern": "(?i)\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)",
+                  "pattern": "(?i)(?:\\b(?:nc|ncat|netcat)\\b\\s+(?:(?:-[a-zA-Z]*\\s+)*\\S+\\s+\\d+\\s*(?:-e|--exec)\\b|(?:-[a-zA-Z]*\\s+)*(?:-e|--exec)\\s+\\S+\\s+\\S+\\s+\\d+\\b)|\\bmkfifo\\b[^;\\r\\n]{1,256};[^|\\r\\n]{1,512}\\|\\s*(?:nc|ncat|netcat)\\b[^;\\r\\n]{1,256}>\\s*/(?:tmp|var/tmp|dev/shm)/)",
                   "title": "Netcat reverse shell with -e",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -6420,7 +7834,7 @@
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
                   "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:sudo\\s+)?(?:mkfs(?:\\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)(?:\\s|$)",
                   "title": "Filesystem format command",
-                  "severity": "CRITICAL",
+                  "severity": "HIGH",
                   "confidence": 0.9,
                   "tags": [
                     "destructive"
@@ -6435,6 +7849,21 @@
                   "confidence": 0.9,
                   "tags": [
                     "destructive"
+                  ]
+                },
+                {
+                  "id": "impact.credential_file_secure_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'shred')",
+                  "pattern": "a^",
+                  "title": "Secure deletion of a credential file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "destructive",
+                    "credential",
+                    "bounded-grammar"
                   ]
                 },
                 {
@@ -6482,8 +7911,8 @@
                 },
                 {
                   "id": "CMD-ETC-WRITE",
-                  "pattern": "(?i)>\\s*/etc/",
-                  "title": "Write redirect to /etc/",
+                  "pattern": "a^",
+                  "title": "Generic write redirect to /etc/ (strict telemetry only)",
                   "severity": "CRITICAL",
                   "confidence": 0.9,
                   "tags": [
@@ -6541,6 +7970,84 @@
                   ]
                 },
                 {
+                  "id": "credential.windows_ntds_ifm_dump",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)",
+                  "pattern": "(?i)\\bntdsutil(?:\\.exe)?\\s+\"?(?:ac i|activate instance) ntds\"?\\s+\"?ifm\"?\\s+\"?create full [A-Z]:\\\\[^\"\\r\\n]+\"?\\s+q\\s+q(?:\\s|$)",
+                  "title": "Export the full Active Directory database with NTDS IFM",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "windows",
+                    "credential-dumping"
+                  ]
+                },
+                {
+                  "id": "credential.directory_credential_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-secretsdump', 'secretsdump.py', 'impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'hashcat', 'hashcat.exe', 'john', 'john.exe', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\\.py|hashcat(?:\\.exe)?|john(?:\\.exe)?\\b[^\\r\\n]*--format(?:=|\\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\\b[^\\r\\n]*(?:--ntds|-M\\s+ntdsutil))\\b",
+                  "title": "Exact directory credential acquisition",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "credential.structured_directory_acquisition",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']",
+                  "pattern": "a^",
+                  "title": "Structured directory credential acquisition",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "credential-dumping",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "chain.compromised_credential_then_successful_authentication",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['add_compromised_account', 'update_compromised_account'] || f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])",
+                  "pattern": "a^",
+                  "title": "Recorded compromised credential used for successful authentication",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "authentication",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
+                },
+                {
+                  "id": "persistence.malicious_download_execute_payload",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'persist'",
+                  "pattern": "(?is)\"method\"\\s*:\\s*\"(?:cron|systemd|pam_module|registry_run|scheduled_task|wmi_subscription)\".{0,1000}\"payload\"\\s*:\\s*\".{0,1000}\\b(?:powershell(?:\\.exe)?|curl|wget|nc|ncat|netcat)\\b",
+                  "title": "Malicious persistence download-and-execute payload",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "download-exec",
+                    "structured-tool",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "impact.windows_delete_all_shadow_copies",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['vssadmin', 'vssadmin.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations)",
@@ -6568,6 +8075,22 @@
                     "tampering",
                     "windows",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "tamper.windows_recursive_everyone_full_control",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.program == 'icacls')",
+                  "pattern": "(?i)\\bicacls(?:\\.exe)?\\b",
+                  "title": "Recursively grant Everyone inheritable full control on Windows",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "tampering",
+                    "privilege",
+                    "windows",
+                    "access-control",
+                    "recursive"
                   ]
                 },
                 {
@@ -6697,7 +8220,7 @@
                   "id": "tamper.windows_telemetry_disable",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['reg', 'reg.exe', 'set-itemproperty', 'new-itemproperty'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application))",
+                  "pattern": "(?i)(?:\\breg(?:\\.exe)?\\s+add\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog)|\\b(?:set|new)-itemproperty\\b[^\\r\\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\\\]Operational|Autologger[/\\\\]EventLog-Application|Services[/\\\\]EventLog))",
                   "title": "Disable exact Windows ETW or event telemetry controls",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -6742,8 +8265,8 @@
                 {
                   "id": "tamper.endpoint_security_product_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:stop|disable)\\s+falcon-sensor\\.service\\b|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sentinelctl', 'sc', 'sc.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:\\b(?:sudo\\s+)?systemctl\\s+(?:(?:stop|disable)\\s+falcon-sensor\\.service|disable\\s+--now\\s+falcon-sensor(?:\\.service)?)\\b|\\b(?:sudo\\s+)?/opt/sentinelone/bin/sentinelctl\\s+control\\s+disable(?:\\s|$)|\\b(?:sudo\\s+)?launchctl\\s+unload\\s+/Library/LaunchDaemons/(?:com\\.carbonblack\\.(?:daemon|defense\\.daemon)|at\\.obdev\\.littlesnitchd)\\.plist\\b|\\bsysmon(?:\\.exe)?\\s+-u(?:\\s|$)|\\b(?:sudo\\s+)?mdatp\\s+config\\s+real-time-protection\\s+--value\\s+disabled(?:\\s|$)|\\bsc(?:\\.exe)?\\s+(?:stop|config|query)\\s+WinDefend\\b)",
                   "title": "Disable or uninstall an exact endpoint-security product",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -6766,6 +8289,22 @@
                     "defense-evasion",
                     "tampering",
                     "firewall",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "tamper.complete_firewall_relaxation_attempt",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'iptables' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "a^",
+                  "title": "Attempt to completely relax the host iptables firewall",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "firewall",
+                    "conditional",
                     "bounded-lineage"
                   ]
                 },
@@ -6802,9 +8341,105 @@
                   ]
                 },
                 {
+                  "id": "secrets.sql_sensitive_server_file_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Database server read of an exact sensitive host file",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "mysql",
+                    "postgresql",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.sql_destructive_mutation",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
+                  "pattern": "a^",
+                  "title": "Exact destructive SQL mutation",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "database",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_sql_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Executable SQL injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "database",
+                    "sql-injection",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "attack.http_command_injection",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'http_request'",
+                  "pattern": "a^",
+                  "title": "Literal command injection in a structured HTTP request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "attack",
+                    "web",
+                    "command-injection",
+                    "execution",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_invoke",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "SQL Server xp_cmdshell operating-system command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "server-side",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.sqlserver_xp_cmdshell_enable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'sql_query'",
+                  "pattern": "a^",
+                  "title": "Enable SQL Server xp_cmdshell command execution",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sql-server",
+                    "configuration",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.cloud_iam_administrator_attachment",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "expression": "f.tool == 'aws.cloudtrail_event' || f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
                   "pattern": "(?i)\\battach-(?:user|role)-policy\\s+--(?:user|role)-name\\s+[A-Za-z0-9_+=,.@-]{1,64}\\s+--policy-arn\\s+arn:aws:iam::aws:policy/AdministratorAccess(?:\\s|\"|$)",
                   "title": "Attach AWS AdministratorAccess to an exact IAM principal",
                   "severity": "HIGH",
@@ -6814,6 +8449,121 @@
                     "cloud",
                     "aws",
                     "iam",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.cloud_iam_wildcard_inline_policy",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant exact wildcard AWS IAM permissions through an inline policy",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "cloud",
+                    "aws",
+                    "iam",
+                    "wildcard",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "impact.cloud_s3_data_delete",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'aws' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations && (('s3' in c.argv) || ('s3api' in c.argv)))",
+                  "pattern": "a^",
+                  "title": "Recursively delete an exact AWS S3 prefix or bucket",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "impact",
+                    "cloud",
+                    "aws",
+                    "s3",
+                    "destructive",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.cloud_security_telemetry_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Disable or delete exact AWS security telemetry",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "cloud",
+                    "aws",
+                    "audit",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exfiltration.cloud_external_snapshot_share",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Share an exact AWS snapshot or image with another account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exfiltration",
+                    "cloud",
+                    "aws",
+                    "snapshot",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exposure.cloud_worldwide_ssh",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'aws.cloudtrail_event'",
+                  "pattern": "a^",
+                  "title": "Expose SSH to a worldwide AWS security-group CIDR",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "exposure",
+                    "cloud",
+                    "aws",
+                    "network",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_exclusion",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Add an exact Microsoft Defender exclusion",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "defense_evasion.endpoint_defender_logging_disable",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'windows.event'",
+                  "pattern": "a^",
+                  "title": "Disable an exact Microsoft Defender logger",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "defense-evasion",
+                    "endpoint",
+                    "windows",
+                    "defender",
+                    "logging",
                     "bounded-lineage"
                   ]
                 },
@@ -6835,6 +8585,55 @@
                   ]
                 },
                 {
+                  "id": "exec.sqlite_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'sqlite3')",
+                  "pattern": "a^",
+                  "title": "SQLite client escaped to a local shell",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "sqlite",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "exec.mysql_client_shell_escape",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])",
+                  "pattern": "a^",
+                  "title": "MySQL client escaped to a local shell",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "execution",
+                    "database",
+                    "mysql",
+                    "mariadb",
+                    "client-escape",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_cluster_admin_binding",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'kubectl' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)",
+                  "pattern": "a^",
+                  "title": "Grant Kubernetes cluster-admin to an exact service account",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege-escalation",
+                    "kubernetes",
+                    "rbac",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
                   "id": "privilege.kubernetes_cronjob_privileged_patch",
                   "tool_call_only": true,
                   "expression": "f.tool == 'kubectl'",
@@ -6847,6 +8646,70 @@
                     "kubernetes",
                     "cronjob",
                     "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "privilege.kubernetes_privileged_pod_run",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Run an exact privileged Kubernetes pod",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "kubernetes",
+                    "pod",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "persistence.kubernetes_cronjob_reverse_shell",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Create a Kubernetes CronJob with an exact reverse shell",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "execution",
+                    "reverse-shell",
+                    "kubernetes",
+                    "cronjob",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_cluster_wide_enumeration",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Enumerate Kubernetes secrets across all namespaces",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "discovery",
+                    "kubernetes",
+                    "cluster",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.kubernetes_workload_identity_token_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'kubectl'",
+                  "pattern": "a^",
+                  "title": "Read a Kubernetes workload identity token through pod exec",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "kubernetes",
+                    "workload-identity",
                     "bounded-lineage"
                   ]
                 },
@@ -6887,8 +8750,8 @@
                 {
                   "id": "tamper.linux_security_control_disable",
                   "tool_call_only": true,
-                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:auditctl\\s+-e\\s+0|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?)(?:\\s|$)",
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'service', 'setenforce', 'systemctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)",
+                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:(?:sudo\\s+)?auditctl\\s+(?:-e\\s+0|-D|-d\\s+(?:task|exit|user|exclude|filesystem|io_uring),(?:never|always)\\b)|setenforce\\s+(?:0|permissive)|(?:sudo\\s+)?systemctl\\s+stop\\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\\.service)?|(?:sudo\\s+)?service\\s+auditd\\s+stop)(?:\\s|$)",
                   "title": "Disable a Linux host security control",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -6978,7 +8841,7 @@
                   "id": "tamper.posix_system_log_destruction",
                   "tool_call_only": true,
                   "expression": "f.paths.exists(p, p.normalized in ['/var/log/messages', '/var/log/security', '/var/log/syslog', '/var/log/auth.log', '/var/log/secure', '/var/log/audit/audit.log'] && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
-                  "pattern": "(?i)(?:^|[;\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|$)",
+                  "pattern": "(?i)(?:^|[;\"\\r\\n]\\s*)(?:cat\\s+/dev/(?:null|zero)\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|echo\\s+(?:''|\"\")\\s*>\\s*/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?(?:/usr/bin/)?truncate\\s+(?:-s\\s+0|--size=0)\\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\\.log)|auth\\.log(?:/current\\.log)?)(?:\\s+2>/dev/null)?(?:\\s+\\|\\|\\s+true)?|chattr\\s+-i\\s+/var/log/audit/audit\\.log\\.1(?:\\s+2>/dev/null)?\\s*;\\s*(?:/usr/bin/)?truncate\\s+-s\\s+0\\s+/var/log/audit/audit\\.log\\.1|(?:rm\\s+-(?:rf|fr)|unlink)\\s+/var/log/(?:messages|security|syslog|auth\\.log|secure|audit/audit\\.log)|(?:sudo\\s+)?rm\\s+-f\\s+/var/log/journal/\\*/system\\.journal|(?:sudo\\s+)?journalctl\\s+--vacuum-time=0)(?:\\s|\"|$)",
                   "title": "Destroy canonical POSIX system logs",
                   "severity": "HIGH",
                   "confidence": 0.99,
@@ -6987,6 +8850,53 @@
                     "tampering",
                     "posix",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "privilege.temporary_setuid_executable",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?i)\\bchmod\\s+(?:--\\s+)?0?4[0-7]*[1-7][0-7]*\\s+/(?:tmp|var/tmp|dev/shm)/\\S+",
+                  "title": "Create a setuid executable in a temporary directory",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.custom_root_suid_implant",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program == 'chmod' && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)",
+                  "pattern": "(?is)\\b(?:cc|gcc)\\s+\\S+\\.c\\s+-o\\s+\\S+.{0,512}\\bchown\\s+(?:root:root|0:0)\\s+\\S+.{0,256}\\bchmod\\s+0?4[0-7]*[1-7][0-7]*\\s+\\S+",
+                  "title": "Compile and install a custom root-setuid executable",
+                  "severity": "CRITICAL",
+                  "confidence": 0.995,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "privilege.pkroot_setuid_shell",
+                  "tool_call_only": true,
+                  "expression": "true",
+                  "pattern": "(?i)^\\s*/(?:tmp|var/tmp|dev/shm)/[A-Za-z0-9._/-]*pkroot/run\\s+--cmd\\s+['\"]cp /bin/bash /tmp/\\.pksh && chmod 4755 /tmp/\\.pksh['\"]\\s*$",
+                  "title": "Create a setuid Bash copy through pkroot",
+                  "severity": "CRITICAL",
+                  "confidence": 0.999,
+                  "tags": [
+                    "privilege",
+                    "persistence",
+                    "posix",
+                    "exact-lineage",
+                    "bounded-grammar"
                   ]
                 },
                 {
@@ -7014,12 +8924,12 @@
                 {
                   "id": "CMD-NETCAT-LISTEN",
                   "pattern": "a^",
-                  "title": "Netcat listener",
+                  "title": "Netcat network-listener exposure",
                   "severity": "HIGH",
                   "confidence": 0.85,
                   "tags": [
                     "network",
-                    "reverse-shell"
+                    "listener"
                   ]
                 },
                 {
@@ -7085,7 +8995,7 @@
                   "id": "exfil.secret_read_and_egress_oneliner",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.paths.exists(p, p.command_id == src.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ)) && f.commands.exists(src, (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in src.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in src.operations) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && src.pipeline_id != 0 && src.pipeline_id == dst.pipeline_id)) && f.commands.exists(src, f.data_flows.exists(d, d.from_command_id == src.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)) && f.commands.exists(dst, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in dst.operations && f.data_flows.exists(d, d.to_command_id == dst.id && d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN) && f.network.exists(n, n.command_id == dst.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) && f.data_flows.exists(d, d.from_command_id == dst.id && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))",
-                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;\\n]*(?:\\.env|credentials|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|/token)\\s*\\|\\s*(?:curl\\b[^;\\n]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;\\n]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;\\n]*--post-(?:data|file)(?:=|\\s+)@?-)",
+                  "pattern": "(?i)\\b(?:cat|type|Get-Content)\\b[^|;&\\r\\n`$()]*(?:\\.env|credentials|secrets?\\.ya?ml|\\.git-credentials|\\.netrc|_netrc|\\.npmrc|\\.pypirc|config\\.json|id_(?:rsa|dsa|ecdsa|ed25519)|/token)\\s*\\|(?:[^|;&\\r\\n`$()]{1,400}\\|)?(?:[^|;&\\r\\n`$()]{1,400}\\|)?\\s*(?:curl\\b[^;&\\r\\n`$()]*(?:--data(?:-binary|-raw|-urlencode)?\\s+@-|-d\\s+@-|(?:--form|-F)\\s+[^;&\\r\\n`$()]*=@-|--upload-file\\s+-|-T\\s+-)|wget\\b[^;&\\r\\n`$()]*--post-(?:data|file)(?:=|\\s+)@?-)",
                   "title": "Sensitive read piped to external upload",
                   "severity": "CRITICAL",
                   "confidence": 0.96,
@@ -7093,6 +9003,21 @@
                     "credential",
                     "exfiltration",
                     "network"
+                  ]
+                },
+                {
+                  "id": "exfil.credential_file_external_upload",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations && f.network.exists(n, n.command_id == c.id && n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD && n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC, defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))",
+                  "pattern": "a^",
+                  "title": "Credential file uploaded to an external destination",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "exfiltration",
+                    "exact-file",
+                    "detection-only"
                   ]
                 },
                 {
@@ -7167,7 +9092,7 @@
                   "id": "integrity.history_tamper",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && (c.program == 'history' || (c.program == 'unset' && 'HISTFILE' in c.argv)))",
-                  "pattern": "(?i)(?:\\bhistory\\b[^;\\n]*\\s-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|\\bunset\\b[^;\\n]*\\bHISTFILE\\b)",
+                  "pattern": "(?i)(?:^|[;&|\\r\\n]\\s*)(?:history\\s+-[acnrw]*c[acnrw]*(?:[\\s;&|]|$)|unset\\b[^;\\n]*\\bHISTFILE\\b)",
                   "title": "Shell history clear or disable",
                   "severity": "MEDIUM",
                   "confidence": 0.95,
@@ -7321,6 +9246,23 @@
                     "persistence",
                     "privilege",
                     "account"
+                  ]
+                },
+                {
+                  "id": "privilege.posix_non_root_uid_zero_account_write",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['write_file', 'write-file', 'writefile']",
+                  "pattern": "a^",
+                  "title": "Non-root UID-0 account written to /etc/passwd",
+                  "severity": "CRITICAL",
+                  "confidence": 0.99,
+                  "tags": [
+                    "persistence",
+                    "privilege",
+                    "account",
+                    "system-file",
+                    "structured-tool",
+                    "bounded-grammar"
                   ]
                 }
               ]
@@ -7551,7 +9493,7 @@
               "rules": [
                 {
                   "id": "SEC-AWS-KEY",
-                  "pattern": "\\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}",
+                  "pattern": "\\b(?:AKIA|ASIA)[0-9A-Z]{16}\\b",
                   "title": "AWS access key",
                   "severity": "CRITICAL",
                   "confidence": 0.95,
@@ -7768,6 +9710,22 @@
                   "tags": [
                     "credential"
                   ]
+                },
+                {
+                  "id": "chain.sensitive_sql_value_then_cross_resource_literal_persistence",
+                  "tool_call_only": true,
+                  "expression": "f.tool in ['write_file', 'create_entities']",
+                  "pattern": "a^",
+                  "title": "Sensitive SQL value persisted literally to a distinct MCP resource",
+                  "severity": "HIGH",
+                  "confidence": 0.98,
+                  "tags": [
+                    "credential",
+                    "database",
+                    "persistence",
+                    "bounded-lineage",
+                    "detection-only"
+                  ]
                 }
               ]
             },
@@ -7937,8 +9895,8 @@
                 },
                 {
                   "id": "PATH-ETC-SUDOERS",
-                  "expression": "f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))",
-                  "pattern": "(?i)(?:\\betc[\\s/\\\\]+(?:slash[\\s]+)?sudoers\\b|\\betc%2Fsudoers\\b)",
+                  "expression": "false",
+                  "pattern": "a^",
                   "title": "/etc/sudoers access",
                   "severity": "HIGH",
                   "confidence": 0.9,
@@ -7962,7 +9920,7 @@
                   "id": "secrets.cloud_credential_read",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))",
-                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
+                  "pattern": "(?i)(?:~|\\$HOME|\\$\\{HOME\\}|/root|/(?:home|Users)/[^/\\\\\"']+|[a-z]:[/\\\\]Users[/\\\\][^/\\\\\"']+)[/\\\\](?:\\.config[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|gh[/\\\\]hosts\\.yml|anthropic[/\\\\]keys\\.json)|AppData[/\\\\]Roaming[/\\\\](?:gcloud[/\\\\](?:application_default_credentials\\.json|(?:access_tokens|credentials)\\.db)|GitHub CLI[/\\\\]hosts\\.yml)|\\.azure[/\\\\](?:azureProfile\\.json|TokenCache\\.dat|msal_token_cache[^/\\\\]*\\.(?:json|bin)))(?:$|[\"'\\s])",
                   "title": "Cloud credential material read",
                   "severity": "CRITICAL",
                   "confidence": 0.92,
@@ -7970,6 +9928,36 @@
                     "credential",
                     "cloud",
                     "file-sensitive"
+                  ]
+                },
+                {
+                  "id": "secrets.cloud_metadata_credential_read",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'cloud_metadata'",
+                  "pattern": "a^",
+                  "title": "Cloud instance-metadata credential token read",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "cloud",
+                    "metadata",
+                    "bounded-lineage"
+                  ]
+                },
+                {
+                  "id": "secrets.structured_credential_extract",
+                  "tool_call_only": true,
+                  "expression": "f.tool == 'credential_extract'",
+                  "pattern": "a^",
+                  "title": "Structured credential-store extraction",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "extraction",
+                    "structured-tool",
+                    "bounded-lineage"
                   ]
                 },
                 {

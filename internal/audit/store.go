@@ -1817,6 +1817,10 @@ var migrations = []migration{
 		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
 		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
 	},
+	{
+		description: "guardrails: add result slot twenty-two for compromised credential authentication",
+		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

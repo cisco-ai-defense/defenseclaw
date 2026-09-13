@@ -12,7 +12,7 @@
           "rules": [
             {
               "id": "impact.cloud_bulk_data_delete",
-              "expression": "f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) || ('s3api' in c.argv && 'delete-objects' in c.argv))) || (c.program == 'gcloud' && 'storage' in c.argv && 'rm' in c.argv && (('--recursive' in c.argv) || ('-r' in c.argv))) || (c.program == 'az' && 'storage' in c.argv && 'delete-batch' in c.argv)))",
+              "expression": "f.tool in ['aws.cloudtrail_event', 'azure.activity_event'] || f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) || ('s3api' in c.argv && 'delete-objects' in c.argv))) || (c.program == 'gcloud' && 'storage' in c.argv && 'rm' in c.argv && (('--recursive' in c.argv) || ('-r' in c.argv))) || (c.program == 'az' && 'storage' in c.argv && 'delete-batch' in c.argv)))",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "Bulk deletion of cloud-hosted data",
@@ -36,6 +36,22 @@
                 "destructive",
                 "cloud",
                 "production-safety"
+              ]
+            },
+            {
+              "id": "impact.cloud_observed_resource_delete",
+              "expression": "f.tool in ['aws.cloudtrail_event', 'azure.activity_event']",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Observed deletion of an exact protected cloud disk or IAM binding",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "destructive",
+                "cloud",
+                "production-safety",
+                "observed",
+                "bounded-lineage"
               ]
             },
             {
@@ -70,7 +86,7 @@
           "rules": [
             {
               "id": "impact.sql_unbounded_delete",
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'] && (('-c' in c.argv) || ('-e' in c.argv) || ('-q' in c.argv) || ('-Q' in c.argv) || ('--command' in c.argv) || ('--execute' in c.argv) || ('--query' in c.argv) || c.argv.exists(a, a.startsWith('--command=') || a.startsWith('--execute=') || a.startsWith('--query='))))",
+              "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "SQL DELETE without a WHERE clause",
@@ -84,7 +100,7 @@
             },
             {
               "id": "impact.sql_schema_destroy",
-              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'] && (('-c' in c.argv) || ('-e' in c.argv) || ('-q' in c.argv) || ('-Q' in c.argv) || ('--command' in c.argv) || ('--execute' in c.argv) || ('--query' in c.argv) || c.argv.exists(a, a.startsWith('--command=') || a.startsWith('--execute=') || a.startsWith('--query='))))",
+              "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "SQL schema or table-wide destructive operation",
@@ -110,6 +126,65 @@
           "filename": "infrastructure-destruction",
           "category": "infrastructure-destruction-protection",
           "rules": [
+            {
+              "id": "impact.protected_filesystem_format",
+              "expression": "f.commands.exists(c, c.argv_complete && c.program in ['mkfs', 'mkfs.ext2', 'mkfs.ext3', 'mkfs.ext4', 'mke2fs', 'mkfs.xfs', 'mkfs.btrfs', 'mkfs.f2fs', 'mkfs.vfat', 'mkdosfs', 'mkfs.ntfs', 'mkntfs', 'mkfs.minix', 'mkswap', 'mkfs.exfat', 'mkexfatfs'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Protected device filesystem format",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "destructive",
+                "storage",
+                "production-safety"
+              ]
+            },
+            {
+              "id": "impact.protected_device_wipe",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DISK_WRITE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND] && p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Protected device destructive write",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "destructive",
+                "storage",
+                "production-safety"
+              ]
+            },
+            {
+              "id": "impact.protected_access_control_change",
+              "expression": "f.commands.exists(c, c.argv_complete && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations && f.paths.exists(p, p.command_id == c.id && p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_METADATA))",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Protected security material access-control weakening",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "privilege",
+                "destructive",
+                "production-safety"
+              ]
+            },
+            {
+              "id": "impact.protected_kernel_control_bind_override",
+              "tool_call_only": true,
+              "expression": "f.commands.exists(c, c.argv_complete && c.program == 'mount' && '--bind' in c.argv)",
+              "pattern": "a^",
+              "title": "Protected kernel control bind override",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "destructive",
+                "integrity",
+                "kernel",
+                "procfs",
+                "production-safety",
+                "bounded-grammar"
+              ]
+            },
             {
               "id": "impact.iac_full_destroy",
               "expression": "f.commands.exists(c, c.argv_complete && c.program in ['terraform', 'tofu', 'pulumi'] && (('destroy' in c.argv) || ('-destroy' in c.argv)))",

@@ -507,6 +507,8 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 		return "chain.secret_read_then_egress", true
 	case "chain.workload_identity_then_lateral_execution":
 		return "chain.workload_identity_then_lateral_execution", true
+	case "chain.compromised_credential_then_successful_authentication":
+		return "chain.compromised_credential_then_successful_authentication", true
 	default:
 		return "", false
 	}

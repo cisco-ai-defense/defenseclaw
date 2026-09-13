@@ -233,11 +233,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:                 actionTool,
-				Args:                 toolArgs,
-				CWD:                  req.CWD,
-				ActiveHome:           trustedSameHostHome(),
-				ToolResourceIdentity: resourceIdentity,
+				Tool:                     actionTool,
+				Args:                     toolArgs,
+				CWD:                      req.CWD,
+				ActiveHome:               trustedSameHostHome(),
+				ToolResourceIdentity:     resourceIdentity,
+				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
 			LegacyText:                string(toolArgs),
 			Connector:                 "codex",

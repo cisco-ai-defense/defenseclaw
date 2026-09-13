@@ -7,7 +7,7 @@ package audit
 
 import "fmt"
 
-// migrateToolChainState adds the bounded, content-free state used by the twenty-one
+// migrateToolChainState adds the bounded, content-free state used by the twenty-two
 // fixed tool-call chain slots. Store.applyMigration owns the surrounding
 // transaction.
 func migrateToolChainState(ex dbExecer) error {
@@ -47,11 +47,11 @@ func migrateToolChainState(ex dbExecer) error {
 				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 923),
+				CHECK (length(enforcement_join_digests) <= 967),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 923),
+				CHECK (length(enforcement_output_join_digests) <= 967),
 			value_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(value_join_digests) <= 14783),
+				CHECK (length(value_join_digests) <= 15487),
 			detected_chain_mask INTEGER NOT NULL
 				CHECK (detected_chain_mask BETWEEN 0 AND 2147483647),
 			enforcement_safe_chain_mask INTEGER NOT NULL
@@ -110,7 +110,8 @@ func migrateToolChainState(ex dbExecer) error {
 				'chain.reverse_shell_payload_write_then_persistence_install_same_artifact',
 				'chain.endpoint_security_control_request_then_completed_same_process',
 				'chain.sensitive_read_value_then_external_literal_transmit',
-				'chain.sensitive_sql_value_then_cross_resource_literal_persistence')),
+				'chain.sensitive_sql_value_then_cross_resource_literal_persistence',
+				'chain.compromised_credential_then_successful_authentication')),
 			chain_version TEXT NOT NULL CHECK (length(chain_version) BETWEEN 1 AND 16),
 			detected_chain_mask INTEGER NOT NULL
 				CHECK (detected_chain_mask BETWEEN 0 AND 2147483647),

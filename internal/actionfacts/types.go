@@ -68,6 +68,11 @@ type Input struct {
 	// PATH, or process state. Callers must authenticate and invalidate this
 	// evidence before supplying it.
 	CurlCapabilities []CurlCapability `json:"-"`
+	// CredentialLineageHMACKey is trusted process-local key material used only
+	// to project exact compromised-account and authentication inputs into opaque
+	// lineage references. A zero key disables that projection. Neither the key
+	// nor the input values are retained by Facts.
+	CredentialLineageHMACKey [32]byte `json:"-"`
 }
 
 // Facts contains the statically proven subset of one action. Attacker-
@@ -217,6 +222,11 @@ type Facts struct {
 	// command, domain, and password values are discarded before Facts crosses the
 	// ActionFacts boundary.
 	CredentialRemoteExecutionOperations []CredentialRemoteExecutionOperationFact `json:"-"`
+	// CompromisedCredentialAuthentications contains only a closed operation role
+	// and process-keyed HMAC references for one exact account and credential.
+	// Usernames, domains, passwords, hashes, and command text are discarded
+	// before Facts crosses the ActionFacts boundary.
+	CompromisedCredentialAuthentications []CompromisedCredentialAuthenticationFact `json:"-"`
 	// DirectoryCredentialAcquisitions contains only exact, completed command
 	// grammars that request or recover reusable Active Directory credential
 	// material. Targets, principals, hashes, passwords, paths, and wordlists are
