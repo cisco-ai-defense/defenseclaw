@@ -332,6 +332,18 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, ad-cs, authentication, bounded-lineage, detection-only]
+  - id: chain.s4u_ticket_then_kerberos_secretsdump_same_cache
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-getst', 'getst.py', 'impacket-secretsdump', 'secretsdump.py'])
+    # Catalog anchor only. The code-owned bounded matcher requires an
+    # authenticated S4U2Proxy result and exact saved-cache identity reuse.
+    pattern: 'a^'
+    title: "Result-backed S4U ticket used for Kerberos-only secretsdump"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, kerberos, secretsdump, bounded-lineage, detection-only]
   - id: persistence.malicious_download_execute_payload
     tool_call_only: true
     expression: "f.tool == 'persist'"

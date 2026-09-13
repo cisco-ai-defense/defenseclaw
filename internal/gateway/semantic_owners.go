@@ -259,6 +259,13 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		// PFX artifact chain; the bounded matcher is the sole owner.
 		detectionOnly: true,
 	},
+	"chain.s4u_ticket_then_kerberos_secretsdump_same_cache": {
+		prerequisite:     s4uTicketSecretsDumpCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this result-gated
+		// exact-cache chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
 })
 
 func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
@@ -266,6 +273,10 @@ func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) b
 }
 
 func adcsCertificateImpersonationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func s4uTicketSecretsDumpCatalogPrerequisite(actionfacts.Facts) bool {
 	return false
 }
 

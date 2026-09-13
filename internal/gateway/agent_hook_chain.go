@@ -37,7 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v10-adcs-pfx-lineage"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v11-s4u-ticket-lineage"
 
 type toolValueLineageProcessKey struct {
 	material  [32]byte
@@ -333,6 +333,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			sqlProjected               bool
 			returnedCredentialMaterial actionfacts.ReturnedCredentialMaterial
 			adcsCertificatePFXDigest   string
+			s4uTicketResult            actionfacts.KerberosS4UTicketResultFact
 		)
 		if outcome == connector.ToolLifecycleOutcomeSuccess {
 			sqlSource, sqlProjection, sqlProjected =
@@ -342,6 +343,8 @@ func (a *APIServer) applyAgentHookToolChains(
 					actionfacts.ClassifyReturnedCredentialMaterial(resultBytes)
 				adcsCertificatePFXDigest =
 					actionfacts.ExactADCSCertificatePFXResult(resultBytes)
+				s4uTicketResult, _ =
+					actionfacts.ExactKerberosS4UTicketResultProjection(resultBytes)
 			}
 		}
 		resolved, resolveErr := repository.ResolvePending(
@@ -360,7 +363,9 @@ func (a *APIServer) applyAgentHookToolChains(
 				SuccessfulSQLValueDigests: toolValueLineageGuardrailDigests(
 					sqlProjection.valueDigests,
 				),
-				SuccessfulADCSCertificatePFXDigest: adcsCertificatePFXDigest,
+				SuccessfulADCSCertificatePFXDigest:         adcsCertificatePFXDigest,
+				SuccessfulS4UTargetPrincipalIdentityDigest: s4uTicketResult.TargetPrincipalIdentityDigest,
+				SuccessfulS4UTicketCacheDigest:             s4uTicketResult.TicketArtifactIdentityDigest,
 			},
 		)
 		if resolveErr != nil {
@@ -973,6 +978,7 @@ func projectTrustedActionChainSteps(
 	findings []RuleFinding,
 ) {
 	projectADCSCertificateImpersonationChainSteps(projection, facts)
+	projectKerberosS4UTicketSecretsDumpChainSteps(projection, facts)
 
 	found := make(map[string]RuleFinding, len(findings))
 	for _, finding := range findings {
@@ -1170,6 +1176,29 @@ func projectTrustedActionChainSteps(
 	projectRemoteArtifactChainSteps(projection, facts)
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
+	}
+}
+
+func projectKerberosS4UTicketSecretsDumpChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainS4UTicketThenKerberosSecretsdump
+	if request, ok := actionfacts.ExactKerberosS4UTicketRequest(facts); ok {
+		// Retain only the target's one-way identity until an authenticated result
+		// proves that the same principal's cache was written. ResolvePending then
+		// replaces this digest with the exact cache identity and promotes step one.
+		addToolChainStep(projection, chainID, 1, true, false)
+		setToolChainEnforcementJoinDigest(
+			projection, chainID, request.TargetPrincipalIdentityDigest,
+		)
+		return
+	}
+	if sink, ok := actionfacts.ExactKerberosS4USecretsDumpSink(facts); ok {
+		addToolChainStep(projection, chainID, 2, true, true)
+		setToolChainEnforcementJoinDigest(
+			projection, chainID, sink.TicketArtifactIdentityDigest,
+		)
 	}
 }
 

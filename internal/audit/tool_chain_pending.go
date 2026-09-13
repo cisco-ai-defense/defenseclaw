@@ -97,6 +97,11 @@ type ToolChainResolvePendingInput struct {
 	// invocation is the exact AD CS impersonation-request predecessor. It
 	// carries a one-way artifact identity, never the certificate path or bytes.
 	SuccessfulADCSCertificatePFXDigest string `json:"-"`
+	// SuccessfulS4U* digests are accepted only as a pair. The result principal
+	// must equal the pending getST target before the saved-cache identity can
+	// replace it as the enforcement join for the later secretsdump sink.
+	SuccessfulS4UTargetPrincipalIdentityDigest string `json:"-"`
+	SuccessfulS4UTicketCacheDigest             string `json:"-"`
 }
 
 type ToolChainResolvePendingResult struct {
@@ -488,6 +493,26 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		projection.EnforcementStepMask |= definition.Step1Bit
 		projection.EnforcementJoinDigests[index] =
 			input.SuccessfulADCSCertificatePFXDigest
+	}
+	if input.SuccessfulS4UTicketCacheDigest != "" {
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainS4UTicketThenKerberosSecretsdump,
+		)
+		definition, definitionOK := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainS4UTicketThenKerberosSecretsdump,
+		)
+		if !ok || !definitionOK ||
+			projection.DetectionStepMask&definition.Step1Bit == 0 ||
+			projection.EnforcementStepMask&definition.Step1Bit != 0 ||
+			projection.EnforcementJoinDigests[index] !=
+				input.SuccessfulS4UTargetPrincipalIdentityDigest ||
+			projection.EnforcementOutputJoinDigests[index] != "" ||
+			projection.ValueJoinDigests[index] != (guardrail.ToolChainValueJoinDigests{}) {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
+		projection.EnforcementStepMask |= definition.Step1Bit
+		projection.EnforcementJoinDigests[index] =
+			input.SuccessfulS4UTicketCacheDigest
 	}
 	if projection.DetectionStepMask == 0 {
 		// A successfully resolved but semantically unrelated tool call still
@@ -963,7 +988,9 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 			input.SuccessfulSQLValueSource != (ToolChainPendingSQLValueSource{}) ||
 			input.SuccessfulSQLResourceIdentityDigest != "" ||
 			input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) ||
-			input.SuccessfulADCSCertificatePFXDigest != "" {
+			input.SuccessfulADCSCertificatePFXDigest != "" ||
+			input.SuccessfulS4UTargetPrincipalIdentityDigest != "" ||
+			input.SuccessfulS4UTicketCacheDigest != "" {
 			return errors.New("audit: unsuccessful pending result contains value lineage")
 		}
 		return nil
@@ -979,6 +1006,10 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 		lineageKinds++
 	}
 	if input.SuccessfulADCSCertificatePFXDigest != "" {
+		lineageKinds++
+	}
+	if input.SuccessfulS4UTargetPrincipalIdentityDigest != "" ||
+		input.SuccessfulS4UTicketCacheDigest != "" {
 		lineageKinds++
 	}
 	if lineageKinds > 1 {
@@ -1011,6 +1042,48 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 		}
 		projection.EnforcementJoinDigests[index] =
 			input.SuccessfulADCSCertificatePFXDigest
+		if err := guardrail.ValidateToolChainProjection(projection); err != nil {
+			return err
+		}
+	}
+	if (input.SuccessfulS4UTargetPrincipalIdentityDigest == "") !=
+		(input.SuccessfulS4UTicketCacheDigest == "") {
+		return errors.New("audit: incomplete successful S4U ticket lineage")
+	}
+	if input.SuccessfulS4UTicketCacheDigest != "" {
+		if err := validateSHA256(
+			"successful S4U target principal identity digest",
+			input.SuccessfulS4UTargetPrincipalIdentityDigest,
+			true,
+		); err != nil {
+			return err
+		}
+		if err := validateSHA256(
+			"successful S4U ticket cache digest",
+			input.SuccessfulS4UTicketCacheDigest,
+			true,
+		); err != nil {
+			return err
+		}
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainS4UTicketThenKerberosSecretsdump,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		definition, ok := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainS4UTicketThenKerberosSecretsdump,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		projection := guardrail.ToolChainProjection{
+			ParseStatus:         actionfacts.StatusComplete,
+			DetectionStepMask:   definition.Step1Bit,
+			EnforcementStepMask: definition.Step1Bit,
+		}
+		projection.EnforcementJoinDigests[index] =
+			input.SuccessfulS4UTicketCacheDigest
 		if err := guardrail.ValidateToolChainProjection(projection); err != nil {
 			return err
 		}

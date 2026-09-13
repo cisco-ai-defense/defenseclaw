@@ -13,6 +13,7 @@ import (
 
 const (
 	kerberosS4UTargetDigestDomain   = "defenseclaw/actionfacts/kerberos-s4u/target/v1"
+	kerberosS4UScopeDigestDomain    = "defenseclaw/actionfacts/kerberos-s4u/scope/v1"
 	kerberosS4USPNDigestDomain      = "defenseclaw/actionfacts/kerberos-s4u/spn/v1"
 	kerberosS4UArtifactDigestDomain = "defenseclaw/actionfacts/kerberos-s4u/artifact/v1"
 	kerberosS4UResultMaxBytes       = 256 * 1024
@@ -40,6 +41,13 @@ type KerberosS4UTicketRequestFact struct {
 type KerberosS4USecretsDumpFact struct {
 	TicketArtifactIdentityDigest  string
 	TargetPrincipalIdentityDigest string
+}
+
+// KerberosS4UTicketResultFact is the value-free projection of the exact
+// successful Impacket result markers used to authenticate an S4U predecessor.
+type KerberosS4UTicketResultFact struct {
+	TargetPrincipalIdentityDigest string
+	TicketArtifactIdentityDigest  string
 }
 
 // ExactKerberosS4UTicketRequest recognizes one direct, unconditional
@@ -167,12 +175,26 @@ func ExactKerberosS4UTicketResult(
 	result []byte,
 	expectedTargetPrincipalIdentityDigest string,
 ) string {
-	if len(result) == 0 || len(result) > kerberosS4UResultMaxBytes ||
-		bytes.IndexByte(result, 0) >= 0 ||
-		!validPrivateDigest(expectedTargetPrincipalIdentityDigest) {
+	projection, ok := ExactKerberosS4UTicketResultProjection(result)
+	if !ok || projection.TargetPrincipalIdentityDigest !=
+		expectedTargetPrincipalIdentityDigest {
 		return ""
 	}
+	return projection.TicketArtifactIdentityDigest
+}
+
+// ExactKerberosS4UTicketResultProjection extracts both one-way identities so
+// the lifecycle repository can compare the authenticated result principal to
+// the exact pending invocation before replacing it with the saved-cache join.
+func ExactKerberosS4UTicketResultProjection(
+	result []byte,
+) (KerberosS4UTicketResultFact, bool) {
+	if len(result) == 0 || len(result) > kerberosS4UResultMaxBytes ||
+		bytes.IndexByte(result, 0) >= 0 {
+		return KerberosS4UTicketResultFact{}, false
+	}
 	stage := 0
+	targetDigest := ""
 	artifactDigest := ""
 	for _, rawLine := range bytes.Split(result, []byte{'\n'}) {
 		lineBytes := bytes.TrimSpace(rawLine)
@@ -180,7 +202,7 @@ func ExactKerberosS4UTicketResult(
 			continue
 		}
 		if len(lineBytes) > kerberosS4UResultLineMaxBytes {
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		}
 		line := string(lineBytes)
 		lower := strings.ToLower(line)
@@ -189,59 +211,83 @@ func ExactKerberosS4UTicketResult(
 			strings.HasPrefix(lower, "fatal:") ||
 			strings.HasPrefix(lower, "traceback (most recent call last):") ||
 			strings.Contains(lower, "kdc_err_") {
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		}
 		switch {
 		case strings.HasPrefix(line, kerberosS4UImpersonatingPrefix):
-			if stage != 0 || KerberosS4UTargetPrincipalIdentityDigest(
+			if stage != 0 {
+				return KerberosS4UTicketResultFact{}, false
+			}
+			targetDigest = KerberosS4UTargetPrincipalIdentityDigest(
 				strings.TrimPrefix(line, kerberosS4UImpersonatingPrefix),
-			) != expectedTargetPrincipalIdentityDigest {
-				return ""
+			)
+			if targetDigest == "" {
+				return KerberosS4UTicketResultFact{}, false
 			}
 			stage = 1
 		case strings.HasPrefix(line, "[*] Impersonating"):
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		case line == kerberosS4USelfLine:
 			if stage != 1 {
-				return ""
+				return KerberosS4UTicketResultFact{}, false
 			}
 			stage = 2
 		case strings.HasPrefix(line, "[*] Requesting S4U2self"):
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		case line == kerberosS4UProxyLine:
 			if stage != 2 {
-				return ""
+				return KerberosS4UTicketResultFact{}, false
 			}
 			stage = 3
 		case strings.HasPrefix(line, "[*] Requesting S4U2Proxy"):
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		case strings.HasPrefix(line, kerberosS4USavingPrefix):
 			if stage != 3 || artifactDigest != "" {
-				return ""
+				return KerberosS4UTicketResultFact{}, false
 			}
 			artifactDigest = KerberosS4UTicketArtifactIdentityDigest(
 				strings.TrimPrefix(line, kerberosS4USavingPrefix),
 			)
 			if artifactDigest == "" {
-				return ""
+				return KerberosS4UTicketResultFact{}, false
 			}
 			stage = 4
 		case strings.HasPrefix(line, "[*] Saving ticket in"):
-			return ""
+			return KerberosS4UTicketResultFact{}, false
 		}
 	}
 	if stage != 4 {
-		return ""
+		return KerberosS4UTicketResultFact{}, false
 	}
-	return artifactDigest
+	return KerberosS4UTicketResultFact{
+		TargetPrincipalIdentityDigest: targetDigest,
+		TicketArtifactIdentityDigest:  artifactDigest,
+	}, true
 }
 
-// ExactKerberosS4USecretsDumpSink recognizes one direct POSIX command with
-// exactly one static KRB5CCNAME prefix assignment and one Kerberos-only
-// impacket-secretsdump/secretsdump.py invocation. It parses the shell AST so
-// the assignment is proven without making prefix assignments transparent to
-// the generic ActionFacts parser.
+// ExactKerberosS4USecretsDumpSink recognizes either one direct POSIX command
+// with exactly one static KRB5CCNAME prefix assignment, or the exact
+// `export KRB5CCNAME=... && impacket-secretsdump ...` shape observed in the
+// pinned Cochise trajectory. It parses the shell AST so no wrapper, extra
+// statement, unresolved expansion, or alternate control flow is accepted.
 func ExactKerberosS4USecretsDumpSink(
+	facts Facts,
+) (KerberosS4USecretsDumpFact, bool) {
+	if len(facts.KerberosS4USecretsDumps) != 1 {
+		return KerberosS4USecretsDumpFact{}, false
+	}
+	return facts.KerberosS4USecretsDumps[0], true
+}
+
+func projectKerberosS4USecretsDumps(input Input) []KerberosS4USecretsDumpFact {
+	fact, ok := exactKerberosS4USecretsDumpInput(input)
+	if !ok {
+		return nil
+	}
+	return []KerberosS4USecretsDumpFact{fact}
+}
+
+func exactKerberosS4USecretsDumpInput(
 	input Input,
 ) (KerberosS4USecretsDumpFact, bool) {
 	commandText, explicitArgv, ok := exactKerberosS4UInputCommand(input)
@@ -261,21 +307,15 @@ func ExactKerberosS4USecretsDumpSink(
 		return KerberosS4USecretsDumpFact{}, false
 	}
 	statement := file.Stmts[0]
-	call, ok := statement.Cmd.(*syntax.CallExpr)
-	if !ok || statement.Negated || statement.Background || statement.Coprocess ||
-		statement.Disown || statement.Semicolon.IsValid() || len(statement.Redirs) != 0 ||
-		len(statement.Comments) != 0 || len(call.Assigns) != 1 || len(call.Args) == 0 {
+	if !exactKerberosS4UStatementShell(statement) {
 		return KerberosS4USecretsDumpFact{}, false
 	}
-	assignment := call.Assigns[0]
-	if assignment == nil || assignment.Append || assignment.Naked ||
-		assignment.Name == nil || assignment.Name.Value != "KRB5CCNAME" ||
-		assignment.Index != nil || assignment.Array != nil || assignment.Value == nil {
+	artifact, call, ok := exactKerberosS4USinkCall(statement)
+	if !ok || len(call.Args) == 0 {
 		return KerberosS4USecretsDumpFact{}, false
 	}
-	artifact := projectPOSIXWord(assignment.Value)
-	artifactDigest := KerberosS4UTicketArtifactIdentityDigest(artifact.Value)
-	if artifact.Expands || artifactDigest == "" {
+	artifactDigest := KerberosS4UTicketArtifactIdentityDigest(artifact)
+	if artifactDigest == "" {
 		return KerberosS4USecretsDumpFact{}, false
 	}
 
@@ -299,6 +339,60 @@ func ExactKerberosS4USecretsDumpSink(
 		TicketArtifactIdentityDigest:  artifactDigest,
 		TargetPrincipalIdentityDigest: targetDigest,
 	}, true
+}
+
+func exactKerberosS4UStatementShell(statement *syntax.Stmt) bool {
+	return statement != nil && !statement.Negated && !statement.Background &&
+		!statement.Coprocess && !statement.Disown &&
+		!statement.Semicolon.IsValid() && len(statement.Redirs) == 0 &&
+		len(statement.Comments) == 0
+}
+
+func exactKerberosS4USinkCall(
+	statement *syntax.Stmt,
+) (string, *syntax.CallExpr, bool) {
+	if call, ok := statement.Cmd.(*syntax.CallExpr); ok {
+		artifact, ok := exactKerberosS4UPrefixAssignment(call)
+		return artifact, call, ok
+	}
+	binary, ok := statement.Cmd.(*syntax.BinaryCmd)
+	if !ok || binary.Op != syntax.AndStmt ||
+		!exactKerberosS4UStatementShell(binary.X) ||
+		!exactKerberosS4UStatementShell(binary.Y) {
+		return "", nil, false
+	}
+	exportCall, exportOK := binary.X.Cmd.(*syntax.CallExpr)
+	sinkCall, sinkOK := binary.Y.Cmd.(*syntax.CallExpr)
+	if !exportOK || !sinkOK || len(exportCall.Assigns) != 0 ||
+		len(exportCall.Args) != 2 || len(sinkCall.Assigns) != 0 {
+		return "", nil, false
+	}
+	exportProgram := projectPOSIXWord(exportCall.Args[0])
+	exportArgument := projectPOSIXWord(exportCall.Args[1])
+	if exportProgram.Expands || exportProgram.Value != "export" ||
+		exportArgument.Expands ||
+		!strings.HasPrefix(exportArgument.Value, "KRB5CCNAME=") {
+		return "", nil, false
+	}
+	artifact := strings.TrimPrefix(exportArgument.Value, "KRB5CCNAME=")
+	if artifact == "" {
+		return "", nil, false
+	}
+	return artifact, sinkCall, true
+}
+
+func exactKerberosS4UPrefixAssignment(call *syntax.CallExpr) (string, bool) {
+	if call == nil || len(call.Assigns) != 1 {
+		return "", false
+	}
+	assignment := call.Assigns[0]
+	if assignment == nil || assignment.Append || assignment.Naked ||
+		assignment.Name == nil || assignment.Name.Value != "KRB5CCNAME" ||
+		assignment.Index != nil || assignment.Array != nil || assignment.Value == nil {
+		return "", false
+	}
+	artifact := projectPOSIXWord(assignment.Value)
+	return artifact.Value, !artifact.Expands && artifact.Value != ""
 }
 
 func exactKerberosS4UInputCommand(input Input) (string, []string, bool) {
@@ -374,7 +468,16 @@ func exactKerberosS4USecretsDumpArguments(argv []string) (string, bool) {
 	if target == "" {
 		return "", false
 	}
+	if validKerberosTicketDomain(target) {
+		digest := framedPrivateDigest(
+			kerberosS4UScopeDigestDomain, strings.ToLower(target),
+		)
+		return digest, validPrivateDigest(digest)
+	}
 	at := strings.LastIndexByte(target, '@')
+	if at <= 0 || at == len(target)-1 {
+		return "", false
+	}
 	principal := target[:at]
 	if strings.Count(principal, "/") == 1 && !strings.Contains(principal, "\\") {
 		principal = strings.Replace(principal, "/", "\\", 1)
@@ -391,8 +494,13 @@ func exactKerberosS4USecretsDumpArguments(argv []string) (string, bool) {
 
 func exactKerberosS4USecretsDumpTarget(value string) bool {
 	if len(value) == 0 || len(value) > maxScalarBytes ||
-		unresolvedCredentialLineageScalar(value) || strings.Contains(value, ":") ||
-		strings.Count(value, "@") != 1 {
+		unresolvedCredentialLineageScalar(value) || strings.Contains(value, ":") {
+		return false
+	}
+	if validKerberosTicketDomain(value) {
+		return true
+	}
+	if strings.Count(value, "@") != 1 {
 		return false
 	}
 	at := strings.LastIndexByte(value, '@')

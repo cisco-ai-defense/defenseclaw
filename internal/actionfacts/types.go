@@ -233,6 +233,11 @@ type Facts struct {
 	// discarded. The projection is intentionally distinct from generic
 	// credential reads so policy can assign a posture to dual-use security tools.
 	DirectoryCredentialAcquisitions []DirectoryCredentialAcquisitionFact `json:"-"`
+	// KerberosS4USecretsDumps contains only the one-way cache and target
+	// identities from an exact KRB5CCNAME-bound, Kerberos-only secretsdump
+	// invocation. Raw cache names, targets, principals, and command text are
+	// discarded before Facts crosses the ActionFacts boundary.
+	KerberosS4USecretsDumps []KerberosS4USecretsDumpFact `json:"-"`
 	// StagedPayloadPersistenceOperations contains only a closed operation class
 	// and a domain-separated SHA-256 digest of one exact normalized absolute
 	// POSIX path. Script bytes, persistence payloads, methods, and raw paths are

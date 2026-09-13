@@ -33,6 +33,7 @@ const (
 	semanticRemoteIPStagedExecExpression                  = `f.commands.exists(c, c.argv_complete && c.program in ['curl', 'wget'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations)`
 	semanticCompromisedCredentialAuthenticationExpression = `f.tool in ['add_compromised_account', 'update_compromised_account'] || f.commands.exists(c, c.argv_complete && c.program in ['nxc', 'netexec', 'crackmapexec'])`
 	semanticADCSCertificateImpersonationExpression        = `f.commands.exists(c, c.argv_complete && c.program in ['certipy', 'certipy-ad'])`
+	semanticS4UTicketSecretsDumpExpression                = `f.commands.exists(c, c.argv_complete && c.program in ['impacket-getst', 'getst.py', 'impacket-secretsdump', 'secretsdump.py'])`
 )
 
 func curlDownloadExecPrerequisite(facts actionfacts.Facts) bool {

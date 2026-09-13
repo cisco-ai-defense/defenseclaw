@@ -266,6 +266,7 @@ func analyze(input Input) Facts {
 		projectCompromisedCredentialAuthentications(input, facts)
 	facts.DirectoryCredentialAcquisitions =
 		projectDirectoryCredentialAcquisitions(input, &facts)
+	facts.KerberosS4USecretsDumps = projectKerberosS4USecretsDumps(input)
 	facts.StagedPayloadPersistenceOperations =
 		projectStagedPayloadPersistenceOperations(input)
 	facts.CloudMetadataCredentialReads =

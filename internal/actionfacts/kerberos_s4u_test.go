@@ -158,14 +158,15 @@ func TestExactKerberosS4USecretsDumpSink(t *testing.T) {
 		command string
 	}{
 		{"minimal", "KRB5CCNAME=" + artifact + " impacket-secretsdump -k -no-pass lab.example/administrator@dc.lab.example"},
+		{"observed export chain", "export KRB5CCNAME=" + artifact + " && impacket-secretsdump -k -no-pass -dc-ip 192.0.2.10 lab.example"},
 		{"routed user scope", "KRB5CCNAME='" + artifact + "' secretsdump.py -k -no-pass -dc-ip 192.0.2.10 -just-dc-user administrator lab.example/administrator@dc.lab.example"},
 		{"target route and ntds scope", "KRB5CCNAME=" + artifact + " impacket-secretsdump -k -no-pass -target-ip 192.0.2.10 lab.example/administrator@dc.lab.example -just-dc-ntlm"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			fact, ok := ExactKerberosS4USecretsDumpSink(Input{
+			fact, ok := ExactKerberosS4USecretsDumpSink(Analyze(Input{
 				Tool: "execute_command", Command: test.command, DialectHint: DialectPOSIX,
-			})
+			}))
 			if !ok || fact.TicketArtifactIdentityDigest !=
 				KerberosS4UTicketArtifactIdentityDigest(artifact) ||
 				!validPrivateDigest(fact.TargetPrincipalIdentityDigest) {
@@ -184,9 +185,9 @@ func TestExactKerberosS4USecretsDumpSink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fact, ok := ExactKerberosS4USecretsDumpSink(Input{
+	if fact, ok := ExactKerberosS4USecretsDumpSink(Analyze(Input{
 		Tool: "execute_command", Args: raw, DialectHint: DialectPOSIX,
-	}); !ok || fact.TicketArtifactIdentityDigest == "" {
+	})); !ok || fact.TicketArtifactIdentityDigest == "" {
 		t.Fatalf("closed command args failed: fact=%+v ok=%t", fact, ok)
 	}
 }
@@ -220,22 +221,25 @@ func TestExactKerberosS4USecretsDumpSinkHardNegatives(t *testing.T) {
 		{"redirect", base + " 2>&1"},
 		{"pipeline", base + " | tee dump.log"},
 		{"compound", base + " && echo done"},
+		{"export without success gate", "export KRB5CCNAME=" + artifact + "; impacket-secretsdump -k -no-pass lab.example"},
+		{"export alternate gate", "export KRB5CCNAME=" + artifact + " || impacket-secretsdump -k -no-pass lab.example"},
+		{"export extra variable", "export MODE=test KRB5CCNAME=" + artifact + " && impacket-secretsdump -k -no-pass lab.example"},
 		{"conditional", "if true; then " + base + "; fi"},
 		{"comment", base + " # credential dump"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			if fact, ok := ExactKerberosS4USecretsDumpSink(Input{
+			if fact, ok := ExactKerberosS4USecretsDumpSink(Analyze(Input{
 				Tool: "execute_command", Command: test.command,
-			}); ok {
+			})); ok {
 				t.Fatalf("hard negative projected %+v", fact)
 			}
 		})
 	}
-	if fact, ok := ExactKerberosS4USecretsDumpSink(Input{
+	if fact, ok := ExactKerberosS4USecretsDumpSink(Analyze(Input{
 		Tool: "execute_command", Command: base,
 		Argv: []string{"impacket-secretsdump", "-k", "-no-pass", "other@dc.lab.example"},
-	}); ok {
+	})); ok {
 		t.Fatalf("conflicting argv projected %+v", fact)
 	}
 }

@@ -57,6 +57,39 @@ func TestADCSCertificateImpersonationChainCatalogAnchor(t *testing.T) {
 	}
 }
 
+func TestS4UTicketSecretsDumpChainCatalogAnchor(t *testing.T) {
+	const (
+		ruleID         = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
+		wantExpression = "f.commands.exists(c, c.argv_complete && " +
+			"c.program in ['impacket-getst', 'getst.py', 'impacket-secretsdump', 'secretsdump.py'])"
+	)
+
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+		var matches []guardrail.RuleDefYAML
+		for _, file := range pack.RuleFiles {
+			for _, rule := range file.Rules {
+				if rule.ID == ruleID {
+					matches = append(matches, rule)
+				}
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("%s contains %d copies of %s, want exactly one", profile, len(matches), ruleID)
+		}
+		rule := matches[0]
+		if !rule.ToolCallOnly || rule.Pattern != "a^" || rule.Severity != "HIGH" ||
+			strings.Join(strings.Fields(rule.Expression), " ") != wantExpression {
+			t.Fatalf("%s anchor can escape bounded matcher ownership: %+v", profile, rule)
+		}
+	}
+
+	owner, ok := semanticOwners[ruleID]
+	if !ok || owner.prerequisite == nil || owner.suppressFallback == nil || !owner.detectionOnly {
+		t.Fatalf("bounded chain semantic owner = %+v, present=%t", owner, ok)
+	}
+}
+
 // TestProfilePosture_InjectionJudge pins the injection-judge labeling
 // contract: every profile assigns HIGH on a single category and
 // CRITICAL on two+ categories. Action mapping (block/alert/allow) is

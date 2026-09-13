@@ -150,6 +150,9 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// request-result-PFX-authentication sequence. Exact lifecycle tests own this
 	// inert catalog expression and its result-backed artifact continuity.
 	coveredExpressions[semanticADCSCertificateImpersonationExpression] = struct{}{}
+	// Lifecycle-owned anchor: only authenticated S4U result promotion plus the
+	// bounded cache-identity matcher may emit this rule.
+	coveredExpressions[semanticS4UTicketSecretsDumpExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {

@@ -34,7 +34,8 @@ func TestSemanticExecutionPipelineExpressionsCompile(t *testing.T) {
 		"CMD-PIPE-CURL":   semanticCurlDownloadExecExpression,
 		"CMD-PIPE-WGET":   semanticWgetDownloadExecExpression,
 		"CMD-PIPE-BASE64": semanticBase64DecodeExecExpression,
-		"exec.remote_ip_download_execute_same_artifact": semanticRemoteIPStagedExecExpression,
+		"exec.remote_ip_download_execute_same_artifact":         semanticRemoteIPStagedExecExpression,
+		"chain.s4u_ticket_then_kerberos_secretsdump_same_cache": semanticS4UTicketSecretsDumpExpression,
 	} {
 		ruleID, expression := ruleID, expression
 		t.Run(ruleID, func(t *testing.T) {

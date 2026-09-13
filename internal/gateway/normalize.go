@@ -511,6 +511,8 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 		return "chain.compromised_credential_then_successful_authentication", true
 	case "chain.adcs_certificate_request_then_pfx_authentication":
 		return "chain.adcs_certificate_request_then_pfx_authentication", true
+	case "chain.s4u_ticket_then_kerberos_secretsdump_same_cache":
+		return "chain.s4u_ticket_then_kerberos_secretsdump_same_cache", true
 	default:
 		return "", false
 	}

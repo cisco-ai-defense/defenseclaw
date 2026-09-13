@@ -280,19 +280,42 @@ func ApplyDeterministicSuccessfulActionResult(
 	resultProof []byte,
 ) DeterministicActionEvaluation {
 	digest := actionfacts.ExactADCSCertificatePFXResult(resultProof)
-	if digest == "" {
+	if digest != "" {
+		return promoteDeterministicSuccessfulChainResult(
+			evaluation,
+			guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+			"",
+			digest,
+		)
+	}
+	s4u, ok := actionfacts.ExactKerberosS4UTicketResultProjection(resultProof)
+	if !ok {
 		return evaluation
 	}
+	return promoteDeterministicSuccessfulChainResult(
+		evaluation,
+		guardrail.ToolChainS4UTicketThenKerberosSecretsdump,
+		s4u.TargetPrincipalIdentityDigest,
+		s4u.TicketArtifactIdentityDigest,
+	)
+}
+
+func promoteDeterministicSuccessfulChainResult(
+	evaluation DeterministicActionEvaluation,
+	chainID string,
+	expectedPendingDigest string,
+	resultJoinDigest string,
+) DeterministicActionEvaluation {
 	definition, ok := guardrail.ToolChainDefinitionByID(
-		guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		chainID,
 	)
 	index, indexOK := guardrail.ToolChainIndexByID(
-		guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		chainID,
 	)
 	if !ok || !indexOK ||
 		evaluation.DetectionStepMask&definition.Step1Bit == 0 ||
 		evaluation.EnforcementStepMask&definition.Step1Bit != 0 ||
-		evaluation.EnforcementJoinDigests[index] != "" ||
+		evaluation.EnforcementJoinDigests[index] != expectedPendingDigest ||
 		evaluation.EnforcementOutputJoinDigests[index] != "" ||
 		evaluation.ValueJoinDigests[index] != (guardrail.ToolChainValueJoinDigests{}) {
 		return evaluation
@@ -305,7 +328,7 @@ func ApplyDeterministicSuccessfulActionResult(
 		EnforcementOutputJoinDigests: evaluation.EnforcementOutputJoinDigests,
 		ValueJoinDigests:             evaluation.ValueJoinDigests,
 	}
-	projection.EnforcementJoinDigests[index] = digest
+	projection.EnforcementJoinDigests[index] = resultJoinDigest
 	if guardrail.ValidateToolChainProjection(projection) != nil {
 		return evaluation
 	}
