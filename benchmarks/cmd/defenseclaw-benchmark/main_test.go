@@ -7,7 +7,10 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
+	"crypto/sha256"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -216,6 +219,80 @@ func TestParseOptInPolicyPacks(t *testing.T) {
 	}
 	if _, err := parseOptInPolicyPacks("../strict"); err == nil {
 		t.Fatal("path-like opt-in policy pack was accepted")
+	}
+}
+
+func TestReadCasesSupportsGzipWithDecompressedDigest(t *testing.T) {
+	dir := t.TempDir()
+	benchmarkCase := benchmark.Case{
+		SchemaVersion: benchmark.SchemaVersion,
+		ID:            "test/gzip-case",
+		Source: benchmark.Source{
+			Dataset:        "test",
+			Revision:       "1",
+			OriginalID:     "gzip-case",
+			License:        "Apache-2.0",
+			Redistribution: "vendored",
+		},
+		Split:   "validation",
+		Surface: "action",
+		Payload: benchmark.Payload{Command: "echo hello"},
+		Truth: benchmark.Truth{
+			SourceTruth:         benchmark.TruthBenign,
+			DeterministicTruth:  benchmark.DeterministicBenign,
+			LabelConfidence:     "high",
+			LabelSource:         "test-fixture",
+			Applicability:       benchmark.InScope,
+			ExpectedDisposition: benchmark.DispositionAllow,
+		},
+	}
+	data, err := json.Marshal(benchmarkCase)
+	if err != nil {
+		t.Fatal(err)
+	}
+	data = append(data, '\n')
+	gzipPath := filepath.Join(dir, "cases.jsonl.gz")
+	file, err := os.OpenFile(gzipPath, os.O_CREATE|os.O_WRONLY|os.O_EXCL, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	writer := gzip.NewWriter(file)
+	if _, err := writer.Write(data); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	cases, err := readCases(gzipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(cases, []benchmark.Case{benchmarkCase}) {
+		t.Fatalf("cases=%+v, want %+v", cases, benchmarkCase)
+	}
+	wantDigest := fmt.Sprintf("%x", sha256.Sum256(data))
+	gotDigest, err := corpusSHA256(gzipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gotDigest != wantDigest {
+		t.Fatalf("digest=%s, want %s", gotDigest, wantDigest)
+	}
+	manifestData := []byte(`{"datasets":["test"],"cases":1,"counts":{"test":1},"output_sha256":"` + wantDigest + `"}`)
+	manifestPath := filepath.Join(dir, "cases.manifest.json")
+	if err := os.WriteFile(manifestPath, manifestData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	loadedManifest, err := readNormalizationManifest("", gzipPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(loadedManifest, manifestData) {
+		t.Fatalf("manifest=%s, want %s", loadedManifest, manifestData)
 	}
 }
 

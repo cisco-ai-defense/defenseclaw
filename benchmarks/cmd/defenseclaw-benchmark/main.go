@@ -18,6 +18,7 @@ package main
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -99,7 +100,7 @@ func runBenchmark(args []string, stdout io.Writer) error {
 		return err
 	}
 
-	corpusData, cases, lockData, _, err := loadInputs(*corpusPath, *lockPath)
+	corpusSHA256, cases, lockData, _, err := loadInputs(*corpusPath, *lockPath)
 	if err != nil {
 		return err
 	}
@@ -110,7 +111,7 @@ func runBenchmark(args []string, stdout io.Writer) error {
 	scoreCases := cases
 	truthCorpusSHA256 := ""
 	if *truthCorpusPath != "" {
-		truthData, truthCases, _, _, err := loadInputs(*truthCorpusPath, *lockPath)
+		truthSHA256, truthCases, _, _, err := loadInputs(*truthCorpusPath, *lockPath)
 		if err != nil {
 			return fmt.Errorf("load truth corpus: %w", err)
 		}
@@ -118,7 +119,7 @@ func runBenchmark(args []string, stdout io.Writer) error {
 			return err
 		}
 		scoreCases = truthCases
-		truthCorpusSHA256 = benchmark.SHA256Hex(truthData)
+		truthCorpusSHA256 = truthSHA256
 	}
 	profiles, err := parseProfiles(*profilesCSV)
 	if err != nil {
@@ -202,7 +203,7 @@ func runBenchmark(args []string, stdout io.Writer) error {
 		OptInPolicyPacks:  optInPacks,
 		OptInPolicyRoot:   optInPolicyRootMetadata,
 		PolicyPostures:    policyPostures,
-		CorpusSHA256:      benchmark.SHA256Hex(corpusData),
+		CorpusSHA256:      corpusSHA256,
 		TruthCorpusSHA256: truthCorpusSHA256,
 		DatasetLockSHA256: benchmark.SHA256Hex(lockData),
 		PolicyDigests:     policyDigests,
@@ -295,11 +296,7 @@ func compareBenchmark(args []string, stdout io.Writer) error {
 	comparisonCases := cases
 	truthCorpusSHA256 := ""
 	if *truthCorpusPath != "" {
-		truthData, err := os.ReadFile(*truthCorpusPath)
-		if err != nil {
-			return fmt.Errorf("read truth corpus: %w", err)
-		}
-		truthCases, err := benchmark.LoadCases(bytes.NewReader(truthData))
+		truthCases, err := readCases(*truthCorpusPath)
 		if err != nil {
 			return fmt.Errorf("load truth corpus: %w", err)
 		}
@@ -307,7 +304,10 @@ func compareBenchmark(args []string, stdout io.Writer) error {
 			return err
 		}
 		comparisonCases = truthCases
-		truthCorpusSHA256 = benchmark.SHA256Hex(truthData)
+		truthCorpusSHA256, err = corpusSHA256(*truthCorpusPath)
+		if err != nil {
+			return fmt.Errorf("digest truth corpus: %w", err)
+		}
 	}
 	baseline, err := readPredictions(*baselinePath)
 	if err != nil {
@@ -321,11 +321,11 @@ func compareBenchmark(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	corpusData, err := os.ReadFile(*corpusPath)
+	corpusSHA256, err := corpusSHA256(*corpusPath)
 	if err != nil {
-		return fmt.Errorf("read corpus for digest: %w", err)
+		return fmt.Errorf("digest corpus: %w", err)
 	}
-	comparison.CorpusSHA256 = benchmark.SHA256Hex(corpusData)
+	comparison.CorpusSHA256 = corpusSHA256
 	comparison.TruthCorpusSHA256 = truthCorpusSHA256
 	data, err := json.MarshalIndent(comparison, "", "  ")
 	if err != nil {
@@ -395,22 +395,22 @@ func verifyBenchmark(args []string, stdout io.Writer) error {
 	return err
 }
 
-func loadInputs(corpusPath, lockPath string) ([]byte, []benchmark.Case, []byte, benchmark.DatasetLock, error) {
-	corpusData, err := os.ReadFile(corpusPath)
+func loadInputs(corpusPath, lockPath string) (string, []benchmark.Case, []byte, benchmark.DatasetLock, error) {
+	corpusSHA256, err := corpusSHA256(corpusPath)
 	if err != nil {
-		return nil, nil, nil, benchmark.DatasetLock{}, fmt.Errorf("read corpus: %w", err)
+		return "", nil, nil, benchmark.DatasetLock{}, fmt.Errorf("digest corpus: %w", err)
 	}
-	cases, err := benchmark.LoadCases(bytes.NewReader(corpusData))
+	cases, err := readCases(corpusPath)
 	if err != nil {
-		return nil, nil, nil, benchmark.DatasetLock{}, err
+		return "", nil, nil, benchmark.DatasetLock{}, err
 	}
 	lockData, err := os.ReadFile(lockPath)
 	if err != nil {
-		return nil, nil, nil, benchmark.DatasetLock{}, fmt.Errorf("read dataset lock: %w", err)
+		return "", nil, nil, benchmark.DatasetLock{}, fmt.Errorf("read dataset lock: %w", err)
 	}
 	lock, err := benchmark.ParseDatasetLock(lockData)
 	if err != nil {
-		return nil, nil, nil, benchmark.DatasetLock{}, err
+		return "", nil, nil, benchmark.DatasetLock{}, err
 	}
 	known := make(map[string]benchmark.DatasetSpec, len(lock.Datasets))
 	for _, dataset := range lock.Datasets {
@@ -419,26 +419,73 @@ func loadInputs(corpusPath, lockPath string) ([]byte, []benchmark.Case, []byte, 
 	for _, benchmarkCase := range cases {
 		dataset, ok := known[benchmarkCase.Source.Dataset]
 		if !ok {
-			return nil, nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q references dataset %q absent from lock", benchmarkCase.ID, benchmarkCase.Source.Dataset)
+			return "", nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q references dataset %q absent from lock", benchmarkCase.ID, benchmarkCase.Source.Dataset)
 		}
 		if !dataset.Enabled {
-			return nil, nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q references disabled dataset %q", benchmarkCase.ID, dataset.ID)
+			return "", nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q references disabled dataset %q", benchmarkCase.ID, dataset.ID)
 		}
 		if benchmarkCase.Source.Revision != dataset.Revision || benchmarkCase.Source.License != dataset.License ||
 			benchmarkCase.Source.Redistribution != dataset.Redistribution {
-			return nil, nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q provenance differs from dataset lock", benchmarkCase.ID)
+			return "", nil, nil, benchmark.DatasetLock{}, fmt.Errorf("case %q provenance differs from dataset lock", benchmarkCase.ID)
 		}
 	}
-	return corpusData, cases, lockData, lock, nil
+	return corpusSHA256, cases, lockData, lock, nil
 }
 
 func readCases(path string) ([]benchmark.Case, error) {
-	file, err := os.Open(path)
+	reader, closeReader, err := openCorpusReader(path)
 	if err != nil {
 		return nil, err
 	}
-	defer file.Close()
-	return benchmark.LoadCases(file)
+	cases, loadErr := benchmark.LoadCases(reader)
+	closeErr := closeReader()
+	if loadErr != nil {
+		return nil, loadErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	return cases, nil
+}
+
+func corpusSHA256(path string) (string, error) {
+	reader, closeReader, err := openCorpusReader(path)
+	if err != nil {
+		return "", err
+	}
+	hash := sha256.New()
+	_, copyErr := io.Copy(hash, reader)
+	closeErr := closeReader()
+	if copyErr != nil {
+		return "", copyErr
+	}
+	if closeErr != nil {
+		return "", closeErr
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func openCorpusReader(path string) (io.Reader, func() error, error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if !strings.HasSuffix(strings.ToLower(path), ".gz") {
+		return file, file.Close, nil
+	}
+	gzipReader, err := gzip.NewReader(file)
+	if err != nil {
+		_ = file.Close()
+		return nil, nil, fmt.Errorf("open gzip corpus: %w", err)
+	}
+	return gzipReader, func() error {
+		gzipErr := gzipReader.Close()
+		fileErr := file.Close()
+		if gzipErr != nil {
+			return gzipErr
+		}
+		return fileErr
+	}, nil
 }
 
 func readPredictions(path string) ([]benchmark.Prediction, error) {
@@ -460,6 +507,9 @@ func readPredictions(path string) ([]benchmark.Prediction, error) {
 func readNormalizationManifest(explicitPath, corpusPath string) ([]byte, error) {
 	path := explicitPath
 	if path == "" {
+		if strings.EqualFold(filepath.Ext(corpusPath), ".gz") {
+			corpusPath = strings.TrimSuffix(corpusPath, filepath.Ext(corpusPath))
+		}
 		extension := filepath.Ext(corpusPath)
 		path = strings.TrimSuffix(corpusPath, extension) + ".manifest.json"
 	}
