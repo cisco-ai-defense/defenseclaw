@@ -169,6 +169,7 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 		ToolChainSensitiveReadValueExternalTransmit:    {1 << 46, 1 << 47, 0},
 		ToolChainSensitiveSQLValueCrossResourcePersist: {1 << 48, 1 << 49, 0},
 		ToolChainCompromisedCredentialThenAuthenticate: {1 << 50, 1 << 51, 0},
+		ToolChainADCSCertificateRequestThenPFXAuth:     {1 << 53, 1 << 54, 0},
 	}
 	for index, definition := range ToolChainDefinitions() {
 		bits, ok := want[definition.ID]
@@ -182,17 +183,17 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 			t.Fatalf("%s result bit=%d want=%d", definition.ID, definition.ResultBit, wantResult)
 		}
 	}
-	if ToolChainCount != 22 || ToolChainLegacyCount != 13 ||
-		ToolChainKnownResultMask != uint32(0x3fffff) ||
+	if ToolChainCount != 23 || ToolChainLegacyCount != 13 ||
+		ToolChainKnownResultMask != uint32(0x7fffff) ||
 		ToolChainKnownResultMask&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("result slot bounds=%d/%#x want 22/0x3fffff",
+		t.Fatalf("result slot bounds=%d/%#x want 23/0x7fffff",
 			ToolChainCount, ToolChainKnownResultMask)
 	}
 	definition, _ := ToolChainDefinitionByID(ToolChainSQLServerXPCommandShellExecution)
-	if ToolChainKnownStepMask != uint64(0x1fffffffffffff) ||
+	if ToolChainKnownStepMask != uint64(0x7fffffffffffff) ||
 		ToolChainArtifactMutationBarrier != uint64(1<<19) ||
 		ToolChainKnownStepMask&ToolChainReservedSignBit != 0 {
-		t.Fatalf("step/barrier bounds=%#x/%#x want 0x3ffffffffffff/0x80000",
+		t.Fatalf("step/barrier bounds=%#x/%#x want 0x7fffffffffffff/0x80000",
 			ToolChainKnownStepMask, ToolChainArtifactMutationBarrier)
 	}
 	if definition.MutationBit != uint64(1<<24) {
@@ -224,6 +225,56 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 	if kubernetes.MutationBit != uint64(1<<28) {
 		t.Fatalf("Kubernetes mutation bit=%#x want %#x",
 			kubernetes.MutationBit, uint64(1<<28))
+	}
+}
+
+func TestMatchADCSCertificateRequestThenPFXAuthenticationRequiresExactArtifact(t *testing.T) {
+	definition, ok := ToolChainDefinitionByID(ToolChainADCSCertificateRequestThenPFXAuth)
+	if !ok || definition.DetectionOnly || !definition.RequiresExactJoin ||
+		definition.RequiresTerminalSuccess || definition.EventWindow != 9 ||
+		definition.TimeWindow != 30*time.Minute || definition.Severity != "HIGH" {
+		t.Fatalf("AD CS certificate impersonation definition=%+v", definition)
+	}
+	index, _ := ToolChainIndexByID(definition.ID)
+	const (
+		same  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		other = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	)
+	projection := func(step uint64, digest string) ToolChainProjection {
+		result := ToolChainProjection{
+			ParseStatus:         actionfacts.StatusComplete,
+			DetectionStepMask:   step,
+			EnforcementStepMask: step,
+		}
+		result.EnforcementJoinDigests[index] = digest
+		return result
+	}
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	request := ToolChainWindowEvent{
+		SemanticEventID: "certificate-request", Sequence: 1, ReceivedAt: now,
+		Projection: projection(definition.Step1Bit, same),
+	}
+	authenticate := ToolChainWindowEvent{
+		SemanticEventID: "pfx-authentication", Sequence: 9, ReceivedAt: now.Add(time.Minute),
+		Projection: projection(definition.Step2Bit, same),
+	}
+	matches, err := MatchToolChains([]ToolChainWindowEvent{request}, authenticate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches.DetectedMask&definition.ResultBit == 0 ||
+		matches.EnforcementSafeMask&definition.ResultBit == 0 {
+		t.Fatalf("exact AD CS lineage masks=%#x/%#x", matches.DetectedMask, matches.EnforcementSafeMask)
+	}
+
+	authenticate.Projection = projection(definition.Step2Bit, other)
+	matches, err = MatchToolChains([]ToolChainWindowEvent{request}, authenticate)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if matches.DetectedMask&definition.ResultBit != 0 ||
+		matches.EnforcementSafeMask&definition.ResultBit != 0 {
+		t.Fatalf("mismatched AD CS artifact matched: %+v", matches)
 	}
 }
 
@@ -649,18 +700,18 @@ func TestLegacyToolChainProjectionFingerprintSurvivesWidening(t *testing.T) {
 	}
 }
 
-func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwentyTwo(t *testing.T) {
-	const futureTwentyThirdChain = uint32(1 << 22)
+func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwentyThree(t *testing.T) {
+	const futureTwentyFourthChain = uint32(1 << 23)
 	matches := ToolChainMatches{
-		DetectedMask:        futureTwentyThirdChain,
-		EnforcementSafeMask: futureTwentyThirdChain,
+		DetectedMask:        futureTwentyFourthChain,
+		EnforcementSafeMask: futureTwentyFourthChain,
 	}
-	if matches.DetectedMask != futureTwentyThirdChain ||
-		matches.EnforcementSafeMask != futureTwentyThirdChain ||
-		futureTwentyThirdChain&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("uint32 result-mask capacity lost bit 22: %+v", matches)
+	if matches.DetectedMask != futureTwentyFourthChain ||
+		matches.EnforcementSafeMask != futureTwentyFourthChain ||
+		futureTwentyFourthChain&ToolChainReservedResultSignBit != 0 {
+		t.Fatalf("uint32 result-mask capacity lost bit 23: %+v", matches)
 	}
-	if _, err := ToolChainIDs(futureTwentyThirdChain); err == nil {
+	if _, err := ToolChainIDs(futureTwentyFourthChain); err == nil {
 		t.Fatal("future result bit was accepted before its catalog definition exists")
 	}
 }

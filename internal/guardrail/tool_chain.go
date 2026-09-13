@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 22
+	ToolChainCount       = 23
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -73,6 +73,7 @@ const (
 	ToolChainSensitiveReadValueExternalTransmit    = "chain.sensitive_read_value_then_external_literal_transmit"
 	ToolChainSensitiveSQLValueCrossResourcePersist = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
 	ToolChainCompromisedCredentialThenAuthenticate = "chain.compromised_credential_then_successful_authentication"
+	ToolChainADCSCertificateRequestThenPFXAuth     = "chain.adcs_certificate_request_then_pfx_authentication"
 	ToolChainMaxValueJoinDigests                   = 16
 	toolChainProjectionFingerprintDomain           = "defenseclaw.tool-chain.projection.v2"
 	toolChainWideProjectionFingerprintDomain       = "defenseclaw.tool-chain.projection.v3-wide"
@@ -367,6 +368,16 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// the tool explicitly classified as compromised. It remains non-blocking
 		// because an authorized assessment can intentionally perform this chain.
 		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainADCSCertificateRequestThenPFXAuth, Version: "1.0",
+		Title:       "AD CS impersonation certificate requested and used for PFX authentication",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "public-cochise-certipy-identity-override-pfx-write-to-exact-artifact-authentication-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		DetectionOnly:           false,
 	},
 }
 

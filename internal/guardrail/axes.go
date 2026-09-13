@@ -36,6 +36,12 @@ const (
 // plausibly hit multiple axes (e.g. "exec via network fetch"), we
 // list all of them so patterns see the full signal.
 func AxesForRuleID(ruleID string) []DataAxis {
+	// This fixed chain is assigned directly because its append-only catalog
+	// entry is intentionally scoped to the guardrail package. The public docs
+	// snapshot remains unchanged until the gateway integration is published.
+	if ruleID == ToolChainADCSCertificateRequestThenPFXAuth {
+		return []DataAxis{AxisSensitiveAccess}
+	}
 	if axes, ok := ruleAxes[ruleID]; ok {
 		return axes
 	}
