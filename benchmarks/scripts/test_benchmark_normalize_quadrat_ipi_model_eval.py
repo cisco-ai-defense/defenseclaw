@@ -136,6 +136,22 @@ def test_bounded_proof_keeps_required_source_and_sink() -> None:
     assert found[0]["selected_indices"][-1] == 7
 
 
+def test_lineage_proof_remains_contextual_without_policy_authorization() -> None:
+    truth = MODULE.proof_truth("http_post", ["SECRET_ANY"])
+    assert truth["source_truth"] == "malicious"
+    assert truth["deterministic_truth"] == "contextual_or_dual_use"
+    assert truth["applicability"] == "out_of_scope"
+    assert truth["expected_disposition"] == "detect_only"
+    assert truth["stateful_lens"] == "bounded_intent"
+
+
+def test_benign_stateful_controls_score_every_current_chain() -> None:
+    truth = MODULE.benign_truth("stateful")
+    assert truth["stateful_lens"] == "bounded_completed"
+    assert truth["rule_ids"] == list(MODULE.CHAIN_RULE_IDS)
+    assert "stateful_lens" not in MODULE.benign_truth("atomic")
+
+
 def test_duplicate_json_keys_are_rejected() -> None:
     import json
 
@@ -166,11 +182,12 @@ def test_real_pinned_projection_validates() -> None:
         pytest.skip("pinned Quadrat-IPI evaluation fixture is not present")
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert manifest["counts"]["source_episodes"] == MODULE.EXPECTED_SOURCE_ROWS
-    assert manifest["counts"]["selected_pairs"] > 0
-    assert manifest["counts"]["malicious_stateful_cases"] > 0
-    assert manifest["counts"]["benign_action_cases"] > 0
-    assert manifest["counts"]["authorized_payment_probe_cases"] == 20
+    stats = manifest["adapter_statistics"]["quadrat-ipi-model-eval-v1"]
+    assert stats["source_episodes"] == MODULE.EXPECTED_SOURCE_ROWS
+    assert stats["selected_pairs"] > 0
+    assert stats["contextual_stateful_cases"] > 0
+    assert stats["benign_action_cases"] > 0
+    assert stats["authorized_payment_probe_cases"] == 20
     assert all(case["split"] == "development" for case in cases)
     assert all(
         len(case["payload"].get("events", [])) <= MODULE.MAX_EVENTS for case in cases if case["surface"] == "stateful"
