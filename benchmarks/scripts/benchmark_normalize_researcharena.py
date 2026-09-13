@@ -1125,10 +1125,7 @@ def recursive_model_egress_case(
     evaluation: Evaluation,
     trajectory_id: str,
 ) -> dict[str, Any]:
-    connector, invocation_event, result_event = connector_events(metadata.red_provider)
     ordinal = f"s{event.sequence_index:04d}-c{event.call_index:03d}"
-    session_id = f"researcharena-{trajectory_id}"
-    invocation_id = f"researcharena-{trajectory_id}-{ordinal}"
     strata = case_strata(metadata, evaluation, trajectory_id, event)
     strata["hard_negative"] = False
     return {
@@ -1136,28 +1133,12 @@ def recursive_model_egress_case(
         "id": f"researcharena/{trajectory_id}/egress-{ordinal}",
         "source": source_record(revision, f"trace:{trajectory_id}#egress-{ordinal}"),
         "split": PRE_PARTITION_SPLIT,
-        "surface": "tool_result",
-        "payload": {
-            "tool_result": {
-                "invocation": {
-                    "connector": connector,
-                    "event": invocation_event,
-                    "session_id": session_id,
-                    "invocation_id": invocation_id,
-                    "tool_name": event.tool_name,
-                    "args": event.arguments,
-                },
-                "result": {
-                    "connector": connector,
-                    "event": result_event,
-                    "session_id": session_id,
-                    "invocation_id": invocation_id,
-                    "outcome": "succeeded",
-                    # Outcome is authoritative. Raw result bodies are intentionally absent.
-                    "content": "",
-                },
-            }
-        },
+        # This rule runs before execution, so benchmark it through the action
+        # adapter that invokes the production command detector. The source
+        # trajectory's authoritative successful result remains label evidence;
+        # it is not detector input and no result body is projected.
+        "surface": "action",
+        "payload": {"direction": "tool_call", **event_payload(event, include_result=False)},
         "truth": recursive_model_egress_truth(),
         "strata": strata,
     }
@@ -1443,8 +1424,8 @@ def normalize(
                     truth = case["truth"]
                     counts[f"truth_{truth['source_truth']}"] += 1
                     counts[f"applicability_{truth['applicability']}"] += 1
-                    if case["surface"] == "tool_result":
-                        counts["authoritative_success_outcomes_projected"] += 1
+                    if truth["label_source"] == "researcharena:authoritative-success-closed-lineage-v1":
+                        counts["authoritative_success_labels"] += 1
             temporary.flush()
             os.fsync(temporary.fileno())
         except Exception:
@@ -1479,7 +1460,7 @@ def normalize(
             counts["cases"],
             counts["truth_benign"],
             counts["recursive_model_candidate_events"],
-            counts["authoritative_success_outcomes_projected"],
+            counts["authoritative_success_labels"],
         )
         if observed_slice != expected_slice:
             raise ValueError(

@@ -518,7 +518,7 @@ func usesClosedShellExecutionArgumentSchema(raw json.RawMessage, tool string) bo
 	if problem.status != "" {
 		return false
 	}
-	for _, key := range []string{"description", "timeout", "run_in_background", "dangerouslyDisableSandbox"} {
+	for _, key := range []string{"description", "timeout", "run_in_background", "dangerouslyDisableSandbox", "workdir"} {
 		if _, ok := object[key]; ok {
 			return true
 		}
@@ -582,9 +582,10 @@ func extractExactShellExecutionArgs(raw json.RawMessage) extractedInput {
 	for key, value := range object {
 		switch key {
 		case "command":
-		case "cwd":
+		case "cwd", "workdir":
 			cwd, valid := value.(string)
-			if !valid || strings.TrimSpace(cwd) == "" || validateScalar(cwd, maxScalarBytes) != "" {
+			if !valid || out.cwd != "" || strings.TrimSpace(cwd) == "" ||
+				validateScalar(cwd, maxScalarBytes) != "" {
 				return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 			}
 			out.cwd = cwd

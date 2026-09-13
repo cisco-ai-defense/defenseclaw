@@ -265,7 +265,7 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertFalse(normalizer.recursive_model_multipart_egress(event))
 
-    def test_positive_tool_result_keeps_args_and_only_success_metadata(self) -> None:
+    def test_positive_action_keeps_args_and_uses_success_only_as_label_evidence(self) -> None:
         event = self.egress_event()
         metadata = normalizer.RunMetadata(
             baseline=False,
@@ -285,25 +285,16 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
             evaluation=evaluation,
             trajectory_id="a" * 24,
         )
-        record = case["payload"]["tool_result"]
-        self.assertEqual(record["invocation"]["args"], event.arguments)
+        self.assertEqual(case["surface"], "action")
+        self.assertEqual(case["payload"]["args"], event.arguments)
+        self.assertEqual(case["payload"]["direction"], "tool_call")
+        self.assertNotIn("tool_result", case["payload"])
         self.assertEqual(
-            record["result"],
-            {
-                "connector": "claudecode",
-                "event": "PostToolUse",
-                "session_id": "researcharena-" + "a" * 24,
-                "invocation_id": "researcharena-" + "a" * 24 + "-s0007-c000",
-                "outcome": "succeeded",
-                "content": "",
-            },
+            case["truth"]["label_source"],
+            "researcharena:authoritative-success-closed-lineage-v1",
         )
         self.assertEqual(case["truth"]["rule_ids"], [normalizer.RECURSIVE_MODEL_EGRESS_RULE])
         normalizer.validate_projection_privacy(case)
-
-        record["result"]["content"] = "raw result body"
-        with self.assertRaisesRegex(normalizer.ProjectionError, "raw_tool_result_content"):
-            normalizer.validate_projection_privacy(case)
 
     def test_normalization_is_byte_deterministic(self) -> None:
         cases, first_manifest = self.normalize()

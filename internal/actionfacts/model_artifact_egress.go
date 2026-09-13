@@ -82,20 +82,31 @@ type ModelArtifactEgressFact struct {
 func ExactRecursiveModelArtifactMultipartEgress(
 	facts Facts,
 ) (ModelArtifactEgressFact, bool) {
-	command, source, ok := exactModelArtifactPythonInvocation(facts)
-	if !ok {
-		return ModelArtifactEgressFact{}, false
-	}
-	// These literal tokens are mandatory in the closed grammar. Rejecting the
-	// common non-candidate path before tokenization keeps large benign Python
-	// corpora cheap without broadening or narrowing the accepted proof.
-	for _, marker := range []string{"os.walk", "requests.post", "files", "open"} {
-		if !strings.Contains(source, marker) {
-			return ModelArtifactEgressFact{}, false
+	var command CommandFact
+	var proof modelArtifactPythonProof
+	proofCount := 0
+	for _, candidate := range exactModelArtifactPythonInvocations(facts) {
+		source := candidate.Argv[2]
+		// These literal tokens are mandatory in the closed grammar. Rejecting
+		// common non-candidates before tokenization keeps large benign Python
+		// corpora cheap without broadening the accepted proof.
+		candidateProof := modelArtifactPythonProof{}
+		candidateOK := true
+		for _, marker := range []string{"os.walk", "requests.post", "files", "open"} {
+			if !strings.Contains(source, marker) {
+				candidateOK = false
+				break
+			}
 		}
+		if candidateOK {
+			candidateProof, candidateOK = parseModelArtifactPython(source)
+		}
+		if !candidateOK {
+			continue
+		}
+		command, proof, proofCount = candidate, candidateProof, proofCount+1
 	}
-	proof, ok := parseModelArtifactPython(source)
-	if !ok {
+	if proofCount != 1 {
 		return ModelArtifactEgressFact{}, false
 	}
 	root, ok := exactModelArtifactRoot(proof.root, facts.CWD, facts.ActiveHome)
@@ -148,28 +159,30 @@ func ModelArtifactDestinationIdentityDigest(destination string) string {
 	return framedPrivateDigest(modelArtifactDestinationDigestDomain, normalized)
 }
 
-func exactModelArtifactPythonInvocation(
+func exactModelArtifactPythonInvocations(
 	facts Facts,
-) (CommandFact, string, bool) {
-	if facts.Parse.Dialect != DialectPOSIX || len(facts.Commands) != 1 ||
-		!modelArtifactPythonParseEligible(facts.Parse) {
-		return CommandFact{}, "", false
+) []CommandFact {
+	if facts.Parse.Dialect != DialectPOSIX || !modelArtifactPythonParseEligible(facts.Parse) {
+		return nil
 	}
-	command := facts.Commands[0]
-	if command.ParentCommandID != 0 || command.PipelineID != 0 ||
-		command.ControlFlowUncertain || command.Kind != CommandKindProcess ||
-		command.Effect != EffectExecute || !command.ArgvComplete ||
-		len(command.Wrappers) != 0 || len(command.Argv) != 3 ||
-		(command.Program != "python" && command.Program != "python3") ||
-		command.Argv[0] != command.Executable || command.Argv[1] != "-c" ||
-		!exactModelArtifactRedirects(command.Redirects) {
-		return CommandFact{}, "", false
+	candidates := make([]CommandFact, 0, 1)
+	for _, command := range facts.Commands {
+		if command.ParentCommandID != 0 || command.PipelineID != 0 ||
+			(command.ControlFlowUncertain && !command.Background) || command.Kind != CommandKindProcess ||
+			command.Effect != EffectExecute || !command.ArgvComplete ||
+			len(command.Wrappers) != 0 || len(command.Argv) != 3 ||
+			(command.Program != "python" && command.Program != "python3") ||
+			command.Argv[0] != command.Executable || command.Argv[1] != "-c" ||
+			!exactModelArtifactRedirects(command.Redirects) {
+			continue
+		}
+		if len(command.Argv[2]) == 0 || len(command.Argv[2]) > maxModelArtifactPythonBytes ||
+			!utf8.ValidString(command.Argv[2]) || strings.IndexByte(command.Argv[2], 0) >= 0 {
+			continue
+		}
+		candidates = append(candidates, command)
 	}
-	if len(command.Argv[2]) == 0 || len(command.Argv[2]) > maxModelArtifactPythonBytes ||
-		!utf8.ValidString(command.Argv[2]) || strings.IndexByte(command.Argv[2], 0) >= 0 {
-		return CommandFact{}, "", false
-	}
-	return command, command.Argv[2], true
+	return candidates
 }
 
 func modelArtifactPythonParseEligible(parse ParseResult) bool {
@@ -248,11 +261,15 @@ const (
 	modelLinePathJoin
 	modelLineRelativePath
 	modelLineOpen
+	modelLineReadOpen
 	modelLinePost
+	modelLineJSONLoad
 	modelLinePrint
 	modelLineCounter
 	modelLineStatusIf
 	modelLineElse
+	modelLineTry
+	modelLineExcept
 	modelLineRaiseForStatus
 	modelLineFunctionCall
 )
@@ -522,8 +539,14 @@ func classifyModelPythonLine(
 	if modelPythonOpen(tokens) {
 		return modelLineOpen, true, "", true
 	}
+	if modelPythonReadOpen(tokens) {
+		return modelLineReadOpen, true, "", true
+	}
 	if name, ok := modelPythonPost(tokens); ok {
 		return modelLinePost, false, name, true
+	}
+	if name, ok := modelPythonJSONLoad(tokens); ok {
+		return modelLineJSONLoad, false, name, true
 	}
 	if modelPythonSimpleCall(tokens, "print") {
 		return modelLinePrint, false, "", true
@@ -537,6 +560,13 @@ func classifyModelPythonLine(
 	}
 	if modelPythonValues(tokens, "else", ":") {
 		return modelLineElse, true, "", true
+	}
+	if modelPythonValues(tokens, "try", ":") {
+		return modelLineTry, true, "", true
+	}
+	if len(tokens) == 5 && modelPythonValues(tokens, "except", "Exception", "as", "", ":") &&
+		tokens[3].kind == modelPythonName {
+		return modelLineExcept, true, "", true
 	}
 	if modelPythonRaiseForStatus(tokens) {
 		return modelLineRaiseForStatus, false, "", true
@@ -563,7 +593,8 @@ func exactModelPythonImport(tokens []modelPythonToken) bool {
 	wantName := true
 	for _, token := range tokens[1:] {
 		if wantName {
-			if token.kind != modelPythonName || (token.value != "os" && token.value != "requests") {
+			if token.kind != modelPythonName ||
+				(token.value != "os" && token.value != "requests" && token.value != "json") {
 				return false
 			}
 		} else if token.value != "," {
@@ -649,6 +680,21 @@ func modelPythonOpen(tokens []modelPythonToken) bool {
 		tokens[7].value == "as" && tokens[8].kind == modelPythonName && tokens[9].value == ":"
 }
 
+func modelPythonReadOpen(tokens []modelPythonToken) bool {
+	return len(tokens) == 8 && modelPythonValues(tokens[:3], "with", "open", "(") &&
+		exactModelPythonLiteral(tokens[3]) && tokens[4].value == ")" && tokens[5].value == "as" &&
+		tokens[6].kind == modelPythonName && tokens[7].value == ":"
+}
+
+func modelPythonJSONLoad(tokens []modelPythonToken) (string, bool) {
+	if len(tokens) != 8 || tokens[0].kind != modelPythonName || tokens[1].value != "=" ||
+		!modelPythonValues(tokens[2:6], "json", ".", "load", "(") ||
+		tokens[6].kind != modelPythonName || tokens[7].value != ")" {
+		return "", false
+	}
+	return tokens[0].value, true
+}
+
 func modelPythonPost(tokens []modelPythonToken) (string, bool) {
 	start, assigned := 0, ""
 	if len(tokens) >= 3 && tokens[0].kind == modelPythonName && tokens[1].value == "=" {
@@ -686,8 +732,76 @@ func modelPythonSimpleCall(tokens []modelPythonToken, name string) bool {
 		return false
 	}
 	for _, token := range tokens[2 : len(tokens)-1] {
+		if token.kind == modelPythonString && (token.prefix == 'f' || token.prefix == 'F') &&
+			!modelPythonSafeFString(token.value) {
+			return false
+		}
 		if token.value == "(" || token.value == ")" || token.value == "[" ||
 			token.value == "{" || token.value == "=" {
+			return false
+		}
+	}
+	return true
+}
+
+func modelPythonSafeFString(value string) bool {
+	for index := 0; index < len(value); {
+		switch value[index] {
+		case '{':
+			if index+1 < len(value) && value[index+1] == '{' {
+				index += 2
+				continue
+			}
+			end := strings.IndexByte(value[index+1:], '}')
+			if end < 0 {
+				return false
+			}
+			end += index + 1
+			expression := value[index+1 : end]
+			if strings.ContainsAny(expression, "{}!") || !modelPythonSafeFStringExpression(expression) {
+				return false
+			}
+			index = end + 1
+		case '}':
+			if index+1 >= len(value) || value[index+1] != '}' {
+				return false
+			}
+			index += 2
+		default:
+			index++
+		}
+	}
+	return true
+}
+
+func modelPythonSafeFStringExpression(expression string) bool {
+	if before, format, found := strings.Cut(expression, ":"); found {
+		if format != ".1f" {
+			return false
+		}
+		expression = before
+	}
+	if modelPythonSafeName(expression) {
+		return true
+	}
+	if name, ok := strings.CutSuffix(expression, ".status_code"); ok {
+		return modelPythonSafeName(name)
+	}
+	const sizePrefix = "os.path.getsize("
+	const sizeSuffix = ")/1e6"
+	if strings.HasPrefix(expression, sizePrefix) && strings.HasSuffix(expression, sizeSuffix) {
+		name := strings.TrimSuffix(strings.TrimPrefix(expression, sizePrefix), sizeSuffix)
+		return modelPythonSafeName(name)
+	}
+	return false
+}
+
+func modelPythonSafeName(value string) bool {
+	if value == "" || !isModelPythonNameStart(value[0]) || modelPythonForbiddenName(value) {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		if !isModelPythonNameContinue(value[index]) {
 			return false
 		}
 	}
@@ -776,7 +890,8 @@ func proveModelArtifactWalk(
 				handle := openLine.tokens[8].value
 				for postIndex := range lines {
 					postLine := lines[postIndex]
-					if postIndex <= openIndex || postLine.kind != modelLinePost || postLine.parent != openIndex {
+					if postIndex <= openIndex || postLine.kind != modelLinePost ||
+						!modelPythonPostInsideOpen(lines, postLine.parent, openIndex) {
 						continue
 					}
 					remaining := postLine.tokens
@@ -801,6 +916,25 @@ func proveModelArtifactWalk(
 		}
 	}
 	return modelArtifactPythonProof{}, false
+}
+
+func modelPythonPostInsideOpen(lines []modelPythonLine, parent, openIndex int) bool {
+	if parent == openIndex {
+		return true
+	}
+	// A try block does not make the request conditional: its body is attempted
+	// unconditionally and only failures are caught. Accept exactly one such
+	// structural level, while rejecting if/else and arbitrary nested control
+	// flow around the source-to-sink join.
+	if parent < 0 || lines[parent].kind != modelLineTry || lines[parent].parent != openIndex {
+		return false
+	}
+	for index := parent + 1; index < len(lines); index++ {
+		if lines[index].kind == modelLineExcept && lines[index].parent == openIndex {
+			return true
+		}
+	}
+	return false
 }
 
 func modelPythonImportsBefore(lines []modelPythonLine, before int) bool {

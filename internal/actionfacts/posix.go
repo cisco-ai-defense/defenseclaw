@@ -275,6 +275,7 @@ func projectPOSIXStatement(
 		PipelineID:           pipelineID,
 		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
 		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+		Background:           stmt.Background,
 		Dialect:              DialectPOSIX,
 		Effect:               EffectExecute,
 		ArgvComplete:         true,

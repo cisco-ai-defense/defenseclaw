@@ -585,7 +585,11 @@ func benchmarkCWD(explicit string, rawArgs json.RawMessage) string {
 	}
 	var object map[string]json.RawMessage
 	if json.Unmarshal(rawArgs, &object) == nil {
-		if raw, present := object["cwd"]; present {
+		for _, key := range []string{"cwd", "workdir"} {
+			raw, present := object[key]
+			if !present {
+				continue
+			}
 			var cwd string
 			if json.Unmarshal(raw, &cwd) == nil && cwd != "" {
 				// The closed tool schema owns this context. Supplying the

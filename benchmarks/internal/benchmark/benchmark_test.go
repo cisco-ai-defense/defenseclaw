@@ -1698,6 +1698,7 @@ func TestBenchmarkCWDDefersToRecordedToolArgument(t *testing.T) {
 	}{
 		{name: "explicit context wins", explicit: "/trusted", raw: `{"cwd":"/tool"}`, want: "/trusted"},
 		{name: "recorded tool context", raw: `{"command":"pwd","cwd":"/tool"}`, want: ""},
+		{name: "recorded workdir context", raw: `{"command":"pwd","workdir":"/tool"}`, want: ""},
 		{name: "missing context uses fixture default", raw: `{"command":"pwd"}`, want: "/repo"},
 		{name: "invalid context uses fixture default", raw: `{"cwd":7}`, want: "/repo"},
 	}

@@ -965,14 +965,18 @@ type CommandFact struct {
 	// should continue to use ControlFlowUncertain unless a bounded proof must
 	// distinguish an AND attempt from OR or mixed/unsupported control flow.
 	ControlFlowOperator CommandControlFlowOperator `json:"-"`
-	Kind                CommandKind
-	Dialect             Dialect
-	Effect              CommandEffect
-	Executable          string
-	Program             string
-	Argv                []string
-	Arguments           []ArgumentFact
-	ArgvComplete        bool
+	// Background distinguishes one statically present asynchronous POSIX
+	// statement from conditional or otherwise unresolved control flow. It is
+	// value-free and private to exact code-owned proofs.
+	Background   bool `json:"-"`
+	Kind         CommandKind
+	Dialect      Dialect
+	Effect       CommandEffect
+	Executable   string
+	Program      string
+	Argv         []string
+	Arguments    []ArgumentFact
+	ArgvComplete bool
 	// LiteralStdin is retained only for one bounded, single-quoted POSIX
 	// heredoc whose bytes cannot undergo shell expansion. It is private
 	// in-process evidence and is intentionally not part of the public semantic

@@ -50,11 +50,19 @@ func TestExtractExactShellExecutionArgs(t *testing.T) {
 		raw        string
 		wantStatus ParseStatus
 		wantBypass bool
+		wantCWD    string
 	}{
 		{
 			name:       "coding agent metadata",
 			raw:        `{"command":"printf ok","cwd":"/repo","description":"inspect state","timeout":120,"run_in_background":false}`,
 			wantStatus: StatusComplete,
+			wantCWD:    "/repo",
+		},
+		{
+			name:       "coding agent workdir alias",
+			raw:        `{"command":"printf ok","workdir":"/repo","description":"inspect state","timeout":120}`,
+			wantStatus: StatusComplete,
+			wantCWD:    "/repo",
 		},
 		{
 			name:       "sandbox disable retained",
@@ -63,13 +71,14 @@ func TestExtractExactShellExecutionArgs(t *testing.T) {
 			wantBypass: true,
 		},
 		{name: "unknown field", raw: `{"command":"printf ok","environment":{"X":"1"}}`, wantStatus: StatusPartial},
+		{name: "conflicting cwd aliases", raw: `{"command":"printf ok","cwd":"/repo","workdir":"/tmp"}`, wantStatus: StatusPartial},
 		{name: "invalid timeout", raw: `{"command":"printf ok","timeout":0}`, wantStatus: StatusPartial},
 		{name: "wrong background type", raw: `{"command":"printf ok","run_in_background":"false"}`, wantStatus: StatusPartial},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			got := extractArgsForTool(json.RawMessage(test.raw), "Bash")
-			if got.status != test.wantStatus || got.policyBypass != test.wantBypass {
+			if got.status != test.wantStatus || got.policyBypass != test.wantBypass || got.cwd != test.wantCWD {
 				t.Fatalf("extracted=%+v", got)
 			}
 		})
