@@ -36,6 +36,9 @@ def test_normalizes_paired_benign_trajectory_without_result_leakage():
     assert cases[0]["truth"]["stateful_lens"] == "bounded_completed"
     assert len(cases[0]["truth"]["rule_ids"]) == 20
     assert all(rule_id.startswith("chain.") for rule_id in cases[0]["truth"]["rule_ids"])
+    assert cases[0]["strata"]["trajectory_id"] == row()["TASK"]
+    assert cases[0]["strata"]["sequence_index"] == 0
+    assert cases[0]["strata"]["call_index"] == 0
     assert cases[0]["payload"]["events"][0]["outcome"] == "succeeded"
     assert "public result" not in json.dumps(cases[0]["payload"])
 

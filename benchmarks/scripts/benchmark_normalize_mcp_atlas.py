@@ -205,6 +205,9 @@ def normalize_rows(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, An
                     "language": "en",
                     "platform": "cross-platform",
                     "split_group": task,
+                    "trajectory_id": task,
+                    "sequence_index": 0,
+                    "call_index": 0,
                 },
                 "surface": "stateful",
                 "truth": {
