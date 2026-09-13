@@ -873,7 +873,9 @@ func TestNormalizationSourceMetadataIsStrictAndPreserved(t *testing.T) {
 		Source: &NormalizationSource{
 			Dataset: "test", Revision: "revision-1", License: "MIT",
 			Redistribution: "download-only", Path: "data/train.parquet",
-			Bytes: 42, SHA256: strings.Repeat("a", 64),
+			Bytes: 42, Rows: 7, Language: "en",
+			TrajectoryVerification: "automated_verifier_passing",
+			SHA256:                 strings.Repeat("a", 64),
 		},
 	}
 	data, err := json.Marshal(normalization)
@@ -885,7 +887,10 @@ func TestNormalizationSourceMetadataIsStrictAndPreserved(t *testing.T) {
 		t.Fatal(err)
 	}
 	if manifest.Normalization == nil || manifest.Normalization.Source == nil ||
-		manifest.Normalization.Source.SHA256 != strings.Repeat("a", 64) {
+		manifest.Normalization.Source.SHA256 != strings.Repeat("a", 64) ||
+		manifest.Normalization.Source.Rows != 7 ||
+		manifest.Normalization.Source.Language != "en" ||
+		manifest.Normalization.Source.TrajectoryVerification != "automated_verifier_passing" {
 		t.Fatalf("source metadata was not preserved: %+v", manifest.Normalization)
 	}
 

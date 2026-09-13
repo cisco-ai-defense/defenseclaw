@@ -43,9 +43,13 @@ type NormalizationSource struct {
 	Paths          []string `json:"paths,omitempty"`
 	Bytes          int64    `json:"bytes"`
 	Files          int      `json:"files,omitempty"`
+	Rows           int      `json:"rows,omitempty"`
 	SHA256         string   `json:"sha256"`
-	SourceURL      string   `json:"source_url,omitempty"`
-	URL            string   `json:"url,omitempty"`
+	Language       string   `json:"language,omitempty"`
+	// TrajectoryVerification records a closed adapter claim, never source text.
+	TrajectoryVerification string `json:"trajectory_verification,omitempty"`
+	SourceURL              string `json:"source_url,omitempty"`
+	URL                    string `json:"url,omitempty"`
 }
 
 type PartitionMetadata struct {
@@ -197,6 +201,8 @@ func buildCorpusManifest(
 		if source.Dataset == "" || normalized.Counts[source.Dataset] == 0 ||
 			source.Revision == "" || source.License == "" || source.Redistribution == "" ||
 			(source.Path == "" && len(source.Paths) == 0) || source.Bytes < 0 ||
+			source.Rows < 0 || len(source.Language) > 32 ||
+			len(source.TrajectoryVerification) > 160 ||
 			!validSHA256(source.SHA256) {
 			return CorpusManifest{}, fmt.Errorf("normalization source metadata is invalid")
 		}
