@@ -1,82 +1,111 @@
-import importlib.util
+#!/usr/bin/env python3
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
 import json
 import tempfile
 import unittest
 from pathlib import Path
 
-MODULE_PATH = Path(__file__).with_name("benchmark_normalize_dtap.py")
-SPEC = importlib.util.spec_from_file_location("benchmark_normalize_dtap", MODULE_PATH)
-assert SPEC and SPEC.loader
-MODULE = importlib.util.module_from_spec(SPEC)
-SPEC.loader.exec_module(MODULE)
+import benchmark_normalize_dtap as normalizer
 
 
-class NormalizeDTapTest(unittest.TestCase):
-    def write_case(self, root: Path, kind: str, success: bool, index: int = 1) -> None:
-        directory = root / "openaisdk" / "gpt-oss-120b" / "code" / kind / "case" / str(index)
-        directory.mkdir(parents=True)
-        trace = {
-            "task_info": {
-                "task_id": f"{kind}-{index}",
-                "domain": "code",
-                "original_instruction": "Complete the requested code task",
-                "risk_category": "dangerous-actions",
-            },
-            "trajectory": [
-                {
-                    "role": "agent",
-                    "metadata": {"tool_name": "execute_command", "tool_params": {"command": "rm /etc/passwd"}},
-                },
-                {
-                    "role": "tool",
-                    "state": repr(
-                        {"type": "text", "text": json.dumps({"success": success, "return_code": 0 if success else 1})}
-                    ),
-                },
-            ],
-        }
-        (directory / "trace.json").write_text(json.dumps(trace), encoding="utf-8")
-        judge = {"task_success": success, "attack_success": success}
-        (directory / "judge_result.json").write_text(json.dumps(judge), encoding="utf-8")
+def agent_call(tool_name, arguments):
+    return {
+        "role": "agent",
+        "metadata": {"tool_name": tool_name, "tool_params": arguments},
+        "content": "agent prose is not action evidence",
+    }
 
-    def test_keeps_only_judge_confirmed_trajectories_and_results(self) -> None:
-        with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
-            self.write_case(root, "benign", True)
-            self.write_case(root, "malicious", True)
-            self.write_case(root, "malicious", False, 2)
-            rows, counts = MODULE.normalize(root, "fixture-revision")
-            self.assertEqual(2, len(rows))
-            self.assertEqual(["benign", "malicious"], sorted(row["truth"]["source_truth"] for row in rows))
-            self.assertTrue(all(row["surface"] == "action" for row in rows))
-            self.assertTrue(all(row["payload"]["tool_name"] == "execute_command" for row in rows))
-            self.assertEqual(2, counts["events"])
-            self.assertEqual(2, counts["action"])
-            self.assertEqual(1, counts["unproved_malicious"])
 
-    def test_parser_never_executes_or_trusts_malformed_tool_state(self) -> None:
-        marker = Path(tempfile.gettempdir()) / "dtap-normalizer-must-not-exist"
-        marker.unlink(missing_ok=True)
-        state = {"role": "tool", "state": f"__import__('pathlib').Path({str(marker)!r}).touch()"}
-        self.assertEqual("unknown", MODULE.result_outcome(state))
-        self.assertFalse(marker.exists())
+def tool_result(tool_name, state):
+    return {"role": "tool", "metadata": {"tool_name": tool_name}, "state": state}
 
-    def test_long_trajectory_is_split_into_bounded_cases(self) -> None:
+
+def trace(*trajectory, instruction="List the records"):
+    return {
+        "task_info": {"domain": "research", "task_id": "task-1", "original_instruction": instruction},
+        "trajectory": list(trajectory),
+    }
+
+
+class DTapNormalizerTest(unittest.TestCase):
+    def test_parallel_calls_require_matching_non_error_results_and_keep_identity(self):
+        source = trace(
+            agent_call("search", {"query": "records"}),
+            agent_call("search", {"query": "users"}),
+            tool_result("search", {"success": True, "items": [1]}),
+            tool_result("search", {"text": '{"success": true, "items": [2]}'}),
+            agent_call("empty", {}),
+            agent_call("failed", {"cmd": "not-authorized"}),
+            tool_result("failed", {"success": False, "error": "denied"}),
+            agent_call("unmatched", {"query": "never returns"}),
+        )
+        events = normalizer.normalized_events(source)
+        self.assertEqual([event["tool_name"] for event in events], ["search", "search"])
+        self.assertEqual([event["offset_seconds"] for event in events], [0, 1])
+        self.assertEqual([event["outcome"] for event in events], ["succeeded", "succeeded"])
+        self.assertEqual([event["args"]["query"] for event in events], ["records", "users"])
+
+    def test_unknown_but_non_error_result_is_kept_and_literal_state_is_safe(self):
+        source = trace(
+            agent_call("lookup", {"key": "abc"}),
+            tool_result("lookup", "{'text': '{\"value\": 7}'}"),
+        )
+        events = normalizer.normalized_events(source)
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0]["outcome"], "unknown")
+
+    def test_plain_error_result_is_not_evidence(self):
+        source = trace(
+            agent_call("lookup", {"key": "abc"}),
+            tool_result("lookup", "Error: permission denied"),
+        )
+        self.assertEqual(normalizer.normalized_events(source), [])
+
+    def test_normalize_is_english_only_and_labels_are_source_limited(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benign = root / "research" / "benign"
+            malicious = root / "research" / "malicious" / "direct" / "dangerous-actions"
+            benign.mkdir(parents=True)
+            malicious.mkdir(parents=True)
+            good = trace(agent_call("read", {"path": "/tmp/report"}), tool_result("read", {"success": True}))
+            bad_language = trace(
+                agent_call("read", {"path": "/tmp/report"}),
+                tool_result("read", {"success": True}),
+                instruction="列出报告",
+            )
+            (benign / "one.json").write_text(json.dumps(good), encoding="utf-8")
+            (benign / "judge_result.json").write_text(json.dumps({"task_success": True}), encoding="utf-8")
+            (malicious / "two.json").write_text(json.dumps(bad_language), encoding="utf-8")
+            (malicious / "judge_result.json").write_text(json.dumps({"attack_success": True}), encoding="utf-8")
+            rows, counts = normalizer.normalize(root, normalizer.PINNED_REVISION)
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["truth"]["expected_disposition"], "allow")
+        self.assertEqual(counts["non_english"], 1)
+        self.assertEqual(rows[0]["source"]["revision"], normalizer.PINNED_REVISION)
+
+    def test_bounded_chunks_and_revision_guard(self):
         events = [
-            {
-                "args": {"command": f"echo {index}"},
-                "dialect": "none",
-                "offset_seconds": index,
-                "outcome": "succeeded",
-                "tool_name": "execute_command",
-            }
-            for index in range(MODULE.MAX_EVENTS + 1)
+            {"args": {"n": index}, "dialect": "none", "offset_seconds": index, "outcome": "unknown", "tool_name": "x"}
+            for index in range(normalizer.MAX_EVENTS + 1)
         ]
-        projected = MODULE.bounded_payloads(events)
-        self.assertEqual("stateful", projected[0][0])
-        self.assertEqual(MODULE.MAX_EVENTS, len(projected[0][1]["events"]))
-        self.assertEqual("action", projected[1][0])
+        projected = normalizer.bounded_payloads(events)
+        self.assertEqual([surface for surface, _ in projected], ["stateful", "action"])
+        self.assertEqual(len(projected[0][1]["events"]), normalizer.MAX_EVENTS)
+        sparse = [
+            {"_ordinal": 0, "args": {"n": 0}, "dialect": "none", "offset_seconds": 0, "outcome": "unknown", "tool_name": "x"},
+            {"_ordinal": 1, "args": {"n": 1}, "dialect": "none", "offset_seconds": 1, "outcome": "unknown", "tool_name": "x"},
+            {"_ordinal": normalizer.MAX_EVENTS, "args": {"n": 1}, "dialect": "none", "offset_seconds": normalizer.MAX_EVENTS, "outcome": "unknown", "tool_name": "x"},
+        ]
+        sparse_projected = normalizer.bounded_payloads_from_source(sparse, normalizer.MAX_EVENTS + 1)
+        self.assertEqual(len(sparse_projected), 2)
+        self.assertNotIn("_ordinal", sparse_projected[0][1]["events"][0])
+        with self.assertRaises(ValueError):
+            normalizer.normalize(Path("/does/not/exist"), "not-the-pinned-revision")
 
 
 if __name__ == "__main__":
     unittest.main()
+

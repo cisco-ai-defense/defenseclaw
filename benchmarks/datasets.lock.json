@@ -357,6 +357,18 @@
       "enabled": true
     },
     {
+      "id": "dtap-bench-agent-trajectories",
+      "purpose": ["stateful", "bounded-chain-candidate", "hard-negative", "real-tool-arguments", "trajectory-label-candidate"],
+      "source_url": "https://huggingface.co/datasets/AI-Secure/DTap-Bench-Agent-Trajectories",
+      "revision": "836caf2fdd78b888ddd14fb62dc038e932e17898",
+      "fetch": "manual",
+      "include_paths": ["README.md"],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
       "id": "toolsandbox",
       "purpose": ["stateful", "tool-benign"],
       "source_url": "https://github.com/apple/ToolSandbox.git",
