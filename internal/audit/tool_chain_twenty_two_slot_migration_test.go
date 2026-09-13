@@ -16,8 +16,8 @@ func TestToolChainTwentyTwoSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 	}
 	fixture := newToolChainFixture(t, ":memory:")
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"967", "15487"},
-		"guardrail_chain_pending_actions": {"967", "15487"},
+		"guardrail_chain_events":          {"1011", "16191"},
+		"guardrail_chain_pending_actions": {"1011", "16191"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(

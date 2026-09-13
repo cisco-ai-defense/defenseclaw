@@ -1825,6 +1825,10 @@ var migrations = []migration{
 		description: "guardrails: bind pending credential sources to authoritative results",
 		apply:       migrateToolChainReturnedCredentialSourceState,
 	},
+	{
+		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
+		apply:       migrateToolChainTwentyThreeSlotADCSState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
