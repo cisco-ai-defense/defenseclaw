@@ -24,6 +24,7 @@ import os
 import re
 import shlex
 import tempfile
+import unicodedata
 from collections import Counter, defaultdict
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
@@ -41,8 +42,9 @@ PRE_PARTITION_SPLIT = "smoke"
 PARTITION_AUTHORITY = "benchmarks/scripts/benchmark_partition.py"
 GROUPING_STRATEGY = "enigma-benchmark-task-identity-v1"
 
-CHAIN_BOUND = 8
-MAX_STATEFUL_EVENTS = CHAIN_BOUND + 1
+MIN_PROOF_EVENTS = 2
+MAX_PROOF_EVENTS = 8
+MAX_STATEFUL_EVENTS = MAX_PROOF_EVENTS
 MAX_SOURCE_FILE_BYTES = 64 * 1024 * 1024
 MAX_TRAJECTORY_EVENTS = 4_096
 MAX_ACTION_BYTES = 1024 * 1024
@@ -230,6 +232,36 @@ def source_identity(relative_path: Path) -> tuple[str, str]:
     return benchmark[:160], task_name[:160]
 
 
+def english_only(document: Mapping[str, Any]) -> bool:
+    """Reject natural-language fields containing non-Latin alphabetic text.
+
+    Observations and state are intentionally excluded: CTF output commonly
+    contains arbitrary bytes rendered as Unicode replacement characters. The
+    detector payload contains only actions, so this check is about the
+    trajectory's natural-language framing rather than challenge artifacts.
+    """
+
+    natural_language: list[str] = []
+    history = document.get("history")
+    if isinstance(history, list):
+        for message in history:
+            if isinstance(message, Mapping) and isinstance(message.get("content"), str):
+                natural_language.append(message["content"])
+    records = document.get("trajectory")
+    if isinstance(records, list):
+        for record in records:
+            if not isinstance(record, Mapping):
+                continue
+            for key in ("response", "thought"):
+                if isinstance(record.get(key), str):
+                    natural_language.append(record[key])
+    for text in natural_language:
+        for character in text:
+            if character.isalpha() and unicodedata.name(character, "").split(" ", 1)[0] != "LATIN":
+                return False
+    return True
+
+
 def project_trajectory(path: Path, root: Path, revision: str) -> Trajectory:
     try:
         relative = path.resolve(strict=True).relative_to(root.resolve(strict=True))
@@ -268,7 +300,7 @@ def project_trajectory(path: Path, root: Path, revision: str) -> Trajectory:
         if not matching:
             raise ProjectionError("submission_action_mismatch")
         submit_source_index = matching[-1].source_index
-        lower = max(0, submit_source_index - CHAIN_BOUND)
+        lower = max(0, submit_source_index - (MAX_PROOF_EVENTS - 1))
         for index in range(submit_source_index - 1, lower - 1, -1):
             observation = records[index].get("observation")
             if (
@@ -280,6 +312,10 @@ def project_trajectory(path: Path, root: Path, revision: str) -> Trajectory:
                 break
 
     lineage = proof_source_index is not None and submit_source_index is not None
+    if lineage:
+        proof_events = submit_source_index - proof_source_index + 1
+        if not MIN_PROOF_EVENTS <= proof_events <= MAX_PROOF_EVENTS:
+            raise ProjectionError("proof_outside_2_to_8_events")
     marked_actions = []
     for action in actions:
         outcome = (
@@ -467,12 +503,33 @@ def build_corpus(
     group_counts: Counter[str] = Counter()
     group_surfaces: dict[str, Counter[str]] = defaultdict(Counter)
     group_metadata: dict[str, tuple[str, str]] = {}
+    audit: Counter[str] = Counter()
+    proof_lengths: Counter[str] = Counter()
 
     paths = sorted(root.rglob("*.traj"), key=lambda path: path.relative_to(root).as_posix())
     for path in paths:
         counts["source_files"] += 1
         try:
+            document = load_source(path)
+            audit["english_only_checked"] += 1
+            if not english_only(document):
+                skipped["non_english_trajectory"] += 1
+                continue
+            info = document.get("info")
+            if isinstance(info, Mapping):
+                status = info.get("exit_status")
+                if status == "submitted":
+                    audit["submitted"] += 1
+                if "result" in info:
+                    audit["result_identity_present"] += 1
+                if "verifier" in info:
+                    audit["verifier_identity_present"] += 1
             trajectory = project_trajectory(path, root, revision)
+            if trajectory.submitted:
+                audit["successful_outcome_closure"] += 1 if trajectory.lineage else 0
+            if trajectory.lineage:
+                assert trajectory.proof_start is not None and trajectory.proof_end is not None
+                proof_lengths[str(trajectory.proof_end - trajectory.proof_start + 1)] += 1
             case = make_case(trajectory, revision)
         except (ProjectionError, OSError) as exc:
             code = exc.code if isinstance(exc, ProjectionError) else "source_io_error"
@@ -509,12 +566,33 @@ def build_corpus(
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "datasets": [DATASET_ID],
+        "source_revision": revision,
+        "source_url": SOURCE_URL,
+        "lock_include_paths": ["LICENSE", "README.md", "trajectories"],
         "cases": len(cases),
         "counts": {DATASET_ID: len(cases)},
         "exact_payload_duplicates_removed": 0,
         "label_conflicts_excluded": 0,
         "adapter_statistics": {ADAPTER: adapter_statistics},
         "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
+        "audit": {
+            "english_only": True,
+            "source_files": counts["source_files"],
+            "english_trajectories": audit["english_only_checked"] - skipped["non_english_trajectory"],
+            "non_english_trajectories": skipped["non_english_trajectory"],
+            "source_submitted": audit["submitted"],
+            "source_fields": {
+                "result_identity": "result",
+                "verifier_identity": "verifier",
+                "successful_outcome": "info.exit_status=submitted + info.submission + exact submit action",
+            },
+            "result_identity_present": audit["result_identity_present"],
+            "verifier_identity_present": audit["verifier_identity_present"],
+            "successful_outcome_closure": audit["successful_outcome_closure"],
+            "proof_event_lengths": {key: proof_lengths[key] for key in sorted(proof_lengths, key=int)},
+            "proof_event_bound": [MIN_PROOF_EVENTS, MAX_PROOF_EVENTS],
+            "exact_tool_arguments": True,
+        },
     }
     group_manifest = {
         "schema_version": SCHEMA_VERSION,
