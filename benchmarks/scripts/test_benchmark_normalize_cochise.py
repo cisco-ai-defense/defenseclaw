@@ -212,6 +212,10 @@ class CochiseNormalizerTests(unittest.TestCase):
         ]
         self.assertEqual(len(positives), 1)
         self.assertEqual(positives[0]["surface"], "action")
+        self.assertEqual(
+            positives[0]["truth"]["rule_ids"],
+            [adapter.KERBEROS_TICKET_FORGERY_RULE],
+        )
         self.assertNotIn("a" * 32, json.dumps(cases, sort_keys=True))
 
     def test_compromised_fact_requires_exact_bounded_successful_authentication(self) -> None:
@@ -418,6 +422,7 @@ class CochiseNormalizerTests(unittest.TestCase):
         for value in (*values, nthash):
             self.assertNotIn(value, projected)
         self.assertNotIn("c" * 32, projected)
+        self.assertIn("0" * 32, projected)
         self.assertIn("REDACTED_SECRET_", projected)
         self.assertNotRegex(projected, r"REDACTED_SECRET_[0-9a-f]{64}")
 
