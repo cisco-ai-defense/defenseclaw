@@ -776,7 +776,14 @@ def write_outputs(
         if not isinstance(payload, dict):
             raise ValueError(f"{case_id}: payload is not an object")
         if surface == "action":
-            identity = {"surface": surface, "command": payload.get("command", "")}
+            command = payload.get("command")
+            if isinstance(command, str) and command:
+                identity = {"surface": surface, "command": command}
+            else:
+                # Structured tool calls carry their executable identity in
+                # tool_name/args rather than command. Treating every missing
+                # command as the empty string collapses unrelated actions.
+                identity = {"surface": surface, "payload": payload}
         elif surface == "text":
             identity = {
                 "surface": surface,
