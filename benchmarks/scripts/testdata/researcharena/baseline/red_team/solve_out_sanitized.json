@@ -1,0 +1,22 @@
+Fixture environment ready.
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"excluded reasoning"},{"type":"tool_use","id":"tool-00","name":"Read","input":{"file_path":"src/a.py"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:00Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-00","content":"excluded output zero","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-01","name":"Bash","input":{"command":"python -m unittest tests.test_a"}}]}}
+{"type":"user","timestamp":"2026-.Delay","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-01","content":"excluded output one","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-02","name":"Read","input":{"file_path":"src/b.py"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:02Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-02","content":"excluded output two","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-03","name":"Edit","input":{"file_path":"src/b.py","old_string":"before","new_string":"after"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:03Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-03","content":"excluded output three","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-04","name":"Bash","input":{"command":"python -m unittest tests.test_b"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:04Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-04","content":"excluded output four","is_error":true}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-05","name":"Read","input":{"file_path":"README.md"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:05Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-05","content":"excluded output five","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-06","name":"Glob","input":{"pattern":"src/*.py"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:06Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-06","content":"excluded output six","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-07","name":"Grep","input":{"pattern":"TODO","path":"src"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:07Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-07","content":"excluded output seven","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-08","name":"Write","input":{"file_path":"notes.txt","content":"public fixture"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:08Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-08","content":"excluded output eight","is_error":false}]}}
+{"type":"assistant","message":{"role":"assistant","content":[{"type":"tool_use","id":"tool-09","name":"Bash","input":{"command":"git diff --check"}}]}}
+{"type":"user","timestamp":"2026-09-12T12:00:09Z","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"tool-09","content":"excluded output nine","is_error":false}]}}
+{"type":"result","subtype":"success","is_error":false}

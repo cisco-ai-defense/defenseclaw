@@ -1,0 +1,9 @@
+Sandbox ready.
+{"type":"thread.started","thread_id":"thread-fixture"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item-1","type":"command_execution","command":"/bin/bash -lc 'python bench.py --compile-only'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item-1","type":"command_execution","command":"/bin/bash -lc 'python bench.py --compile-only'","aggregated_output":"excluded compile output","exit_code":0,"status":"completed"}}
+{"type":"item.started","item":{"id":"item-2","type":"file_change","changes":[{"path":"/home/user/task/server.py","kind":"update"}],"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item-2","type":"file_change","changes":[{"path":"/home/user/task/server.py","kind":"update"}],"status":"completed"}}
+{"type":"item.completed","item":{"id":"msg-1","type":"agent_message","text":"excluded model prose"}}
+{"type":"turn.completed","usage":{"input_tokens":10,"output_tokens":5}}

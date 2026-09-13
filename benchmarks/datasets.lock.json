@@ -1044,6 +1044,34 @@
       "enabled": true
     },
     {
+      "id": "aisa-group/ResearchArena-Trajectories",
+      "purpose": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "contextual-security",
+        "coding-agent",
+        "bounded-sequence",
+        "evaluator-scored-side-task",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/aisa-group/ResearchArena-Trajectories",
+      "revision": "241e456ba88bc09ba40ec906cf0c16e4b2daa918",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "**/metadata.json",
+        "**/red_team/solve_out_sanitized.json",
+        "**/blue_team/*/results.json"
+      ],
+      "license": "Apache-2.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
       "id": "infraset/infraset",
       "purpose": [
         "action",

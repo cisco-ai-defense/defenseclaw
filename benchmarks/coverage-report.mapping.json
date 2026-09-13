@@ -988,6 +988,26 @@
         "Trajectory-level verifier success supplies benign task context, but individual command outcomes are unavailable and remain unknown."
       ]
     },
+    "aisa-group/ResearchArena-Trajectories": {
+      "intended_use": [
+        "action",
+        "stateful",
+        "benign",
+        "hard-negative",
+        "contextual-security",
+        "coding-agent",
+        "bounded-sequence",
+        "evaluator-scored-side-task",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "Only English baseline runs with unanimously positive main-task-score signs contribute in-scope benign/FPR cases.",
+        "Side-task trajectories remain contextual and out of scope even when every evaluator reports a positive side-task score; individual calls are never labeled deterministic malicious.",
+        "Tool outputs are consumed only to establish outcome and are not copied into detector payloads; malformed stream-json trajectories fail closed."
+      ]
+    },
     "few-sh/terminal-wrench-trajectories": {
       "intended_use": [
         "action",
