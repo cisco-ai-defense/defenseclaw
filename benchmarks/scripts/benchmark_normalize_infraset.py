@@ -115,7 +115,12 @@ class Event:
             "command": self.command,
             "dialect": "posix",
             "outcome": self.outcome,
-            "tool_name": "infrastructure_command",
+            # InfraSet's closed infrastructure_command envelope executes this
+            # exact POSIX command on the named disposable node. Project that
+            # source-specific primitive onto the benchmark's canonical shell
+            # surface so ActionFacts evaluates command semantics. The source
+            # dataset identity preserves the original envelope semantics.
+            "tool_name": "shell",
         }
 
 
@@ -330,7 +335,7 @@ def normalize(
                 "node": event.node,
                 "return_code": event.return_code,
                 "task_group": group,
-                "tool_name": "infrastructure_command",
+                "tool_name": "shell",
             }
             fingerprint = hashlib.sha256(canonical_json(normalized_action).encode()).hexdigest()
             if fingerprint in seen_actions:

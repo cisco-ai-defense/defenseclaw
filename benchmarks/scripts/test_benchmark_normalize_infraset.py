@@ -93,6 +93,10 @@ class InfraSetNormalizerTest(unittest.TestCase):
         self.assertTrue(all(case["truth"]["stateful_lens"] == "bounded_intent" for case in stateful))
         self.assertTrue(all(case["truth"]["rule_ids"] == MODULE.CHAIN_RULE_IDS for case in stateful))
         self.assertEqual(5, counts["cases"])
+        self.assertTrue(all(case["payload"]["tool_name"] == "shell" for case in actions))
+        self.assertTrue(
+            all(event["tool_name"] == "shell" for event in stateful[-1]["payload"]["events"])
+        )
         self.assertEqual(
             ["succeeded", "failed", "unknown"],
             [event["outcome"] for event in stateful[-1]["payload"]["events"]],
