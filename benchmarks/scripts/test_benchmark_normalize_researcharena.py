@@ -66,6 +66,21 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
         self.assertTrue(cases)
         self.assertTrue(all(case["strata"]["language"] == "en" for case in cases))
 
+    def test_manifest_uses_public_benchmark_contract(self) -> None:
+        cases, manifest = self.normalize()
+        statistics = manifest["adapter_statistics"][normalizer.ADAPTER]
+        source = manifest["source"]
+
+        self.assertTrue(cases)
+        self.assertTrue(statistics)
+        self.assertTrue(all(type(value) is int for value in statistics.values()))
+        self.assertEqual(source["path"], "pinned-source-tree")
+        self.assertGreater(source["bytes"], 0)
+        self.assertGreater(source["files"], 0)
+        self.assertEqual(len(source["sha256"]), 64)
+        self.assertNotIn("source_bytes", source)
+        self.assertNotIn("source_tree_sha256", source)
+
     def test_split_group_is_stable_per_task_family(self) -> None:
         copied = Path(self.temporary.name) / "fixture-task-families"
         shutil.copytree(self.fixture, copied)
