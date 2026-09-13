@@ -105,6 +105,7 @@ class NormalizeActBenchTest(unittest.TestCase):
         self.assertEqual([0, 2], [case["strata"]["sequence_index"] for case in actions])
         self.assertTrue(all(case["truth"]["deterministic_truth"] == "benign" for case in cases))
         self.assertTrue(all(case["strata"]["hard_negative"] for case in cases))
+        self.assertTrue(all(case["strata"]["language"] == "en" for case in cases))
         self.assertEqual(
             ["succeeded", "failed", "succeeded"],
             [event["outcome"] for event in sequences[0]["payload"]["events"]],
@@ -118,6 +119,7 @@ class NormalizeActBenchTest(unittest.TestCase):
         cases, manifest = MODULE.normalize([source_row("attack")], REVISION)
 
         self.assertEqual(1, len(cases))
+        self.assertEqual("en", cases[0]["strata"]["language"])
         case = cases[0]
         self.assertEqual("stateful", case["surface"])
         self.assertEqual("malicious", case["truth"]["source_truth"])
