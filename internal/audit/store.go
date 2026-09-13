@@ -1829,6 +1829,10 @@ var migrations = []migration{
 		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
 		apply:       migrateToolChainTwentyThreeSlotADCSState,
 	},
+	{
+		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
+		apply:       migrateToolChainTwentyFourSlotS4UState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.
