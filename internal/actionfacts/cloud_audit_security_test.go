@@ -57,6 +57,37 @@ func TestCloudAuditSecurityOperationsRejectNearMisses(t *testing.T) {
 	}
 }
 
+func TestCloudShareSameOperationControlsAreAuthoritativeWithoutFindings(t *testing.T) {
+	t.Parallel()
+	controls := []string{
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifySnapshotAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":{"attributeType":"CREATE_VOLUME_PERMISSION","createVolumePermission":{"remove":{"items":[{"group":"all"}]}},"snapshotId":"snap-0123456789abcdef0"}}`,
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifyImageAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":{"attributeType":"launchPermission","imageId":"ami-0123456789abcdef0","launchPermission":{"remove":{"items":[{"group":"all"}]}}}}`,
+		`{"provider":"aws","event_source":"rds.amazonaws.com","event_name":"ModifyDBSnapshotAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":{"attributeName":"restore","dBSnapshotIdentifier":"production-snapshot","valuesToRemove":["111111111111"]}}`,
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifySnapshotAttribute","status":{"error_code":"Client.UnauthorizedOperation","error_message_present":true,"outcome":"failed"},"request_parameters":{"attributeType":"CREATE_VOLUME_PERMISSION","createVolumePermission":{"add":{"items":[{"userId":"222222222222"}]}},"snapshotId":"snap-0123456789abcdef0"}}`,
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifyImageAttribute","status":{"error_code":"Client.InvalidParameterCombination","error_message_present":true,"outcome":"failed"},"request_parameters":null}`,
+	}
+	for _, raw := range controls {
+		facts := Analyze(Input{Tool: "aws.cloudtrail_event", Args: json.RawMessage(raw)})
+		if !facts.Authoritative() || len(ExactCloudAuditSecurityOperations(facts)) != 0 {
+			t.Fatalf("same-operation control was not an authoritative non-finding: facts=%+v", facts)
+		}
+	}
+}
+
+func TestCloudShareOperationEnvelopeRejectsOpenShapes(t *testing.T) {
+	t.Parallel()
+	for _, raw := range []string{
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifySnapshotAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":null}`,
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifySnapshotAttribute","status":{"error_code":"Denied","error_message_present":true,"outcome":"failed","extra":true},"request_parameters":null}`,
+		`{"provider":"aws","event_source":"ec2.amazonaws.com","event_name":"ModifySnapshotAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":{"attributeType":"CREATE_VOLUME_PERMISSION","createVolumePermission":{"remove":{"items":[{"group":"everyone"}]}},"snapshotId":"snap-0123456789abcdef0"}}`,
+		`{"provider":"aws","event_source":"rds.amazonaws.com","event_name":"ModifyDBSnapshotAttribute","status":{"error_code":null,"error_message_present":false,"outcome":"succeeded"},"request_parameters":{"attributeName":"restore","dBSnapshotIdentifier":"production-snapshot","valuesToRemove":["dynamic-account"]}}`,
+	} {
+		if facts := Analyze(Input{Tool: "aws.cloudtrail_event", Args: json.RawMessage(raw)}); facts.Authoritative() {
+			t.Fatalf("open cloud-share shape became authoritative: %+v", facts)
+		}
+	}
+}
+
 func TestCloudAuditSecurityOperationsRejectUnprovenSensitiveParameters(t *testing.T) {
 	t.Parallel()
 	cases := []struct {

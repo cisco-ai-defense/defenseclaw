@@ -2,7 +2,8 @@
 
 This directory contains a three-row, normalized test fixture for
 `benchmark_normalize_cloud_share_controls.py`. It preserves the bounded AWS
-request/result shapes needed by the parser while excluding credentials,
+request/status shapes needed by the parser while using source results only as
+label evidence and excluding credentials,
 principal details, source addresses, user agents, TLS metadata, and plaintext
 error messages. It is not the benchmark corpus and must not be used as an FPR
 denominator.
@@ -25,6 +26,11 @@ successful permission removals and five argument-complete failed operations.
 Two additional failed operations have no request parameters and are retained
 only as parser controls with `applicability=out_of_scope`. Eight observations
 are too few for a production false-positive-rate claim.
+
+The Elastic and CybersecJSONSchemaBench entries remain disabled in the dataset
+lock pending license review. The adapter and fixture are retained so the slice
+can be reproduced immediately after approval, but its aggregate must not enter
+a publishable benchmark until then.
 
 Labels are deterministic projections of source arguments and outcomes. No LLM
 labels are used.

@@ -1177,6 +1177,71 @@
       "enabled": true
     },
     {
+      "id": "elastic/integrations-aws-cloudtrail-fixtures",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "successful-permission-removal",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://github.com/elastic/integrations",
+      "revision": "f79b2e9c59de04d980d0bb087421f2c2b1a9cd8d",
+      "fetch": "git",
+      "include_paths": [
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-snapshot-attribute-json.log",
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-image-attribute-json.log",
+        "packages/aws/data_stream/cloudtrail/_dev/test/pipeline/test-modify-db-snapshot-attributte-json.log"
+      ],
+      "license": "Elastic-2.0",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "achinta3/cybersec-jsonschemabench-cloudtrail-v6",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/achinta3/cybersec-jsonschemabench-cloudtrail-v6",
+      "revision": "f90172fc32a3900e97f63bd30538abcc9565f238",
+      "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "test.jsonl"
+      ],
+      "license": "other",
+      "license_status": "review_required",
+      "redistribution": "download-only",
+      "enabled": false
+    },
+    {
+      "id": "adanalvarez/TrailDiscover",
+      "purpose": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "parser-boundary"
+      ],
+      "source_url": "https://github.com/adanalvarez/TrailDiscover",
+      "revision": "f96cbdb0591f78d16b1948e84c211becce6258e6",
+      "fetch": "git",
+      "include_paths": [
+        "LICENSE",
+        "events/EC2/ModifySnapshotAttribute.json.cloudtrail",
+        "events/EC2/ModifyImageAttribute.json.cloudtrail",
+        "events/RDS/ModifyDBSnapshotAttribute.json.cloudtrail"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
       "id": "agent-trace",
       "purpose": [
         "action",

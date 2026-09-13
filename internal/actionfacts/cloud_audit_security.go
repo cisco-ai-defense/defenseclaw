@@ -68,6 +68,125 @@ func exactCloudAuditSecurityOperationInput(raw json.RawMessage) (CloudAuditSecur
 	return exactCloudAuditOperation(source, name, parameters, object["principal"])
 }
 
+// exactCloudShareOperationEnvelope recognizes the complete, value-bounded
+// event grammar for the three snapshot-sharing APIs even when the operation
+// failed or removed permission. Those controls are authoritative benign
+// same-operation inputs, but they deliberately emit no security-operation
+// fact. Successful external additions still require exactCloudAuditOperation.
+func exactCloudShareOperationEnvelope(raw json.RawMessage) bool {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" || !exactObjectKeys(object, cloudAuditOuterKeys) ||
+		exactString(object["provider"]) != "aws" {
+		return false
+	}
+	succeeded, statusOK := exactClosedCloudAuditStatus(object["status"])
+	if !statusOK {
+		return false
+	}
+	operation := exactString(object["event_source"]) + ":" + exactString(object["event_name"])
+	switch operation {
+	case "ec2.amazonaws.com:ModifySnapshotAttribute",
+		"ec2.amazonaws.com:ModifyImageAttribute",
+		"rds.amazonaws.com:ModifyDBSnapshotAttribute":
+	default:
+		return false
+	}
+	parameters, hasParameters := object["request_parameters"].(map[string]any)
+	if !hasParameters {
+		return !succeeded && object["request_parameters"] == nil
+	}
+	switch operation {
+	case "ec2.amazonaws.com:ModifySnapshotAttribute":
+		return len(parameters) == 3 &&
+			exactString(parameters["attributeType"]) == "CREATE_VOLUME_PERMISSION" &&
+			exactEC2ResourceID(parameters["snapshotId"], "snap") &&
+			exactClosedAccountPermissionMutation(parameters["createVolumePermission"])
+	case "ec2.amazonaws.com:ModifyImageAttribute":
+		return len(parameters) == 3 && exactString(parameters["attributeType"]) == "launchPermission" &&
+			exactEC2ResourceID(parameters["imageId"], "ami") &&
+			exactClosedAccountPermissionMutation(parameters["launchPermission"])
+	case "rds.amazonaws.com:ModifyDBSnapshotAttribute":
+		return exactClosedRDSSnapshotPermissionMutation(parameters)
+	default:
+		return false
+	}
+}
+
+func exactClosedCloudAuditStatus(value any) (bool, bool) {
+	if successfulCloudAuditStatus(value) {
+		return true, true
+	}
+	status, ok := value.(map[string]any)
+	if !ok || len(status) != 3 || exactString(status["outcome"]) != "failed" ||
+		!exactBoundedCloudIdentity(status["error_code"]) {
+		return false, false
+	}
+	_, presentOK := status["error_message_present"].(bool)
+	return false, presentOK
+}
+
+func exactClosedAccountPermissionMutation(value any) bool {
+	permission, ok := value.(map[string]any)
+	if !ok || len(permission) != 1 {
+		return false
+	}
+	var body any
+	if add, present := permission["add"]; present {
+		body = add
+	} else if remove, present := permission["remove"]; present {
+		body = remove
+	} else {
+		return false
+	}
+	mutation, ok := body.(map[string]any)
+	if !ok || len(mutation) != 1 {
+		return false
+	}
+	items, ok := mutation["items"].([]any)
+	if !ok || len(items) == 0 || len(items) > 16 {
+		return false
+	}
+	for _, value := range items {
+		item, ok := value.(map[string]any)
+		if !ok || len(item) != 1 {
+			return false
+		}
+		if exactString(item["group"]) == "all" {
+			continue
+		}
+		if !validAWSAccountID(exactString(item["userId"])) {
+			return false
+		}
+	}
+	return true
+}
+
+func exactClosedRDSSnapshotPermissionMutation(parameters map[string]any) bool {
+	if len(parameters) != 3 || exactString(parameters["attributeName"]) != "restore" ||
+		!exactRDSDBSnapshotIdentifier(parameters["dBSnapshotIdentifier"]) {
+		return false
+	}
+	var values any
+	if add, present := parameters["valuesToAdd"]; present {
+		values = add
+	} else if remove, present := parameters["valuesToRemove"]; present {
+		values = remove
+	} else {
+		return false
+	}
+	accounts, ok := values.([]any)
+	if !ok || len(accounts) == 0 || len(accounts) > 16 {
+		return false
+	}
+	for _, candidate := range accounts {
+		account := exactString(candidate)
+		if account != "all" && !validAWSAccountID(account) {
+			return false
+		}
+	}
+	return true
+}
+
 func exactObjectKeys(object map[string]any, allowed map[string]bool) bool {
 	if object == nil {
 		return false

@@ -136,7 +136,9 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
 	if tool == "aws.cloudtrail_event" {
-		if _, ok := exactCloudAuditSecurityOperationInput(raw); ok || exactCloudAuditResourceMutationInput(tool, raw) != nil {
+		if _, ok := exactCloudAuditSecurityOperationInput(raw); ok ||
+			exactCloudAuditResourceMutationInput(tool, raw) != nil ||
+			exactCloudShareOperationEnvelope(raw) {
 			// The reviewed CloudTrail recognizer owns this closed, post-action
 			// schema. Cloud values remain private and never become generic argv.
 			return extractedInput{status: StatusComplete}

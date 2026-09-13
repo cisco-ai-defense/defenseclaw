@@ -181,7 +181,7 @@ def test_normalized_counts_and_measurement_boundary() -> None:
     assert all(source["source_url"].endswith(source["revision"]) for source in manifest["sources"])
 
 
-def test_projection_preserves_argument_result_shapes_but_excludes_sensitive_fields() -> None:
+def test_projection_preserves_detector_argument_shape_but_excludes_result_and_sensitive_fields() -> None:
     row = base_event(
         "5e68a70c-9e8b-49c3-a6c5-63ab2bc2685a",
         "ModifySnapshotAttribute",
@@ -197,20 +197,20 @@ def test_projection_preserves_argument_result_shapes_but_excludes_sensitive_fiel
     assert event["control_kind"] == "successful_remove"
     args = event["args"]
     assert args["request_parameters"] == snapshot_request("remove", "all")
-    assert args["response_elements"] == {"_return": True}
+    assert "response_elements" not in args
     rendered = MODULE.canonical_json(args)
     for forbidden in ("accessKeyId", "excluded principal", "sourceIPAddress", "userAgent", "tlsDetails"):
         assert forbidden not in rendered
 
 
-def test_error_message_is_hashed_not_retained() -> None:
+def test_error_message_is_not_retained() -> None:
     row = cybersec_records()[0][1]
     row["errorMessage"] = "sensitive free-form failure detail"
     event = MODULE.project_event(row)
     rendered = MODULE.canonical_json(event["args"])
     assert "sensitive free-form failure detail" not in rendered
     assert event["args"]["status"]["error_message_present"] is True
-    assert len(event["args"]["status"]["error_message_sha256"]) == 64
+    assert set(event["args"]["status"]) == {"outcome", "error_code", "error_message_present"}
 
 
 def test_incomplete_failures_are_parser_only_and_not_hard_negatives() -> None:

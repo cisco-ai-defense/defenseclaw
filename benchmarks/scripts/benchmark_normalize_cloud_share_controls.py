@@ -12,7 +12,7 @@ be used to claim a production false-positive rate: only eight cases qualify
 for that denominator.
 
 The source artifacts remain download-only. The normalizer emits bounded
-request/response projections and excludes credentials, principals, source
+request/status projections and excludes credentials, principals, source
 addresses, user agents, TLS metadata, and free-form error messages. No LLM
 labels are used.
 """
@@ -375,10 +375,6 @@ def project_event(row: Mapping[str, Any]) -> dict[str, Any]:
         "error_code": error_code,
         "error_message_present": error_message is not None,
     }
-    if isinstance(error_message, str):
-        encoded = error_message.encode("utf-8")
-        status["error_message_bytes"] = len(encoded)
-        status["error_message_sha256"] = hashlib.sha256(encoded).hexdigest()
     args: dict[str, object] = {
         "provider": "aws",
         "event_id": event_id,
@@ -387,7 +383,6 @@ def project_event(row: Mapping[str, Any]) -> dict[str, Any]:
         "event_time": parse_time(row.get("eventTime")),
         "region": required_text(row.get("awsRegion"), "invalid_region", 64),
         "request_parameters": request,
-        "response_elements": response,
         "status": status,
     }
     kind = "incomplete_failure" if request is None else ("failed_no_effect" if failed else f"successful_{mutation_kind(event_name, request)}")
@@ -461,7 +456,7 @@ def make_case(source_key: str, source_path: str, event: Mapping[str, Any]) -> di
         "truth": truth(control_kind),
         "strata": {
             "platform": "aws",
-            "language": "english",
+            "language": "en",
             "ecosystem": "aws_cloudtrail",
             "domain": "cloud_snapshot_sharing",
             "document_type": f"{event['event_source']}:{event['event_name']}",
@@ -655,10 +650,18 @@ def atomic_write(path: Path, content: str) -> None:
             temporary.unlink()
 
 
-def write_outputs(cases: Sequence[dict[str, Any]], manifest: Mapping[str, Any], output: Path, manifest_path: Path) -> None:
+def write_outputs(
+    cases: Sequence[dict[str, Any]],
+    manifest: Mapping[str, Any],
+    output: Path,
+    manifest_path: Path,
+) -> dict[str, Any]:
     corpus = "".join(f"{canonical_json(case)}\n" for case in cases)
+    output_manifest = dict(manifest)
+    output_manifest["output_sha256"] = hashlib.sha256(corpus.encode("utf-8")).hexdigest()
     atomic_write(output, corpus)
-    atomic_write(manifest_path, f"{json.dumps(manifest, indent=2, sort_keys=True)}\n")
+    atomic_write(manifest_path, f"{json.dumps(output_manifest, indent=2, sort_keys=True)}\n")
+    return output_manifest
 
 
 def main() -> int:
@@ -666,8 +669,8 @@ def main() -> int:
     cases, manifest = normalize_sources(args.elastic_checkout, args.cybersec_jsonl, args.traildiscover_checkout)
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
-    write_outputs(cases, manifest, args.output, manifest_path)
-    print(json.dumps({"output": str(args.output), **manifest}, sort_keys=True))
+    output_manifest = write_outputs(cases, manifest, args.output, manifest_path)
+    print(json.dumps({"output": str(args.output), **output_manifest}, sort_keys=True))
     return 0
 
 
