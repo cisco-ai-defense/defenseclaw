@@ -245,6 +245,7 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 			Args:                     benchmarkRuntimeArgs(event.Args, event.Command != "" || len(event.Argv) != 0),
 			Command:                  event.Command,
 			Argv:                     append([]string(nil), event.Argv...),
+			ToolResourceIdentity:     event.ToolResourceIdentity,
 			CWD:                      benchmarkCWD(event.CWD, event.Args),
 			ActiveHome:               firstNonEmpty(event.ActiveHome, "/home/alice"),
 			ActiveAgentFiles:         append([]string(nil), event.ActiveAgentFiles...),
@@ -252,10 +253,13 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 			CredentialLineageHMACKey: benchmarkCredentialLineageHMACKey,
 		}
 		result := gateway.EvaluateDeterministicAction(ctx, input, firstNonEmpty(event.Command, string(event.Args)), connector, profile)
-		if event.Outcome == "succeeded" && event.ResultProof != "" {
-			result = gateway.ApplyDeterministicSuccessfulActionResult(
-				result, []byte(event.ResultProof),
-			)
+		if event.Outcome == "succeeded" {
+			result = gateway.ApplyDeterministicSuccessfulActionOutcome(result)
+			if event.ResultProof != "" {
+				result = gateway.ApplyDeterministicSuccessfulActionResult(
+					result, []byte(event.ResultProof),
+				)
+			}
 		}
 		prediction.IssueCodes = append(prediction.IssueCodes, result.IssueCodes...)
 		prediction.EvaluationStatus = mergeEvaluationStatus(prediction.EvaluationStatus, result.CELEvaluationStatus)

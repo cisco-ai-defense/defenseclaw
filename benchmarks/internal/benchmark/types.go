@@ -144,16 +144,21 @@ type ActionSpan struct {
 }
 
 type ActionEvent struct {
-	ToolName         string          `json:"tool_name,omitempty"`
-	Command          string          `json:"command,omitempty"`
-	Argv             []string        `json:"argv,omitempty"`
-	Args             json.RawMessage `json:"args,omitempty"`
-	Dialect          string          `json:"dialect,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	ActiveHome       string          `json:"active_home,omitempty"`
-	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
-	Outcome          string          `json:"outcome,omitempty"`
-	OffsetSeconds    int             `json:"offset_seconds,omitempty"`
+	ToolName string          `json:"tool_name,omitempty"`
+	Command  string          `json:"command,omitempty"`
+	Argv     []string        `json:"argv,omitempty"`
+	Args     json.RawMessage `json:"args,omitempty"`
+	// ToolResourceIdentity is benchmark-authenticated connector context used
+	// only to replay exact same-resource joins. Normalizers must derive an
+	// opaque, stable value from source metadata; it must never be copied from
+	// model-controlled tool arguments.
+	ToolResourceIdentity string   `json:"tool_resource_identity,omitempty"`
+	Dialect              string   `json:"dialect,omitempty"`
+	CWD                  string   `json:"cwd,omitempty"`
+	ActiveHome           string   `json:"active_home,omitempty"`
+	ActiveAgentFiles     []string `json:"active_agent_files,omitempty"`
+	Outcome              string   `json:"outcome,omitempty"`
+	OffsetSeconds        int      `json:"offset_seconds,omitempty"`
 	// ResultProof is a bounded, value-safe synthetic proof used only to replay
 	// production result-backed state transitions. Normalizers must never copy a
 	// raw tool result into this field.
@@ -529,6 +534,9 @@ func (c Case) Validate() error {
 				}
 				if event.OffsetSeconds < priorOffset || event.OffsetSeconds > 1800 {
 					return fmt.Errorf("stateful event %d has invalid offset_seconds", index)
+				}
+				if len(event.ToolResourceIdentity) > 1024 || strings.IndexByte(event.ToolResourceIdentity, 0) >= 0 {
+					return fmt.Errorf("stateful event %d has invalid tool_resource_identity", index)
 				}
 				if c.Truth.StatefulLens != "" {
 					switch event.Outcome {

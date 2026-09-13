@@ -270,6 +270,29 @@ func EvaluateDeterministicAction(
 	return result
 }
 
+// ApplyDeterministicSuccessfulActionOutcome promotes pending chain state whose
+// production lifecycle requires only an authenticated successful terminal
+// outcome. It is used solely by the offline stateful benchmark runner; a
+// pre-action evaluation cannot call it and therefore cannot forge success.
+func ApplyDeterministicSuccessfulActionOutcome(
+	evaluation DeterministicActionEvaluation,
+) DeterministicActionEvaluation {
+	definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete,
+	)
+	index, indexOK := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete,
+	)
+	if !ok || !indexOK ||
+		evaluation.DetectionStepMask&definition.Step1Bit == 0 ||
+		evaluation.EnforcementStepMask&definition.Step1Bit != 0 ||
+		evaluation.EnforcementJoinDigests[index] == "" {
+		return evaluation
+	}
+	evaluation.EnforcementStepMask |= definition.Step1Bit
+	return evaluation
+}
+
 // ApplyDeterministicSuccessfulActionResult promotes only result-backed chain
 // state that the production lifecycle would attach after an authenticated
 // successful terminal event. It is used by the offline stateful benchmark to
