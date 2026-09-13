@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"bytes"
 	"net/netip"
 	"path"
 	"strings"
@@ -12,6 +13,14 @@ import (
 const (
 	adcsCertificatePrincipalDigestDomain = "defenseclaw/actionfacts/adcs-certificate-impersonation/principal/v1"
 	adcsCertificatePFXDigestDomain       = "defenseclaw/actionfacts/adcs-certificate-impersonation/pfx/v1"
+	adcsCertificateResultMaxBytes        = 256 * 1024
+	adcsCertificateResultLineMaxBytes    = 16 * 1024
+)
+
+const (
+	adcsCertificateRequestedLine = "[*] Successfully requested certificate"
+	adcsCertificateSavingPrefix  = "[*] Saving certificate and private key to '"
+	adcsCertificateWrotePrefix   = "[*] Wrote certificate and private key to '"
 )
 
 // ADCSCertificateImpersonationRequestFact is the value-free projection of one
@@ -151,6 +160,59 @@ func ADCSCertificatePFXArtifactIdentityDigest(artifact string) string {
 		return ""
 	}
 	return framedPrivateDigest(adcsCertificatePFXDigestDomain, cleaned)
+}
+
+// ExactADCSCertificatePFXResult returns the value-free identity of a PFX only
+// when one bounded result proves successful enrollment and agrees on the exact
+// artifact in both Certipy save messages. The raw result and path are never
+// retained by this classifier.
+func ExactADCSCertificatePFXResult(result []byte) string {
+	if len(result) == 0 || len(result) > adcsCertificateResultMaxBytes ||
+		bytes.IndexByte(result, 0) >= 0 {
+		return ""
+	}
+	requested, saving, wrote := false, false, false
+	artifactDigest := ""
+	for _, rawLine := range bytes.Split(result, []byte{'\n'}) {
+		lineBytes := bytes.TrimSpace(rawLine)
+		if len(lineBytes) == 0 {
+			continue
+		}
+		if len(lineBytes) > adcsCertificateResultLineMaxBytes {
+			return ""
+		}
+		line := string(lineBytes)
+		switch {
+		case line == adcsCertificateRequestedLine:
+			requested = true
+		case strings.HasPrefix(line, adcsCertificateSavingPrefix):
+			digest := exactADCSCertificateResultArtifact(line, adcsCertificateSavingPrefix)
+			if digest == "" || (artifactDigest != "" && artifactDigest != digest) {
+				return ""
+			}
+			artifactDigest, saving = digest, true
+		case strings.HasPrefix(line, adcsCertificateWrotePrefix):
+			digest := exactADCSCertificateResultArtifact(line, adcsCertificateWrotePrefix)
+			if digest == "" || (artifactDigest != "" && artifactDigest != digest) {
+				return ""
+			}
+			artifactDigest, wrote = digest, true
+		}
+	}
+	if !requested || !saving || !wrote {
+		return ""
+	}
+	return artifactDigest
+}
+
+func exactADCSCertificateResultArtifact(line, prefix string) string {
+	if !strings.HasPrefix(line, prefix) || len(line) <= len(prefix)+1 ||
+		!strings.HasSuffix(line, "'") {
+		return ""
+	}
+	return ADCSCertificatePFXArtifactIdentityDigest(
+		strings.TrimSuffix(strings.TrimPrefix(line, prefix), "'"),
+	)
 }
 
 func exactADCSCertificateCommand(facts Facts) (CommandFact, bool) {

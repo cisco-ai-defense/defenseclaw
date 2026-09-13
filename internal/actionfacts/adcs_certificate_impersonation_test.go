@@ -4,6 +4,7 @@
 package actionfacts
 
 import (
+	"bytes"
 	"fmt"
 	"strings"
 	"testing"
@@ -248,6 +249,46 @@ func TestADCSCertificateIdentityDigestRejectsUnsafeValues(t *testing.T) {
 				t.Fatalf("unsafe value produced digest %q", test.digest)
 			}
 		})
+	}
+}
+
+func TestExactADCSCertificatePFXResultRequiresSuccessfulSameArtifactProof(t *testing.T) {
+	result := []byte(strings.Join([]string{
+		"Certipy v5.0.0",
+		adcsCertificateRequestedLine,
+		adcsCertificateSavingPrefix + "administrator.pfx'",
+		adcsCertificateWrotePrefix + "administrator.pfx'",
+	}, "\n"))
+	want := ADCSCertificatePFXArtifactIdentityDigest("administrator.pfx")
+	if got := ExactADCSCertificatePFXResult(result); got != want {
+		t.Fatalf("result digest=%q want=%q", got, want)
+	}
+
+	for _, mutate := range []func(string) string{
+		func(value string) string { return strings.Replace(value, adcsCertificateRequestedLine+"\n", "", 1) },
+		func(value string) string {
+			return strings.Replace(value, adcsCertificateSavingPrefix+"administrator.pfx'\n", "", 1)
+		},
+		func(value string) string {
+			return strings.Replace(value, adcsCertificateWrotePrefix+"administrator.pfx'", adcsCertificateWrotePrefix+"other.pfx'", 1)
+		},
+		func(value string) string {
+			return strings.Replace(value, "administrator.pfx'", "../administrator.pfx'", 1)
+		},
+	} {
+		if got := ExactADCSCertificatePFXResult([]byte(mutate(string(result)))); got != "" {
+			t.Fatalf("incomplete or mismatched result produced digest %q", got)
+		}
+	}
+
+	oversized := append([]byte(nil), result...)
+	oversized = append(oversized, bytes.Repeat([]byte{'x'}, adcsCertificateResultMaxBytes)...)
+	if got := ExactADCSCertificatePFXResult(oversized); got != "" {
+		t.Fatalf("oversized result produced digest %q", got)
+	}
+	withNUL := append(append([]byte(nil), result...), 0)
+	if got := ExactADCSCertificatePFXResult(withNUL); got != "" {
+		t.Fatalf("NUL result produced digest %q", got)
 	}
 }
 
