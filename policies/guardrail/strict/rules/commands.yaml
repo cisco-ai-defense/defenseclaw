@@ -1234,8 +1234,9 @@ rules:
     tags: [privilege, persistence, sudoers]
   - id: persistence.global_ld_preload_install
     tool_call_only: true
-    # Regex is only a candidate selector. The fallback contract requires an
-    # authoritative exact write/append plus literal shared-object content.
+    # The code-owned fallback requires an authoritative exact write/append
+    # plus literal shared-object content. It also recognizes a closed
+    # /etc/profile.d/*.sh LD_PRELOAD assignment without relying on regex.
     pattern: '(?i)(?:>|>>|\btee(?:\s+-a)?)\s*/etc/ld\.so\.preload\b'
     title: "Global dynamic-loader preload installation"
     severity: HIGH

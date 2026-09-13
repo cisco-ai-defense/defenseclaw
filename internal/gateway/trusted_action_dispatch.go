@@ -483,9 +483,14 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		detectionOnly: true,
 	},
 	"persistence.global_ld_preload_install": {
-		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return globalLDPreloadInstallPrerequisite(facts)
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return globalLDPreloadInstallPrerequisite(input, facts)
 		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return globalLDPreloadInstallPrerequisite(input, facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
 	},
 	"persistence.shell_profile_write": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {

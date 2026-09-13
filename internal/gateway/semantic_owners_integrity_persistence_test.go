@@ -734,10 +734,73 @@ func TestGlobalLDPreloadInstallOwnerBoundaries(t *testing.T) {
 			facts := actionfacts.Analyze(actionfacts.Input{
 				Tool: "shell", Command: test.command, CWD: "/repo",
 			})
-			if got := contract.proves(actionfacts.Input{}, facts); got != test.want {
+			if got := contract.proves(actionfacts.Input{Tool: "shell", Command: test.command, CWD: "/repo"}, facts); got != test.want {
 				t.Fatalf("eligible=%t want=%t facts=%+v", got, test.want, facts)
 			}
 		})
+	}
+}
+
+func TestGlobalLDPreloadProfileInstallOwnerBoundaries(t *testing.T) {
+	contract := exactFallbackContracts["persistence.global_ld_preload_install"]
+	if !contract.requiresExactDetectionProof || !contract.codeOwnedDetection {
+		t.Fatal("global LD_PRELOAD detection must be owned by its exact proof")
+	}
+	for _, test := range []struct {
+		name    string
+		command string
+		want    bool
+	}{
+		{
+			"literal profile fragment",
+			"echo '# loader\nexport LD_PRELOAD=\"/usr/local/lib/libguard.so\"' > /etc/profile.d/guard.sh",
+			true,
+		},
+		{"dynamic library", "echo 'export LD_PRELOAD=$LIBRARY' > /etc/profile.d/guard.sh", false},
+		{"unrelated profile write", "echo 'export PATH=/opt/bin:$PATH' > /etc/profile.d/tool.sh", false},
+		{"nested profile path", "echo 'export LD_PRELOAD=/tmp/lib.so' > /etc/profile.d/test/guard.sh", false},
+		{"profile fixture", "echo 'export LD_PRELOAD=/tmp/lib.so' > /repo/fixtures/etc/profile.d/guard.sh", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			input := actionfacts.Input{Tool: "shell", Command: test.command, CWD: "/repo"}
+			facts := actionfacts.Analyze(input)
+			if got := contract.proves(input, facts); got != test.want {
+				t.Fatalf("eligible=%t want=%t facts=%+v", got, test.want, facts)
+			}
+		})
+	}
+}
+
+func TestGlobalLDPreloadProfileInstallEndToEnd(t *testing.T) {
+	const ruleID = "persistence.global_ld_preload_install"
+	inputs := []actionfacts.Input{
+		{
+			Tool: "Bash",
+			Command: "echo '# logger\nexport LD_PRELOAD=\"/usr/local/lib/liblogger.so\"' > " +
+				"/etc/profile.d/logger.sh",
+			DialectHint: actionfacts.DialectPOSIX,
+		},
+		{
+			Tool: "Write",
+			Args: json.RawMessage(`{"file_path":"/etc/profile.d/logger.sh","content":"# logger\nexport LD_PRELOAD=/usr/local/lib/liblogger.so\n"}`),
+		},
+	}
+	for profile, wantAction := range map[string]string{
+		"default": "alert", "permissive": "alert", "strict": "block",
+	} {
+		connector := "global-ld-preload-profile-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		for _, input := range inputs {
+			result := EvaluateDeterministicAction(
+				t.Context(), input, input.Command+string(input.Args), connector, profile,
+			)
+			if !slices.Contains(result.RuleIDs, ruleID) || result.Action != wantAction {
+				t.Fatalf(
+					"profile=%s input=%+v result=%+v want_action=%s",
+					profile, input, result, wantAction,
+				)
+			}
+		}
 	}
 }
 

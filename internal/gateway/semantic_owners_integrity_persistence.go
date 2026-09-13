@@ -1647,15 +1647,25 @@ func matchesGlobalLDPreload(
 
 // globalLDPreloadInstallPrerequisite proves a system-wide loader injection
 // only when a closed literal producer writes one absolute shared-object path
-// to the active preload file. Merely reading the file, clearing it during
-// remediation, setting process-local LD_PRELOAD, or writing opaque/dynamic
-// content is not enough to enforce this rule.
-func globalLDPreloadInstallPrerequisite(facts actionfacts.Facts) bool {
+// to the active preload file, or one exact profile fragment exports that path.
+// Merely reading either location, clearing it during remediation, setting
+// process-local LD_PRELOAD, or writing opaque/dynamic content is insufficient.
+func globalLDPreloadInstallPrerequisite(
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) bool {
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
+	if actionfacts.ExactGlobalLDPreloadProfileWrite(input, facts) {
+		return true
+	}
 	for _, target := range facts.Paths {
-		if !matchesGlobalLDPreload(facts, target) {
+		preloadFile := matchesGlobalLDPreload(facts, target)
+		profileFragment := actionfacts.ExactGlobalLDPreloadProfilePath(
+			semanticPathValue(target),
+		) && target.Access == actionfacts.PathAccessWrite
+		if !preloadFile && !profileFragment {
 			continue
 		}
 		destination, ok := integrityCommandByID(facts, target.CommandID)
@@ -1668,7 +1678,8 @@ func globalLDPreloadInstallPrerequisite(facts actionfacts.Facts) bool {
 				continue
 			}
 			content, ok := sudoersLiteralCommandOutput(source)
-			if ok && literalSharedObjectPath(content) {
+			if ok && (preloadFile && literalSharedObjectPath(content) ||
+				profileFragment && actionfacts.ExactGlobalLDPreloadProfileContent(content)) {
 				return true
 			}
 		}
