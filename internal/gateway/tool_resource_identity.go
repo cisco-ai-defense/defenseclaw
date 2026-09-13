@@ -4,16 +4,24 @@
 package gateway
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"io"
 	"strings"
 )
 
 const (
 	trustedToolResourceIdentityDomain = "defenseclaw/trusted-tool-resource/v1"
 	trustedToolResourceComponentMax   = 128
+	// The authenticated hook envelope adds exactly one object around the
+	// reviewed value-lineage input grammars. Keep that additional depth local
+	// to envelope validation so the value parsers retain their tighter bound.
+	trustedToolResourceEnvelopeMaxJSONDepth = toolValueLineageMaxJSONDepth + 1
 )
 
 type trustedToolResourceContextKey struct{}
@@ -36,11 +44,7 @@ func withAuthenticatedToolResource(
 	if ctx == nil {
 		ctx = context.Background()
 	}
-	decoded, exact := toolValueLineageDecodeJSON(rawBody)
-	if !exact {
-		return ctx
-	}
-	if _, object := decoded.(map[string]interface{}); !object {
+	if !exactTrustedToolResourceEnvelopeJSON(rawBody) {
 		return ctx
 	}
 	projection, ok := authenticatedToolResource(ctx, req)
@@ -48,6 +52,94 @@ func withAuthenticatedToolResource(
 		return ctx
 	}
 	return context.WithValue(ctx, trustedToolResourceContextKey{}, projection)
+}
+
+// exactTrustedToolResourceEnvelopeJSON validates the original authenticated
+// bytes before attaching trusted metadata. It intentionally retains no values:
+// the already-decoded request remains the only consumer. Case-insensitive
+// duplicate keys, malformed input, excessive nesting/cardinality, and trailing
+// values all fail closed.
+func exactTrustedToolResourceEnvelopeJSON(raw []byte) bool {
+	if !toolValueLineageInputValid(raw) {
+		return false
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	elements := 0
+	rootObject, err := consumeTrustedToolResourceJSONValue(decoder, 0, &elements)
+	if err != nil || !rootObject {
+		return false
+	}
+	_, err = decoder.Token()
+	return errors.Is(err, io.EOF)
+}
+
+func consumeTrustedToolResourceJSONValue(
+	decoder *json.Decoder,
+	depth int,
+	elements *int,
+) (bool, error) {
+	if depth > trustedToolResourceEnvelopeMaxJSONDepth {
+		return false, errors.New("trusted tool resource JSON depth exceeded")
+	}
+	*elements = *elements + 1
+	if *elements > toolValueLineageMaxJSONElements {
+		return false, errors.New("trusted tool resource JSON element limit exceeded")
+	}
+	token, err := decoder.Token()
+	if err != nil {
+		return false, err
+	}
+	delimiter, composite := token.(json.Delim)
+	if !composite {
+		switch token.(type) {
+		case string, json.Number, bool, nil:
+			return false, nil
+		default:
+			return false, errors.New("trusted tool resource unsupported JSON scalar")
+		}
+	}
+
+	switch delimiter {
+	case '{':
+		seen := make(map[string]struct{})
+		for decoder.More() {
+			keyToken, err := decoder.Token()
+			if err != nil {
+				return false, err
+			}
+			key, ok := keyToken.(string)
+			if !ok || key == "" || strings.ContainsRune(key, 0) {
+				return false, errors.New("trusted tool resource invalid JSON key")
+			}
+			folded := strings.ToLower(key)
+			if _, duplicate := seen[folded]; duplicate {
+				return false, errors.New("trusted tool resource duplicate JSON key")
+			}
+			seen[folded] = struct{}{}
+			if _, err := consumeTrustedToolResourceJSONValue(decoder, depth+1, elements); err != nil {
+				return false, err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim('}') {
+			return false, errors.New("trusted tool resource invalid JSON object")
+		}
+		return true, nil
+	case '[':
+		for decoder.More() {
+			if _, err := consumeTrustedToolResourceJSONValue(decoder, depth+1, elements); err != nil {
+				return false, err
+			}
+		}
+		closing, err := decoder.Token()
+		if err != nil || closing != json.Delim(']') {
+			return false, errors.New("trusted tool resource invalid JSON array")
+		}
+		return false, nil
+	default:
+		return false, errors.New("trusted tool resource invalid JSON delimiter")
+	}
 }
 
 func authenticatedToolResource(

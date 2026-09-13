@@ -23,6 +23,8 @@ const semanticSQLiteClientShellEscapeExpression = `f.commands.exists(c, c.argv_c
 
 const semanticMySQLClientShellEscapeExpression = `f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])`
 
+const semanticSensitiveSQLValueCrossResourcePersistenceExpression = `f.tool in ['write_file', 'create_entities']`
+
 var semanticDatabaseOwners = map[string]semanticOwner{
 	"attack.http_command_injection": {
 		prerequisite:     httpCommandInjectionPrerequisite,
@@ -103,6 +105,17 @@ var semanticDatabaseOwners = map[string]semanticOwner{
 		suppressFallback: authoritativeSemanticSafeNegative,
 		alertOnly:        true,
 	},
+	"chain.sensitive_sql_value_then_cross_resource_literal_persistence": {
+		prerequisite:     sensitiveSQLValueCrossResourcePersistenceCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The CEL rule is a catalog/admission anchor only. A single sink action can
+		// never prove this chain; the bounded state matcher is the sole code owner.
+		detectionOnly: true,
+	},
+}
+
+func sensitiveSQLValueCrossResourcePersistenceCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
 }
 
 func sqlClientShellEscapePrerequisite(

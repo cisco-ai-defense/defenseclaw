@@ -62,7 +62,7 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 		}
 	}
 
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "constraints", correlationDigest("constraints-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -116,9 +116,10 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 }
 
 func TestToolChainAppendOnlyMaskCapacityMigrationPreservesReplayAndRejectsUnknownMasks(t *testing.T) {
-	if got := migrations[len(migrations)-1].description; got !=
+	const migrationIndex = 44
+	if len(migrations) <= migrationIndex || migrations[migrationIndex].description !=
 		"guardrails: reserve append-only bounded chain mask capacity" {
-		t.Fatalf("append-only capacity migration is not last: %q", got)
+		t.Fatal("append-only mask capacity is not migration 45")
 	}
 	path := filepath.Join(t.TempDir(), "capacity.db")
 	fixture := newToolChainFixture(t, path)
@@ -541,7 +542,7 @@ func toolChainProjection(t *testing.T, ids []string, step int, enforce bool) gua
 		projection.EnforcementStepMask = mask
 		for _, id := range ids {
 			definition, _ := guardrail.ToolChainDefinitionByID(id)
-			if !definition.RequiresEnforcementJoin {
+			if !definition.RequiresEnforcementJoin && !definition.RequiresExactJoin {
 				continue
 			}
 			index, _ := guardrail.ToolChainIndexByID(id)
@@ -591,8 +592,8 @@ func TestToolChainRepositoryPersistsThreeStepDerivedArtifactLineage(t *testing.T
 		t.Fatal(err)
 	}
 	if result.DetectedMask != definition.ResultBit ||
-		result.EnforcementSafeMask != definition.ResultBit ||
-		result.DeniedMask != definition.ResultBit || len(result.ReceiptIDs) != 1 {
+		result.EnforcementSafeMask != 0 || result.DeniedMask != 0 ||
+		len(result.ReceiptIDs) != 0 {
 		t.Fatalf("derived lineage result=%+v", result)
 	}
 
@@ -612,10 +613,7 @@ func TestToolChainRepositoryPersistsThreeStepDerivedArtifactLineage(t *testing.T
 func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	fixture := newToolChainFixture(t, path)
-	chains := []string{
-		guardrail.ToolChainGuardrailsOffThenEgress,
-		guardrail.ToolChainSecretReadThenEgress,
-	}
+	chains := []string{guardrail.ToolChainStagedReverseShellPersistence}
 	first := fixture.seed(t, "session-a", correlationDigest("first"))
 	first.Projection = toolChainProjection(t, chains, 1, true)
 	if result, err := fixture.chain.Observe(t.Context(), first); err != nil ||
@@ -630,7 +628,7 @@ func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fresh.Status != ToolChainObserveFresh || len(fresh.ReceiptIDs) != 2 ||
+	if fresh.Status != ToolChainObserveFresh || len(fresh.ReceiptIDs) != 1 ||
 		fresh.DeniedMask == 0 || fresh.SuppressTelemetry {
 		t.Fatalf("fresh result=%#v", fresh)
 	}
@@ -672,7 +670,7 @@ func TestToolChainObserveRestartReplayRulesetAndFinalization(t *testing.T) {
 
 func TestToolChainObserveReplayModeTransitionsAreMonotonic(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainSecretReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	resultBit, _ := guardrail.ToolChainResultMask(chainID)
 
 	first := fixture.seed(t, "mode-transition", correlationDigest("mode-first"))
@@ -734,7 +732,7 @@ func TestToolChainObserveReplayModeTransitionsAreMonotonic(t *testing.T) {
 
 func TestToolChainObserveSerializesDuplicateAndIsolatesPartitions(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainSecretManagerReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "shared", correlationDigest("serial-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -860,7 +858,7 @@ func TestToolChainObserveNoJoinBoundsExpiryAndClose(t *testing.T) {
 	fixture.chain.maxPartitions = 1
 	fixture.chain.receiptTTL = time.Minute
 	fixture.chain.maxHorizon = 2 * time.Minute
-	chainID := guardrail.ToolChainWorkloadIdentityThenLateralExec
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "bounded", correlationDigest("bounded-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -934,7 +932,7 @@ func TestToolChainObserveNoJoinBoundsExpiryAndClose(t *testing.T) {
 
 func TestToolChainFinalizationRollsBackAsOneTransaction(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "rollback", correlationDigest("rollback-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {
@@ -1000,7 +998,7 @@ func TestToolChainCorruptWindowResetsWithoutDeny(t *testing.T) {
 
 func TestToolChainCorruptReceiptCannotReplayDeny(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "corrupt-receipt", correlationDigest("receipt-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := fixture.chain.Observe(t.Context(), first); err != nil {

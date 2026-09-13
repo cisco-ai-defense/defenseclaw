@@ -137,6 +137,11 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// fields and is regression-tested on the trusted fallback route instead.
 	const fallbackOnlyPersistenceExpression = "f.tool == 'persist'"
 	coveredExpressions[fallbackOnlyPersistenceExpression] = struct{}{}
+	// This expression admits only the reviewed sink tools into a code-owned,
+	// success-gated bounded-chain path. A single ActionFacts corpus row cannot
+	// complete that proof; exact positive and negative lifecycle coverage lives
+	// in tool_value_lineage_sql_chain_test.go.
+	coveredExpressions[semanticSensitiveSQLValueCrossResourcePersistenceExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {

@@ -194,6 +194,9 @@ func (a *APIServer) applyAgentHookToolChains(
 	var typedFindings []RuleFinding
 	if projectionEligible {
 		projection, typedFindings = projectAgentHookToolChains(req, lifecycle)
+		if structuredAction {
+			projectSQLValuePersistenceSink(ctx, req, &projection)
+		}
 		projection = toolChainProjectionForPolicyPosture(
 			a.scannerCfg,
 			req.ConnectorName,
@@ -324,17 +327,31 @@ func (a *APIServer) applyAgentHookToolChains(
 		)
 		readPathDigest, readValueDigests :=
 			toolValueLineageSuccessfulReadResult(req, outcome)
+		var (
+			sqlSource     audit.ToolChainPendingSQLValueSource
+			sqlProjection toolValueLineageSQLSuccessfulProjection
+			sqlProjected  bool
+		)
+		if outcome == connector.ToolLifecycleOutcomeSuccess {
+			sqlSource, sqlProjection, sqlProjected =
+				projectSuccessfulSQLResultCandidate(ctx, req)
+		}
 		resolved, resolveErr := repository.ResolvePending(
 			ctx,
 			audit.ToolChainResolvePendingInput{
-				ConnectorInstanceID:        audit.ConnectorInstanceID(req.ConnectorInstanceID),
-				ToolInvocationDigest:       invocationDigest,
-				Outcome:                    auditToolChainPendingOutcome(outcome),
-				RulesetFingerprint:         rulesetFingerprint,
-				TerminalSemanticEventID:    audit.SemanticEventID(req.SemanticEventID),
-				TerminalInputFingerprint:   inputFingerprint,
-				SuccessfulReadPathDigest:   readPathDigest,
-				SuccessfulReadValueDigests: readValueDigests,
+				ConnectorInstanceID:                 audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				ToolInvocationDigest:                invocationDigest,
+				Outcome:                             auditToolChainPendingOutcome(outcome),
+				RulesetFingerprint:                  rulesetFingerprint,
+				TerminalSemanticEventID:             audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint:            inputFingerprint,
+				SuccessfulReadPathDigest:            readPathDigest,
+				SuccessfulReadValueDigests:          readValueDigests,
+				SuccessfulSQLValueSource:            sqlSource,
+				SuccessfulSQLResourceIdentityDigest: sqlProjection.resourceIdentityDigest,
+				SuccessfulSQLValueDigests: toolValueLineageGuardrailDigests(
+					sqlProjection.valueDigests,
+				),
 			},
 		)
 		if resolveErr != nil {
@@ -344,9 +361,7 @@ func (a *APIServer) applyAgentHookToolChains(
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
 			resolvedInvocation
 		if resolvedSuccess {
-			if sqlProjection, ok := projectBoundSuccessfulSQLResult(
-				ctx, req, resolved.SQLValueSource,
-			); ok {
+			if sqlProjected && resolved.SQLValueSource == sqlSource {
 				req.toolChain.successfulSQLResult = &sqlProjection
 			}
 			// Terminal-success-only chains are deliberately absent from the

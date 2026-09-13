@@ -53,7 +53,8 @@ func migrateToolChainPendingState(ex dbExecer) error {
 			-- command-UDF create/invoke roles and its exact-function barrier. Bits 41
 			-- through 43 are the staged reverse-shell write, persistence install, and
 			-- exact same-path rewrite barrier. Bits 44 and 45 are the endpoint-control
-			-- request/result roles, and bit 46 is the sensitive-read value source.
+			-- request/result roles, bit 46 is the sensitive-read value source, and
+			-- bits 47 and 48 are the SQL-value source and literal-persistence sink.
 			-- Bit 63 is permanently reserved because SQLite INTEGER is signed.
 			detection_step_mask INTEGER NOT NULL
 				CHECK (detection_step_mask BETWEEN 0 AND 9223372036854775807),
@@ -61,9 +62,11 @@ func migrateToolChainPendingState(ex dbExecer) error {
 				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 879),
+				CHECK (length(enforcement_join_digests) <= 923),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 879),
+				CHECK (length(enforcement_output_join_digests) <= 923),
+			value_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(value_join_digests) <= 14783),
 			prepared_time_unix_nano INTEGER NOT NULL
 				CHECK (prepared_time_unix_nano > 0),
 			expires_time_unix_nano INTEGER NOT NULL

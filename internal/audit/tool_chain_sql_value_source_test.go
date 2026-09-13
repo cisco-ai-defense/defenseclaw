@@ -14,9 +14,10 @@ import (
 )
 
 func TestToolChainSQLValueSourceMigrationIsValueFreeAndIdempotent(t *testing.T) {
-	if got := migrations[len(migrations)-1].description; got !=
+	const migrationIndex = 45
+	if len(migrations) <= migrationIndex || migrations[migrationIndex].description !=
 		"guardrails: bind pending SQL value sources to authoritative results" {
-		t.Fatalf("last migration=%q", got)
+		t.Fatal("SQL value-source state is not append-only migration 46")
 	}
 	store, err := NewStore(":memory:")
 	if err != nil {

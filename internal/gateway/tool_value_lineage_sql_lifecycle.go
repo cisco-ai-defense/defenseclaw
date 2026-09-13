@@ -5,21 +5,28 @@ package gateway
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-// toolValueLineageSQLSuccessfulProjection is intentionally request-scoped and
-// inert. Stage 2b populates it only after an exact pending invocation resolves
-// successfully; no matcher, finding, audit event, or telemetry sink consumes
-// it yet.
+// toolValueLineageSQLSuccessfulProjection is intentionally request-scoped.
+// Only its bounded digests cross into the successful pending-resolution path;
+// raw SQL results and values never enter matcher, audit, log, or telemetry
+// state.
 type toolValueLineageSQLSuccessfulProjection struct {
 	databaseIdentityDigest string
+	resourceIdentityDigest string
 	valueDigests           []toolValueLineageDigest
 }
+
+const toolValueLineageMCPResourceJoinDomain = "defenseclaw/tool-value-lineage/mcp-resource-join/v1"
 
 func pendingSQLValueSource(
 	capture *toolChainHookCapture,
@@ -42,23 +49,45 @@ func projectBoundSuccessfulSQLResult(
 	req agentHookRequest,
 	source audit.ToolChainPendingSQLValueSource,
 ) (toolValueLineageSQLSuccessfulProjection, bool) {
-	if source == (audit.ToolChainPendingSQLValueSource{}) ||
-		!activeToolValueLineageProcessKey.available {
+	candidateSource, projection, ok := projectSuccessfulSQLResultCandidate(ctx, req)
+	if !ok || source == (audit.ToolChainPendingSQLValueSource{}) ||
+		candidateSource != source {
 		return toolValueLineageSQLSuccessfulProjection{}, false
+	}
+	return projection, true
+}
+
+// projectSuccessfulSQLResultCandidate produces only value-free descriptors and
+// keyed digests. ResolvePending must rebind candidateSource to the invocation's
+// stored descriptor before any part of projection can enter durable state.
+func projectSuccessfulSQLResultCandidate(
+	ctx context.Context,
+	req agentHookRequest,
+) (
+	audit.ToolChainPendingSQLValueSource,
+	toolValueLineageSQLSuccessfulProjection,
+	bool,
+) {
+	if !activeToolValueLineageProcessKey.available {
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
 	actionTool, resourceIdentity := trustedToolActionFromContext(
 		ctx, req.ConnectorName, req.ToolName, req.ToolName,
 	)
 	if resourceIdentity == "" {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
 	toolInput, ok := req.Payload["tool_input"].(map[string]interface{})
 	if !ok || len(toolInput) == 0 {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
 	args, err := json.Marshal(toolInput)
 	if err != nil {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
 	facts := actionfacts.Analyze(actionfacts.Input{
 		Tool: actionTool, Args: args, CWD: req.CWD,
@@ -66,25 +95,104 @@ func projectBoundSuccessfulSQLResult(
 		ToolResourceIdentity: resourceIdentity,
 	})
 	reads := actionfacts.ExactSensitiveSQLRowsetReads(facts)
-	if len(reads) != 1 || !reads[0].Exact ||
-		reads[0].TableClass != source.TableClass ||
-		reads[0].DatabaseIdentityDigest != source.DatabaseIdentityDigest {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+	if len(reads) != 1 || !reads[0].Exact {
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
+	}
+	source := audit.ToolChainPendingSQLValueSource{
+		TableClass:             reads[0].TableClass,
+		DatabaseIdentityDigest: reads[0].DatabaseIdentityDigest,
 	}
 	result, ok := exactSuccessfulSQLResultBytes(req)
 	if !ok {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
 	digests, ok := toolValueLineageSQLRowsetDigests(
 		activeToolValueLineageProcessKey.material, source.TableClass, result,
 	)
 	if !ok {
-		return toolValueLineageSQLSuccessfulProjection{}, false
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
 	}
-	return toolValueLineageSQLSuccessfulProjection{
+	resourceDigest := toolValueLineageMCPResourceDigest(resourceIdentity)
+	if resourceDigest == "" {
+		return audit.ToolChainPendingSQLValueSource{},
+			toolValueLineageSQLSuccessfulProjection{}, false
+	}
+	return source, toolValueLineageSQLSuccessfulProjection{
 		databaseIdentityDigest: source.DatabaseIdentityDigest,
+		resourceIdentityDigest: resourceDigest,
 		valueDigests:           append([]toolValueLineageDigest(nil), digests...),
 	}, true
+}
+
+func projectSQLValuePersistenceSink(
+	ctx context.Context,
+	req agentHookRequest,
+	projection *guardrail.ToolChainProjection,
+) {
+	if projection == nil || !activeToolValueLineageProcessKey.available {
+		return
+	}
+	actionTool, resourceIdentity := trustedToolActionFromContext(
+		ctx, req.ConnectorName, req.ToolName, req.ToolName,
+	)
+	if resourceIdentity == "" {
+		return
+	}
+	toolInput, ok := req.Payload["tool_input"].(map[string]interface{})
+	if !ok || len(toolInput) == 0 {
+		return
+	}
+	args, err := json.Marshal(toolInput)
+	if err != nil {
+		return
+	}
+	input := actionfacts.Input{
+		Tool: actionTool, Args: args, CWD: req.CWD,
+		ActiveHome:           trustedSameHostHome(),
+		ToolResourceIdentity: resourceIdentity,
+	}
+	digests, ok := toolValueLineageStructuredPersistenceDigests(
+		activeToolValueLineageProcessKey.material,
+		input,
+	)
+	values := toolValueLineageGuardrailDigests(digests)
+	resourceDigest := toolValueLineageMCPResourceDigest(resourceIdentity)
+	if !ok || values == (guardrail.ToolChainValueJoinDigests{}) ||
+		resourceDigest == "" {
+		return
+	}
+	addToolChainStep(
+		projection,
+		guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
+		2,
+		true,
+		false,
+	)
+	index, ok := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
+	)
+	if !ok {
+		return
+	}
+	projection.EnforcementJoinDigests[index] = resourceDigest
+	projection.ValueJoinDigests[index] = values
+}
+
+func toolValueLineageMCPResourceDigest(identity string) string {
+	if identity == "" {
+		return ""
+	}
+	hash := sha256.New()
+	for _, value := range []string{toolValueLineageMCPResourceJoinDomain, identity} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
 }
 
 func exactSuccessfulSQLResultBytes(req agentHookRequest) ([]byte, bool) {

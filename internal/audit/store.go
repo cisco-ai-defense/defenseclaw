@@ -1813,6 +1813,10 @@ var migrations = []migration{
 		description: "guardrails: bind pending SQL value sources to authoritative results",
 		apply:       migrateToolChainSQLValueSourceState,
 	},
+	{
+		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
+		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

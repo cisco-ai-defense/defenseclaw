@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 20
+	ToolChainCount       = 21
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -51,38 +51,39 @@ const (
 	ToolChainReceiptTTL    = 7 * 24 * time.Hour
 	ToolChainMaxHorizon    = 30 * time.Minute
 
-	ToolChainGuardrailsOffThenEgress            = "chain.guardrails_off_then_egress"
-	ToolChainPermissionDeniedThenBypass         = "chain.permission_denied_then_runtime_bypass"
-	ToolChainPrivilegeDiscoveryThenElevation    = "chain.privilege_discovery_then_elevation"
-	ToolChainSecretManagerReadThenEgress        = "chain.secret_manager_read_then_egress"
-	ToolChainSecretReadThenEgress               = "chain.secret_read_then_egress"
-	ToolChainWorkloadIdentityThenLateralExec    = "chain.workload_identity_then_lateral_execution"
-	ToolChainDownloadDecodeExecuteSameArtifact  = "chain.download_decode_execute_same_artifact"
-	ToolChainDownloadThenExecuteSameArtifact    = "chain.download_then_execute_same_artifact"
-	ToolChainSensitiveEgressArtifactThenExec    = "chain.sensitive_egress_artifact_then_execute"
-	ToolChainFirewallExpansionThenDestination   = "chain.firewall_trust_expansion_then_destination_use"
-	ToolChainSQLServerXPCommandShellExecution   = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
-	ToolChainPrivilegedKubernetesHostRootExec   = "chain.kubernetes_privileged_host_root_write_apply_exec"
-	ToolChainWirelessCaptureThenDeauthSameBSSID = "chain.wireless_capture_then_deauth_same_bssid"
-	ToolChainSecretsdumpThenPsExecSameIdentity  = "chain.secretsdump_then_psexec_same_target_principal"
-	ToolChainCloudIAMPrincipalAdmin             = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
-	ToolChainKubernetesPrivilegedCronJob        = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
-	ToolChainSQLCommandUDF                      = "chain.sql_command_udf_create_then_invoke_same_function"
-	ToolChainStagedReverseShellPersistence      = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
-	ToolChainEndpointSecurityControlMutation    = "chain.endpoint_security_control_request_then_completed_same_process"
-	ToolChainSensitiveReadValueExternalTransmit = "chain.sensitive_read_value_then_external_literal_transmit"
-	ToolChainMaxValueJoinDigests                = 16
-	toolChainProjectionFingerprintDomain        = "defenseclaw.tool-chain.projection.v2"
-	toolChainWideProjectionFingerprintDomain    = "defenseclaw.tool-chain.projection.v3-wide"
-	toolChainRulesetFingerprintDomain           = "defenseclaw.tool-chain.ruleset.v1"
-	toolChainDefinitionFingerprintDomain        = "defenseclaw.tool-chain.definition.v1"
-	toolChainCatalogFingerprintDomain           = "defenseclaw.tool-chain.catalog.v1"
-	toolChainRelevantSemanticProjection         = "actionfacts-v12-structured-credential-egress-lineage"
-	toolChainRelevantEnforcementProjection      = "enforcement-proof-v1"
-	toolChainRelevantFallbackProjection         = "owner-local-fallback-v1"
-	toolChainRelevantExternalEgressProjection   = "external-egress-v1"
-	toolChainRelevantN13Projection              = "n13-lateral-exec-proof-v1"
-	toolChainRelevantH18Projection              = "h18-system-root-proof-v1"
+	ToolChainGuardrailsOffThenEgress               = "chain.guardrails_off_then_egress"
+	ToolChainPermissionDeniedThenBypass            = "chain.permission_denied_then_runtime_bypass"
+	ToolChainPrivilegeDiscoveryThenElevation       = "chain.privilege_discovery_then_elevation"
+	ToolChainSecretManagerReadThenEgress           = "chain.secret_manager_read_then_egress"
+	ToolChainSecretReadThenEgress                  = "chain.secret_read_then_egress"
+	ToolChainWorkloadIdentityThenLateralExec       = "chain.workload_identity_then_lateral_execution"
+	ToolChainDownloadDecodeExecuteSameArtifact     = "chain.download_decode_execute_same_artifact"
+	ToolChainDownloadThenExecuteSameArtifact       = "chain.download_then_execute_same_artifact"
+	ToolChainSensitiveEgressArtifactThenExec       = "chain.sensitive_egress_artifact_then_execute"
+	ToolChainFirewallExpansionThenDestination      = "chain.firewall_trust_expansion_then_destination_use"
+	ToolChainSQLServerXPCommandShellExecution      = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
+	ToolChainPrivilegedKubernetesHostRootExec      = "chain.kubernetes_privileged_host_root_write_apply_exec"
+	ToolChainWirelessCaptureThenDeauthSameBSSID    = "chain.wireless_capture_then_deauth_same_bssid"
+	ToolChainSecretsdumpThenPsExecSameIdentity     = "chain.secretsdump_then_psexec_same_target_principal"
+	ToolChainCloudIAMPrincipalAdmin                = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
+	ToolChainKubernetesPrivilegedCronJob           = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
+	ToolChainSQLCommandUDF                         = "chain.sql_command_udf_create_then_invoke_same_function"
+	ToolChainStagedReverseShellPersistence         = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
+	ToolChainEndpointSecurityControlMutation       = "chain.endpoint_security_control_request_then_completed_same_process"
+	ToolChainSensitiveReadValueExternalTransmit    = "chain.sensitive_read_value_then_external_literal_transmit"
+	ToolChainSensitiveSQLValueCrossResourcePersist = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
+	ToolChainMaxValueJoinDigests                   = 16
+	toolChainProjectionFingerprintDomain           = "defenseclaw.tool-chain.projection.v2"
+	toolChainWideProjectionFingerprintDomain       = "defenseclaw.tool-chain.projection.v3-wide"
+	toolChainRulesetFingerprintDomain              = "defenseclaw.tool-chain.ruleset.v1"
+	toolChainDefinitionFingerprintDomain           = "defenseclaw.tool-chain.definition.v1"
+	toolChainCatalogFingerprintDomain              = "defenseclaw.tool-chain.catalog.v1"
+	toolChainRelevantSemanticProjection            = "actionfacts-v12-structured-credential-egress-lineage"
+	toolChainRelevantEnforcementProjection         = "enforcement-proof-v1"
+	toolChainRelevantFallbackProjection            = "owner-local-fallback-v1"
+	toolChainRelevantExternalEgressProjection      = "external-egress-v1"
+	toolChainRelevantN13Projection                 = "n13-lateral-exec-proof-v1"
+	toolChainRelevantH18Projection                 = "h18-system-root-proof-v1"
 )
 
 // ToolChainDefinition is the immutable private catalog entry for one bounded
@@ -104,9 +105,14 @@ type ToolChainDefinition struct {
 	RequiresEnforcementJoin bool
 	RequiresExactJoin       bool
 	RequiresValueJoin       bool
-	RequiresTerminalSuccess bool
-	ArtifactMutationBarrier bool
-	DetectionOnly           bool
+	// RequiresDistinctResourceJoin requires both roles to carry exact, non-empty
+	// trusted resource identities and rejects a same-resource pair. It is
+	// intentionally separate from value equality: the associated value HMACs
+	// must still intersect exactly.
+	RequiresDistinctResourceJoin bool
+	RequiresTerminalSuccess      bool
+	ArtifactMutationBarrier      bool
+	DetectionOnly                bool
 	// OutputJoinFromFirst selects a three-step proof whose source action knows
 	// the terminal identity while the middle action knows only the input
 	// artifact. This is used for manifest write -> apply -> named-pod exec.
@@ -325,6 +331,21 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// Exact value continuity proves the data flow but not whether an external
 		// destination is approved by deployment policy. Keep the first slice
 		// detection-only rather than turning profile severity into authorization.
+		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainSensitiveSQLValueCrossResourcePersist, Version: "1.0",
+		Title:       "Sensitive SQL value persisted literally to a distinct MCP resource",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                     "authenticated-successful-sensitive-sql-rowset-to-exact-cross-resource-literal-persistence-bounded8-v1",
+		RequiresValueJoin:            true,
+		RequiresDistinctResourceJoin: true,
+		RequiresTerminalSuccess:      true,
+		// Exact value and resource continuity proves a cross-resource persistence
+		// flow, but not whether that flow was authorized. Keep every built-in
+		// posture detection-only until benchmark and deployment policy evidence can
+		// justify enforcement.
 		DetectionOnly: true,
 	},
 }
@@ -651,6 +672,11 @@ func MatchToolChains(
 							event.Projection.ValueJoinDigests[i],
 							final.Projection.ValueJoinDigests[i],
 						)
+				if definition.RequiresDistinctResourceJoin {
+					detectionJoinPossible = detectionJoinPossible &&
+						predecessorDigest != "" && finalDigest != "" &&
+						predecessorDigest != finalDigest
+				}
 			} else if definition.RequiresExactJoin {
 				detectionJoinPossible = predecessorDigest != "" &&
 					predecessorDigest == finalDigest
@@ -690,6 +716,10 @@ func MatchToolChains(
 					event.Projection.ValueJoinDigests[i],
 					final.Projection.ValueJoinDigests[i],
 				)
+				if definition.RequiresDistinctResourceJoin {
+					joinSafe = joinSafe && predecessorDigest != "" &&
+						finalDigest != "" && predecessorDigest != finalDigest
+				}
 			} else if definition.RequiresExactJoin {
 				joinSafe = joinSafe && predecessorDigest != "" &&
 					predecessorDigest == finalDigest
@@ -1106,6 +1136,11 @@ func toolChainBaseFingerprint(definition ToolChainDefinition, relevantOwnerDiges
 		fmt.Sprintf("%t", definition.DetectionOnly),
 		relevantOwnerDigest,
 	)
+	if definition.RequiresDistinctResourceJoin {
+		// Preserve every deployed definition fingerprint byte-for-byte. Only the
+		// new cross-resource proof appends this ABI field.
+		base = toolChainDigest(base, "distinct-resource-join")
+	}
 	if definition.Step4Bit != 0 {
 		// Keep every deployed two- and three-step definition fingerprint
 		// byte-for-byte stable. Four-step definitions append their new ABI field.

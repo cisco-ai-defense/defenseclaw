@@ -111,7 +111,7 @@ func TestToolChainPendingTableIsMandatoryForStoreReadiness(t *testing.T) {
 func TestToolChainPendingSuccessCommitsTerminalPredecessorAndReplays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	fixture := newToolChainFixture(t, path)
-	chainID := guardrail.ToolChainSecretReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	pre := fixture.seed(t, "pending-success", correlationDigest("pending-pre"))
 	prepare := ToolChainPreparePendingInput{
 		ConnectorInstanceID:  pre.ConnectorInstanceID,
@@ -732,7 +732,7 @@ func TestToolChainDiscardPendingForEventSessionIsExactAndBounded(t *testing.T) {
 
 func TestToolChainTerminalResetIsExactAndSuppressesStaleReplay(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainPrivilegeDiscoveryThenElevation
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	seedObserved := func(session, name string, step int, deny bool) ToolChainObserveInput {
 		t.Helper()
 		input := fixture.seed(t, session, correlationDigest(name))

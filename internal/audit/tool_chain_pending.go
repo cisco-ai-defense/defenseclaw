@@ -84,8 +84,14 @@ type ToolChainResolvePendingInput struct {
 	// SuccessfulReadPathDigest rebinds a result envelope's trusted path/type to
 	// the exact pre-tool sensitive-read projection. Value digests are keyed,
 	// bounded, and never accepted without that identity match.
-	SuccessfulReadPathDigest   string
-	SuccessfulReadValueDigests guardrail.ToolChainValueJoinDigests
+	SuccessfulReadPathDigest   string                              `json:"-"`
+	SuccessfulReadValueDigests guardrail.ToolChainValueJoinDigests `json:"-"`
+	// SuccessfulSQLValueSource rebinds a value-free terminal projection to the
+	// descriptor captured from the authenticated invocation. The resource and
+	// value digests are process-private, bounded, and excluded from JSON.
+	SuccessfulSQLValueSource            ToolChainPendingSQLValueSource      `json:"-"`
+	SuccessfulSQLResourceIdentityDigest string                              `json:"-"`
+	SuccessfulSQLValueDigests           guardrail.ToolChainValueJoinDigests `json:"-"`
 }
 
 type ToolChainResolvePendingResult struct {
@@ -137,6 +143,7 @@ type persistedToolChainPending struct {
 	detectionSteps, enforcementSteps                                 uint64
 	enforcementJoinDigests                                           [guardrail.ToolChainCount]string
 	enforcementOutputJoinDigests                                     [guardrail.ToolChainCount]string
+	valueJoinDigests                                                 [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	prepared, expires                                                int64
 	sqlValueSourceTableClass, sqlValueSourceResourceDigest           string
 }
@@ -288,17 +295,18 @@ func (repo *ToolChainRepository) preparePendingTx(
 			connector_instance_id, tool_invocation_digest, session_value_digest,
 			pre_semantic_event_id, pre_input_fingerprint, projection_fingerprint,
 		ruleset_fingerprint, parse_status, detection_step_mask,
-		enforcement_step_mask, enforcement_join_digests,
-		enforcement_output_join_digests,
-		prepared_time_unix_nano, expires_time_unix_nano
-		, sql_value_source_table_class, sql_value_source_resource_digest
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			enforcement_step_mask, enforcement_join_digests,
+			enforcement_output_join_digests, value_join_digests,
+			prepared_time_unix_nano, expires_time_unix_nano
+			, sql_value_source_table_class, sql_value_source_resource_digest
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(input.ConnectorInstanceID), input.ToolInvocationDigest, session,
 		string(input.PreSemanticEventID), input.PreInputFingerprint, projectionFP,
 		input.RulesetFingerprint, string(input.Projection.ParseStatus),
 		input.Projection.DetectionStepMask, input.Projection.EnforcementStepMask,
 		encodeToolChainJoinDigests(input.Projection.EnforcementJoinDigests),
 		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
+		encodeToolChainValueJoinDigests(input.Projection.ValueJoinDigests),
 		unixNano(now), unixNano(expires), string(input.SQLValueSource.TableClass),
 		input.SQLValueSource.DatabaseIdentityDigest)
 	if err != nil {
@@ -412,6 +420,7 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		EnforcementStepMask:          pending.enforcementSteps,
 		EnforcementJoinDigests:       pending.enforcementJoinDigests,
 		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
+		ValueJoinDigests:             pending.valueJoinDigests,
 	}
 	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
 		index, ok := guardrail.ToolChainIndexByID(
@@ -427,6 +436,27 @@ func (repo *ToolChainRepository) resolvePendingTx(
 			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
 		}
 		projection.ValueJoinDigests[index] = input.SuccessfulReadValueDigests
+	}
+	if input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
+		)
+		definition, definitionOK := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
+		)
+		if !ok || !definitionOK ||
+			pendingSQLValueSource(pending) != input.SuccessfulSQLValueSource ||
+			projection.DetectionStepMask&
+				(definition.Step1Bit|definition.Step2Bit) != 0 ||
+			projection.EnforcementJoinDigests[index] != "" ||
+			projection.ValueJoinDigests[index] != (guardrail.ToolChainValueJoinDigests{}) {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
+		projection.ParseStatus = actionfacts.StatusComplete
+		projection.DetectionStepMask |= definition.Step1Bit
+		projection.EnforcementJoinDigests[index] =
+			input.SuccessfulSQLResourceIdentityDigest
+		projection.ValueJoinDigests[index] = input.SuccessfulSQLValueDigests
 	}
 	if projection.DetectionStepMask == 0 {
 		// A successfully resolved but semantically unrelated tool call still
@@ -893,7 +923,10 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 	}
 	if input.Outcome != ToolChainPendingOutcomeSuccess {
 		if input.SuccessfulReadPathDigest != "" ||
-			input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+			input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) ||
+			input.SuccessfulSQLValueSource != (ToolChainPendingSQLValueSource{}) ||
+			input.SuccessfulSQLResourceIdentityDigest != "" ||
+			input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
 			return errors.New("audit: unsuccessful pending result contains value lineage")
 		}
 		return nil
@@ -901,25 +934,69 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 	if err := validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true); err != nil {
 		return err
 	}
+	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) &&
+		input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+		return errors.New("audit: successful pending result contains ambiguous value lineage")
+	}
 	if input.SuccessfulReadValueDigests == (guardrail.ToolChainValueJoinDigests{}) {
 		if input.SuccessfulReadPathDigest != "" {
 			return errors.New("audit: read path digest has no value lineage")
 		}
+	} else {
+		if err := validateSHA256(
+			"successful read path digest", input.SuccessfulReadPathDigest, true,
+		); err != nil {
+			return err
+		}
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		definition, ok := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		projection := guardrail.ToolChainProjection{
+			ParseStatus:       actionfacts.StatusComplete,
+			DetectionStepMask: definition.Step1Bit,
+		}
+		projection.ValueJoinDigests[index] = input.SuccessfulReadValueDigests
+		if err := guardrail.ValidateToolChainProjection(projection); err != nil {
+			return err
+		}
+	}
+	if input.SuccessfulSQLValueDigests == (guardrail.ToolChainValueJoinDigests{}) {
+		if input.SuccessfulSQLValueSource != (ToolChainPendingSQLValueSource{}) ||
+			input.SuccessfulSQLResourceIdentityDigest != "" {
+			return errors.New("audit: SQL value-lineage descriptor has no value lineage")
+		}
 		return nil
 	}
+	if err := validatePendingSQLValueSource(input.SuccessfulSQLValueSource); err != nil {
+		return err
+	}
+	if input.SuccessfulSQLValueSource == (ToolChainPendingSQLValueSource{}) {
+		return errors.New("audit: SQL value lineage has no source descriptor")
+	}
 	if err := validateSHA256(
-		"successful read path digest", input.SuccessfulReadPathDigest, true,
+		"successful SQL resource identity digest",
+		input.SuccessfulSQLResourceIdentityDigest,
+		true,
 	); err != nil {
 		return err
 	}
 	index, ok := guardrail.ToolChainIndexByID(
-		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
 	)
 	if !ok {
 		return ErrToolChainIntegrity
 	}
 	definition, ok := guardrail.ToolChainDefinitionByID(
-		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		guardrail.ToolChainSensitiveSQLValueCrossResourcePersist,
 	)
 	if !ok {
 		return ErrToolChainIntegrity
@@ -928,7 +1005,8 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 		ParseStatus:       actionfacts.StatusComplete,
 		DetectionStepMask: definition.Step1Bit,
 	}
-	projection.ValueJoinDigests[index] = input.SuccessfulReadValueDigests
+	projection.EnforcementJoinDigests[index] = input.SuccessfulSQLResourceIdentityDigest
+	projection.ValueJoinDigests[index] = input.SuccessfulSQLValueDigests
 	return guardrail.ValidateToolChainProjection(projection)
 }
 
@@ -1016,12 +1094,13 @@ func loadToolChainPending(
 	invocationDigest string,
 ) (persistedToolChainPending, bool, error) {
 	var pending persistedToolChainPending
-	var enforcementJoinDigests, enforcementOutputJoinDigests string
+	var enforcementJoinDigests, enforcementOutputJoinDigests, valueJoinDigests string
 	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id,
 		tool_invocation_digest, session_value_digest, pre_semantic_event_id,
 		pre_input_fingerprint, projection_fingerprint, ruleset_fingerprint,
 		parse_status, detection_step_mask, enforcement_step_mask,
 		enforcement_join_digests, enforcement_output_join_digests,
+		value_join_digests,
 		prepared_time_unix_nano, expires_time_unix_nano,
 		sql_value_source_table_class, sql_value_source_resource_digest
 		FROM guardrail_chain_pending_actions
@@ -1033,6 +1112,7 @@ func loadToolChainPending(
 		&pending.ruleset, &pending.parseStatus, &pending.detectionSteps,
 		&pending.enforcementSteps, &enforcementJoinDigests,
 		&enforcementOutputJoinDigests,
+		&valueJoinDigests,
 		&pending.prepared, &pending.expires,
 		&pending.sqlValueSourceTableClass, &pending.sqlValueSourceResourceDigest,
 	)
@@ -1052,6 +1132,11 @@ func loadToolChainPending(
 		return persistedToolChainPending{}, true, ErrToolChainIntegrity
 	}
 	pending.enforcementOutputJoinDigests = outputJoins
+	values, valueJoinErr := decodeToolChainValueJoinDigests(valueJoinDigests)
+	if valueJoinErr != nil {
+		return persistedToolChainPending{}, true, ErrToolChainIntegrity
+	}
+	pending.valueJoinDigests = values
 	return pending, true, nil
 }
 
@@ -1260,6 +1345,7 @@ func validatePersistedToolChainPending(pending persistedToolChainPending) error 
 		EnforcementStepMask:          pending.enforcementSteps,
 		EnforcementJoinDigests:       pending.enforcementJoinDigests,
 		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
+		ValueJoinDigests:             pending.valueJoinDigests,
 	}
 	if err := validatePendingToolChainProjection(projection); err != nil {
 		return ErrToolChainIntegrity
@@ -1310,6 +1396,7 @@ func sameToolChainPending(
 		pending.enforcementSteps == input.Projection.EnforcementStepMask &&
 		pending.enforcementJoinDigests == input.Projection.EnforcementJoinDigests &&
 		pending.enforcementOutputJoinDigests == input.Projection.EnforcementOutputJoinDigests &&
+		pending.valueJoinDigests == input.Projection.ValueJoinDigests &&
 		pendingSQLValueSource(pending) == input.SQLValueSource
 }
 

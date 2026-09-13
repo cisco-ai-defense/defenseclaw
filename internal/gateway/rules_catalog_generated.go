@@ -38,6 +38,7 @@ var defaultRuleCategories = []ruleCategory{
 			{ID: "SEC-NPM-TOKEN", Pattern: regexp.MustCompile("npm_[a-zA-Z0-9]{36,}"), Title: "npm access token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 			{ID: "SEC-PYPI-TOKEN", Pattern: regexp.MustCompile("pypi-[A-Za-z0-9\\-_]{50,}"), Title: "PyPI API token", Severity: "CRITICAL", Confidence: 0.95, Tags: []string{"credential"}},
 			{ID: "SEC-HEX-SECRET", Pattern: regexp.MustCompile("(?i)(?:secret(?:_key)?|api[_-]?key|[a-z0-9]{0,24}[_-]?token)\\s*[=:]\\s*[\"']?[a-f0-9]{32,}\\b"), Title: "Hex-encoded secret in assignment", Severity: "HIGH", Confidence: 0.72, Tags: []string{"credential"}},
+			{ID: "chain.sensitive_sql_value_then_cross_resource_literal_persistence", Pattern: regexp.MustCompile("a^"), Expression: "f.tool in ['write_file', 'create_entities']", ToolCallOnly: true, Title: "Sensitive SQL value persisted literally to a distinct MCP resource", Severity: "HIGH", Confidence: 0.98, Tags: []string{"credential", "database", "persistence", "bounded-lineage", "detection-only"}},
 		},
 	},
 	{

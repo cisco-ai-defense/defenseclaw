@@ -47,9 +47,15 @@ func TestMatchToolChainsFixedCatalog(t *testing.T) {
 			}
 			if definition.RequiresValueJoin {
 				index, _ := ToolChainIndexByID(definition.ID)
-				const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-				firstProjection.ValueJoinDigests[index][0] = digest
-				finalProjection.ValueJoinDigests[index][0] = digest
+				const valueDigest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				firstProjection.ValueJoinDigests[index][0] = valueDigest
+				finalProjection.ValueJoinDigests[index][0] = valueDigest
+				if definition.RequiresDistinctResourceJoin {
+					firstProjection.EnforcementJoinDigests[index] =
+						"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+					finalProjection.EnforcementJoinDigests[index] =
+						"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+				}
 			}
 			matches, err := MatchToolChains([]ToolChainWindowEvent{{
 				SemanticEventID: "first", Sequence: 1, ReceivedAt: now,
@@ -141,26 +147,27 @@ func TestProximityOnlyChainsRemainVisibleButCannotEnforce(t *testing.T) {
 
 func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 	want := map[string][3]uint64{
-		ToolChainGuardrailsOffThenEgress:            {1 << 0, 1 << 1, 0},
-		ToolChainPermissionDeniedThenBypass:         {1 << 2, 1 << 3, 0},
-		ToolChainPrivilegeDiscoveryThenElevation:    {1 << 4, 1 << 5, 0},
-		ToolChainSecretManagerReadThenEgress:        {1 << 6, 1 << 7, 0},
-		ToolChainSecretReadThenEgress:               {1 << 8, 1 << 9, 0},
-		ToolChainWorkloadIdentityThenLateralExec:    {1 << 10, 1 << 11, 0},
-		ToolChainDownloadDecodeExecuteSameArtifact:  {1 << 12, 1 << 13, 1 << 14},
-		ToolChainDownloadThenExecuteSameArtifact:    {1 << 15, 1 << 16, 0},
-		ToolChainSensitiveEgressArtifactThenExec:    {1 << 17, 1 << 18, 0},
-		ToolChainFirewallExpansionThenDestination:   {1 << 20, 1 << 21, 0},
-		ToolChainSQLServerXPCommandShellExecution:   {1 << 22, 1 << 23, 0},
-		ToolChainPrivilegedKubernetesHostRootExec:   {1 << 25, 1 << 26, 1 << 27},
-		ToolChainWirelessCaptureThenDeauthSameBSSID: {1 << 29, 1 << 30, 0},
-		ToolChainSecretsdumpThenPsExecSameIdentity:  {1 << 31, 1 << 32, 0},
-		ToolChainCloudIAMPrincipalAdmin:             {1 << 33, 1 << 34, 0},
-		ToolChainKubernetesPrivilegedCronJob:        {1 << 35, 1 << 36, 0},
-		ToolChainSQLCommandUDF:                      {1 << 38, 1 << 39, 0},
-		ToolChainStagedReverseShellPersistence:      {1 << 41, 1 << 42, 0},
-		ToolChainEndpointSecurityControlMutation:    {1 << 44, 1 << 45, 0},
-		ToolChainSensitiveReadValueExternalTransmit: {1 << 46, 1 << 47, 0},
+		ToolChainGuardrailsOffThenEgress:               {1 << 0, 1 << 1, 0},
+		ToolChainPermissionDeniedThenBypass:            {1 << 2, 1 << 3, 0},
+		ToolChainPrivilegeDiscoveryThenElevation:       {1 << 4, 1 << 5, 0},
+		ToolChainSecretManagerReadThenEgress:           {1 << 6, 1 << 7, 0},
+		ToolChainSecretReadThenEgress:                  {1 << 8, 1 << 9, 0},
+		ToolChainWorkloadIdentityThenLateralExec:       {1 << 10, 1 << 11, 0},
+		ToolChainDownloadDecodeExecuteSameArtifact:     {1 << 12, 1 << 13, 1 << 14},
+		ToolChainDownloadThenExecuteSameArtifact:       {1 << 15, 1 << 16, 0},
+		ToolChainSensitiveEgressArtifactThenExec:       {1 << 17, 1 << 18, 0},
+		ToolChainFirewallExpansionThenDestination:      {1 << 20, 1 << 21, 0},
+		ToolChainSQLServerXPCommandShellExecution:      {1 << 22, 1 << 23, 0},
+		ToolChainPrivilegedKubernetesHostRootExec:      {1 << 25, 1 << 26, 1 << 27},
+		ToolChainWirelessCaptureThenDeauthSameBSSID:    {1 << 29, 1 << 30, 0},
+		ToolChainSecretsdumpThenPsExecSameIdentity:     {1 << 31, 1 << 32, 0},
+		ToolChainCloudIAMPrincipalAdmin:                {1 << 33, 1 << 34, 0},
+		ToolChainKubernetesPrivilegedCronJob:           {1 << 35, 1 << 36, 0},
+		ToolChainSQLCommandUDF:                         {1 << 38, 1 << 39, 0},
+		ToolChainStagedReverseShellPersistence:         {1 << 41, 1 << 42, 0},
+		ToolChainEndpointSecurityControlMutation:       {1 << 44, 1 << 45, 0},
+		ToolChainSensitiveReadValueExternalTransmit:    {1 << 46, 1 << 47, 0},
+		ToolChainSensitiveSQLValueCrossResourcePersist: {1 << 48, 1 << 49, 0},
 	}
 	for index, definition := range ToolChainDefinitions() {
 		bits, ok := want[definition.ID]
@@ -174,17 +181,17 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 			t.Fatalf("%s result bit=%d want=%d", definition.ID, definition.ResultBit, wantResult)
 		}
 	}
-	if ToolChainCount != 20 || ToolChainLegacyCount != 13 ||
-		ToolChainKnownResultMask != uint32(0xfffff) ||
+	if ToolChainCount != 21 || ToolChainLegacyCount != 13 ||
+		ToolChainKnownResultMask != uint32(0x1fffff) ||
 		ToolChainKnownResultMask&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("result slot bounds=%d/%#x want 20/0xfffff",
+		t.Fatalf("result slot bounds=%d/%#x want 21/0x1fffff",
 			ToolChainCount, ToolChainKnownResultMask)
 	}
 	definition, _ := ToolChainDefinitionByID(ToolChainSQLServerXPCommandShellExecution)
-	if ToolChainKnownStepMask != uint64(0xffffffffffff) ||
+	if ToolChainKnownStepMask != uint64(0x3ffffffffffff) ||
 		ToolChainArtifactMutationBarrier != uint64(1<<19) ||
 		ToolChainKnownStepMask&ToolChainReservedSignBit != 0 {
-		t.Fatalf("step/barrier bounds=%#x/%#x want 0xfffffffffff/0x80000",
+		t.Fatalf("step/barrier bounds=%#x/%#x want 0x3ffffffffffff/0x80000",
 			ToolChainKnownStepMask, ToolChainArtifactMutationBarrier)
 	}
 	if definition.MutationBit != uint64(1<<24) {
@@ -634,18 +641,18 @@ func TestLegacyToolChainProjectionFingerprintSurvivesWidening(t *testing.T) {
 	}
 }
 
-func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwenty(t *testing.T) {
-	const futureTwentyFirstChain = uint32(1 << 20)
+func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwentyOne(t *testing.T) {
+	const futureTwentySecondChain = uint32(1 << 21)
 	matches := ToolChainMatches{
-		DetectedMask:        futureTwentyFirstChain,
-		EnforcementSafeMask: futureTwentyFirstChain,
+		DetectedMask:        futureTwentySecondChain,
+		EnforcementSafeMask: futureTwentySecondChain,
 	}
-	if matches.DetectedMask != futureTwentyFirstChain ||
-		matches.EnforcementSafeMask != futureTwentyFirstChain ||
-		futureTwentyFirstChain&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("uint32 result-mask capacity lost bit 20: %+v", matches)
+	if matches.DetectedMask != futureTwentySecondChain ||
+		matches.EnforcementSafeMask != futureTwentySecondChain ||
+		futureTwentySecondChain&ToolChainReservedResultSignBit != 0 {
+		t.Fatalf("uint32 result-mask capacity lost bit 21: %+v", matches)
 	}
-	if _, err := ToolChainIDs(futureTwentyFirstChain); err == nil {
+	if _, err := ToolChainIDs(futureTwentySecondChain); err == nil {
 		t.Fatal("future result bit was accepted before its catalog definition exists")
 	}
 }
