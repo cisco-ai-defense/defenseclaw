@@ -206,11 +206,11 @@ func TestRunBenchmarkLoadsAndLabelsOptInPolicyPack(t *testing.T) {
 }
 
 func TestParseOptInPolicyPacks(t *testing.T) {
-	got, err := parseOptInPolicyPacks("cloud-production-protection, privacy-high-assurance,ssh-authorized-keys-protection,cloud-production-protection")
+	got, err := parseOptInPolicyPacks("cloud-production-protection, privacy-high-assurance,cloud-production-protection")
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"cloud-production-protection", "privacy-high-assurance", "ssh-authorized-keys-protection"}
+	want := []string{"cloud-production-protection", "privacy-high-assurance"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("packs=%v, want %v", got, want)
 	}

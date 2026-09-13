@@ -75,10 +75,10 @@ go run ./benchmarks/cmd/defenseclaw-benchmark verify \
 
 Supported names are `cloud-production-protection`,
 `database-destruction-protection`, `infrastructure-destruction-protection`,
-`kubernetes-production-protection`, `privacy-high-assurance`, and
-`ssh-authorized-keys-protection`. The output environment records each lane's
-policy digest, policy root, and action posture. Standard `default`,
-`permissive`, and `strict` runs are unchanged when `--opt-in-packs` is omitted.
+`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+environment records each lane's policy digest, policy root, and action posture.
+Standard `default`, `permissive`, and `strict` runs are unchanged when
+`--opt-in-packs` is omitted.
 
 ## Prepare public sources
 

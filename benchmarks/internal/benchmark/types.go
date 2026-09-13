@@ -61,7 +61,6 @@ var validOptInPolicyPacks = map[string]bool{
 	"infrastructure-destruction-protection": true,
 	"kubernetes-production-protection":      true,
 	"privacy-high-assurance":                true,
-	"ssh-authorized-keys-protection":        true,
 }
 
 const optInPolicyLabelPrefix = "opt-in/"
