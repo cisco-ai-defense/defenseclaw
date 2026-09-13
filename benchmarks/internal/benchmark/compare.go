@@ -115,7 +115,22 @@ func CompareRuns(cases []Case, baseline, candidate []Prediction, seed int64) (Ru
 	if err != nil {
 		return RunComparison{}, fmt.Errorf("candidate: %w", err)
 	}
-	for _, profile := range []string{"default", "permissive", "strict"} {
+	profiles := make([]string, 0, len(baselineByProfile))
+	for profile := range baselineByProfile {
+		profiles = append(profiles, profile)
+	}
+	sort.Strings(profiles)
+	if len(profiles) != len(candidateByProfile) {
+		return RunComparison{}, fmt.Errorf(
+			"profile count differs: baseline=%d candidate=%d",
+			len(profiles),
+			len(candidateByProfile),
+		)
+	}
+	for _, profile := range profiles {
+		if _, ok := candidateByProfile[profile]; !ok {
+			return RunComparison{}, fmt.Errorf("candidate is missing profile %q", profile)
+		}
 		if len(baselineByProfile[profile]) != len(candidateByProfile[profile]) {
 			return RunComparison{}, fmt.Errorf(
 				"profile %s prediction count differs: baseline=%d candidate=%d",
@@ -137,7 +152,7 @@ func CompareRuns(cases []Case, baseline, candidate []Prediction, seed int64) (Ru
 		CandidateRunID: candidateRunID,
 		Seed:           seed,
 	}
-	for _, profile := range []string{"default", "permissive", "strict"} {
+	for _, profile := range profiles {
 		if len(baselineByProfile[profile]) == 0 {
 			continue
 		}

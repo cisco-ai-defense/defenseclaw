@@ -1531,6 +1531,44 @@ func TestCompareRunsUsesPairedCasesAndRejectsMissingPredictions(t *testing.T) {
 	}
 }
 
+func TestCompareRunsIncludesOptInProfilesAndRejectsProfileDrift(t *testing.T) {
+	benchmarkCase := minimalCase("attack", TruthMalicious, DispositionDetectOnly)
+	benchmarkCase.Truth.DeterministicTruth = DeterministicMalicious
+	const optInProfile = "opt-in/cloud-production-protection"
+	baseline := []Prediction{
+		profilePrediction("attack", "default", false, "allow"),
+		profilePrediction("attack", optInProfile, false, "allow"),
+	}
+	candidate := []Prediction{
+		profilePrediction("attack", "default", true, "alert"),
+		profilePrediction("attack", optInProfile, true, "alert"),
+	}
+	for index := range baseline {
+		baseline[index].RunID = "baseline"
+		candidate[index].RunID = "candidate"
+	}
+
+	comparison, err := CompareRuns([]Case{benchmarkCase}, baseline, candidate, 4321)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(comparison.Profiles) != 2 ||
+		comparison.Profiles[0].Profile != "default" ||
+		comparison.Profiles[1].Profile != optInProfile {
+		t.Fatalf("profiles=%+v", comparison.Profiles)
+	}
+	for _, profile := range comparison.Profiles {
+		if profile.Changes.PositiveDetectionGains != 1 {
+			t.Fatalf("profile %q changes=%+v", profile.Profile, profile.Changes)
+		}
+	}
+	if _, err := CompareRuns(
+		[]Case{benchmarkCase}, baseline, candidate[:1], 4321,
+	); err == nil || !strings.Contains(err.Error(), "profile count differs") {
+		t.Fatalf("missing opt-in profile error=%v", err)
+	}
+}
+
 func TestBenchmarkScoreIncludesSensitiveTruthAndOverlappingSpans(t *testing.T) {
 	cases := []Case{
 		{
