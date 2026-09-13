@@ -151,6 +151,44 @@ class CochiseNormalizerTests(unittest.TestCase):
         self.assertNotIn(secret, json.dumps(chains, sort_keys=True))
         self.assertEqual(adapter_stats(manifest)["deterministic_authentication_chains"], 1)
 
+    def test_failed_exact_authentication_is_a_real_chain_hard_negative(self) -> None:
+        secret = "generated passphrase"
+        rows = [
+            event(
+                "tool_call",
+                "fact",
+                tool="add_compromised_account",
+                params={"username": "LAB/user", "password": secret},
+            ),
+            event(
+                "tool_result",
+                "fact",
+                tool="add_compromised_account",
+                result="noted compromised account LAB/user",
+            ),
+            event("tool_call", "auth", params={"command": f"nxc smb host -u user -p '{secret}'"}),
+            event("tool_result", "auth", result="STATUS_LOGON_FAILURE"),
+        ]
+        self.write("failed-chain.json", rows)
+        cases, manifest = self.normalize()
+        chains = [row for row in cases if row["surface"] == "stateful"]
+        self.assertEqual(len(chains), 1)
+        self.assertEqual(chains[0]["truth"], adapter.failed_authentication_truth())
+        self.assertTrue(chains[0]["strata"]["hard_negative"])
+        self.assertEqual([item["outcome"] for item in chains[0]["payload"]["events"]], ["succeeded", "failed"])
+        self.assertEqual(adapter_stats(manifest)["failed_authentication_hard_negatives"], 1)
+
+    def test_task_scoped_secret_references_preserve_matches_and_mismatches(self) -> None:
+        shared = {"bravo": "REDACTED_SECRET_0001"}
+        first = adapter.projected_args({"password": "bravo"}, shared)
+        second = adapter.projected_args(
+            {"command": "nxc smb host -u user -p bravo -H alpha"}, shared
+        )
+        self.assertEqual(first["password"], "REDACTED_SECRET_0001")
+        self.assertIn("REDACTED_SECRET_0001", second["command"])
+        self.assertIn("REDACTED_SECRET", second["command"])
+        self.assertNotIn("alpha", second["command"])
+
     def test_failed_mismatched_and_unbounded_authentication_remain_contextual(self) -> None:
         secret = "generated passphrase"
         rows = [
