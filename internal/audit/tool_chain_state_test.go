@@ -81,23 +81,29 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 		t.Fatal("projection subset constraint accepted invalid masks")
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
-		SET detected_chain_mask=262143, enforcement_safe_chain_mask=262143
+		SET detected_chain_mask=1048575, enforcement_safe_chain_mask=1048575
 		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err != nil {
-		t.Fatalf("eighteen-slot event mask rejected: %v", err)
+		t.Fatalf("twenty-slot event mask rejected: %v", err)
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
-		SET detected_chain_mask=262144
-		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err == nil {
-		t.Fatal("event result mask accepted a nineteenth slot")
+		SET detected_chain_mask=1048576, enforcement_safe_chain_mask=1048576,
+			denied_chain_mask=1048576
+		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err != nil {
+		t.Fatalf("event result-mask storage did not reserve the twenty-first slot: %v", err)
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
-		SET detected_chain_mask=262143, enforcement_safe_chain_mask=262143,
-			denied_chain_mask=262143, severity='CRITICAL'`); err != nil {
-		t.Fatalf("eighteen-slot critical receipt rejected: %v", err)
+		SET detected_chain_mask=1048575, enforcement_safe_chain_mask=1048575,
+			denied_chain_mask=1048575, severity='CRITICAL'`); err != nil {
+		t.Fatalf("twenty-slot critical receipt rejected: %v", err)
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
-		SET detected_chain_mask=262144`); err == nil {
-		t.Fatal("receipt result mask accepted a nineteenth slot")
+		SET detected_chain_mask=1048576, enforcement_safe_chain_mask=1048576,
+			denied_chain_mask=1048576`); err != nil {
+		t.Fatalf("receipt result-mask storage did not reserve the twenty-first slot: %v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
+		SET detected_chain_mask=-1`); err == nil {
+		t.Fatal("receipt result mask accepted the reserved sign domain")
 	}
 	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_deny_receipts
 		SET severity='LOW'`); err == nil {
@@ -106,6 +112,74 @@ func TestToolChainMigrationIsContentFreeIdempotentAndConstrained(t *testing.T) {
 	if _, err := fixture.store.db.Exec(`DELETE FROM correlation_events
 		WHERE semantic_event_id=?`, string(final.SemanticEventID)); err == nil {
 		t.Fatal("correlation event deletion bypassed chain-event RESTRICT")
+	}
+}
+
+func TestToolChainAppendOnlyMaskCapacityMigrationPreservesReplayAndRejectsUnknownMasks(t *testing.T) {
+	if got := migrations[len(migrations)-1].description; got !=
+		"guardrails: reserve append-only bounded chain mask capacity" {
+		t.Fatalf("append-only capacity migration is not last: %q", got)
+	}
+	path := filepath.Join(t.TempDir(), "capacity.db")
+	fixture := newToolChainFixture(t, path)
+	input := fixture.seed(t, "capacity", correlationDigest("capacity-input"))
+	input.Projection = toolChainProjection(
+		t, []string{guardrail.ToolChainGuardrailsOffThenEgress}, 1, true,
+	)
+	first, err := fixture.chain.Observe(t.Context(), input)
+	if err != nil || first.Status != ToolChainObserveFresh {
+		t.Fatalf("initial observe=%+v err=%v", first, err)
+	}
+	if err := migrateToolChainAppendOnlyMaskCapacity(fixture.store.db); err != nil {
+		t.Fatalf("capacity migration: %v", err)
+	}
+	replay, err := fixture.chain.Observe(t.Context(), input)
+	if err != nil || replay.Status != ToolChainObserveReplay || !replay.SuppressTelemetry {
+		t.Fatalf("post-migration replay=%+v err=%v", replay, err)
+	}
+
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, enforcement_step_mask=0
+		WHERE semantic_event_id=?`, int64(1)<<52, string(input.SemanticEventID)); err != nil {
+		t.Fatalf("SQLite positive step capacity rejected bit 52: %v", err)
+	}
+	if _, err := fixture.chain.Observe(t.Context(), input); !errors.Is(err, ErrToolChainIntegrity) {
+		t.Fatalf("unknown persisted step mask error=%v", err)
+	}
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, detected_chain_mask=?
+		WHERE semantic_event_id=?`, input.Projection.DetectionStepMask,
+		int64(1)<<20, string(input.SemanticEventID)); err != nil {
+		t.Fatalf("SQLite positive result capacity rejected bit 20: %v", err)
+	}
+	if _, err := fixture.chain.Observe(t.Context(), input); !errors.Is(err, ErrToolChainIntegrity) {
+		t.Fatalf("unknown persisted result mask error=%v", err)
+	}
+
+	if _, err := fixture.store.db.Exec(`UPDATE guardrail_chain_events
+		SET detection_step_mask=?, enforcement_step_mask=?, detected_chain_mask=0
+		WHERE semantic_event_id=?`, input.Projection.DetectionStepMask,
+		input.Projection.EnforcementStepMask, string(input.SemanticEventID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := fixture.store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	restarted, err := NewStore(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = restarted.Close() })
+	if err := restarted.Init(); err != nil {
+		t.Fatal(err)
+	}
+	repository, err := restarted.ToolChainRepository()
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayedAfterRestart, err := repository.Observe(t.Context(), input)
+	if err != nil || replayedAfterRestart.Status != ToolChainObserveReplay {
+		t.Fatalf("restart replay=%+v err=%v", replayedAfterRestart, err)
 	}
 }
 
@@ -229,6 +303,15 @@ func TestToolChainEighteenSlotWideMaskMigrationIsAppendOnly(t *testing.T) {
 	}
 	if low, high := stableToolChainActionID(input, 1), stableToolChainActionID(input, 131073); low == high {
 		t.Fatal("eighteenth result bit collided in stable action identity")
+	}
+}
+
+func TestToolChainTwentySlotValueLineageMigrationIsAppendOnly(t *testing.T) {
+	const migrationIndex = 43
+	if len(migrations) <= migrationIndex ||
+		migrations[migrationIndex].description !=
+			"guardrails: add result slots nineteen and twenty with bounded exact-value lineage" {
+		t.Fatal("twenty-slot value-lineage catalog is not append-only migration 44")
 	}
 }
 

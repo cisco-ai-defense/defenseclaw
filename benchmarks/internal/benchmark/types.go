@@ -38,6 +38,10 @@ const (
 	DeterministicMalicious  = "deterministic_malicious"
 	DeterministicContextual = "contextual_or_dual_use"
 	DeterministicBenign     = "benign"
+
+	StatefulAtomicTerminal  = "atomic_terminal"
+	StatefulBoundedIntent   = "bounded_intent"
+	StatefulBoundedComplete = "bounded_completed"
 )
 
 var validProfiles = map[string]bool{
@@ -45,6 +49,16 @@ var validProfiles = map[string]bool{
 	"permissive": true,
 	"strict":     true,
 }
+
+var validOptInPolicyPacks = map[string]bool{
+	"cloud-production-protection":           true,
+	"database-destruction-protection":       true,
+	"infrastructure-destruction-protection": true,
+	"kubernetes-production-protection":      true,
+	"privacy-high-assurance":                true,
+}
+
+const optInPolicyLabelPrefix = "opt-in/"
 
 // Case is one normalized benchmark input and its independent source,
 // applicability, and enforcement labels.
@@ -80,7 +94,19 @@ type Payload struct {
 	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
 	Filename         string          `json:"filename,omitempty"`
 	Target           string          `json:"target,omitempty"`
+	AnnotationSpans  []ActionSpan    `json:"annotation_spans,omitempty"`
 	Events           []ActionEvent   `json:"events,omitempty"`
+}
+
+// ActionSpan records source annotation offsets over an atomic command or one
+// stateful event command. It is benchmark evidence only and is never projected
+// into runtime ActionFacts.
+type ActionSpan struct {
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	Label      string `json:"label"`
+	RuleID     string `json:"rule_id,omitempty"`
+	EventIndex *int   `json:"event_index,omitempty"`
 }
 
 type ActionEvent struct {
@@ -102,6 +128,7 @@ type Truth struct {
 	LabelConfidence        string            `json:"label_confidence,omitempty"`
 	LabelSource            string            `json:"label_source,omitempty"`
 	EnforcementLens        string            `json:"enforcement_lens,omitempty"`
+	StatefulLens           string            `json:"stateful_lens,omitempty"`
 	Applicability          string            `json:"applicability"`
 	ExpectedDisposition    string            `json:"expected_disposition"`
 	ExpectedProfileActions map[string]string `json:"expected_profile_actions,omitempty"`
@@ -120,6 +147,7 @@ type Span struct {
 
 type Strata struct {
 	Platform      string `json:"platform,omitempty"`
+	Provider      string `json:"provider,omitempty"`
 	Dialect       string `json:"dialect,omitempty"`
 	Language      string `json:"language,omitempty"`
 	Ecosystem     string `json:"ecosystem,omitempty"`
@@ -178,6 +206,9 @@ type Environment struct {
 	PythonVersion        string            `json:"python_version"`
 	Profiles             []string          `json:"profiles"`
 	PolicyRoot           string            `json:"policy_root"`
+	OptInPolicyPacks     []string          `json:"opt_in_policy_packs,omitempty"`
+	OptInPolicyRoot      string            `json:"opt_in_policy_root,omitempty"`
+	PolicyPostures       map[string]string `json:"policy_postures,omitempty"`
 	CorpusSHA256         string            `json:"corpus_sha256"`
 	TruthCorpusSHA256    string            `json:"truth_corpus_sha256,omitempty"`
 	DatasetLockSHA256    string            `json:"dataset_lock_sha256"`
@@ -197,7 +228,7 @@ func (p Prediction) Validate() error {
 	if len(p.RunID) > 160 || len(p.CaseID) > 240 || len(p.Engine) > 120 {
 		return errors.New("prediction identity exceeds schema bounds")
 	}
-	if err := ValidateProfile(p.Profile); err != nil {
+	if err := ValidateBenchmarkProfile(p.Profile); err != nil {
 		return err
 	}
 	if p.DetectionStepMask&^guardrail.ToolChainKnownStepMask != 0 ||
@@ -361,6 +392,19 @@ func (c Case) Validate() error {
 	default:
 		return fmt.Errorf("unsupported enforcement_lens %q", c.Truth.EnforcementLens)
 	}
+	switch c.Truth.StatefulLens {
+	case "":
+	case StatefulAtomicTerminal, StatefulBoundedIntent, StatefulBoundedComplete:
+		if c.Surface != "stateful" {
+			return errors.New("stateful_lens is reserved for stateful cases")
+		}
+	default:
+		return fmt.Errorf("unsupported stateful_lens %q", c.Truth.StatefulLens)
+	}
+	if c.Truth.StatefulLens == StatefulBoundedIntent &&
+		c.Truth.ExpectedDisposition == DispositionBlock {
+		return errors.New("bounded_intent cannot have expected_disposition=block")
+	}
 	switch c.Truth.ExpectedDisposition {
 	case DispositionAllow, DispositionDetectOnly, DispositionBlock:
 	default:
@@ -380,6 +424,22 @@ func (c Case) Validate() error {
 			strings.TrimSpace(span.Label) == "" || len(span.Label) > 120 || len(span.RuleID) > 160 ||
 			(span.RuleID != "" && !boundedIdentifier.MatchString(span.RuleID)) {
 			return fmt.Errorf("invalid truth span %d", index)
+		}
+	}
+	for index, span := range c.Payload.AnnotationSpans {
+		command := c.Payload.Command
+		if span.EventIndex != nil {
+			if c.Surface != "stateful" || *span.EventIndex < 0 || *span.EventIndex >= len(c.Payload.Events) {
+				return fmt.Errorf("invalid action annotation span %d", index)
+			}
+			command = c.Payload.Events[*span.EventIndex].Command
+		} else if c.Surface != "action" {
+			return fmt.Errorf("invalid action annotation span %d", index)
+		}
+		if command == "" || span.Start < 0 || span.End <= span.Start || span.End > len(command) ||
+			strings.TrimSpace(span.Label) == "" || len(span.Label) > 120 || len(span.RuleID) > 160 ||
+			(span.RuleID != "" && !boundedIdentifier.MatchString(span.RuleID)) {
+			return fmt.Errorf("invalid action annotation span %d", index)
 		}
 	}
 	for profile, action := range c.Truth.ExpectedProfileActions {
@@ -428,6 +488,16 @@ func (c Case) Validate() error {
 				if event.OffsetSeconds < priorOffset || event.OffsetSeconds > 1800 {
 					return fmt.Errorf("stateful event %d has invalid offset_seconds", index)
 				}
+				if c.Truth.StatefulLens != "" {
+					switch event.Outcome {
+					case "succeeded", "failed", "denied", "cancelled", "unknown":
+					default:
+						return fmt.Errorf("stateful event %d requires an explicit outcome for an adjudicated truth lens", index)
+					}
+				}
+				if c.Truth.StatefulLens == StatefulBoundedComplete && event.Outcome == "unknown" {
+					return fmt.Errorf("stateful event %d has unknown outcome under bounded_completed", index)
+				}
 				priorOffset = event.OffsetSeconds
 			}
 		} else if c.Payload.Content == "" || c.Payload.Direction == "" {
@@ -443,6 +513,24 @@ func (c Case) Validate() error {
 // available. Contextual/dual-use commands are excluded from binary scoring;
 // their source provenance remains available as a diagnostic dimension.
 func detectionTruth(benchmarkCase Case) (positive bool, scorable bool) {
+	if benchmarkCase.Surface == "stateful" {
+		switch benchmarkCase.Truth.StatefulLens {
+		case StatefulAtomicTerminal, "":
+			return false, false
+		case StatefulBoundedIntent, StatefulBoundedComplete:
+			if !hasTruthRulePrefix(benchmarkCase.Truth.RuleIDs, "chain.") {
+				return false, false
+			}
+			switch benchmarkCase.Truth.DeterministicTruth {
+			case DeterministicMalicious:
+				return true, true
+			case DeterministicBenign:
+				return false, true
+			default:
+				return false, false
+			}
+		}
+	}
 	switch benchmarkCase.Truth.DeterministicTruth {
 	case DeterministicMalicious:
 		return true, true
@@ -462,10 +550,63 @@ func detectionTruth(benchmarkCase Case) (positive bool, scorable bool) {
 }
 
 func benignTruth(benchmarkCase Case) bool {
+	if benchmarkCase.Surface == "stateful" &&
+		benchmarkCase.Truth.StatefulLens == StatefulAtomicTerminal {
+		return false
+	}
 	if benchmarkCase.Truth.DeterministicTruth != "" {
 		return benchmarkCase.Truth.DeterministicTruth == DeterministicBenign
 	}
 	return benchmarkCase.Truth.SourceTruth == TruthBenign
+}
+
+func detectionPrediction(benchmarkCase Case, prediction Prediction, positive bool) bool {
+	if benchmarkCase.Surface == "stateful" && benchmarkCase.Truth.StatefulLens != "" &&
+		benchmarkCase.Truth.StatefulLens != StatefulAtomicTerminal && len(benchmarkCase.Truth.RuleIDs) > 0 {
+		if !prediction.Detected {
+			return false
+		}
+		for _, expected := range benchmarkCase.Truth.RuleIDs {
+			for _, actual := range prediction.RuleIDs {
+				if actual == expected {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !prediction.Detected || !positive || len(benchmarkCase.Truth.RuleIDs) == 0 {
+		return prediction.Detected
+	}
+	for _, expected := range benchmarkCase.Truth.RuleIDs {
+		for _, actual := range prediction.RuleIDs {
+			if actual == expected {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func enforcementTruth(benchmarkCase Case) (positive bool, scorable bool) {
+	if benchmarkCase.Surface == "stateful" {
+		switch benchmarkCase.Truth.StatefulLens {
+		case StatefulAtomicTerminal, StatefulBoundedIntent, "":
+			return false, false
+		case StatefulBoundedComplete:
+			return benchmarkCase.Truth.ExpectedDisposition == DispositionBlock, true
+		}
+	}
+	return benchmarkCase.Truth.ExpectedDisposition == DispositionBlock, true
+}
+
+func hasTruthRulePrefix(ruleIDs []string, prefix string) bool {
+	for _, ruleID := range ruleIDs {
+		if strings.HasPrefix(ruleID, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateProfile(profile string) error {
@@ -473,4 +614,36 @@ func ValidateProfile(profile string) error {
 		return fmt.Errorf("unsupported profile %q", profile)
 	}
 	return nil
+}
+
+// ValidateOptInPolicyPack restricts benchmark policy selection to the public,
+// repository-owned opt-in packs. Keeping this allowlist separate from runtime
+// profiles prevents a benchmark argument from becoming an arbitrary path.
+func ValidateOptInPolicyPack(name string) error {
+	if !validOptInPolicyPacks[name] {
+		return fmt.Errorf("unsupported opt-in policy pack %q", name)
+	}
+	return nil
+}
+
+// OptInPolicyLabel returns the distinct score/report dimension for a named
+// opt-in pack. Opt-in packs use the balanced/default action posture, but are
+// never reported as the default profile.
+func OptInPolicyLabel(name string) (string, error) {
+	if err := ValidateOptInPolicyPack(name); err != nil {
+		return "", err
+	}
+	return optInPolicyLabelPrefix + name, nil
+}
+
+// ValidateBenchmarkProfile accepts standard runtime profiles and the closed
+// set of benchmark-only opt-in labels emitted by Runner.
+func ValidateBenchmarkProfile(profile string) error {
+	if validProfiles[profile] {
+		return nil
+	}
+	if !strings.HasPrefix(profile, optInPolicyLabelPrefix) {
+		return fmt.Errorf("unsupported benchmark profile %q", profile)
+	}
+	return ValidateOptInPolicyPack(strings.TrimPrefix(profile, optInPolicyLabelPrefix))
 }

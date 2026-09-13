@@ -198,6 +198,22 @@ class TrajectoryBedrockLabelTests(unittest.TestCase):
         self.assertEqual(set(user_value), {"trajectory_id", "events"})
         self.assertEqual(set(user_value["events"][0]), {"event_index", "tool_name", "arguments"})
 
+    def test_action_surface_is_an_explicit_tool_call_without_direction(self) -> None:
+        item = case("a", "rollout-a", 0, 0)
+        item["surface"] = "action"
+        del item["payload"]["direction"]
+        bundle = self.prepare([item])
+        request = json.loads((bundle / "requests.jsonl").read_text())
+        user_value = json.loads(request["modelInput"]["messages"][1]["content"])
+        self.assertEqual(user_value["events"][0]["tool_name"], "inspect_file")
+
+    def test_missing_direction_on_non_action_surface_is_rejected(self) -> None:
+        item = case("a", "rollout-a", 0, 0)
+        item["surface"] = "text"
+        del item["payload"]["direction"]
+        with self.assertRaisesRegex(ValueError, "only tool_call rows"):
+            self.prepare([item])
+
     def test_refuses_mixed_splits_and_sealed_test_without_frozen_artifacts(self) -> None:
         with self.assertRaisesRegex(ValueError, "mixed splits"):
             self.prepare(
@@ -424,18 +440,32 @@ class TrajectoryBedrockLabelTests(unittest.TestCase):
         )
 
         retry = self.root / "retry"
-        labeler.prepare_retry(argparse.Namespace(bundle=parent, output_dir=retry, allow_small=True))
+        labeler.prepare_retry(
+            argparse.Namespace(
+                bundle=parent,
+                output_dir=retry,
+                allow_small=True,
+                max_completion_tokens=8192,
+            )
+        )
         retry_requests = [
             json.loads(line) for line in (retry / "requests.jsonl").read_text(encoding="utf-8").splitlines()
         ]
         self.assertEqual([row["recordId"] for row in retry_requests], [failed_record])
         self.assertIn("response_format", retry_requests[0]["modelInput"])
+        self.assertEqual(retry_requests[0]["modelInput"]["max_completion_tokens"], 8192)
         retry_index = json.loads((retry / "index.json").read_text(encoding="utf-8"))["records"]
         self.assertEqual(retry_index, index)
         prior_rows = labeler.command_labeler.load_jsonl(retry / "prior-labels.jsonl")
         self.assertEqual([row["id"] for row in prior_rows], [success_meta["id"]])
         retry_manifest = json.loads((retry / "retry-manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(retry_manifest["retry_record_ids"], [failed_record])
+        self.assertEqual(
+            json.loads((retry / "prepare-manifest.json").read_text(encoding="utf-8"))[
+                "max_completion_tokens"
+            ],
+            8192,
+        )
         prior, expected, usage = labeler._load_retry_context(
             retry,
             retry_index,
@@ -445,6 +475,75 @@ class TrajectoryBedrockLabelTests(unittest.TestCase):
         self.assertEqual(set(prior), {success_meta["id"]})
         self.assertEqual(expected, {failed_record})
         self.assertEqual(usage, {"input_tokens": 100, "output_tokens": 50})
+
+    def test_prepare_retry_can_chain_from_a_retry_bundle(self) -> None:
+        parent = self.prepare(
+            [case("success", "rollout-success", 0, 0), case("failed", "rollout-failed", 0, 0)],
+            "chain-parent",
+        )
+        index = json.loads((parent / "index.json").read_text(encoding="utf-8"))["records"]
+        success_record, failed_record = list(index)
+        success_meta = index[success_record]["events"][0]
+        successful_label = {
+            "schema_version": labeler.SCHEMA_VERSION,
+            "id": success_meta["id"],
+            "trajectory_record_id": success_record,
+            "prompt_version": labeler.PROMPT_VERSION_BY_MODEL[labeler.MODEL_ID],
+            "model_id": labeler.MODEL_ID,
+            "input_sha256": success_meta["input_sha256"],
+            "trajectory_input_sha256": index[success_record]["input_sha256"],
+            "sequence_index": success_meta["sequence_index"],
+            "call_index": success_meta["call_index"],
+            "label": {**event(0), "completed_proofs": []},
+            "review_required": False,
+        }
+        labels_path = parent / "labels.jsonl"
+        labels_path.write_text(labeler.canonical_json(successful_label) + "\n", encoding="utf-8")
+        prepare_manifest = json.loads((parent / "prepare-manifest.json").read_text(encoding="utf-8"))
+        labeler.command_labeler.write_json(
+            parent / "labels.manifest.json",
+            {
+                "schema_version": labeler.SCHEMA_VERSION,
+                "workflow": "bounded_trajectory_proof",
+                "prompt_version": prepare_manifest["prompt_version"],
+                "model_id": labeler.MODEL_ID,
+                "job_arn": "test-job",
+                "requests_sha256": prepare_manifest["requests_sha256"],
+                "index_sha256": prepare_manifest["index_sha256"],
+                "labels_sha256": labeler.command_labeler.sha256_file(labels_path),
+                "label_count": 1,
+                "review_required_count": 0,
+                "errors": [{"record_id": failed_record, "reason": "invalid_model_output", "retryable": True}],
+                "token_usage": {"input_tokens": 100, "output_tokens": 50},
+            },
+        )
+        first_retry = self.root / "chain-retry-one"
+        labeler.prepare_retry(argparse.Namespace(bundle=parent, output_dir=first_retry, allow_small=True))
+
+        first_retry_labels = first_retry / "labels.jsonl"
+        first_retry_labels.write_text(labeler.canonical_json(successful_label) + "\n", encoding="utf-8")
+        first_retry_prepare = json.loads((first_retry / "prepare-manifest.json").read_text(encoding="utf-8"))
+        labeler.command_labeler.write_json(
+            first_retry / "labels.manifest.json",
+            {
+                "schema_version": labeler.SCHEMA_VERSION,
+                "workflow": "bounded_trajectory_proof",
+                "prompt_version": first_retry_prepare["prompt_version"],
+                "model_id": labeler.MODEL_ID,
+                "job_arn": "test-retry-job",
+                "requests_sha256": first_retry_prepare["requests_sha256"],
+                "index_sha256": first_retry_prepare["index_sha256"],
+                "labels_sha256": labeler.command_labeler.sha256_file(first_retry_labels),
+                "label_count": 1,
+                "review_required_count": 0,
+                "errors": [{"record_id": failed_record, "reason": "invalid_model_output", "retryable": True}],
+                "token_usage": {"input_tokens": 125, "output_tokens": 60},
+            },
+        )
+        second_retry = self.root / "chain-retry-two"
+        labeler.prepare_retry(argparse.Namespace(bundle=first_retry, output_dir=second_retry, allow_small=True))
+        requests = labeler._load_request_records(second_retry / "requests.jsonl")
+        self.assertEqual(set(requests), {failed_record})
 
     def test_rejects_missing_identity_continuity_and_bad_proof_references(self) -> None:
         proof = {

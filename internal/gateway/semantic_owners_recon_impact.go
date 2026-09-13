@@ -17,6 +17,8 @@
 package gateway
 
 import (
+	"net/netip"
+	"net/url"
 	"path"
 	"strconv"
 	"strings"
@@ -54,12 +56,28 @@ func celProgramList(programs []string) string {
 }
 
 var semanticReconImpactOwners = map[string]semanticOwner{
+	"credential.structured_directory_acquisition": {
+		prerequisite: actionfacts.ExactDirectoryCredentialAcquisition,
+		alertOnly:    true,
+	},
+	"credential.directory_credential_acquisition": {
+		prerequisite:     actionfacts.ExactDirectoryCredentialAcquisition,
+		suppressFallback: actionfacts.DirectoryCredentialAcquisitionSafeNegative,
+	},
+	"credential.windows_ntds_ifm_dump": {
+		prerequisite:     actionfacts.ExactWindowsNTDSIFMDump,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"impact.windows_delete_all_shadow_copies": {
 		prerequisite:     actionfacts.ExactWindowsVSSDeleteAllShadows,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"tamper.windows_usn_journal_delete": {
 		prerequisite:     actionfacts.ExactWindowsUSNJournalDelete,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"tamper.windows_recursive_everyone_full_control": {
+		prerequisite:     actionfacts.ExactWindowsRecursiveEveryoneFullControl,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"impact.windows_recovery_disable_pair": {
@@ -69,6 +87,36 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	"tamper.windows_audit_policy_wipe": {
 		prerequisite:     actionfacts.ExactWindowsAuditPolicyWipePair,
 		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"defense_evasion.windows_defender_executable_exclusion": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsDefenderExecutableExtensionExclusion,
+		),
+		detectionOnly: true,
+	},
+	"defense_evasion.windows_defender_drive_root_exclusion": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsDefenderDriveRootExclusion,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_detailed_tracking_failure_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditDetailedTrackingFailureDisable,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_process_creation_success_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditProcessCreationSuccessDisable,
+		),
+		detectionOnly: true,
+	},
+	"tamper.windows_audit_full_privilege_disable": {
+		prerequisite: windowsSecurityControlMutationPrerequisite(
+			actionfacts.WindowsAuditFullPrivilegeDisable,
+		),
+		detectionOnly: true,
 	},
 	"impact.windows_recovery_store_destruction": {
 		prerequisite:     actionfacts.ExactWindowsRecoveryStoreDestruction,
@@ -154,6 +202,22 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	"tamper.posix_system_log_destruction": {
 		prerequisite:     actionfacts.ExactPOSIXSystemLogDestruction,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		// Literal security-log destruction is strong detection evidence, but
+		// without protected-host policy context it is also a valid maintenance
+		// operation. Keep the built-in owner alert-only in every profile.
+		alertOnly: true,
+	},
+	"privilege.temporary_setuid_executable": {
+		prerequisite:     actionfacts.ExactTemporarySetuidExecutable,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.custom_root_suid_implant": {
+		prerequisite:     actionfacts.ExactCustomRootSUIDImplant,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"privilege.pkroot_setuid_shell": {
+		prerequisite:     actionfacts.ExactPKRootSetuidShell,
+		suppressFallback: authoritativeSemanticSafeNegative,
 	},
 	"CMD-RM-RF": {
 		equivalentAliases: []string{
@@ -167,7 +231,7 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     sudoOrRootPrivilegeDiscoveryPrerequisite,
 		suppressFallback: sudoOrRootPrivilegeDiscoverySafeNegative,
 	},
-	"CMD-CHMOD-WORLD": reconImpactOwnerWithAliases(
+	"CMD-CHMOD-WORLD": detectionOnlyReconImpactOwnerWithAliases(
 		actionfacts.OperationPermissionChange,
 		accessControlMutationDisposition,
 		"CMD-CHOWN-ROOT",
@@ -179,8 +243,27 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 	"CMD-MKFS": {
 		prerequisite:     filesystemWipePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		// Formatting a device is exact high-impact telemetry, but may be an
+		// authorized provisioning operation. Built-in profiles do not know which
+		// devices are protected; the opt-in infrastructure pack enforces it.
+		detectionOnly: true,
 	},
 	"CMD-DEVICE-WIPE": {
+		prerequisite:     destructiveDeviceWritePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Preserve exact device-write recognition without universally denying
+		// storage retirement and incident-response workflows.
+		detectionOnly: true,
+	},
+	"impact.protected_access_control_change": reconImpactOwner(
+		actionfacts.OperationPermissionChange,
+		accessControlMutationDisposition,
+	),
+	"impact.protected_filesystem_format": {
+		prerequisite:     filesystemWipePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.protected_device_wipe": {
 		prerequisite:     destructiveDeviceWritePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
@@ -208,6 +291,14 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		actionfacts.OperationAccountChange,
 		privilegedAccountDisposition,
 	),
+}
+
+func windowsSecurityControlMutationPrerequisite(
+	operation actionfacts.WindowsSecurityControlMutation,
+) semanticOwnerPrerequisite {
+	return func(facts actionfacts.Facts) bool {
+		return actionfacts.ExactWindowsSecurityControlMutation(facts, operation)
+	}
 }
 
 func windowsRegistrySecurityControlDisablePrerequisite(facts actionfacts.Facts) bool {
@@ -264,6 +355,16 @@ func reconImpactOwnerWithAliases(
 ) semanticOwner {
 	owner := reconImpactOwner(operation, disposition)
 	owner.equivalentAliases = append([]string(nil), aliases...)
+	return owner
+}
+
+func detectionOnlyReconImpactOwnerWithAliases(
+	operation actionfacts.OperationKind,
+	disposition reconImpactDisposition,
+	aliases ...string,
+) semanticOwner {
+	owner := reconImpactOwnerWithAliases(operation, disposition, aliases...)
+	owner.detectionOnly = true
 	return owner
 }
 
@@ -739,6 +840,45 @@ func symbolicPermissionRisk(mode string) (setID, publicReadWrite, valid bool) {
 		}
 	}
 	return setID, publicReadWrite, true
+}
+
+func secureCredentialFileDeletePrerequisite(facts actionfacts.Facts) bool {
+	if !facts.Authoritative() {
+		return false
+	}
+	for _, command := range facts.Commands {
+		if !command.ArgvComplete || command.Program != "shred" ||
+			!hasOperation(command, actionfacts.OperationDelete) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID != command.ID ||
+				candidate.Access != actionfacts.PathAccessDelete ||
+				integrityPathHasFixtureSegment(firstNonEmpty(
+					candidate.Resolved, candidate.Normalized, candidate.Value,
+				)) {
+				continue
+			}
+			value := strings.ToLower(strings.ReplaceAll(
+				firstNonEmpty(candidate.Resolved, candidate.Normalized, candidate.Value),
+				`\`, "/",
+			))
+			base := path.Base(value)
+			switch base {
+			case ".env", "credentials", "credentials.json", "secret.yml", "secret.yaml",
+				"secrets.yml", "secrets.yaml", ".git-credentials", ".netrc", "_netrc",
+				".npmrc", ".pypirc":
+				return true
+			}
+			if strings.HasPrefix(base, "id_") && !strings.HasSuffix(base, ".pub") {
+				switch base {
+				case "id_rsa", "id_dsa", "id_ecdsa", "id_ed25519":
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 func recursiveActiveSSHOwnershipChange(
@@ -1732,7 +1872,8 @@ func workloadExecFallbackProof(facts actionfacts.Facts) bool {
 		switch strings.ToLower(command.Program) {
 		case "kubectl", "oc":
 			if hasOperation(command, actionfacts.OperationWorkloadExec) &&
-				staticKubernetesExecOuter(command) {
+				staticKubernetesExecOuter(command) &&
+				!staticKubernetesLoopbackHealthCheck(command) {
 				return true
 			}
 		case "crictl":
@@ -1752,6 +1893,79 @@ func workloadExecFallbackProof(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+// staticKubernetesLoopbackHealthCheck recognizes only a literal, read-only
+// curl probe executed after kubectl/oc's argument separator. It intentionally
+// abstains on variables, non-loopback hosts, uploads, arbitrary paths, and
+// shell wrappers so those remain visible workload-exec evidence.
+func staticKubernetesLoopbackHealthCheck(command actionfacts.CommandFact) bool {
+	separator := -1
+	for index, argument := range command.Argv {
+		if argument == "--" {
+			separator = index
+			break
+		}
+	}
+	if separator < 0 || separator+2 > len(command.Argv) {
+		return false
+	}
+	child := command.Argv[separator+1:]
+	if len(child) < 2 || !oneOfFold(child[0], "curl", "curl.exe") {
+		return false
+	}
+	var target string
+	for index := 1; index < len(child); index++ {
+		argument := child[index]
+		switch strings.ToLower(argument) {
+		case "--fail", "--silent", "--show-error":
+			continue
+		case "--max-time", "--connect-timeout":
+			index++
+			if index >= len(child) {
+				return false
+			}
+			continue
+		}
+		if staticCurlProbeFlag(argument) {
+			continue
+		}
+		if strings.HasPrefix(argument, "-") || target != "" {
+			return false
+		}
+		target = argument
+	}
+	parsed, err := url.Parse(target)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") ||
+		parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" {
+		return false
+	}
+	host := strings.ToLower(parsed.Hostname())
+	if host != "localhost" {
+		address, err := netip.ParseAddr(host)
+		if err != nil || !address.IsLoopback() {
+			return false
+		}
+	}
+	probePath := strings.TrimSuffix(strings.ToLower(parsed.EscapedPath()), "/")
+	for _, suffix := range []string{"/health", "/healthz", "/livez", "/readyz"} {
+		if probePath == suffix || strings.HasSuffix(probePath, suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+func staticCurlProbeFlag(argument string) bool {
+	if len(argument) < 2 || argument[0] != '-' || argument[1] == '-' {
+		return false
+	}
+	for _, option := range argument[1:] {
+		if option != 'f' && option != 's' && option != 'S' {
+			return false
+		}
+	}
+	return true
 }
 
 func staticKubernetesExecOuter(command actionfacts.CommandFact) bool {

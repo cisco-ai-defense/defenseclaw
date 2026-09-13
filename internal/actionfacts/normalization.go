@@ -174,6 +174,16 @@ func posixCommandExpandsTilde(
 	matched := false
 	expands := true
 	for _, argument := range command.Arguments {
+		if argument.Value == "" && argument.Expands &&
+			argument.Quote == QuoteNone && argument.StaticGlob == fact.Value &&
+			strings.HasPrefix(fact.Value, "~/") &&
+			!strings.ContainsAny(fact.Value, "*?[") {
+			// The POSIX parser retains an unquoted leading-tilde word in
+			// StaticGlob because expansion prevents generic argv authority.
+			// A trusted active home still makes this exact path resolvable.
+			matched = true
+			continue
+		}
 		if argument.Value != fact.Value {
 			continue
 		}

@@ -16,10 +16,10 @@ from typing import Any
 if __package__:
     from .benchmark_error_analysis import load_jsonl, sha256_file
     from .benchmark_label_bedrock import (
-        MODEL_ID,
         LEGACY_MODEL_ID,
         MANUAL_MODEL_ID,
         MANUAL_PROMPT_VERSION,
+        MODEL_ID,
         SUPPORTED_PROMPT_VERSIONS,
         extract_command,
         normalize_label,
@@ -27,10 +27,10 @@ if __package__:
 else:
     from benchmark_error_analysis import load_jsonl, sha256_file
     from benchmark_label_bedrock import (
+        LEGACY_MODEL_ID,
         MANUAL_MODEL_ID,
         MANUAL_PROMPT_VERSION,
         MODEL_ID,
-        LEGACY_MODEL_ID,
         SUPPORTED_PROMPT_VERSIONS,
         extract_command,
         normalize_label,

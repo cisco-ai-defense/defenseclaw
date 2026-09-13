@@ -11,6 +11,7 @@
 package gateway
 
 import (
+	"os"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -18,6 +19,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"gopkg.in/yaml.v3"
 )
 
 // TestProfilePosture_InjectionJudge pins the injection-judge labeling
@@ -96,6 +98,42 @@ func TestGuardrailPolicyProfilesHaveGoCompatibleRegexes(t *testing.T) {
 					}
 				}
 			}
+		})
+	}
+}
+
+func TestProfilePosture_AGENTSMDRequiresSemanticMutation(t *testing.T) {
+	for _, profile := range []string{"strict", "default", "permissive"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			path := filepath.Join(
+				guardrailPoliciesRoot(t), profile, "rules", "cognitive.yaml",
+			)
+			contents, err := os.ReadFile(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var rules guardrail.RulesFileYAML
+			if err := yaml.Unmarshal(contents, &rules); err != nil {
+				t.Fatal(err)
+			}
+			for _, rule := range rules.Rules {
+				if rule.ID != "COG-AGENTS-MD" {
+					continue
+				}
+				if !rule.ToolCallOnly || rule.Pattern != "a^" {
+					t.Fatalf(
+						"COG-AGENTS-MD fallback = (%q, tool_call_only=%t), want disabled lexical fallback confined to trusted tool calls",
+						rule.Pattern,
+						rule.ToolCallOnly,
+					)
+				}
+				if strings.TrimSpace(rule.Expression) == "" {
+					t.Fatal("COG-AGENTS-MD is missing its semantic mutation expression")
+				}
+				return
+			}
+			t.Fatal("COG-AGENTS-MD is missing")
 		})
 	}
 }
@@ -601,7 +639,7 @@ func TestShippedProfilesKeepSharedDriftCorrections(t *testing.T) {
 	}{
 		{
 			id:      "SEC-AWS-KEY",
-			pattern: `\b(?:AKIA|AGPA|AIDA|AROA|AIPA|ANPA|ANVA|ASIA)[0-9A-Z]{16,}`,
+			pattern: `\b(?:AKIA|ASIA)[0-9A-Z]{16}\b`,
 		},
 		{
 			id:      "CMD-ENV-DUMP",

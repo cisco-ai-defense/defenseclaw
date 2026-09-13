@@ -14,6 +14,11 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+MAX_REVIEW_PAYLOAD_BYTES = 32 * 1024
+MAX_REVIEW_STRING_CHARS = 8 * 1024
+MAX_REVIEW_COLLECTION_ITEMS = 64
+MAX_REVIEW_DEPTH = 5
+
 
 def sha256_file(path: Path) -> str:
     digest = hashlib.sha256()
@@ -84,6 +89,65 @@ def error_kind(case: dict[str, Any], prediction: dict[str, Any]) -> str:
     return "unscored"
 
 
+def bounded_value(value: Any, budget: list[int], depth: int = 0) -> Any:
+    """Return a deterministic, size-bounded JSON value for offline review."""
+    if budget[0] <= 0:
+        return "<truncated>"
+    if depth >= MAX_REVIEW_DEPTH:
+        return "<max-depth>"
+    if value is None or isinstance(value, (bool, int, float)):
+        rendered = json.dumps(value, separators=(",", ":"))
+        budget[0] -= len(rendered.encode("utf-8"))
+        return value
+    if isinstance(value, str):
+        rendered = value[: min(MAX_REVIEW_STRING_CHARS, budget[0])]
+        budget[0] -= len(rendered.encode("utf-8"))
+        return rendered + ("<truncated>" if len(rendered) < len(value) else "")
+    if isinstance(value, list):
+        return [
+            bounded_value(item, budget, depth + 1)
+            for item in value[:MAX_REVIEW_COLLECTION_ITEMS]
+            if budget[0] > 0
+        ]
+    if isinstance(value, dict):
+        output: dict[str, Any] = {}
+        for key, item in sorted(value.items(), key=lambda pair: str(pair[0]))[:MAX_REVIEW_COLLECTION_ITEMS]:
+            if budget[0] <= 0:
+                break
+            rendered_key = str(key)[:256]
+            budget[0] -= len(rendered_key.encode("utf-8"))
+            output[rendered_key] = bounded_value(item, budget, depth + 1)
+        return output
+    rendered = str(value)
+    return bounded_value(rendered, budget, depth)
+
+
+def review_payload(payload: dict[str, Any]) -> dict[str, Any] | None:
+    """Project command, content, structured args, or bounded events for review."""
+    projected: dict[str, Any] = {}
+    for field in ("tool_name", "dialect", "direction", "filename"):
+        if payload.get(field) not in (None, ""):
+            projected[field] = payload[field]
+    command = payload.get("command")
+    content = payload.get("content")
+    args = payload.get("args")
+    events = payload.get("events")
+    if isinstance(command, str) and command.strip():
+        projected["command"] = command
+    elif isinstance(content, str) and content.strip():
+        projected["content"] = content
+    elif isinstance(args, dict) and args:
+        projected["args"] = args
+    elif isinstance(events, list) and events:
+        # Stateful evaluation is bounded to the current event plus eight
+        # predecessors. Preserve that same boundary in the review artifact.
+        projected["events"] = events[-9:]
+    else:
+        return None
+    bounded = bounded_value(projected, [MAX_REVIEW_PAYLOAD_BYTES])
+    return bounded if isinstance(bounded, dict) else None
+
+
 def cluster_rows(
     cases: dict[str, dict[str, Any]],
     predictions: list[dict[str, Any]],
@@ -137,6 +201,7 @@ def build_queue(
     predictions: list[dict[str, Any]],
     profile: str,
     maximum: int,
+    include_contextual_candidates: bool = False,
 ) -> list[dict[str, Any]]:
     by_profile: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
     for prediction in predictions:
@@ -167,6 +232,17 @@ def build_queue(
             reasons.append("authoritative_miss" if prediction.get("authoritative") else "non_authoritative_miss")
         elif kind == "true_positive":
             priority, reasons = 30, ["source_attack_catch_audit"]
+        elif (
+            include_contextual_candidates
+            and kind == "unscored"
+            and case["truth"].get("deterministic_truth") == "contextual_or_dual_use"
+            and case["truth"].get("expected_disposition") == "detect_only"
+            and not prediction.get("detected")
+        ):
+            priority, reasons = 45, ["contextual_detection_candidate"]
+            if prediction.get("authoritative"):
+                priority += 10
+                reasons.append("authoritative_candidate")
         else:
             continue
 
@@ -178,21 +254,8 @@ def build_queue(
             priority += 15
             reasons.append("profile_disagreement")
 
-        payload = case.get("payload") or {}
-        command = payload.get("command")
-        content = payload.get("content")
-        if isinstance(command, str) and command.strip():
-            review_payload = {
-                "command": command,
-                "dialect": payload.get("dialect", ""),
-            }
-        elif isinstance(content, str) and content.strip():
-            review_payload = {
-                "content": content,
-                "direction": payload.get("direction", ""),
-                "filename": payload.get("filename", ""),
-            }
-        else:
+        projected_payload = review_payload(case.get("payload") or {})
+        if projected_payload is None:
             continue
         queue_row = {
             "schema_version": "1",
@@ -204,7 +267,7 @@ def build_queue(
             "truth_source": truth_source,
             "source_disposition": case["truth"]["expected_disposition"],
             "surface": case.get("surface", ""),
-            "payload": review_payload,
+            "payload": projected_payload,
             "priority": priority,
             "reasons": sorted(set(reasons)),
             "baseline": {
@@ -245,6 +308,11 @@ def main() -> int:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--profile", default="default")
     parser.add_argument("--max-queue", type=int, default=0, help="0 keeps every eligible case")
+    parser.add_argument(
+        "--include-contextual-candidates",
+        action="store_true",
+        help="queue undetected detect-only contextual rows for rule mining without changing score semantics",
+    )
     parser.add_argument("--allow-test", action="store_true")
     args = parser.parse_args()
 
@@ -256,7 +324,13 @@ def main() -> int:
         parser.error("corpus contains duplicate case IDs")
     prediction_rows = load_jsonl(args.predictions)
     clusters, _ = cluster_rows(cases, prediction_rows, args.profile)
-    queue = build_queue(cases, prediction_rows, args.profile, args.max_queue)
+    queue = build_queue(
+        cases,
+        prediction_rows,
+        args.profile,
+        args.max_queue,
+        include_contextual_candidates=args.include_contextual_candidates,
+    )
     args.output_dir.mkdir(parents=True, exist_ok=False)
     write_json(
         args.output_dir / "clusters.json",

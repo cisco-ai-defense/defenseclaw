@@ -82,10 +82,12 @@ func runBenchmark(args []string, stdout io.Writer) error {
 	lockPath := flags.String("dataset-lock", "benchmarks/datasets.lock.json", "dataset lock")
 	repoRoot := flags.String("repo-root", ".", "DefenseClaw repository root")
 	policyRoot := flags.String("policy-root", "policies/guardrail", "profile policy root, relative to repository root unless absolute")
+	optInPolicyRoot := flags.String("opt-in-policy-root", "policies/guardrail-use-cases", "opt-in policy-pack root, relative to repository root unless absolute")
 	dataDir := flags.String("data-dir", "", "external benchmark data root")
 	outputDir := flags.String("output", "outputs/benchmarks/run", "output directory")
 	runID := flags.String("run-id", "", "stable run identifier")
 	profilesCSV := flags.String("profiles", "default,permissive,strict", "comma-separated profiles")
+	optInPacksCSV := flags.String("opt-in-packs", "", "comma-separated named opt-in policy packs, evaluated with balanced posture")
 	seed := flags.Int64("seed", defaultSeed, "bootstrap seed")
 	gate := flags.Bool("gate", false, "enforce smoke expectations")
 	evaluateOutOfScope := flags.Bool("evaluate-out-of-scope", false, "emit detector diagnostics for candidate rows without scoring them")
@@ -122,6 +124,28 @@ func runBenchmark(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
+	optInPacks, err := parseOptInPolicyPacks(*optInPacksCSV)
+	if err != nil {
+		return err
+	}
+	policyLabels := append([]string(nil), profiles...)
+	var policyPostures map[string]string
+	optInPolicyRootMetadata := ""
+	if len(optInPacks) > 0 {
+		policyPostures = make(map[string]string, len(profiles)+len(optInPacks))
+		for _, profile := range profiles {
+			policyPostures[profile] = profile
+		}
+		for _, name := range optInPacks {
+			label, labelErr := benchmark.OptInPolicyLabel(name)
+			if labelErr != nil {
+				return labelErr
+			}
+			policyLabels = append(policyLabels, label)
+			policyPostures[label] = "default"
+		}
+		optInPolicyRootMetadata = filepath.Clean(*optInPolicyRoot)
+	}
 	commit, dirty := gitState(*repoRoot)
 	if *runID == "" {
 		short := commit
@@ -133,9 +157,11 @@ func runBenchmark(args []string, stdout io.Writer) error {
 	runner := benchmark.Runner{
 		RepoRoot:           *repoRoot,
 		PolicyRoot:         *policyRoot,
+		OptInPolicyRoot:    *optInPolicyRoot,
 		DataDir:            firstNonEmpty(*dataDir, os.Getenv("BENCHMARK_DATA_DIR")),
 		RunID:              *runID,
 		Profiles:           profiles,
+		OptInPolicyPacks:   optInPacks,
 		SkillBinary:        *skillBinary,
 		PluginBinary:       *pluginBinary,
 		MCPBinary:          *mcpBinary,
@@ -171,8 +197,11 @@ func runBenchmark(args []string, stdout io.Writer) error {
 		GOARCH:            runtime.GOARCH,
 		GoVersion:         runtime.Version(),
 		PythonVersion:     pythonVersion(),
-		Profiles:          profiles,
+		Profiles:          policyLabels,
 		PolicyRoot:        filepath.Clean(*policyRoot),
+		OptInPolicyPacks:  optInPacks,
+		OptInPolicyRoot:   optInPolicyRootMetadata,
+		PolicyPostures:    policyPostures,
 		CorpusSHA256:      benchmark.SHA256Hex(corpusData),
 		TruthCorpusSHA256: truthCorpusSHA256,
 		DatasetLockSHA256: benchmark.SHA256Hex(lockData),
@@ -597,6 +626,26 @@ func parseProfiles(value string) ([]string, error) {
 		return nil, errors.New("at least one profile is required")
 	}
 	return profiles, nil
+}
+
+func parseOptInPolicyPacks(value string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var packs []string
+	for _, raw := range strings.Split(value, ",") {
+		name := strings.ToLower(strings.TrimSpace(raw))
+		if name == "" {
+			continue
+		}
+		if err := benchmark.ValidateOptInPolicyPack(name); err != nil {
+			return nil, err
+		}
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		packs = append(packs, name)
+	}
+	return packs, nil
 }
 
 func gitState(repoRoot string) (string, bool) {

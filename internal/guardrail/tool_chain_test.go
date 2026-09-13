@@ -4,6 +4,8 @@
 package guardrail
 
 import (
+	"crypto/sha256"
+	"strings"
 	"testing"
 	"time"
 
@@ -17,7 +19,8 @@ func TestMatchToolChainsFixedCatalog(t *testing.T) {
 			wantSeverity := "HIGH"
 			if definition.ID == ToolChainSecretReadThenEgress ||
 				definition.ID == ToolChainDownloadDecodeExecuteSameArtifact ||
-				definition.ID == ToolChainStagedReverseShellPersistence {
+				definition.ID == ToolChainStagedReverseShellPersistence ||
+				definition.ID == ToolChainSensitiveReadValueExternalTransmit {
 				wantSeverity = "CRITICAL"
 			}
 			if definition.Step3Bit != 0 {
@@ -41,6 +44,12 @@ func TestMatchToolChainsFixedCatalog(t *testing.T) {
 				const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 				firstProjection.EnforcementJoinDigests[index] = digest
 				finalProjection.EnforcementJoinDigests[index] = digest
+			}
+			if definition.RequiresValueJoin {
+				index, _ := ToolChainIndexByID(definition.ID)
+				const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				firstProjection.ValueJoinDigests[index][0] = digest
+				finalProjection.ValueJoinDigests[index][0] = digest
 			}
 			matches, err := MatchToolChains([]ToolChainWindowEvent{{
 				SemanticEventID: "first", Sequence: 1, ReceivedAt: now,
@@ -66,6 +75,70 @@ func TestMatchToolChainsFixedCatalog(t *testing.T) {
 	}
 }
 
+func TestProximityOnlyChainsRemainVisibleButCannotEnforce(t *testing.T) {
+	now := time.Date(2026, 9, 12, 12, 0, 0, 0, time.UTC)
+	for _, chainID := range []string{
+		ToolChainPrivilegeDiscoveryThenElevation,
+		ToolChainGuardrailsOffThenEgress,
+		ToolChainPermissionDeniedThenBypass,
+		ToolChainSecretManagerReadThenEgress,
+		ToolChainWorkloadIdentityThenLateralExec,
+		ToolChainSecretReadThenEgress,
+		ToolChainDownloadDecodeExecuteSameArtifact,
+	} {
+		t.Run(chainID, func(t *testing.T) {
+			definition, ok := ToolChainDefinitionByID(chainID)
+			if !ok || !definition.DetectionOnly {
+				t.Fatalf("chain definition=%+v, want detection-only", definition)
+			}
+			index, _ := ToolChainIndexByID(chainID)
+			const (
+				inputDigest  = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+				outputDigest = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+			)
+			projection := func(step uint64) ToolChainProjection {
+				result := ToolChainProjection{
+					ParseStatus:         actionfacts.StatusComplete,
+					DetectionStepMask:   step,
+					EnforcementStepMask: step,
+				}
+				result.EnforcementJoinDigests[index] = inputDigest
+				return result
+			}
+			prior := []ToolChainWindowEvent{{
+				SemanticEventID: "first", Sequence: 1, ReceivedAt: now,
+				Projection: projection(definition.Step1Bit),
+			}}
+			finalProjection := projection(definition.Step2Bit)
+			finalSequence := uint64(2)
+			if definition.Step3Bit != 0 {
+				middle := projection(definition.Step2Bit)
+				middle.EnforcementOutputJoinDigests[index] = outputDigest
+				prior = append(prior, ToolChainWindowEvent{
+					SemanticEventID: "middle", Sequence: 2, ReceivedAt: now.Add(time.Second),
+					Projection: middle,
+				})
+				finalProjection = projection(definition.Step3Bit)
+				finalProjection.EnforcementOutputJoinDigests[index] = outputDigest
+				finalSequence = 3
+			}
+			matches, err := MatchToolChains(prior, ToolChainWindowEvent{
+				SemanticEventID: "final", Sequence: finalSequence,
+				ReceivedAt: now.Add(time.Duration(finalSequence-1) * time.Second),
+				Projection: finalProjection,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if matches.DetectedMask&definition.ResultBit == 0 ||
+				matches.EnforcementSafeMask&definition.ResultBit != 0 {
+				t.Fatalf("masks=%#x/%#x, want detected and enforcement-safe=false",
+					matches.DetectedMask, matches.EnforcementSafeMask)
+			}
+		})
+	}
+}
+
 func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 	want := map[string][3]uint64{
 		ToolChainGuardrailsOffThenEgress:            {1 << 0, 1 << 1, 0},
@@ -86,6 +159,8 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 		ToolChainKubernetesPrivilegedCronJob:        {1 << 35, 1 << 36, 0},
 		ToolChainSQLCommandUDF:                      {1 << 38, 1 << 39, 0},
 		ToolChainStagedReverseShellPersistence:      {1 << 41, 1 << 42, 0},
+		ToolChainEndpointSecurityControlMutation:    {1 << 44, 1 << 45, 0},
+		ToolChainSensitiveReadValueExternalTransmit: {1 << 46, 1 << 47, 0},
 	}
 	for index, definition := range ToolChainDefinitions() {
 		bits, ok := want[definition.ID]
@@ -99,14 +174,14 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 			t.Fatalf("%s result bit=%d want=%d", definition.ID, definition.ResultBit, wantResult)
 		}
 	}
-	if ToolChainCount != 18 || ToolChainLegacyCount != 13 ||
-		ToolChainKnownResultMask != uint32(0x3ffff) ||
+	if ToolChainCount != 20 || ToolChainLegacyCount != 13 ||
+		ToolChainKnownResultMask != uint32(0xfffff) ||
 		ToolChainKnownResultMask&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("result slot bounds=%d/%#x want 18/0x3ffff",
+		t.Fatalf("result slot bounds=%d/%#x want 20/0xfffff",
 			ToolChainCount, ToolChainKnownResultMask)
 	}
 	definition, _ := ToolChainDefinitionByID(ToolChainSQLServerXPCommandShellExecution)
-	if ToolChainKnownStepMask != uint64(0xfffffffffff) ||
+	if ToolChainKnownStepMask != uint64(0xffffffffffff) ||
 		ToolChainArtifactMutationBarrier != uint64(1<<19) ||
 		ToolChainKnownStepMask&ToolChainReservedSignBit != 0 {
 		t.Fatalf("step/barrier bounds=%#x/%#x want 0xfffffffffff/0x80000",
@@ -559,18 +634,18 @@ func TestLegacyToolChainProjectionFingerprintSurvivesWidening(t *testing.T) {
 	}
 }
 
-func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitEighteen(t *testing.T) {
-	const futureNineteenthChain = uint32(1 << 18)
+func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwenty(t *testing.T) {
+	const futureTwentyFirstChain = uint32(1 << 20)
 	matches := ToolChainMatches{
-		DetectedMask:        futureNineteenthChain,
-		EnforcementSafeMask: futureNineteenthChain,
+		DetectedMask:        futureTwentyFirstChain,
+		EnforcementSafeMask: futureTwentyFirstChain,
 	}
-	if matches.DetectedMask != futureNineteenthChain ||
-		matches.EnforcementSafeMask != futureNineteenthChain ||
-		futureNineteenthChain&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("uint32 result-mask capacity lost bit 18: %+v", matches)
+	if matches.DetectedMask != futureTwentyFirstChain ||
+		matches.EnforcementSafeMask != futureTwentyFirstChain ||
+		futureTwentyFirstChain&ToolChainReservedResultSignBit != 0 {
+		t.Fatalf("uint32 result-mask capacity lost bit 20: %+v", matches)
 	}
-	if _, err := ToolChainIDs(futureNineteenthChain); err == nil {
+	if _, err := ToolChainIDs(futureTwentyFirstChain); err == nil {
 		t.Fatal("future result bit was accepted before its catalog definition exists")
 	}
 }
@@ -756,9 +831,8 @@ func TestMatchToolChainsDownloadDecodeExecuteRequiresBothExactJoins(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if matches.DetectedMask != definition.ResultBit ||
-		matches.EnforcementSafeMask != definition.ResultBit {
-		t.Fatalf("masks=%08b/%08b want %08b", matches.DetectedMask,
+	if matches.DetectedMask != definition.ResultBit || matches.EnforcementSafeMask != 0 {
+		t.Fatalf("masks=%08b/%08b want detection-only %08b", matches.DetectedMask,
 			matches.EnforcementSafeMask, definition.ResultBit)
 	}
 
@@ -808,7 +882,7 @@ func TestMatchToolChainsDownloadDecodeExecuteRequiresBothExactJoins(t *testing.T
 	}
 }
 
-func TestMatchToolChainsUsesIndependentEarliestPredecessors(t *testing.T) {
+func TestMatchToolChainsDetectionOnlyUsesEarliestDetectionPredecessor(t *testing.T) {
 	definition, _ := ToolChainDefinitionByID(ToolChainSecretReadThenEgress)
 	index, _ := ToolChainIndexByID(definition.ID)
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -843,7 +917,8 @@ func TestMatchToolChainsUsesIndependentEarliestPredecessors(t *testing.T) {
 		t.Fatal(err)
 	}
 	if matches.DetectionPredecessors[index] != "detection" ||
-		matches.EnforcementPredecessors[index] != "enforcement" {
+		matches.EnforcementPredecessors[index] != "" ||
+		matches.EnforcementSafeMask&definition.ResultBit != 0 {
 		t.Fatalf("predecessors=%q/%q", matches.DetectionPredecessors[index],
 			matches.EnforcementPredecessors[index])
 	}
@@ -964,5 +1039,70 @@ func TestToolChainProjectionAndFingerprintsAreClosed(t *testing.T) {
 	second, err := ToolChainFingerprint(ToolChainSecretReadThenEgress, first)
 	if err != nil || len(second) != 64 {
 		t.Fatalf("chain fingerprint=%q err=%v", second, err)
+	}
+}
+
+func TestSensitiveReadValueExternalTransmitRequiresExactBoundedValueJoin(t *testing.T) {
+	definition, ok := ToolChainDefinitionByID(ToolChainSensitiveReadValueExternalTransmit)
+	if !ok || !definition.RequiresValueJoin || !definition.DetectionOnly ||
+		definition.EventWindow != 5 {
+		t.Fatalf("unexpected value-lineage definition: %+v", definition)
+	}
+	index, _ := ToolChainIndexByID(ToolChainSensitiveReadValueExternalTransmit)
+	digestA := strings.Repeat("1", sha256.Size*2)
+	digestB := strings.Repeat("2", sha256.Size*2)
+	projection := func(step uint64, digest string) ToolChainProjection {
+		result := ToolChainProjection{
+			ParseStatus:         actionfacts.StatusComplete,
+			DetectionStepMask:   step,
+			EnforcementStepMask: step,
+		}
+		result.ValueJoinDigests[index][0] = digest
+		return result
+	}
+	base := time.Unix(100, 0).UTC()
+	prior := ToolChainWindowEvent{
+		SemanticEventID: "source", Sequence: 1, ReceivedAt: base,
+		Projection: projection(definition.Step1Bit, digestA),
+	}
+	final := ToolChainWindowEvent{
+		SemanticEventID: "sink", Sequence: 5, ReceivedAt: base.Add(time.Second),
+		Projection: projection(definition.Step2Bit, digestA),
+	}
+	matched, err := MatchToolChains([]ToolChainWindowEvent{prior}, final)
+	if err != nil || matched.DetectedMask&definition.ResultBit == 0 ||
+		matched.EnforcementSafeMask&definition.ResultBit != 0 {
+		t.Fatalf("exact value join = %+v, %v", matched, err)
+	}
+
+	final.Projection = projection(definition.Step2Bit, digestB)
+	if got, err := MatchToolChains([]ToolChainWindowEvent{prior}, final); err != nil ||
+		got.DetectedMask&definition.ResultBit != 0 {
+		t.Fatalf("different value joined: %+v, %v", got, err)
+	}
+	final.Projection = projection(definition.Step2Bit, digestA)
+	final.Sequence = 6
+	if got, err := MatchToolChains([]ToolChainWindowEvent{prior}, final); err != nil ||
+		got.DetectedMask&definition.ResultBit != 0 {
+		t.Fatalf("out-of-window value joined: %+v, %v", got, err)
+	}
+}
+
+func TestSensitiveReadValueJoinProjectionRejectsNonCanonicalSets(t *testing.T) {
+	definition, _ := ToolChainDefinitionByID(ToolChainSensitiveReadValueExternalTransmit)
+	index, _ := ToolChainIndexByID(ToolChainSensitiveReadValueExternalTransmit)
+	projection := ToolChainProjection{
+		ParseStatus:       actionfacts.StatusComplete,
+		DetectionStepMask: definition.Step1Bit,
+	}
+	projection.ValueJoinDigests[index][0] = strings.Repeat("2", sha256.Size*2)
+	projection.ValueJoinDigests[index][1] = strings.Repeat("1", sha256.Size*2)
+	if err := ValidateToolChainProjection(projection); err == nil {
+		t.Fatal("unsorted value digest set was accepted")
+	}
+	projection.ValueJoinDigests[index] = ToolChainValueJoinDigests{}
+	projection.ValueJoinDigests[index][1] = strings.Repeat("1", sha256.Size*2)
+	if err := ValidateToolChainProjection(projection); err == nil {
+		t.Fatal("sparse value digest set was accepted")
 	}
 }

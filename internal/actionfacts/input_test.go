@@ -44,6 +44,73 @@ func TestExtractArgsSupportedShapes(t *testing.T) {
 	}
 }
 
+func TestExtractExactShellExecutionArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		raw        string
+		wantStatus ParseStatus
+		wantBypass bool
+	}{
+		{
+			name:       "coding agent metadata",
+			raw:        `{"command":"printf ok","cwd":"/repo","description":"inspect state","timeout":120,"run_in_background":false}`,
+			wantStatus: StatusComplete,
+		},
+		{
+			name:       "sandbox disable retained",
+			raw:        `{"command":"printf ok","dangerouslyDisableSandbox":true}`,
+			wantStatus: StatusComplete,
+			wantBypass: true,
+		},
+		{name: "unknown field", raw: `{"command":"printf ok","environment":{"X":"1"}}`, wantStatus: StatusPartial},
+		{name: "invalid timeout", raw: `{"command":"printf ok","timeout":0}`, wantStatus: StatusPartial},
+		{name: "wrong background type", raw: `{"command":"printf ok","run_in_background":"false"}`, wantStatus: StatusPartial},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := extractArgsForTool(json.RawMessage(test.raw), "Bash")
+			if got.status != test.wantStatus || got.policyBypass != test.wantBypass {
+				t.Fatalf("extracted=%+v", got)
+			}
+		})
+	}
+}
+
+func TestExtractClosedCodingAgentArgs(t *testing.T) {
+	tests := []struct {
+		name       string
+		tool       string
+		raw        string
+		wantStatus ParseStatus
+		wantPath   string
+		wantURL    string
+	}{
+		{name: "paginated read", tool: "Read", raw: `{"file_path":"/repo/a","offset":2,"limit":20}`, wantStatus: StatusComplete, wantPath: "/repo/a"},
+		{name: "literal edit", tool: "Edit", raw: `{"file_path":"/repo/a","old_string":"before","new_string":"after","replace_all":false}`, wantStatus: StatusComplete, wantPath: "/repo/a"},
+		{name: "bounded grep", tool: "Grep", raw: `{"pattern":"needle","path":"/repo","output_mode":"content","head_limit":10,"-n":true}`, wantStatus: StatusComplete, wantPath: "/repo"},
+		{name: "web fetch prompt metadata", tool: "WebFetch", raw: `{"url":"https://docs.example/a","prompt":"summarize"}`, wantStatus: StatusComplete, wantURL: "https://docs.example/a"},
+		{name: "code search", tool: "search_code", raw: `{"root":"/repo","pattern":"credential","glob":"*.go","max_results":20}`, wantStatus: StatusComplete, wantPath: "/repo"},
+		{name: "notebook edit", tool: "NotebookEdit", raw: `{"notebook_path":"/repo/a.ipynb","cell_id":"cell-1","cell_type":"code","edit_mode":"replace","new_source":"print('ok')"}`, wantStatus: StatusComplete, wantPath: "/repo/a.ipynb"},
+		{name: "unknown read field", tool: "Read", raw: `{"file_path":"/repo/a","recursive":true}`, wantStatus: StatusPartial},
+		{name: "wrong pagination type", tool: "Read", raw: `{"file_path":"/repo/a","offset":"2"}`, wantStatus: StatusPartial},
+		{name: "duplicate field", tool: "Read", raw: `{"file_path":"/repo/a","file_path":"/repo/b"}`, wantStatus: StatusAmbiguous},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := extractArgsForTool(json.RawMessage(test.raw), test.tool)
+			if got.status != test.wantStatus {
+				t.Fatalf("status=%s issues=%v", got.status, got.issues)
+			}
+			if test.wantPath != "" && (len(got.paths) != 1 || got.paths[0].value != test.wantPath) {
+				t.Fatalf("paths=%+v", got.paths)
+			}
+			if test.wantURL != "" && (len(got.urls) != 1 || got.urls[0] != test.wantURL) {
+				t.Fatalf("urls=%+v", got.urls)
+			}
+		})
+	}
+}
+
 func TestExtractArgsUsesOnlyExplicitFieldAliases(t *testing.T) {
 	tests := []struct {
 		name    string

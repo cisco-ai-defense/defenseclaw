@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -70,6 +71,28 @@ func TestGeneratedDefaultSemanticRulesUseRegisteredOwners(t *testing.T) {
 	for _, candidate := range generation.semanticRules {
 		compiled[candidate.rule.ID] = candidate
 	}
+	strictPack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), "strict"))
+	strictGeneration, err := compileRulePackCategories(strictPack)
+	if err != nil {
+		t.Fatalf("compile strict rule generation: %v", err)
+	}
+	strictCompiled := make(map[string]compiledSemanticRule, len(strictGeneration.semanticRules))
+	for _, candidate := range strictGeneration.semanticRules {
+		strictCompiled[candidate.rule.ID] = candidate
+	}
+	strictOnlyOwners := map[string]bool{
+		"defense_evasion.windows_defender_executable_exclusion":  true,
+		"defense_evasion.windows_defender_drive_root_exclusion":  true,
+		"integrity.dpkg_status_direct_mutation":                  true,
+		"tamper.windows_audit_detailed_tracking_failure_disable": true,
+		"tamper.windows_audit_process_creation_success_disable":  true,
+		"tamper.windows_audit_full_privilege_disable":            true,
+	}
+	useCaseOnlyOwners := map[string]bool{
+		"impact.protected_access_control_change": true,
+		"impact.protected_device_wipe":           true,
+		"impact.protected_filesystem_format":     true,
+	}
 	for _, ruleID := range []string{"CMD-MKFS", "CMD-DEVICE-WIPE"} {
 		candidate, ok := compiled[ruleID]
 		if !ok {
@@ -89,13 +112,19 @@ func TestGeneratedDefaultSemanticRulesUseRegisteredOwners(t *testing.T) {
 		semanticIntegrityPersistenceOwners,
 	} {
 		for ruleID := range owners {
+			if useCaseOnlyOwners[ruleID] {
+				continue
+			}
 			candidate, ok := compiled[ruleID]
+			if !ok && strictOnlyOwners[ruleID] {
+				candidate, ok = strictCompiled[ruleID]
+			}
 			if !ok {
-				// CMD-SYSTEMCTL is intentionally fallback-only: its previous broad
-				// semantic expression treated routine service management as a
-				// security finding. Windows registry persistence now has its own
-				// exact semantic owner.
-				if ruleID == "CMD-SYSTEMCTL" {
+				// These rules are intentionally fallback-only. Their code-owned
+				// prerequisites prove a narrower fact than the generic CEL schema
+				// can currently express.
+				if ruleID == "CMD-SYSTEMCTL" ||
+					ruleID == "persistence.malicious_download_execute_payload" {
 					continue
 				}
 				t.Fatalf("default semantic rule %q is missing", ruleID)
@@ -489,7 +518,6 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 			name:   "ordinary shred target",
 			ruleID: "CMD-MKFS",
 			input:  reconImpactCommand("shred -n 1 /tmp/fixture.img"),
-			status: actionfacts.StatusPartial,
 		},
 		{
 			name:   "network range",
@@ -694,6 +722,58 @@ func TestSemanticReconImpactPrerequisiteBoundaries(t *testing.T) {
 	}
 }
 
+func TestCredentialFileSecureDeleteOwner(t *testing.T) {
+	positive := actionfacts.Analyze(reconImpactCommand(
+		"shred -u /home/alice/project/.env /home/alice/project/config/secrets.yaml /home/alice/project/credentials.json",
+	))
+	owner := semanticOwnerForRule("impact.credential_file_secure_delete")
+	if !owner.eligible(positive) || !owner.detectionOnly {
+		t.Fatalf("positive facts were not owned as detection-only: owner=%+v facts=%+v", owner, positive)
+	}
+
+	for _, command := range []string{
+		"shred /home/alice/project/.env",
+		"rm -f /home/alice/project/.env",
+		"shred -u /tmp/fixture.env",
+		"shred -u /repo/fixtures/.env",
+		"shred -u /home/alice/project/README.md",
+	} {
+		facts := actionfacts.Analyze(reconImpactCommand(command))
+		if owner.eligible(facts) {
+			t.Fatalf("near miss %q was owned: %+v", command, facts)
+		}
+	}
+}
+
+func TestHostNamespaceEntryRemainsVisibleWithoutBlocking(t *testing.T) {
+	const ruleID = "privilege.host_namespace_entry"
+	contract := exactFallbackContracts[ruleID]
+	if contract.proves == nil || !contract.detectionOnly {
+		t.Fatalf("fallback contract=%+v, want detection-only proof", contract)
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			connector := "host-namespace-detection-only-" + profile
+			installToolCallCorpusProfileConnector(t, connector, profile)
+			command := "nsenter --target 1 --mount /bin/sh"
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: actionfacts.Input{
+					Tool:    "shell",
+					Command: command,
+					CWD:     "/repo",
+				},
+				LegacyText:         command,
+				Connector:          connector,
+				EnforcementCapable: true,
+			})
+			finding := findingWithID(findings, ruleID)
+			if finding == nil || finding.contributesToEnforcement() {
+				t.Fatalf("finding=%+v all=%v", finding, FindingStrings(findings))
+			}
+		})
+	}
+}
+
 func TestExplicitFormatCOMDispatchesDeviceWipeFinding(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -726,10 +806,10 @@ func TestExplicitFormatCOMDispatchesDeviceWipeFinding(t *testing.T) {
 				EnforcementCapable: true,
 			})
 			matched := findingWithID(findings, "CMD-DEVICE-WIPE")
-			if matched == nil || !matched.contributesToEnforcement() ||
+			if matched == nil || matched.contributesToEnforcement() ||
 				matched.Evidence != "" {
 				t.Fatalf(
-					"format.com lost semantic device-wipe enforcement: findings=%v facts=%+v",
+					"format.com lost alert-only semantic device-wipe detection: findings=%v facts=%+v",
 					FindingStrings(findings), actionfacts.Analyze(input),
 				)
 			}

@@ -32,6 +32,18 @@ fi`,
 			want:    true,
 		},
 		{
+			name:    "falcon sensor disable now",
+			command: `systemctl disable --now falcon-sensor`,
+			dialect: DialectPOSIX,
+			want:    true,
+		},
+		{
+			name:    "sentinelone disable",
+			command: `sudo /opt/sentinelone/bin/sentinelctl control disable`,
+			dialect: DialectPOSIX,
+			want:    true,
+		},
+		{
 			name: "carbon black launch daemons",
 			command: "sudo launchctl unload /Library/LaunchDaemons/com.carbonblack.daemon.plist\n" +
 				"sudo launchctl unload /Library/LaunchDaemons/com.carbonblack.defense.daemon.plist",
@@ -103,8 +115,8 @@ fi`,
 			}
 		})
 	}
-	if accepted != 5 {
-		t.Fatalf("accepted source candidates=%d want=5", accepted)
+	if accepted != 7 {
+		t.Fatalf("accepted source candidates=%d want=7", accepted)
 	}
 }
 
@@ -116,6 +128,11 @@ func TestExactEndpointSecurityProductDisableHardNegatives(t *testing.T) {
 	}{
 		{name: "falcon stop only", command: `sudo systemctl stop falcon-sensor.service`, dialect: DialectPOSIX},
 		{name: "falcon disable only", command: `sudo systemctl disable falcon-sensor.service`, dialect: DialectPOSIX},
+		{name: "falcon disable now other service", command: `systemctl disable --now nginx`, dialect: DialectPOSIX},
+		{name: "falcon disable now extra unit", command: `systemctl disable --now falcon-sensor nginx`, dialect: DialectPOSIX},
+		{name: "sentinelone nearby path", command: `/tmp/sentinelctl control disable`, dialect: DialectPOSIX},
+		{name: "sentinelone status", command: `/opt/sentinelone/bin/sentinelctl control status`, dialect: DialectPOSIX},
+		{name: "sentinelone extra argument", command: `/opt/sentinelone/bin/sentinelctl control disable force`, dialect: DialectPOSIX},
 		{name: "falcon wrong order", command: "sudo systemctl disable falcon-sensor.service\nsudo systemctl stop falcon-sensor.service", dialect: DialectPOSIX},
 		{name: "falcon restore", command: "sudo systemctl stop falcon-sensor.service\nsudo systemctl enable falcon-sensor.service", dialect: DialectPOSIX},
 		{name: "falcon extra target", command: "sudo systemctl stop falcon-sensor.service nginx\nsudo systemctl disable falcon-sensor.service", dialect: DialectPOSIX},

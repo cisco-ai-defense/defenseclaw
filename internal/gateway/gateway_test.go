@@ -2277,7 +2277,7 @@ func TestScanAllRules_DangerousShellCommands(t *testing.T) {
 		{"shell", `{"command":"go test ./..."}`, false},
 		{"shell", `{"command":"chmod 777 /tmp/backdoor"}`, false}, // strict-only broad permission signal
 		{"shell", `{"command":"dd if=/dev/zero of=/dev/sda"}`, true},
-		{"shell", `{"command":"echo 'malicious' >> /etc/hosts"}`, true},
+		{"shell", `{"command":"echo 'malicious' >> /etc/hosts"}`, false}, // generic /etc redirect is strict-only telemetry
 	}
 
 	for _, tt := range tests {
@@ -2327,8 +2327,8 @@ func TestScanAllRules_CommandDangerousPatterns(t *testing.T) {
 		{"ruby -e 'puts 1'", false}, // MEDIUM severity — benign inline code
 		{"perl -e 'exec'", false},   // MEDIUM severity — benign inline code
 		{"mkfs.ext4 /dev/sda1", true},
-		{"ncat -lvp 4444", false}, // strict-only listener without a shell/callback proof
-		{"echo hacked > /etc/sudoers", true},
+		{"ncat -lvp 4444", false},             // strict-only listener without a shell/callback proof
+		{"echo hacked > /etc/sudoers", false}, // generic sudoers mutation is strict-only telemetry
 		{"", false},
 		{"echo hello world", false},
 	}
@@ -4342,7 +4342,7 @@ func TestInspectToolHILTUnsupportedFailsClosed(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"write_file","args":{"path":"/etc/sudoers","content":"alice ALL=(ALL) NOPASSWD:ALL"},"session_id":"sess-1"}`)
+		`{"tool":"shell","args":{"command":"systemctl enable backdoor.service"},"session_id":"sess-1"}`)
 
 	if verdict.Action != "block" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want block/confirm when approval cannot be delivered",
@@ -4364,7 +4364,7 @@ func TestInspectToolHILTNativeSurfaceReturnsConfirm(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, store, logger, cfg)
 
 	_, verdict := postInspect(t, api,
-		`{"tool":"write_file","args":{"path":"/etc/sudoers","content":"alice ALL=(ALL) NOPASSWD:ALL"},"session_id":"sess-1","approval_surface":"native"}`)
+		`{"tool":"shell","args":{"command":"systemctl enable backdoor.service"},"session_id":"sess-1","approval_surface":"native"}`)
 
 	if verdict.Action != "confirm" || verdict.RawAction != "confirm" {
 		t.Fatalf("action=%q raw=%q, want confirm/confirm for native approval surface", verdict.Action, verdict.RawAction)

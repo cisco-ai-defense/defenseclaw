@@ -12,8 +12,10 @@ never projected. Task identities are hashed before entering manifests, and all
 rollouts for one task share one leakage group. Normalized rows use the
 schema-valid ``smoke`` split only as a pre-partition placeholder;
 ``benchmark_partition.py`` is the sole authority for development, validation,
-and test assignments. Because only reward-1 trajectories are admitted, their
-projected stateful tool events are marked succeeded.
+and test assignments. A reward-1 label proves that the task trajectory
+succeeded; it does not prove that every command inside it succeeded, so
+projected stateful events remain outcome-unknown unless a future adapter can
+attribute structured call-level results.
 """
 
 from __future__ import annotations
@@ -325,7 +327,7 @@ def event_for_call(call: ProjectedCall) -> dict[str, Any]:
         "tool_name": call.tool_name,
         "args": {"cmd": call.argument},
         "dialect": "none",
-        "outcome": "succeeded",
+        "outcome": "unknown",
         "offset_seconds": call.sequence_index,
     }
     if call.tool_name.casefold() in SHELL_TOOLS and isinstance(call.argument, str):
@@ -347,6 +349,7 @@ def truth() -> dict[str, Any]:
             "benign_hard_negative",
             "real_tool_arguments",
             "successful_terminalbench_task",
+            "call_outcome_unknown",
         ],
     }
 
@@ -641,8 +644,8 @@ def validate_cases(
                 raise ValueError("projected tool arguments violate the adapter contract")
             if any(key in event for key in ("obs", "observation", "result", "output", "msg")):
                 raise ValueError("projected payload contains an excluded trajectory field")
-            if events is not None and event.get("outcome") != "succeeded":
-                raise ValueError("successful TerminalBench stateful events must be succeeded")
+            if events is not None and event.get("outcome") != "unknown":
+                raise ValueError("TerminalBench stateful event outcomes must remain unknown")
 
 
 def validate_group_manifest(

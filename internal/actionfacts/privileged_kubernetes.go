@@ -317,6 +317,18 @@ func exactStructuredKubectlInput(raw json.RawMessage) (string, string, bool) {
 	if !commandOK || validateCommandText(command) != "" || strings.TrimSpace(command) != command {
 		return "", "", false
 	}
+	// Structured adapters differ on whether `command` includes the executable.
+	// Normalize exactly one literal redundant prefix; the direct-command parser
+	// below still rejects shell operators, wrappers, and dynamic values.
+	if separator := strings.IndexAny(command, " \t"); separator > 0 {
+		program := strings.ToLower(command[:separator])
+		if program == "kubectl" || program == "kubectl.exe" {
+			command = strings.TrimLeft(command[separator:], " \t")
+			if command == "" {
+				return "", "", false
+			}
+		}
+	}
 	namespace := ""
 	for key, value := range object {
 		switch key {
@@ -369,8 +381,16 @@ func stripExactKubectlNamespace(argv []string, schema string) ([]string, string,
 			cleaned = append(cleaned, arg)
 			continue
 		}
-		if !exactKubernetesIdentity(value) || namespaceSeen {
+		if !exactKubernetesIdentity(value) {
 			return nil, "", false
+		}
+		if namespaceSeen {
+			if namespace != value {
+				return nil, "", false
+			}
+			// Structured adapters commonly repeat the same namespace in the
+			// schema and command. Equality preserves one unambiguous identity.
+			continue
 		}
 		namespace = value
 		namespaceSeen = true

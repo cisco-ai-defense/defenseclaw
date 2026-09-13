@@ -215,28 +215,34 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 	a.comparable++
 	positiveTruth, detectionScorable := detectionTruth(benchmarkCase)
 	isBenign := benignTruth(benchmarkCase)
+	baselineDetected := detectionPrediction(benchmarkCase, baseline, positiveTruth)
+	candidateDetected := detectionPrediction(benchmarkCase, candidate, positiveTruth)
 	if detectionScorable {
 		if positiveTruth {
-			a.detectionPositive.add(baseline.Detected, candidate.Detected)
+			a.detectionPositive.add(baselineDetected, candidateDetected)
 		} else {
-			a.detectionNegative.add(baseline.Detected, candidate.Detected)
+			a.detectionNegative.add(baselineDetected, candidateDetected)
 		}
 	}
 	baselineBlocked := baseline.Action == "block"
 	candidateBlocked := candidate.Action == "block"
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionBlock {
-		a.enforcementPositive.add(baselineBlocked, candidateBlocked)
-	} else {
-		a.enforcementNegative.add(baselineBlocked, candidateBlocked)
+	blockTruth, enforcementScorable := enforcementTruth(benchmarkCase)
+	if enforcementScorable {
+		if blockTruth {
+			a.enforcementPositive.add(baselineBlocked, candidateBlocked)
+		} else {
+			a.enforcementNegative.add(baselineBlocked, candidateBlocked)
+		}
 	}
 	if isBenign {
 		a.benignBlock.add(baselineBlocked, candidateBlocked)
 	}
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionDetectOnly {
+	if benchmarkCase.Truth.ExpectedDisposition == DispositionDetectOnly &&
+		(benchmarkCase.Surface != "stateful" || benchmarkCase.Truth.StatefulLens != StatefulAtomicTerminal) {
 		a.detectOnlyBlock.add(baselineBlocked, candidateBlocked)
 	}
 
-	if !baseline.Detected && candidate.Detected {
+	if detectionScorable && !baselineDetected && candidateDetected {
 		if positiveTruth {
 			a.changes.PositiveDetectionGains++
 		}
@@ -244,7 +250,7 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 			a.changes.BenignFindingIntroduced++
 		}
 	}
-	if baseline.Detected && !candidate.Detected {
+	if detectionScorable && baselineDetected && !candidateDetected {
 		if positiveTruth {
 			a.changes.PositiveDetectionLosses++
 		}
@@ -252,7 +258,7 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 			a.changes.BenignFindingResolved++
 		}
 	}
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionBlock {
+	if enforcementScorable && blockTruth {
 		if !baselineBlocked && candidateBlocked {
 			a.changes.ExpectedBlockGains++
 		}

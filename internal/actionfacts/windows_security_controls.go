@@ -73,6 +73,9 @@ func windowsClassifyAuditPol(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
+	if classifyExactWindowsSecurityControlMutation(command) {
+		return
+	}
 	if _, ok := exactWindowsAuditPolicyWipeStep(args); !ok {
 		builder.out.markPartial(IssueUnknownOperandGrammar)
 		return
@@ -145,6 +148,9 @@ func windowsClassifySetMPPreference(
 	args []windowsWord,
 	builder *windowsFactBuilder,
 ) {
+	if classifyExactWindowsSecurityControlMutation(command) {
+		return
+	}
 	_, disabled, ok := exactWindowsDefenderDisableSetting(args)
 	if !ok {
 		builder.out.markPartial(IssueUnknownOperandGrammar)
@@ -153,6 +159,15 @@ func windowsClassifySetMPPreference(
 	windowsAddOperation(command, OperationConfigChange)
 	if disabled {
 		windowsAddOperation(command, OperationPolicyBypass)
+	}
+}
+
+func windowsClassifyAddMPPreference(
+	command *CommandFact,
+	builder *windowsFactBuilder,
+) {
+	if !classifyExactWindowsSecurityControlMutation(command) {
+		builder.out.markPartial(IssueUnknownOperandGrammar)
 	}
 }
 

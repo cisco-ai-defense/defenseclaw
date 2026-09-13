@@ -397,7 +397,8 @@ def trajectory_identity(row: dict[str, Any]) -> str:
 
 def _project_event(row: dict[str, Any]) -> dict[str, Any]:
     payload = _mapping(row.get("payload"))
-    if payload.get("direction") != "tool_call":
+    direction = payload.get("direction")
+    if direction != "tool_call" and not (direction is None and row.get("surface") == "action"):
         raise ValueError("trajectory labeling accepts only tool_call rows")
     tool_name = payload.get("tool_name")
     arguments = payload.get("args")
@@ -674,8 +675,16 @@ def prepare_retry(args: argparse.Namespace) -> int:
     if labels_manifest.get("labels_sha256") != command_labeler.sha256_file(required["labels"]):
         raise ValueError("parent label digest does not match its manifest")
 
+    model_id = str(prepare_manifest.get("model_id", ""))
+    if model_id not in SUPPORTED_MODEL_IDS:
+        raise ValueError("parent bundle has an unsupported model ID")
+    prompt_version = PROMPT_VERSION_BY_MODEL[model_id]
     parent_requests = _load_request_records(required["requests"])
-    if set(parent_requests) != set(index):
+    if (parent / "retry-manifest.json").is_file():
+        _, expected_retry_ids, _ = _load_retry_context(parent, index, model_id, prompt_version)
+        if set(parent_requests) != expected_retry_ids:
+            raise ValueError("parent retry requests do not match its retry manifest")
+    elif set(parent_requests) != set(index):
         raise ValueError("parent requests and index do not contain the same trajectories")
     parent_labels = command_labeler.load_jsonl(required["labels"])
     if labels_manifest.get("label_count") != len(parent_labels):
@@ -720,13 +729,14 @@ def prepare_retry(args: argparse.Namespace) -> int:
     if args.output_dir.exists():
         raise FileExistsError(args.output_dir)
 
-    model_id = str(prepare_manifest.get("model_id", ""))
-    if model_id not in SUPPORTED_MODEL_IDS:
-        raise ValueError("parent bundle has an unsupported model ID")
-    prompt_version = PROMPT_VERSION_BY_MODEL[model_id]
     max_completion_tokens = int(prepare_manifest.get("max_completion_tokens", 0))
     if max_completion_tokens < 1:
         raise ValueError("parent bundle has an invalid completion-token limit")
+    retry_completion_tokens = int(getattr(args, "max_completion_tokens", 0) or 0)
+    if retry_completion_tokens < 0:
+        raise ValueError("retry completion-token limit must be positive")
+    if retry_completion_tokens:
+        max_completion_tokens = retry_completion_tokens
 
     args.output_dir.mkdir(parents=True)
     request_path = args.output_dir / "requests.jsonl"
@@ -751,6 +761,7 @@ def prepare_retry(args: argparse.Namespace) -> int:
             "requests_sha256": command_labeler.sha256_file(request_path),
             "index_sha256": command_labeler.sha256_file(args.output_dir / "index.json"),
             "system_prompt_sha256": sha256_text(SYSTEM_PROMPT),
+            "max_completion_tokens": max_completion_tokens,
             "token_usage_estimate": {
                 "method": "serialized_message_utf8_bytes_divided_by_4_ceiling",
                 "input_tokens": estimated_input_tokens,
@@ -1333,6 +1344,12 @@ def parser() -> argparse.ArgumentParser:
     retry_parser.add_argument("--bundle", type=Path, required=True)
     retry_parser.add_argument("--output-dir", type=Path, required=True)
     retry_parser.add_argument("--allow-small", action="store_true", help="local format tests only")
+    retry_parser.add_argument(
+        "--max-completion-tokens",
+        type=int,
+        default=0,
+        help="override the parent completion-token limit for complete retry records",
+    )
     retry_parser.set_defaults(handler=prepare_retry)
 
     submit_parser = subcommands.add_parser("submit")

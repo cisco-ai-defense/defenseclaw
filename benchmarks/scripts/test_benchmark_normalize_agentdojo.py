@@ -1,0 +1,227 @@
+#!/usr/bin/env python3
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+from __future__ import annotations
+
+import copy
+import importlib.util
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+MODULE_PATH = Path(__file__).with_name("benchmark_normalize_agentdojo.py")
+SPEC = importlib.util.spec_from_file_location("benchmark_normalize_agentdojo", MODULE_PATH)
+assert SPEC and SPEC.loader
+MODULE = importlib.util.module_from_spec(SPEC)
+sys.modules[SPEC.name] = MODULE
+SPEC.loader.exec_module(MODULE)
+
+
+def tool_call(index: int, *, failed: bool = False) -> tuple[dict[str, object], dict[str, object]]:
+    call = {
+        "id": f"call-{index}",
+        "function": "search_files" if index == 0 else "send_email",
+        "args": {"query": f"record-{index}", "nested": {"limit": index + 1}},
+    }
+    emitted = {
+        "role": "assistant",
+        "content": "PRIVATE_REASONING_MARKER",
+        "tool_calls": [copy.deepcopy(call)],
+    }
+    result = {
+        "role": "tool",
+        "content": {
+            "records": [{"id": index}],
+            "marker": "PRIVATE_RESULT_MARKER",
+        },
+        "tool_call_id": call["id"],
+        "tool_call": copy.deepcopy(call),
+        "error": "synthetic tool failure" if failed else None,
+    }
+    return emitted, result
+
+
+def source_record(
+    *,
+    security: bool = True,
+    utility: bool = True,
+    attacked: bool = True,
+    executed: int = 3,
+    emitted_only: bool = False,
+) -> dict[str, object]:
+    messages: list[dict[str, object]] = [
+        {"role": "system", "content": "PRIVATE_SYSTEM_MARKER"},
+        {"role": "user", "content": "PRIVATE_PROMPT_MARKER"},
+    ]
+    for index in range(executed):
+        emitted, result = tool_call(index, failed=index == 1)
+        messages.extend((emitted, result))
+    if emitted_only:
+        messages.append(
+            {
+                "role": "assistant",
+                "content": "PRIVATE_UNEXECUTED_REASONING",
+                "tool_calls": [
+                    {
+                        "id": "never-executed",
+                        "function": "delete_everything",
+                        "args": {"scope": "all"},
+                    }
+                ],
+            }
+        )
+    return {
+        "suite_name": "workspace",
+        "pipeline_name": "fixture-agent",
+        "user_task_id": "user_task_1",
+        "injection_task_id": "injection_task_1" if attacked else None,
+        "attack_type": "important_instructions" if attacked else None,
+        "injections": {"excluded": "PRIVATE_INJECTION_MARKER"},
+        "messages": messages,
+        "error": None,
+        "utility": utility,
+        "security": security,
+    }
+
+
+class AgentDojoNormalizerTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temporary = tempfile.TemporaryDirectory()
+        self.root = Path(self.temporary.name)
+        self.runs = self.root / "runs"
+        self.runs.mkdir()
+
+    def tearDown(self) -> None:
+        self.temporary.cleanup()
+
+    def write_run(self, name: str, value: dict[str, object]) -> Path:
+        path = self.runs / "fixture-agent" / "workspace" / name / "direct" / "injection_task_1.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(value), encoding="utf-8")
+        return path
+
+    def build(self):
+        return MODULE.build_corpus(self.root, MODULE.PINNED_REVISION, "development")
+
+    def test_projects_only_executed_tool_messages_with_real_arguments(self) -> None:
+        self.write_run("user_task_1", source_record(emitted_only=True))
+        cases, manifest = self.build()
+        actions = [row for row in cases if row["surface"] == "action"]
+        self.assertEqual(3, len(actions))
+        self.assertEqual(
+            ["search_files", "send_email", "send_email"],
+            [row["payload"]["tool_name"] for row in actions],
+        )
+        self.assertEqual("record-0", actions[0]["payload"]["args"]["query"])
+        self.assertNotIn("delete_everything", json.dumps(cases))
+        self.assertEqual(1, manifest["statistics"]["unobserved_emitted_calls"])
+
+    def test_preserves_linked_results_errors_and_run_outcomes_without_prompts(
+        self,
+    ) -> None:
+        record = source_record()
+        first_result = next(message for message in record["messages"] if message["role"] == "tool")
+        first_result["tool_call"]["id"] = ""
+        first_result["tool_call_id"] = ""
+        self.write_run("user_task_1", record)
+        cases, _ = self.build()
+        stateful = [row for row in cases if row["surface"] == "stateful"]
+        self.assertEqual(2, len(stateful))
+        final = stateful[-1]
+        self.assertEqual(
+            ["succeeded", "failed", "succeeded"],
+            [event["outcome"] for event in final["payload"]["events"]],
+        )
+        evidence = final["payload"]["args"]["_agentdojo_execution"]
+        self.assertTrue(evidence["security"])
+        self.assertTrue(evidence["utility"])
+        self.assertEqual(
+            "synthetic tool failure",
+            evidence["linked_results"][1]["error"],
+        )
+        self.assertEqual(
+            "PRIVATE_RESULT_MARKER",
+            evidence["linked_results"][0]["result"]["marker"],
+        )
+        self.assertEqual("", evidence["linked_results"][0]["call_ref"])
+        serialized = json.dumps(cases)
+        self.assertNotIn("PRIVATE_SYSTEM_MARKER", serialized)
+        self.assertNotIn("PRIVATE_PROMPT_MARKER", serialized)
+        self.assertNotIn("PRIVATE_REASONING_MARKER", serialized)
+        self.assertNotIn("PRIVATE_INJECTION_MARKER", serialized)
+
+    def test_security_preserved_attacks_are_benign_hard_negatives(self) -> None:
+        self.write_run("user_task_1", source_record(security=True, attacked=True))
+        cases, _ = self.build()
+        self.assertTrue(all(row["truth"]["source_truth"] == "benign" for row in cases))
+        self.assertTrue(all(row["strata"]["hard_negative"] for row in cases))
+        self.assertTrue(all(row["truth"]["expected_disposition"] == "allow" for row in cases))
+
+    def test_only_complete_bounded_violated_run_is_contextual_positive(
+        self,
+    ) -> None:
+        self.write_run("user_task_1", source_record(security=False, executed=3))
+        cases, _ = self.build()
+        actions = [row for row in cases if row["surface"] == "action"]
+        windows = [row for row in cases if row["surface"] == "stateful"]
+        self.assertTrue(all(row["truth"]["source_truth"] == "unknown" for row in actions))
+        self.assertEqual("unknown", windows[0]["truth"]["source_truth"])
+        self.assertEqual("malicious", windows[-1]["truth"]["source_truth"])
+        self.assertEqual(
+            "contextual_or_dual_use",
+            windows[-1]["truth"]["deterministic_truth"],
+        )
+        self.assertEqual("detect_only", windows[-1]["truth"]["expected_disposition"])
+
+    def test_long_violated_run_has_bounded_unscored_windows(self) -> None:
+        self.write_run("user_task_1", source_record(security=False, executed=10))
+        cases, _ = self.build()
+        windows = [row for row in cases if row["surface"] == "stateful"]
+        self.assertEqual(9, len(windows))
+        self.assertTrue(all(2 <= len(row["payload"]["events"]) <= MODULE.MAX_EVENTS for row in windows))
+        self.assertTrue(all(row["truth"]["source_truth"] == "unknown" for row in windows))
+
+    def test_no_injection_runs_are_benign_but_not_attack_hard_negatives(
+        self,
+    ) -> None:
+        self.write_run("user_task_1", source_record(attacked=False))
+        cases, _ = self.build()
+        self.assertTrue(all(row["truth"]["source_truth"] == "benign" for row in cases))
+        self.assertTrue(all(not row["strata"]["hard_negative"] for row in cases))
+
+    def test_rejects_id_mismatch_unknown_suite_and_unpinned_revision(
+        self,
+    ) -> None:
+        mismatch = source_record()
+        tool_message = next(message for message in mismatch["messages"] if message["role"] == "tool")
+        tool_message["tool_call_id"] = "different"
+        self.write_run("mismatch", mismatch)
+        unknown_suite = source_record()
+        unknown_suite["suite_name"] = "translated-suite"
+        self.write_run("unknown-suite", unknown_suite)
+        cases, manifest = self.build()
+        self.assertEqual([], cases)
+        self.assertEqual(1, manifest["skipped"]["mismatched_tool_call_id"])
+        self.assertEqual(1, manifest["skipped"]["non_english_or_unknown_suite"])
+        with self.assertRaisesRegex(ValueError, "must be pinned"):
+            MODULE.build_corpus(self.root, "0" * 40, "development")
+
+    def test_case_v1_validation_and_deterministic_output(self) -> None:
+        self.write_run("safe", source_record(security=True))
+        self.write_run("violated", source_record(security=False))
+        first, first_manifest = self.build()
+        second, second_manifest = self.build()
+        self.assertEqual(first, second)
+        self.assertEqual(first_manifest, second_manifest)
+        MODULE.validate_cases(first, MODULE.DEFAULT_SCHEMA)
+        self.assertEqual(MODULE.SOURCE_URL, first_manifest["source_url"])
+        self.assertEqual(MODULE.LICENSE_URL, first_manifest["source_license_url"])
+        self.assertEqual(MODULE.PINNED_REVISION, first_manifest["source_revision"])
+        self.assertEqual("MIT", first_manifest["source_license"])
+
+
+if __name__ == "__main__":
+    unittest.main()

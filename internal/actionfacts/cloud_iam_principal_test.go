@@ -40,6 +40,16 @@ func TestExactCloudIAMPrincipalOperationUsesSourceAWSCLIShapes(t *testing.T) {
 			command:   "attach-role-policy --role-name BackdoorAdminRole --policy-arn " + awsAdministratorAccessARN,
 			operation: CloudIAMRoleAdminAttach, wantOp: OperationPermissionChange,
 		},
+		{
+			name:      "source user wildcard inline policy",
+			command:   `put-user-policy --user-name backdoor-admin --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'`,
+			operation: CloudIAMUserWildcardPolicy, wantOp: OperationPermissionChange,
+		},
+		{
+			name:      "source role wildcard inline policy",
+			command:   `put-role-policy --role-name BackdoorAdminRole --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'`,
+			operation: CloudIAMRoleWildcardPolicy, wantOp: OperationPermissionChange,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -55,11 +65,14 @@ func TestExactCloudIAMPrincipalOperationUsesSourceAWSCLIShapes(t *testing.T) {
 				!commandHasOperation(facts.Commands[0], test.wantOp) {
 				t.Fatalf("commands=%+v, want aws/%s", facts.Commands, test.wantOp)
 			}
-			if test.operation == CloudIAMUserAdminAttach ||
-				test.operation == CloudIAMRoleAdminAttach {
-				if !commandHasOperation(facts.Commands[0], OperationPrivilege) ||
-					!ExactCloudIAMAdministratorAttachment(facts) {
+			if test.operation == CloudIAMUserAdminAttach || test.operation == CloudIAMRoleAdminAttach {
+				if !commandHasOperation(facts.Commands[0], OperationPrivilege) || !ExactCloudIAMAdministratorAttachment(facts) {
 					t.Fatalf("administrator attachment did not expose exact CEL facts: %+v", facts.Commands[0])
+				}
+			}
+			if test.operation == CloudIAMUserWildcardPolicy || test.operation == CloudIAMRoleWildcardPolicy {
+				if !commandHasOperation(facts.Commands[0], OperationPrivilege) || !ExactCloudIAMWildcardInlinePolicy(facts) {
+					t.Fatalf("wildcard policy did not expose exact CEL facts: %+v", facts.Commands[0])
 				}
 			}
 		})
@@ -103,7 +116,8 @@ func TestCloudIAMPrincipalOperationAbstainsOnUnresolvedOrOpenShapes(t *testing.T
 		{name: "dynamic user", tool: "aws_cli", args: map[string]any{"service": "iam", "command": "create-user --user-name $USER"}},
 		{name: "placeholder user", tool: "aws_cli", args: map[string]any{"service": "iam", "command": "attach-user-policy --user-name <user> --policy-arn " + awsAdministratorAccessARN}},
 		{name: "custom policy unresolved", tool: "aws_cli", args: map[string]any{"service": "iam", "command": "attach-user-policy --user-name backdoor-admin --policy-arn arn:aws:iam::123456789012:policy/Admin"}},
-		{name: "inline wildcard existing user", tool: "aws_cli", args: map[string]any{"service": "iam", "command": `put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'`}},
+		{name: "inline wildcard with condition", tool: "aws_cli", args: map[string]any{"service": "iam", "command": `put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*","Condition":{}}]}'`}},
+		{name: "inline action subset", tool: "aws_cli", args: map[string]any{"service": "iam", "command": `put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}'`}},
 		{name: "reordered attach flags", tool: "aws_cli", args: map[string]any{"service": "iam", "command": "attach-user-policy --policy-arn " + awsAdministratorAccessARN + " --user-name backdoor-admin"}},
 		{name: "extra option", tool: "aws_cli", args: map[string]any{"service": "iam", "command": "create-user --user-name backdoor-admin --tags Key=Fixture,Value=True"}},
 		{name: "gcp service", tool: "aws_cli", args: map[string]any{"service": "gcp", "command": "create-user --user-name backdoor-admin"}},

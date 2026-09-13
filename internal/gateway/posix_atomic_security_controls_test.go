@@ -6,6 +6,7 @@
 package gateway
 
 import (
+	"encoding/json"
 	"path/filepath"
 	"testing"
 
@@ -16,6 +17,7 @@ import (
 const (
 	pamPasswordCaptureRuleID = "credential.pam_password_capture"
 	posixHardeningRuleID     = "tamper.posix_logging_hardening_disable"
+	linuxSecurityRuleID      = "tamper.linux_security_control_disable"
 )
 
 func TestPOSIXAtomicSecurityControlsProfilePosture(t *testing.T) {
@@ -47,6 +49,14 @@ func TestPOSIXAtomicSecurityControlsProfilePosture(t *testing.T) {
 		{
 			name: "ufw logging off", ruleID: posixHardeningRuleID,
 			command: `ufw logging off`,
+		},
+		{
+			name: "legacy auditd stop", ruleID: linuxSecurityRuleID,
+			command: `service auditd stop`,
+		},
+		{
+			name: "legacy auditd stop through sudo", ruleID: linuxSecurityRuleID,
+			command: `sudo service auditd stop`,
 		},
 	}
 	profiles := []struct {
@@ -104,6 +114,123 @@ func TestPOSIXAtomicSecurityControlsProfilePosture(t *testing.T) {
 	}
 }
 
+func TestPOSIXSystemLogBoundedFallbackProfilePosture(t *testing.T) {
+	commands := []string{
+		`sudo truncate -s 0 /var/log/auth.log 2>/dev/null || true`,
+		`/usr/bin/truncate -s 0 /var/log/auth.log/current.log 2>/dev/null || true`,
+		"chattr -i /var/log/audit/audit.log.1 2>/dev/null;\ntruncate -s 0 /var/log/audit/audit.log.1",
+	}
+	profiles := []struct {
+		name     string
+		action   string
+		severity string
+	}{
+		{name: "default", action: "allow", severity: "HIGH"},
+		{name: "permissive", action: "allow", severity: "HIGH"},
+		{name: "strict", action: "allow", severity: "CRITICAL"},
+	}
+	for _, profile := range profiles {
+		t.Run(profile.name, func(t *testing.T) {
+			const connector = "codex"
+			installToolCallCorpusProfileConnector(t, connector, profile.name)
+			for _, command := range commands {
+				rawFindings := scanTrustedRulesForProfile(t, profile.name, command, "shell")
+				if findingWithID(rawFindings, "tamper.posix_system_log_destruction") == nil {
+					t.Fatalf("command=%q did not produce the bounded fallback candidate", command)
+				}
+				input := actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX}
+				filtered := filterExactFallbackFindings(rawFindings, input, actionfacts.Analyze(input), true)
+				if finding := findingWithID(filtered, "tamper.posix_system_log_destruction"); finding == nil || finding.contributesToEnforcement() {
+					t.Fatalf("command=%q bounded fallback finding=%+v", command, finding)
+				}
+				hookArgs, err := json.Marshal(map[string]interface{}{"command": command})
+				if err != nil {
+					t.Fatal(err)
+				}
+				hookInput := actionfacts.Input{Tool: "shell", Args: hookArgs, CWD: "/repo"}
+				hookFacts := actionfacts.Analyze(hookInput)
+				if !actionfacts.ExactPOSIXSystemLogDestruction(hookFacts) {
+					t.Fatalf("command=%q hook facts lost exact proof: %+v", command, hookFacts)
+				}
+				dispatched := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: hookInput, LegacyText: string(hookArgs), Connector: connector,
+					EnforcementCapable: true,
+				})
+				if finding := findingWithID(dispatched, "tamper.posix_system_log_destruction"); finding == nil || finding.contributesToEnforcement() {
+					t.Fatalf("command=%q dispatched finding=%+v all=%+v", command, finding, dispatched)
+				}
+				cfg := &config.Config{}
+				cfg.Guardrail.Mode = "action"
+				cfg.Guardrail.Connector = connector
+				cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile.name)
+				response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(t.Context(), codexHookRequest{
+					HookEventName: "PreToolUse",
+					ToolName:      "shell",
+					CWD:           "/repo",
+					ToolInput: map[string]interface{}{
+						"command": command,
+					},
+				})
+				if response.Action != profile.action || response.RawAction != profile.action ||
+					response.Severity != profile.severity ||
+					!findingStringHasRuleID(response.Findings, "tamper.posix_system_log_destruction") {
+					t.Fatalf("command=%q response=%+v want %s/%s", command, response, profile.action, profile.severity)
+				}
+			}
+		})
+	}
+}
+
+func TestPOSIXMultipleSecurityLogDestructionAlertsWithoutBlocking(t *testing.T) {
+	const command = `rm -rf /var/log/secure /var/log/wtmp`
+	owner := semanticOwners["tamper.posix_system_log_destruction"]
+	if owner.prerequisite == nil || owner.detectionOnly || !owner.alertOnly {
+		t.Fatalf("system-log owner posture=%+v", owner)
+	}
+	for _, profile := range []struct {
+		name     string
+		severity string
+	}{
+		{name: "default", severity: "HIGH"},
+		{name: "permissive", severity: "HIGH"},
+		{name: "strict", severity: "CRITICAL"},
+	} {
+		t.Run(profile.name, func(t *testing.T) {
+			const connector = "codex"
+			installToolCallCorpusProfileConnector(t, connector, profile.name)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = connector
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile.name)
+			response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(t.Context(), codexHookRequest{
+				HookEventName: "PreToolUse", ToolName: "shell", CWD: "/repo",
+				ToolInput: map[string]interface{}{"command": command},
+			})
+			if response.Action != guardrailActionAlert || response.WouldBlock ||
+				response.Severity != profile.severity ||
+				!findingStringHasRuleID(response.Findings, "tamper.posix_system_log_destruction") {
+				t.Fatalf("profile=%s response=%+v", profile.name, response)
+			}
+		})
+	}
+}
+
+func TestPOSIXJournalRetentionDoesNotProduceSystemLogDestruction(t *testing.T) {
+	const command = `sudo find /var/log/journal -type f -name '*.journal' -mtime +0 -delete`
+	input := actionfacts.Input{Tool: "shell", Command: command, CWD: "/repo", DialectHint: actionfacts.DialectPOSIX}
+	facts := actionfacts.Analyze(input)
+	if actionfacts.ExactPOSIXSystemLogDestruction(facts) {
+		t.Fatalf("bounded journal retention was classified as log destruction: %+v", facts)
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		raw := scanTrustedRulesForProfile(t, profile, command, "shell")
+		filtered := filterExactFallbackFindings(raw, input, facts, true)
+		if finding := findingWithID(filtered, "tamper.posix_system_log_destruction"); finding != nil {
+			t.Fatalf("profile=%s retention finding=%+v", profile, finding)
+		}
+	}
+}
+
 func TestPOSIXAtomicSecurityControlsFallbackContracts(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -127,10 +254,39 @@ func TestPOSIXAtomicSecurityControlsFallbackContracts(t *testing.T) {
 			name: "partial pf change", ruleID: posixHardeningRuleID,
 			command: `service pf stop`,
 		},
+		{
+			name: "exact legacy auditd stop", ruleID: linuxSecurityRuleID,
+			command: `sudo service auditd stop`, want: true,
+		},
+		{
+			name: "legacy auditd restart", ruleID: linuxSecurityRuleID,
+			command: `service auditd restart`,
+		},
+		{
+			name: "legacy auditd stop with extra argument", ruleID: linuxSecurityRuleID,
+			command: `service auditd stop now`,
+		},
+		{
+			name:    "exact log truncate failure suppression",
+			ruleID:  "tamper.posix_system_log_destruction",
+			command: `sudo truncate -s 0 /var/log/auth.log 2>/dev/null || true`, want: true,
+		},
+		{
+			name:    "nonliteral log failure branch",
+			ruleID:  "tamper.posix_system_log_destruction",
+			command: `sudo truncate -s 0 /var/log/auth.log 2>/dev/null || echo failed`,
+		},
+		{
+			name:    "mismatched rotated audit log lineage",
+			ruleID:  "tamper.posix_system_log_destruction",
+			command: `chattr -i /var/log/audit/audit.log.1; truncate -s 0 /var/log/audit/audit.log.2`,
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			contract, ok := exactFallbackContracts[test.ruleID]
-			if !ok || contract.proves == nil || contract.boundedSubgraphProves == nil || contract.detectionOnly {
+			wantDetectionOnly := test.ruleID == "tamper.posix_system_log_destruction"
+			if !ok || contract.proves == nil || contract.boundedSubgraphProves == nil ||
+				contract.detectionOnly != wantDetectionOnly {
 				t.Fatalf("fallback contract %s is incomplete: %+v", test.ruleID, contract)
 			}
 			input := actionfacts.Input{

@@ -110,7 +110,12 @@ func TestActiveAgentContextAcceptsNativeCaseAliasesAtLoad(t *testing.T) {
 		alias     string
 	}{
 		{canonical: "AGENTS.md", alias: "agents.md"},
+		{canonical: "CLAUDE.md", alias: "claude.md"},
+		{canonical: "gateway.json", alias: "GATEWAY.JSON"},
+		{canonical: "IDENTITY.md", alias: "identity.md"},
 		{canonical: "MEMORY.md", alias: "memory.md"},
+		{canonical: "SOUL.md", alias: "soul.md"},
+		{canonical: "TOOLS.md", alias: "tools.md"},
 	} {
 		t.Run(test.canonical, func(t *testing.T) {
 			root := t.TempDir()
@@ -679,9 +684,9 @@ func TestActiveAgentContextInvalidRelativeSymlinkAndOverflowPreserveExactEntries
 		}
 	})
 
-	t.Run("out of scope file cannot erase exact entry", func(t *testing.T) {
+	t.Run("unsupported file cannot erase exact entry", func(t *testing.T) {
 		cache := activeAgentContextCache{}
-		inexact := writeActiveAgentTestFile(t, root, "CLAUDE.md")
+		inexact := writeActiveAgentTestFile(t, root, "README.md")
 		cache.seed("claudecode", "session", valid)
 		cache.seed("claudecode", "session", inexact)
 		if got := cache.snapshot("claudecode", "session"); !slices.Equal(got.files, []string{valid}) || got.uncertain {
@@ -1056,7 +1061,7 @@ func TestActiveAgentContextTimestampTieEvictionIsDeterministic(t *testing.T) {
 func TestActiveAgentContextInvalidNewSessionCannotEvictExactSession(t *testing.T) {
 	root := t.TempDir()
 	agentFile := writeActiveAgentTestFile(t, root, "AGENTS.md")
-	invalidFile := writeActiveAgentTestFile(t, root, "CLAUDE.md")
+	invalidFile := writeActiveAgentTestFile(t, root, "README.md")
 	now := time.Unix(1_700_000_000, 0)
 	cache := activeAgentContextCache{now: func() time.Time { return now }}
 

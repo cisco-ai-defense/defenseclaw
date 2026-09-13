@@ -125,7 +125,9 @@ def normalize(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         "split": split,
         "row_count": len(rows),
         "skipped": dict(sorted(skipped.items())),
-        "normalization": "user-tool plus attacker-tool names only; instructions, responses, and parameter values excluded",
+        "normalization": (
+            "user-tool plus attacker-tool names only; instructions, responses, and parameter values excluded"
+        ),
     }
     return rows, manifest
 

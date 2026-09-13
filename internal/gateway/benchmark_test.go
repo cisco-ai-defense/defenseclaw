@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 func TestEvaluateDeterministicActionUsesProductionProofBoundary(t *testing.T) {
@@ -60,6 +61,38 @@ func TestEvaluateDeterministicActionUsesProductionProofBoundary(t *testing.T) {
 				t.Fatalf("missing value-free parser state: %+v", got)
 			}
 		})
+	}
+}
+
+func TestEvaluateDeterministicActionKeepsProximityPrivilegeChainStrictOnly(t *testing.T) {
+	step1, _ := guardrail.ToolChainStepMask(
+		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+		1,
+	)
+	step2, _ := guardrail.ToolChainStepMask(
+		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+		2,
+	)
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		discovery := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "shell", Command: "sudo -l", DialectHint: actionfacts.DialectPOSIX},
+			"sudo -l",
+			"",
+			profile,
+		)
+		elevation := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "shell", Command: "sudo -u root /bin/bash", DialectHint: actionfacts.DialectPOSIX},
+			"sudo -u root /bin/bash",
+			"",
+			profile,
+		)
+		got := discovery.DetectionStepMask&step1 != 0 &&
+			elevation.DetectionStepMask&step2 != 0
+		if want := profile == "strict"; got != want {
+			t.Fatalf("profile=%s projects proximity chain projected=%t want=%t", profile, got, want)
+		}
 	}
 }
 

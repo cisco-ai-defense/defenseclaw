@@ -104,7 +104,7 @@ class TerminalBenchNormalizerTests(unittest.TestCase):
             self.assertGreaterEqual(row["strata"]["call_index"], 0)
             self.assertEqual(
                 {event["outcome"] for event in row["payload"]["events"]},
-                {"succeeded"},
+                {"unknown"},
             )
 
     def test_projects_real_invocation_arguments_but_excludes_messages_and_observations(self) -> None:

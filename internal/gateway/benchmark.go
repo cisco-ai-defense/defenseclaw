@@ -183,6 +183,7 @@ func EvaluateDeterministicAction(
 	}
 	projection := guardrail.ToolChainProjection{ParseStatus: captured.Parse.Status}
 	projectTrustedActionChainSteps(&projection, captured, capturedFindings)
+	projection = toolChainProjectionForNamedPosture(profile, projection)
 	result.DetectionStepMask = projection.DetectionStepMask
 	result.EnforcementStepMask = projection.EnforcementStepMask
 	result.EnforcementJoinDigests = projection.EnforcementJoinDigests

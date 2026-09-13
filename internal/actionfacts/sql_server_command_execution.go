@@ -116,8 +116,11 @@ func exactSQLQueryArgs(raw json.RawMessage) (connection, database, query string,
 		case "database":
 			var databaseOK bool
 			database, databaseOK = object[key].(string)
-			if !databaseOK || !exactSQLScalar(database, maxScalarBytes) ||
-				unresolvedSQLConnectionIdentity(database) {
+			// An explicitly empty optional database is semantically identical to
+			// omission. Several structured connectors preserve the empty field.
+			if !databaseOK || database != "" &&
+				(!exactSQLScalar(database, maxScalarBytes) ||
+					unresolvedSQLConnectionIdentity(database)) {
 				return "", "", "", false
 			}
 		default:
@@ -136,6 +139,7 @@ func unresolvedSQLConnectionIdentity(value string) bool {
 	lower := strings.ToLower(value)
 	return strings.Contains(value, "${") || strings.Contains(value, "#{") ||
 		strings.Contains(value, "{{") || strings.Contains(value, "}}") ||
+		strings.ContainsAny(value, "<>") ||
 		strings.Contains(value, "<%") || strings.Contains(value, "%>") ||
 		strings.Contains(lower, "<connection") || strings.Contains(lower, "<database") ||
 		strings.Contains(lower, "your_connection") || strings.Contains(lower, "your_database")

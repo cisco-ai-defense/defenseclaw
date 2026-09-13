@@ -92,6 +92,23 @@ func TestSessionNoise_ReadingClaudeMDIsNotAnInstructionMutation(t *testing.T) {
 	}
 }
 
+func TestSessionNoise_DirectoryListingWithClaudeMDIsNotAnInstructionMutation(t *testing.T) {
+	api := newNoiseAPI()
+	resp := api.evaluateClaudeCodeHook(context.Background(), claudeCodeHookRequest{
+		HookEventName: "PostToolUse",
+		ToolName:      "Bash",
+		ToolInput:     map[string]interface{}{"command": "ls -la /repo"},
+		ToolResponse: map[string]interface{}{
+			"stdout": "-rw-r--r--  1 user staff  128 Sep 12 12:00 CLAUDE.md\n",
+		},
+	})
+	for _, finding := range resp.Findings {
+		if strings.Contains(finding, "COG-CLAUDE-MD") {
+			t.Fatalf("CLAUDE.md directory listing produced cognitive-mutation finding: %v", resp.Findings)
+		}
+	}
+}
+
 // Secret detection is deliberately RETAINED on untrusted content by #750/#755.
 // This test documents that boundary rather than asserting silence.
 func TestSessionNoise_SecretInResultStillDetected(t *testing.T) {

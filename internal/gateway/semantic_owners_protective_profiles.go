@@ -18,22 +18,31 @@ package gateway
 
 import (
 	"strings"
-	"unicode"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
 const (
-	semanticCloudBulkDataDeleteExpression       = `f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) || ('s3api' in c.argv && 'delete-objects' in c.argv))) || (c.program == 'gcloud' && 'storage' in c.argv && 'rm' in c.argv && (('--recursive' in c.argv) || ('-r' in c.argv))) || (c.program == 'az' && 'storage' in c.argv && 'delete-batch' in c.argv)))`
-	semanticCloudResourceDeleteExpression       = `f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && ('delete' in c.argv || 'delete-bucket' in c.argv || 'delete-db-instance' in c.argv || 'delete-table' in c.argv || 'delete-stack' in c.argv || 'terminate-instances' in c.argv || 'delete-cluster' in c.argv)) || (c.program == 'gcloud' && 'delete' in c.argv) || (c.program == 'az' && 'delete' in c.argv)))`
-	semanticSQLUnboundedDeleteExpression        = `f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'] && (('-c' in c.argv) || ('-e' in c.argv) || ('-q' in c.argv) || ('-Q' in c.argv) || ('--command' in c.argv) || ('--execute' in c.argv) || ('--query' in c.argv) || c.argv.exists(a, a.startsWith('--command=') || a.startsWith('--execute=') || a.startsWith('--query='))))`
-	semanticSQLSchemaDestroyExpression          = semanticSQLUnboundedDeleteExpression
-	semanticKubernetesNamespaceDeleteExpression = `f.commands.exists(c, c.argv_complete && c.program in ['kubectl', 'oc'] && 'delete' in c.argv && (('namespace' in c.argv) || ('namespaces' in c.argv) || ('ns' in c.argv)))`
-	semanticKubernetesBulkDeleteExpression      = `f.commands.exists(c, c.argv_complete && c.program in ['kubectl', 'oc'] && 'delete' in c.argv && '--all' in c.argv)`
-	semanticIaCFullDestroyExpression            = `f.commands.exists(c, c.argv_complete && c.program in ['terraform', 'tofu', 'pulumi'] && (('destroy' in c.argv) || ('-destroy' in c.argv)))`
+	semanticCloudBulkDataDeleteExpression         = `f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) || ('s3api' in c.argv && 'delete-objects' in c.argv))) || (c.program == 'gcloud' && 'storage' in c.argv && 'rm' in c.argv && (('--recursive' in c.argv) || ('-r' in c.argv))) || (c.program == 'az' && 'storage' in c.argv && 'delete-batch' in c.argv)))`
+	semanticCloudResourceDeleteExpression         = `f.commands.exists(c, c.argv_complete && ((c.program == 'aws' && ('delete' in c.argv || 'delete-bucket' in c.argv || 'delete-db-instance' in c.argv || 'delete-table' in c.argv || 'delete-stack' in c.argv || 'terminate-instances' in c.argv || 'delete-cluster' in c.argv)) || (c.program == 'gcloud' && 'delete' in c.argv) || (c.program == 'az' && 'delete' in c.argv)))`
+	semanticCloudObservedResourceDeleteExpression = `f.tool in ['aws.cloudtrail_event', 'azure.activity_event']`
+	semanticSQLUnboundedDeleteExpression          = semanticSQLDestructiveMutationExpression
+	semanticSQLSchemaDestroyExpression            = semanticSQLUnboundedDeleteExpression
+	semanticKubernetesNamespaceDeleteExpression   = `f.commands.exists(c, c.argv_complete && c.program in ['kubectl', 'oc'] && 'delete' in c.argv && (('namespace' in c.argv) || ('namespaces' in c.argv) || ('ns' in c.argv)))`
+	semanticKubernetesBulkDeleteExpression        = `f.commands.exists(c, c.argv_complete && c.program in ['kubectl', 'oc'] && 'delete' in c.argv && '--all' in c.argv)`
+	semanticIaCFullDestroyExpression              = `f.commands.exists(c, c.argv_complete && c.program in ['terraform', 'tofu', 'pulumi'] && (('destroy' in c.argv) || ('-destroy' in c.argv)))`
 )
 
 var semanticProtectiveProfileOwners = map[string]semanticOwner{
+	"integrity.kernel_control_bind_override": {
+		prerequisite:     actionfacts.ExactPOSIXKernelControlBindOverride,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
+	},
+	"impact.protected_kernel_control_bind_override": {
+		prerequisite:     actionfacts.ExactPOSIXKernelControlBindOverride,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"impact.cloud_bulk_data_delete": {
 		prerequisite:     cloudBulkDataDeletePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -41,6 +50,14 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 	"impact.cloud_resource_delete": {
 		prerequisite:     cloudResourceDeletePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"impact.cloud_observed_resource_delete": {
+		prerequisite:     cloudObservedResourceDeletePrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Provider audit events report completed operations after the fact. Strict
+		// and an explicitly assigned protected-cloud pack may surface them, but a
+		// post-action observation can never authorize synchronous denial.
+		alertOnly: true,
 	},
 	"impact.sql_unbounded_delete": {
 		prerequisite:     sqlUnboundedDeletePrerequisite,
@@ -65,6 +82,11 @@ var semanticProtectiveProfileOwners = map[string]semanticOwner{
 }
 
 func cloudBulkDataDeletePrerequisite(facts actionfacts.Facts) bool {
+	for _, mutation := range actionfacts.ExactCloudResourceMutations(facts) {
+		if mutation.Provider == "aws" && mutation.Service == "s3" && mutation.Recursive {
+			return true
+		}
+	}
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) {
 			continue
@@ -94,6 +116,12 @@ func cloudBulkDataDeletePrerequisite(facts actionfacts.Facts) bool {
 }
 
 func cloudResourceDeletePrerequisite(facts actionfacts.Facts) bool {
+	for _, mutation := range actionfacts.ExactCloudResourceMutations(facts) {
+		if mutation.Operation == actionfacts.CloudResourceDeleteDisk ||
+			mutation.Operation == actionfacts.CloudResourceDeleteIAMBinding {
+			return true
+		}
+	}
 	for _, command := range facts.Commands {
 		if !reconImpactExecutingOwned(command) {
 			continue
@@ -142,6 +170,19 @@ func cloudResourceDeletePrerequisite(facts actionfacts.Facts) bool {
 	return false
 }
 
+func cloudObservedResourceDeletePrerequisite(facts actionfacts.Facts) bool {
+	for _, mutation := range actionfacts.ExactCloudResourceMutations(facts) {
+		if !mutation.Observed {
+			continue
+		}
+		if mutation.Operation == actionfacts.CloudResourceDeleteDisk ||
+			mutation.Operation == actionfacts.CloudResourceDeleteIAMBinding {
+			return true
+		}
+	}
+	return false
+}
+
 func hasAnyArgFold(argv []string, values ...string) bool {
 	for _, argument := range argv {
 		for _, value := range values {
@@ -164,11 +205,23 @@ func hasArgPrefixFold(argv []string, prefix string) bool {
 }
 
 func sqlUnboundedDeletePrerequisite(facts actionfacts.Facts) bool {
-	return sqlMutationPrerequisite(facts, sqlMutationUnboundedDelete)
+	for _, mutation := range actionfacts.ExactSQLMutations(facts) {
+		if mutation.Operation == actionfacts.SQLMutationDeleteUnbounded {
+			return true
+		}
+	}
+	return false
 }
 
 func sqlSchemaDestroyPrerequisite(facts actionfacts.Facts) bool {
-	return sqlMutationPrerequisite(facts, sqlMutationSchemaDestroy)
+	for _, mutation := range actionfacts.ExactSQLMutations(facts) {
+		switch mutation.Operation {
+		case actionfacts.SQLMutationTruncate, actionfacts.SQLMutationDropSchema,
+			actionfacts.SQLMutationDropDatabase:
+			return true
+		}
+	}
+	return false
 }
 
 func kubernetesNamespaceDeletePrerequisite(facts actionfacts.Facts) bool {
@@ -319,294 +372,4 @@ func staticProtectiveOperand(value string) bool {
 		!strings.ContainsAny(value, "$`\r\n") &&
 		!strings.Contains(value, "$(") &&
 		!strings.Contains(value, "${")
-}
-
-type sqlMutationKind uint8
-
-const (
-	sqlMutationUnboundedDelete sqlMutationKind = iota + 1
-	sqlMutationSchemaDestroy
-)
-
-func sqlMutationPrerequisite(facts actionfacts.Facts, wanted sqlMutationKind) bool {
-	for _, command := range facts.Commands {
-		if !reconImpactExecutingOwned(command) {
-			continue
-		}
-		queries, determinate := staticSQLQueries(command)
-		if !determinate {
-			continue
-		}
-		for _, query := range queries {
-			mutations, ok := classifyStaticSQLMutations(query)
-			if !ok {
-				continue
-			}
-			for _, mutation := range mutations {
-				if mutation == wanted {
-					return true
-				}
-			}
-		}
-	}
-	return false
-}
-
-func staticSQLQueries(command actionfacts.CommandFact) ([]string, bool) {
-	program := strings.ToLower(command.Program)
-	var shortOptions, longOptions []string
-	switch program {
-	case "psql":
-		shortOptions, longOptions = []string{"-c"}, []string{"--command"}
-	case "mysql", "mariadb":
-		shortOptions, longOptions = []string{"-e"}, []string{"--execute"}
-	case "sqlcmd":
-		shortOptions = []string{"-q", "-Q"}
-	case "snowsql":
-		shortOptions, longOptions = []string{"-q"}, []string{"--query"}
-	default:
-		return nil, false
-	}
-
-	var queries []string
-	for index := 1; index < len(command.Argv); index++ {
-		argument := command.Argv[index]
-		matched := false
-		for _, option := range shortOptions {
-			if argument == option {
-				if index+1 >= len(command.Argv) || command.Argv[index+1] == "" {
-					return nil, false
-				}
-				queries = append(queries, command.Argv[index+1])
-				index++
-				matched = true
-				break
-			}
-		}
-		if matched {
-			continue
-		}
-		for _, option := range longOptions {
-			prefix := option + "="
-			if strings.HasPrefix(argument, prefix) {
-				query := argument[len(prefix):]
-				if query == "" {
-					return nil, false
-				}
-				queries = append(queries, query)
-				matched = true
-				break
-			}
-			if argument == option {
-				if index+1 >= len(command.Argv) || command.Argv[index+1] == "" {
-					return nil, false
-				}
-				queries = append(queries, command.Argv[index+1])
-				index++
-				matched = true
-				break
-			}
-		}
-	}
-	return queries, len(queries) != 0
-}
-
-func classifyStaticSQLMutations(query string) ([]sqlMutationKind, bool) {
-	sanitized, ok := stripSQLLiteralsAndComments(query)
-	if !ok {
-		return nil, false
-	}
-	var mutations []sqlMutationKind
-	var pending []sqlMutationKind
-	inTransaction := false
-	for _, statement := range strings.Split(sanitized, ";") {
-		tokens := sqlKeywordTokens(statement)
-		if len(tokens) == 0 {
-			continue
-		}
-		if tokens[0] == "BEGIN" ||
-			(len(tokens) > 1 && tokens[0] == "START" && tokens[1] == "TRANSACTION") {
-			if inTransaction {
-				return nil, false
-			}
-			inTransaction = true
-			pending = nil
-			continue
-		}
-		if tokens[0] == "ROLLBACK" {
-			if inTransaction {
-				inTransaction = false
-				pending = nil
-			}
-			continue
-		}
-		if tokens[0] == "COMMIT" {
-			if inTransaction {
-				inTransaction = false
-				mutations = append(mutations, pending...)
-				pending = nil
-			}
-			continue
-		}
-		statementMutations := classifyStaticSQLStatement(tokens)
-		if inTransaction {
-			pending = append(pending, statementMutations...)
-		} else {
-			mutations = append(mutations, statementMutations...)
-		}
-	}
-	if inTransaction {
-		return nil, false
-	}
-	return mutations, true
-}
-
-func classifyStaticSQLStatement(tokens []string) []sqlMutationKind {
-	var mutations []sqlMutationKind
-	if len(tokens) == 0 {
-		return nil
-	}
-	if tokens[0] == "DROP" && len(tokens) > 1 &&
-		(tokens[1] == "DATABASE" || tokens[1] == "SCHEMA") {
-		return []sqlMutationKind{sqlMutationSchemaDestroy}
-	}
-	if tokens[0] == "TRUNCATE" {
-		return []sqlMutationKind{sqlMutationSchemaDestroy}
-	}
-	deleteIndex := -1
-	for index, token := range tokens {
-		if token == "DELETE" && index+1 < len(tokens) && tokens[index+1] == "FROM" {
-			deleteIndex = index
-			break
-		}
-	}
-	if deleteIndex < 0 {
-		return nil
-	}
-	if tokens[0] == "EXPLAIN" && !containsSQLToken(tokens[:deleteIndex], "ANALYZE") {
-		return nil
-	}
-	if !containsSQLToken(tokens[deleteIndex+2:], "WHERE") {
-		mutations = append(mutations, sqlMutationUnboundedDelete)
-	}
-	return mutations
-}
-
-func containsSQLToken(tokens []string, expected string) bool {
-	for _, token := range tokens {
-		if token == expected {
-			return true
-		}
-	}
-	return false
-}
-
-func sqlKeywordTokens(statement string) []string {
-	return strings.FieldsFunc(strings.ToUpper(statement), func(r rune) bool {
-		return !unicode.IsLetter(r) && r != '_'
-	})
-}
-
-// stripSQLLiteralsAndComments keeps only executable SQL syntax. Quoted values,
-// quoted identifiers, and comments are replaced with spaces so examples such
-// as SELECT 'DELETE FROM users' never become policy evidence. Unterminated or
-// nested constructs are indeterminate and therefore cannot authorize a block.
-func stripSQLLiteralsAndComments(query string) (string, bool) {
-	var out strings.Builder
-	for index := 0; index < len(query); {
-		switch {
-		case query[index] == '\'':
-			index++
-			closed := false
-			for index < len(query) {
-				if query[index] != '\'' {
-					index++
-					continue
-				}
-				if index+1 < len(query) && query[index+1] == '\'' {
-					index += 2
-					continue
-				}
-				index++
-				closed = true
-				break
-			}
-			if !closed {
-				return "", false
-			}
-			out.WriteByte(' ')
-		case query[index] == '"' || query[index] == '`':
-			quote := query[index]
-			index++
-			closed := false
-			for index < len(query) {
-				if query[index] != quote {
-					index++
-					continue
-				}
-				if index+1 < len(query) && query[index+1] == quote {
-					index += 2
-					continue
-				}
-				index++
-				closed = true
-				break
-			}
-			if !closed {
-				return "", false
-			}
-			out.WriteByte(' ')
-		case query[index] == '[':
-			end := strings.IndexByte(query[index+1:], ']')
-			if end < 0 {
-				return "", false
-			}
-			index += end + 2
-			out.WriteByte(' ')
-		case index+1 < len(query) && query[index:index+2] == "--":
-			index += 2
-			for index < len(query) && query[index] != '\n' && query[index] != '\r' {
-				index++
-			}
-			out.WriteByte(' ')
-		case index+1 < len(query) && query[index:index+2] == "/*":
-			end := strings.Index(query[index+2:], "*/")
-			if end < 0 || strings.Contains(query[index+2:index+2+end], "/*") {
-				return "", false
-			}
-			index += end + 4
-			out.WriteByte(' ')
-		case query[index] == '$':
-			end := strings.IndexByte(query[index+1:], '$')
-			if end < 0 {
-				out.WriteByte(query[index])
-				index++
-				continue
-			}
-			tagEnd := index + end + 2
-			tag := query[index:tagEnd]
-			validTag := true
-			for _, r := range tag[1 : len(tag)-1] {
-				if !unicode.IsLetter(r) && !unicode.IsDigit(r) && r != '_' {
-					validTag = false
-					break
-				}
-			}
-			if !validTag {
-				out.WriteByte(query[index])
-				index++
-				continue
-			}
-			closeOffset := strings.Index(query[tagEnd:], tag)
-			if closeOffset < 0 {
-				return "", false
-			}
-			index = tagEnd + closeOffset + len(tag)
-			out.WriteByte(' ')
-		default:
-			out.WriteByte(query[index])
-			index++
-		}
-	}
-	return out.String(), true
 }

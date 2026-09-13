@@ -20,6 +20,7 @@ import (
 	"encoding/base64"
 	"path"
 	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
@@ -32,10 +33,23 @@ const (
 	// Owner eligibility accepts only executing mutations (or static redirects
 	// that remain executing in the enforcement projection), so an unrelated
 	// sibling mutation cannot lend it authority.
-	semanticActiveAgentInstructionMutationExpression = `f.commands.exists(c, f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))`
+	semanticActiveAgentInstructionMutationExpression = `f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])`
 )
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
+	"integrity.dpkg_status_direct_mutation": {
+		prerequisite:     actionfacts.ExactPOSIXDPKGStatusMutation,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
+	},
+	"privilege.posix_non_root_uid_zero_account_write": {
+		prerequisite:     actionfacts.ExactPOSIXNonRootUIDZeroAccountWrite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
+	"persistence.malicious_download_execute_payload": {
+		prerequisite:  actionfacts.ExactMaliciousPersistencePayload,
+		detectionOnly: true,
+	},
 	"CMD-CRONTAB": {
 		prerequisite:     crontabInstallPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -52,8 +66,13 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 		prerequisite:     windowsRegistryPersistencePrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
-	"COG-AGENTS-MD": activeAgentInstructionMutationOwner("AGENTS.md"),
-	"COG-MEMORY":    activeAgentInstructionMutationOwner("MEMORY.md"),
+	"COG-AGENTS-MD":    activeAgentInstructionMutationOwner("AGENTS.md"),
+	"COG-CLAUDE-MD":    activeAgentInstructionMutationOwner("CLAUDE.md"),
+	"COG-GATEWAY-JSON": activeAgentInstructionMutationOwner("gateway.json"),
+	"COG-IDENTITY":     activeAgentInstructionMutationOwner("IDENTITY.md"),
+	"COG-MEMORY":       activeAgentInstructionMutationOwner("MEMORY.md"),
+	"COG-SOUL":         activeAgentInstructionMutationOwner("SOUL.md"),
+	"COG-TOOLS-MD":     activeAgentInstructionMutationOwner("TOOLS.md"),
 	"integrity.git_hooks_bypass": {
 		prerequisite:     gitHooksBypassPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -61,6 +80,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"source.git_remote_tamper": {
 		prerequisite:     gitRemoteTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
 	},
 	"source.git_config_exec": {
 		prerequisite:     gitConfigExecPrerequisite,
@@ -76,6 +96,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"integrity.history_tamper": {
 		prerequisite:     historyTamperPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		detectionOnly:    true,
 	},
 	"PATH-HISTORY": {
 		// The generic owner handles mutations, but a read of the Windows
@@ -106,6 +127,7 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	"privilege.container_runtime_socket_access": {
 		prerequisite:     containerRuntimeSocketPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
 	},
 	"persistence.shell_profile_write": integrityMutationOwner(
 		matchesShellProfileCandidate,
@@ -130,7 +152,6 @@ var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
 	},
 	"COG-OPENCLAW-JSON": integrityMutationOwner(
 		matchesAgentConfigCandidate, matchesActiveAgentConfig, nil,
-		"COG-GATEWAY-JSON",
 	),
 	"tamper.detector_state_write": integrityMutationOwner(
 		matchesDefenseClawStateCandidate,
@@ -262,12 +283,38 @@ func activeAgentInstructionMutationOwner(fileName string) semanticOwner {
 	// A fixture-looking path can alias the active file just as any other path
 	// can. Known-empty context is already handled by isSafe; do not let the
 	// generic lexical fixture exemption erase an unresolved alias finding.
-	owner.suppressFallback = integrityMutationSafeNegativeWithFixture(
+	pathSafeNegative := integrityMutationSafeNegativeWithFixture(
 		isCandidate,
 		isActive,
 		isSafe,
 		nil,
 	)
+	owner.suppressFallback = func(facts actionfacts.Facts) bool {
+		if pathSafeNegative(facts) {
+			return true
+		}
+		if !facts.Authoritative() {
+			return false
+		}
+		for _, command := range facts.Commands {
+			if hasAnyOperation(
+				command,
+				actionfacts.OperationWrite,
+				actionfacts.OperationAppend,
+				actionfacts.OperationDelete,
+				actionfacts.OperationCopy,
+				actionfacts.OperationMove,
+				actionfacts.OperationConfigChange,
+			) {
+				// If ActionFacts saw a mutation but could not prove its target,
+				// retain the lexical fallback as non-authoritative evidence.
+				return false
+			}
+		}
+		// A bare filename in an otherwise authoritative read/list/search or
+		// prose-only command is not evidence of an instruction-file mutation.
+		return true
+	}
 	return owner
 }
 
@@ -1092,8 +1139,10 @@ func gitRemoteTamperPrerequisite(facts actionfacts.Facts) bool {
 			continue
 		}
 		argv := lowerArgv(command.Argv[invocation.subcommandIndex:])
-		if len(argv) < 2 ||
-			(argv[1] != "add" && argv[1] != "set-url") {
+		// Adding a remote is ordinary repository initialization. Without trusted
+		// prior-state proving that the named remote already existed, only an
+		// explicit set-url operation is a deterministic routing change.
+		if len(argv) < 2 || argv[1] != "set-url" {
 			continue
 		}
 		if hasExternalNetworkAction(
@@ -1660,6 +1709,12 @@ var unrestrictedSudoersGrantLine = regexp.MustCompile(
 // staged writer/sed/copy flows, while rejecting expandable heredocs,
 // variables, command substitutions, aliases, includes, and opaque transforms.
 func unrestrictedSudoersGrantPrerequisite(facts actionfacts.Facts) bool {
+	// A dedicated closed terminal envelope may prove this fact even though the
+	// generic shell parser conservatively marks redirected terminal input as
+	// partial. No generic or malformed input can project the fact.
+	if actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts) {
+		return true
+	}
 	if !facts.Authoritative() || !facts.EnforcementEligible() {
 		return false
 	}
@@ -1854,11 +1909,29 @@ func sudoersLiteralOutputReachesDestination(
 	if source.ID == destination.ID {
 		return true
 	}
-	return source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
+	if source.PipelineID != 0 && source.PipelineID == destination.PipelineID &&
 		hasCommandDataFlow(
 			facts,
 			source.ID,
 			destination.ID,
+			actionfacts.DataStdout,
+			actionfacts.DataStdin,
+		) {
+		return true
+	}
+	if destination.ParentCommandID == 0 || len(destination.Wrappers) != 1 ||
+		destination.Wrappers[0].Executable != "sudo" {
+		return false
+	}
+	parent, ok := integrityCommandByID(facts, destination.ParentCommandID)
+	return ok && parent.Program == "sudo" && parent.ArgvComplete &&
+		len(parent.Argv) == len(destination.Argv)+1 &&
+		slices.Equal(parent.Argv[1:], destination.Argv) &&
+		source.PipelineID != 0 && source.PipelineID == parent.PipelineID &&
+		hasCommandDataFlow(
+			facts,
+			source.ID,
+			parent.ID,
 			actionfacts.DataStdout,
 			actionfacts.DataStdin,
 		)
@@ -1883,6 +1956,10 @@ func sudoersLiteralCommandOutput(command actionfacts.CommandFact) (string, bool)
 		}
 		return command.Argv[1], true
 	case "printf":
+		segments := actionfacts.StaticPOSIXPrintfFormatStdoutSegments(command)
+		if len(segments) == 1 && segments[0].LeftExact && segments[0].RightExact {
+			return segments[0].Value, true
+		}
 		if len(command.Argv) != 3 ||
 			(command.Argv[1] != `%s\n` && command.Argv[1] != "%s") {
 			return "", false

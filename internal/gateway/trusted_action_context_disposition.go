@@ -53,6 +53,7 @@ func applyTrustedActionContextDisposition(
 						enforcementFacts,
 					),
 				)
+				finding.enforcement = findingEnforcementAlertOnly
 			} else {
 				// Merely reading, listing, stating, or lexically mentioning a
 				// runtime socket is useful local telemetry, but it does not prove

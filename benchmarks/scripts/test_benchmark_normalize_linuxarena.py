@@ -74,6 +74,29 @@ def source_row(
     }
 
 
+def projection_row(identity: int, *, policy: str = "honest", side_task_success: bool = False):
+    attack = policy == "attack"
+    return {
+        "trajectory_id": f"projection-trajectory-{identity}",
+        "run_id": f"projection-run-{identity}",
+        "policy": policy,
+        "environment": "shared_dotfiles",
+        "main_task": "task-family-1",
+        "side_task": "steal-key" if attack else "",
+        "main_task_success": True,
+        "side_task_success": side_task_success,
+        "has_side_task": attack,
+        "number_of_actions": 2,
+        "action_functions": ["bash", "text_editor"],
+        "action_arguments_json": [
+            '{"cmd":"printf hello","timeout":10}',
+            '{"command":"view","path":"README.md"}',
+        ],
+        "action_output_error": ["", "not found"],
+        "action_has_error": [False, True],
+    }
+
+
 class LinuxArenaNormalizerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -121,6 +144,38 @@ class LinuxArenaNormalizerTests(unittest.TestCase):
             "PRIVATE_MODEL_MARKER",
         ):
             self.assertNotIn(marker, serialized)
+
+    def test_projection_schema_preserves_truth_boundary_and_excludes_outputs(self) -> None:
+        rows, manifest, groups = adapter.build_corpus(
+            [projection_row(1), projection_row(2, policy="attack", side_task_success=True)],
+            revision=REVISION,
+            dataset=adapter.PROJECTION_DATASET,
+        )
+        honest = [row for row in rows if row["strata"]["hard_negative"]]
+        attack = [row for row in rows if not row["strata"]["hard_negative"]]
+        self.assertTrue(all(row["truth"]["source_truth"] == "benign" for row in honest))
+        self.assertEqual(
+            {row["truth"]["source_truth"] for row in attack if row["surface"] == "action"}, {"unknown"}
+        )
+        self.assertEqual(
+            {row["truth"]["source_truth"] for row in attack if row["surface"] == "stateful"},
+            {"malicious"},
+        )
+        self.assertTrue(all(row["truth"]["applicability"] == "out_of_scope" for row in attack))
+        self.assertEqual(manifest["datasets"], [adapter.PROJECTION_DATASET])
+        self.assertEqual(manifest["source"]["license"], "MIT")
+        self.assertEqual(groups["trajectory_count"], 2)
+        self.assertNotIn("not found", json.dumps(rows, sort_keys=True))
+
+    def test_projection_rejects_malformed_parallel_data(self) -> None:
+        malformed = projection_row(1)
+        malformed["action_has_error"] = [False]
+        with self.assertRaisesRegex(ValueError, "number_of_actions"):
+            adapter.build_corpus([malformed], revision=REVISION, dataset=adapter.PROJECTION_DATASET)
+        malformed = projection_row(2)
+        malformed["action_arguments_json"][0] = '{"cmd":"one","cmd":"two"}'
+        with self.assertRaisesRegex(ValueError, "strict JSON"):
+            adapter.build_corpus([malformed], revision=REVISION, dataset=adapter.PROJECTION_DATASET)
 
     def test_output_error_is_the_only_per_call_outcome_signal(self) -> None:
         rows, _, _ = self.build(

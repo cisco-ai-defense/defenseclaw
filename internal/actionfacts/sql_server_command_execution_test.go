@@ -45,6 +45,27 @@ func TestSQLServerCommandExecutionFactsAreExactAndValueFree(t *testing.T) {
 	}
 }
 
+func TestSQLServerCommandExecutionODBCConnectionWithoutDatabaseField(t *testing.T) {
+	connection := "Server=db.invalid,1433;Database=master;User Id=fixture;Password=fixture-password;"
+	queries := []struct {
+		query string
+		want  SQLServerCommandOperation
+	}{
+		{
+			query: "EXEC sp_configure 'show advanced options', 1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell', 1; RECONFIGURE;",
+			want:  SQLServerXPCommandShellEnable,
+		},
+		{query: "EXEC xp_cmdshell 'whoami';", want: SQLServerXPCommandShellInvoke},
+	}
+	for _, test := range queries {
+		facts := Analyze(Input{Tool: "sql_query", Args: mustSQLQueryArgs(t, connection, "", test.query)})
+		operation, digest, ok := ExactSQLServerCommandExecution(facts)
+		if !ok || operation != test.want || digest == "" {
+			t.Fatalf("operation=%q digest=%q ok=%t facts=%+v", operation, digest, ok, facts)
+		}
+	}
+}
+
 func TestSQLServerCommandExecutionHardNegatives(t *testing.T) {
 	tests := []struct {
 		name       string

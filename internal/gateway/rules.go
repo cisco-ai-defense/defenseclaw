@@ -270,6 +270,7 @@ func compileRulePackGenerationWithCompiler(
 		ruleIdentityTitles: make(map[string]map[string]struct{}),
 	}
 	claimed := make(map[string]string)
+	semanticRulePositions := make(map[string]int)
 	var staticCost uint64
 	for _, category := range ownedCategories {
 		for _, rule := range category.Rules {
@@ -297,6 +298,27 @@ func compileRulePackGenerationWithCompiler(
 			if code != semantic.CompileOK {
 				return nil, fmt.Errorf("semantic rule %q failed admission (%s)", rule.ID, code)
 			}
+			if position, duplicate := semanticRulePositions[ruleID]; duplicate {
+				current := compiled.semanticRules[position]
+				currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.rule.Severity))]
+				candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(rule.Severity))]
+				// Added use-case categories may intentionally strengthen a base
+				// rule with the same identity. Compile only the strongest (and,
+				// at equal severity, latest) definition so the semantic lane sees
+				// the policy overlay instead of the earlier catalog entry.
+				if candidateRank < currentRank {
+					continue
+				}
+				staticCost -= current.program.StaticCost()
+				staticCost += program.StaticCost()
+				if staticCost > maxGenerationSemanticStaticCost {
+					return nil, errors.New("effective semantic rule cost exceeds limit")
+				}
+				compiled.semanticRules[position] = compiledSemanticRule{
+					rule: rule, program: program, owner: semanticOwnerForRule(rule.ID),
+				}
+				continue
+			}
 			if len(compiled.semanticRules) >= maxGenerationSemanticRules {
 				return nil, errors.New("effective semantic rule count exceeds limit")
 			}
@@ -321,6 +343,7 @@ func compileRulePackGenerationWithCompiler(
 				program: program,
 				owner:   owner,
 			})
+			semanticRulePositions[ruleID] = len(compiled.semanticRules) - 1
 		}
 	}
 	return compiled, nil
@@ -850,6 +873,12 @@ func scanRuleCategoriesWithOptions(
 		for ruleIndex := range cat.Rules {
 			rule := &cat.Rules[ruleIndex]
 			if !options.allows(rule.ID, rule.ToolCallOnly) {
+				continue
+			}
+			// An effective profile can contain the same canonical rule through
+			// more than one merged category. Findings are identities, not match
+			// occurrences, so emit each rule ID at most once per scan.
+			if seen[rule.ID] {
 				continue
 			}
 			loc := firstAcceptedRuleMatch(*rule, text)

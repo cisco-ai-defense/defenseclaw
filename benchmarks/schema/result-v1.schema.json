@@ -10,7 +10,18 @@
     "run_id": {"type": "string", "minLength": 1, "maxLength": 160},
     "case_id": {"type": "string", "minLength": 1, "maxLength": 240},
     "engine": {"type": "string", "minLength": 1, "maxLength": 120},
-    "profile": {"enum": ["default", "permissive", "strict"]},
+    "profile": {
+      "anyOf": [
+        {"enum": ["default", "permissive", "strict"]},
+        {"enum": [
+          "opt-in/cloud-production-protection",
+          "opt-in/database-destruction-protection",
+          "opt-in/infrastructure-destruction-protection",
+          "opt-in/kubernetes-production-protection",
+          "opt-in/privacy-high-assurance"
+        ]}
+      ]
+    },
     "applicable": {"type": "boolean"},
     "detected": {"type": "boolean"},
     "alerted": {"type": "boolean"},

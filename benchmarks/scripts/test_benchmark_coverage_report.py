@@ -148,12 +148,25 @@ class CoverageReportTests(unittest.TestCase):
                 }
             ],
         }
-        report = coverage.build_report(public, candidates, [], {"conformance-public"}, {}, {}, set())
+        mapping = {
+            "conformance-public": {
+                "domains": [],
+                "intended_use": ["cloud-policy-conformance"],
+                "limitations": [],
+            }
+        }
+        report = coverage.build_report(
+            public, candidates, [], {"conformance-public"}, mapping, {}, set()
+        )
         scored = report["datasets"][0]
         self.assertEqual(scored["status"], "scored")
+        self.assertEqual(scored["metric_focus"], "enforcement")
         self.assertNotIn("overall", scored)
         self.assertIsNone(scored["profiles"]["balanced"]["detection"]["f1"])
         self.assertEqual(scored["profiles"]["balanced"]["enforcement"]["f1"], 1.0)
+        self.assertIsNone(
+            scored["profiles"]["balanced"]["enforcement"]["benign_block_rate"]
+        )
         self.assertEqual(scored["profiles"]["strict"]["detection"]["f1"], 2 / 3)
         self.assertEqual(report["datasets"][1]["status"], "missing")
         markdown = coverage.render_markdown(report)
@@ -161,6 +174,85 @@ class CoverageReportTests(unittest.TestCase):
         self.assertIn("| conformance-public | balanced |", markdown)
         self.assertNotIn("| conformance-public | overall |", markdown)
         self.assertIn("Enforcement F1", markdown)
+        self.assertIn("metric_focus", markdown)
+
+    def test_differing_profile_populations_are_not_collapsed_to_a_maximum(self) -> None:
+        public = [dataset("public-set")]
+        candidates = {
+            ("public-set", "balanced"): [
+                {
+                    "run_id": "balanced-v1",
+                    "metrics": self.raw_metrics(
+                        cases=10,
+                        applicable=8,
+                        detection=(2, 6, 0, 0),
+                        enforcement=(1, 6, 0, 1),
+                    ),
+                }
+            ],
+            ("public-set", "strict"): [
+                {
+                    "run_id": "strict-v1",
+                    "metrics": self.raw_metrics(
+                        cases=12,
+                        applicable=11,
+                        detection=(4, 7, 0, 0),
+                        enforcement=(3, 7, 0, 1),
+                    ),
+                }
+            ],
+        }
+        report = coverage.build_report(public, candidates, [], {"public-set"}, {}, {}, set())
+        row = report["datasets"][0]
+        self.assertIsNone(row["case_count"])
+        self.assertIsNone(row["applicable_count"])
+        self.assertEqual(row["profiles"]["balanced"]["cases"], 10)
+        self.assertEqual(row["profiles"]["strict"]["cases"], 12)
+        markdown = coverage.render_markdown(report)
+        self.assertIn("varies by profile", markdown)
+
+    def test_absent_detection_metrics_are_unavailable_not_zero_f1(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            group = metric_group(
+                "conformance-public",
+                "balanced",
+                cases=4,
+                applicable=4,
+                tp=0,
+                tn=0,
+                fp=0,
+                fn=0,
+                enforcement=(4, 0, 0, 0),
+            )
+            del group["detection"]
+            result_run(
+                root,
+                "conformance-v1",
+                {"conformance-public": 4},
+                [group],
+                ["balanced"],
+            )
+            candidates, groups, normalized, limitations = coverage.collect_candidates(
+                root, {"conformance-public"}, set()
+            )
+            report = coverage.build_report(
+                [dataset("conformance-public")],
+                candidates,
+                groups,
+                normalized,
+                {},
+                {},
+                set(),
+                limitations,
+            )
+            metrics = report["datasets"][0]["profiles"]["balanced"]
+            self.assertFalse(metrics["detection"]["available"])
+            self.assertIsNone(metrics["detection"]["tp"])
+            self.assertTrue(metrics["enforcement"]["available"])
+            self.assertEqual(metrics["enforcement"]["f1"], 1.0)
+            markdown = coverage.render_markdown(report)
+            self.assertIn("| conformance-public | balanced | 4 | 4 | — | — |", markdown)
 
     def test_checked_in_mapping_covers_the_public_lock(self) -> None:
         benchmarks_root = Path(__file__).resolve().parent.parent

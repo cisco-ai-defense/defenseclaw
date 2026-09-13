@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/binary"
 	"encoding/hex"
@@ -36,7 +37,23 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v6"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v9-policy-posture"
+
+type toolValueLineageProcessKey struct {
+	material  [32]byte
+	available bool
+}
+
+var activeToolValueLineageProcessKey = newToolValueLineageProcessKey()
+
+func newToolValueLineageProcessKey() toolValueLineageProcessKey {
+	var result toolValueLineageProcessKey
+	if _, err := rand.Read(result.material[:]); err != nil {
+		return result
+	}
+	result.available = true
+	return result
+}
 
 type toolChainHookCaptureContextKey struct{}
 
@@ -176,6 +193,11 @@ func (a *APIServer) applyAgentHookToolChains(
 	var typedFindings []RuleFinding
 	if projectionEligible {
 		projection, typedFindings = projectAgentHookToolChains(req, lifecycle)
+		projection = toolChainProjectionForPolicyPosture(
+			a.scannerCfg,
+			req.ConnectorName,
+			projection,
+		)
 	}
 	if len(typedFindings) != 0 {
 		intent := guardrailRuntimeActionForConnector(
@@ -299,15 +321,19 @@ func (a *APIServer) applyAgentHookToolChains(
 			req.HookEventName,
 			req.Payload,
 		)
+		readPathDigest, readValueDigests :=
+			toolValueLineageSuccessfulReadResult(req, outcome)
 		resolved, resolveErr := repository.ResolvePending(
 			ctx,
 			audit.ToolChainResolvePendingInput{
-				ConnectorInstanceID:      audit.ConnectorInstanceID(req.ConnectorInstanceID),
-				ToolInvocationDigest:     invocationDigest,
-				Outcome:                  auditToolChainPendingOutcome(outcome),
-				RulesetFingerprint:       rulesetFingerprint,
-				TerminalSemanticEventID:  audit.SemanticEventID(req.SemanticEventID),
-				TerminalInputFingerprint: inputFingerprint,
+				ConnectorInstanceID:        audit.ConnectorInstanceID(req.ConnectorInstanceID),
+				ToolInvocationDigest:       invocationDigest,
+				Outcome:                    auditToolChainPendingOutcome(outcome),
+				RulesetFingerprint:         rulesetFingerprint,
+				TerminalSemanticEventID:    audit.SemanticEventID(req.SemanticEventID),
+				TerminalInputFingerprint:   inputFingerprint,
+				SuccessfulReadPathDigest:   readPathDigest,
+				SuccessfulReadValueDigests: readValueDigests,
 			},
 		)
 		if resolveErr != nil {
@@ -491,17 +517,74 @@ func (a *APIServer) applyAgentHookToolChains(
 	return resp, finalization
 }
 
+// toolChainProjectionForPolicyPosture keeps useful but proximity-only chain
+// signals out of the normal blocking/alerting path. Privilege discovery
+// followed by an elevated shell does not prove an exploit or unauthorized
+// action without an exact principal, permission, and result join. Strict users
+// may opt into that noisier signal; balanced and permissive users abstain.
+func toolChainProjectionForPolicyPosture(
+	cfg *config.Config,
+	connectorName string,
+	projection guardrail.ToolChainProjection,
+) guardrail.ToolChainProjection {
+	rulePackDir := ""
+	if cfg != nil {
+		rulePackDir = cfg.EffectiveRulePackDirForConnector(connectorName)
+	}
+	return toolChainProjectionForNamedPosture(rulePackDir, projection)
+}
+
+func toolChainProjectionForNamedPosture(
+	posture string,
+	projection guardrail.ToolChainProjection,
+) guardrail.ToolChainProjection {
+	normalized := strings.TrimRight(
+		strings.ReplaceAll(strings.TrimSpace(posture), `\`, "/"),
+		"/",
+	)
+	if normalized == "strict" || strings.HasSuffix(normalized, "/strict") {
+		return projection
+	}
+
+	definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+	)
+	if !ok {
+		return projection
+	}
+	mask := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
+		definition.Step4Bit | definition.MutationBit
+	projection.DetectionStepMask &^= mask
+	projection.EnforcementStepMask &^= mask
+	if index, found := guardrail.ToolChainIndexByID(definition.ID); found {
+		projection.EnforcementJoinDigests[index] = ""
+		projection.EnforcementOutputJoinDigests[index] = ""
+		projection.ValueJoinDigests[index] = guardrail.ToolChainValueJoinDigests{}
+	}
+	return projection
+}
+
 func splitToolChainProjection(
 	projection guardrail.ToolChainProjection,
+) (predecessor guardrail.ToolChainProjection, terminal guardrail.ToolChainProjection) {
+	return splitToolChainProjectionForDefinitions(projection, guardrail.ToolChainDefinitions())
+}
+
+func splitToolChainProjectionForDefinitions(
+	projection guardrail.ToolChainProjection,
+	definitions []guardrail.ToolChainDefinition,
 ) (predecessor guardrail.ToolChainProjection, terminal guardrail.ToolChainProjection) {
 	predecessor.ParseStatus = projection.ParseStatus
 	terminal.ParseStatus = projection.ParseStatus
 	predecessorMask := guardrail.ToolChainArtifactMutationBarrier
 	var terminalMask uint64
-	for index, definition := range guardrail.ToolChainDefinitions() {
+	for index, definition := range definitions {
+		if index >= guardrail.ToolChainCount {
+			break
+		}
 		pendingMask := definition.Step1Bit
 		if definition.RequiresTerminalSuccess {
-			pendingMask |= definition.Step2Bit | definition.Step3Bit |
+			pendingMask |= definition.Step2Bit | definition.Step3Bit | definition.Step4Bit |
 				definition.MutationBit
 		} else {
 			terminalMask |= definition.Step2Bit
@@ -511,14 +594,18 @@ func splitToolChainProjection(
 			predecessor.EnforcementJoinDigests[index] =
 				projection.EnforcementJoinDigests[index]
 		}
+		if projection.DetectionStepMask&pendingMask != 0 {
+			predecessor.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
+		}
 		if !definition.RequiresTerminalSuccess &&
 			projection.DetectionStepMask&definition.Step2Bit != 0 {
 			terminal.EnforcementJoinDigests[index] =
 				projection.EnforcementJoinDigests[index]
+			terminal.ValueJoinDigests[index] = projection.ValueJoinDigests[index]
 		}
 		if definition.Step3Bit != 0 {
 			predecessorMask |= definition.Step2Bit
-			if !definition.RequiresTerminalSuccess {
+			if !definition.RequiresTerminalSuccess && definition.Step4Bit == 0 {
 				terminalMask |= definition.Step3Bit
 			}
 			if definition.OutputJoinFromFirst &&
@@ -539,6 +626,31 @@ func splitToolChainProjection(
 				} else {
 					terminal.EnforcementOutputJoinDigests[index] =
 						projection.EnforcementOutputJoinDigests[index]
+				}
+			}
+		}
+		if definition.Step4Bit != 0 {
+			predecessorMask |= definition.Step2Bit | definition.Step3Bit
+			if !definition.RequiresTerminalSuccess {
+				terminalMask |= definition.Step4Bit
+			}
+			if projection.DetectionStepMask&definition.Step1Bit != 0 {
+				predecessor.EnforcementOutputJoinDigests[index] =
+					projection.EnforcementOutputJoinDigests[index]
+			}
+			if projection.DetectionStepMask&(definition.Step2Bit|definition.Step3Bit) != 0 {
+				predecessor.EnforcementJoinDigests[index] =
+					projection.EnforcementJoinDigests[index]
+				predecessor.EnforcementOutputJoinDigests[index] =
+					projection.EnforcementOutputJoinDigests[index]
+			}
+			if projection.DetectionStepMask&definition.Step4Bit != 0 {
+				if definition.RequiresTerminalSuccess {
+					predecessor.EnforcementJoinDigests[index] =
+						projection.EnforcementJoinDigests[index]
+				} else {
+					terminal.EnforcementJoinDigests[index] =
+						projection.EnforcementJoinDigests[index]
 				}
 			}
 		}
@@ -581,6 +693,18 @@ func mergeToolChainJoinDigests(
 		}
 		if destination.EnforcementOutputJoinDigests[index] != digest {
 			destination.EnforcementOutputJoinDigests[index] = ""
+		}
+	}
+	for index, digests := range source.ValueJoinDigests {
+		if digests == (guardrail.ToolChainValueJoinDigests{}) {
+			continue
+		}
+		if destination.ValueJoinDigests[index] == (guardrail.ToolChainValueJoinDigests{}) {
+			destination.ValueJoinDigests[index] = digests
+			continue
+		}
+		if destination.ValueJoinDigests[index] != digests {
+			destination.ValueJoinDigests[index] = guardrail.ToolChainValueJoinDigests{}
 		}
 	}
 }
@@ -650,7 +774,8 @@ func toolChainProjectionHasBlockIntent(
 	projection guardrail.ToolChainProjection,
 ) bool {
 	for _, definition := range guardrail.ToolChainDefinitions() {
-		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit
+		steps := definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
+			definition.Step4Bit
 		if projection.EnforcementStepMask&steps != 0 &&
 			guardrailRuntimeActionForConnector(
 				cfg,
@@ -679,7 +804,8 @@ func toolChainBlockEligibleProjection(
 			continue
 		}
 		projection.EnforcementStepMask &^=
-			definition.Step1Bit | definition.Step2Bit | definition.Step3Bit
+			definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
+				definition.Step4Bit
 		if !definition.RequiresExactJoin {
 			projection.EnforcementJoinDigests[index] = ""
 			projection.EnforcementOutputJoinDigests[index] = ""
@@ -755,6 +881,9 @@ func projectAgentHookToolChains(
 	if capture != nil && capture.recorded {
 		projection.ParseStatus = capture.facts.Parse.Status
 		projectTrustedActionChainSteps(&projection, capture.facts, capture.findings)
+		projectToolValueLineageSink(
+			&projection, capture.facts, activeToolValueLineageProcessKey,
+		)
 		for _, artifact := range capture.artifactProjections {
 			projection.DetectionStepMask |= artifact.DetectionStepMask
 			projection.EnforcementStepMask |= artifact.EnforcementStepMask
@@ -811,6 +940,7 @@ func projectTrustedActionChainSteps(
 		"PATH-WIN-GIT-CREDS", "PATH-WIN-NETRC",
 		"PATH-PROC-ENVIRON", "PATH-ETC-SHADOW",
 		"secrets.cloud_credential_read",
+		"secrets.structured_credential_extract",
 		"secrets.browser_session_store_read",
 		"secrets.workload_identity_token_read",
 	}
@@ -831,6 +961,22 @@ func projectTrustedActionChainSteps(
 			guardrail.ToolChainSecretReadThenEgress,
 			secretReadDigest,
 		)
+	}
+	if _, supported := toolValueLineageSourceKindForSensitiveRead(facts); supported {
+		addToolChainStep(
+			projection,
+			guardrail.ToolChainSensitiveReadValueExternalTransmit,
+			1,
+			secretReadExact,
+			secretReadExact,
+		)
+		if secretReadExact {
+			setToolChainEnforcementJoinDigest(
+				projection,
+				guardrail.ToolChainSensitiveReadValueExternalTransmit,
+				secretReadDigest,
+			)
+		}
 	}
 
 	// Chain state is derived from trusted ActionFacts, not from the active
@@ -954,10 +1100,33 @@ func projectTrustedActionChainSteps(
 	projectKubernetesPrivilegedCronJobChainSteps(projection, facts)
 	projectSQLCommandUDFChainSteps(projection, facts)
 	projectStagedReverseShellPersistenceChainSteps(projection, facts)
+	projectEndpointSecurityControlChainSteps(projection, facts)
 	projectRemoteArtifactChainSteps(projection, facts)
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
 	}
+}
+
+func projectEndpointSecurityControlChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainEndpointSecurityControlMutation
+	operation, digest, ok := actionfacts.ExactEndpointSecurityControlLineageOperation(facts)
+	if !ok || digest == "" {
+		return
+	}
+	switch operation {
+	case actionfacts.EndpointDefenderExclusionRequested,
+		actionfacts.EndpointDefenderLoggingDisableRequested:
+		addToolChainStep(projection, chainID, 1, true, false)
+	case actionfacts.EndpointDefenderExclusionAdded,
+		actionfacts.EndpointDefenderLoggingDisabled:
+		addToolChainStep(projection, chainID, 2, true, false)
+	default:
+		return
+	}
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
 }
 
 func projectStagedReverseShellPersistenceChainSteps(
@@ -1610,6 +1779,133 @@ func externalDataBearingUpload(facts actionfacts.Facts) bool {
 		}
 	}
 	return false
+}
+
+func projectToolValueLineageSink(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+	processKey toolValueLineageProcessKey,
+) {
+	if projection == nil || !processKey.available ||
+		facts.Parse.Status != actionfacts.StatusComplete ||
+		!facts.Authoritative() || !facts.EnforcementEligible() ||
+		!externalDataBearingUpload(facts) || len(facts.Commands) != 1 {
+		return
+	}
+	digests, ok := toolValueLineageCurlPayloadDigests(
+		processKey.material, facts.Commands[0],
+	)
+	if !ok {
+		return
+	}
+	values := toolValueLineageGuardrailDigests(digests)
+	if values == (guardrail.ToolChainValueJoinDigests{}) {
+		return
+	}
+	addToolChainStep(
+		projection,
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		2,
+		true,
+		true,
+	)
+	index, ok := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	)
+	if ok {
+		projection.ValueJoinDigests[index] = values
+	}
+}
+
+func toolValueLineageSuccessfulReadResult(
+	req agentHookRequest,
+	outcome connector.ToolLifecycleOutcome,
+) (string, guardrail.ToolChainValueJoinDigests) {
+	if !activeToolValueLineageProcessKey.available ||
+		outcome != connector.ToolLifecycleOutcomeSuccess ||
+		!strings.EqualFold(req.ConnectorName, "claudecode") ||
+		canonicalEvent(req.HookEventName) != "posttooluse" {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	toolInput, ok := req.Payload["tool_input"].(map[string]interface{})
+	if !ok || len(toolInput) == 0 {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	response, ok := req.Payload["tool_response"].(string)
+	if !ok || req.Payload["tool_calls"] != nil ||
+		strings.TrimSpace(payloadString(req.Payload, "error")) != "" ||
+		strings.TrimSpace(payloadString(req.Payload, "error_details")) != "" {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	args, err := json.Marshal(toolInput)
+	if err != nil {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:       req.ToolName,
+		Args:       args,
+		CWD:        req.CWD,
+		ActiveHome: trustedSameHostHome(),
+	})
+	pathDigest, exact := exactSingleReadPathDigest(facts)
+	kind, supported := toolValueLineageSourceKindForSensitiveRead(facts)
+	if !exact || !supported || facts.Parse.Status != actionfacts.StatusComplete ||
+		!facts.Authoritative() || !facts.EnforcementEligible() {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	digests, ok := toolValueLineageSourceDigests(
+		activeToolValueLineageProcessKey.material, kind, []byte(response),
+	)
+	if !ok {
+		return "", guardrail.ToolChainValueJoinDigests{}
+	}
+	return pathDigest, toolValueLineageGuardrailDigests(digests)
+}
+
+func toolValueLineageSourceKindForSensitiveRead(
+	facts actionfacts.Facts,
+) (toolValueLineageSourceKind, bool) {
+	var selected string
+	for _, candidate := range facts.Paths {
+		if candidate.Access != actionfacts.PathAccessRead ||
+			!matchesAnySensitivePathCandidate(semanticPathValue(candidate)) {
+			continue
+		}
+		identity, ok := exactPathIdentity(candidate)
+		if !ok || (selected != "" && selected != identity) {
+			return 0, false
+		}
+		selected = identity
+	}
+	if selected == "" {
+		return 0, false
+	}
+	value := strings.ToLower(strings.ReplaceAll(selected, `\`, "/"))
+	switch {
+	case matchesEnvironmentFile(value) || matchesProcEnvironCandidate(value):
+		return toolValueLineageSourceEnv, true
+	case strings.HasSuffix(value, ".json"):
+		return toolValueLineageSourceJSON, true
+	case matchesSSHPrivateKey(value):
+		return toolValueLineageSourcePEM, true
+	case matchesWorkloadIdentityTokenCandidate(value):
+		return toolValueLineageSourceSingleToken, true
+	default:
+		return 0, false
+	}
+}
+
+func toolValueLineageGuardrailDigests(
+	digests []toolValueLineageDigest,
+) guardrail.ToolChainValueJoinDigests {
+	var result guardrail.ToolChainValueJoinDigests
+	if len(digests) == 0 || len(digests) > len(result) {
+		return result
+	}
+	for index, digest := range digests {
+		result[index] = hex.EncodeToString(digest[:])
+	}
+	return result
 }
 
 func permissionDeniedChainEvidence(

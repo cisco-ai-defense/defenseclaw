@@ -1801,6 +1801,14 @@ var migrations = []migration{
 		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
 		apply:       migrateToolChainEighteenSlotWideMaskState,
 	},
+	{
+		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
+		apply:       migrateToolChainTwentySlotValueLineageState,
+	},
+	{
+		description: "guardrails: reserve append-only bounded chain mask capacity",
+		apply:       migrateToolChainAppendOnlyMaskCapacity,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

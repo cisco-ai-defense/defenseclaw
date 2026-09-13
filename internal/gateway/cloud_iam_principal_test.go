@@ -14,6 +14,41 @@ import (
 )
 
 const cloudIAMAdministratorAttachmentRuleID = "privilege.cloud_iam_administrator_attachment"
+const cloudIAMWildcardInlinePolicyRuleID = "privilege.cloud_iam_wildcard_inline_policy"
+
+func TestCloudIAMWildcardInlinePolicyAlertsWithoutBlocking(t *testing.T) {
+	command := `put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'`
+	input := cloudIAMGatewayInput(t, command)
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			const connector = "codex"
+			installToolCallCorpusProfileConnector(t, connector, profile)
+			findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+				Input: input, Connector: connector, EnforcementCapable: true,
+			})
+			finding := findingWithID(findings, cloudIAMWildcardInlinePolicyRuleID)
+			if finding == nil || finding.Severity != "HIGH" ||
+				finding.contributesToEnforcement() || !finding.contributesToAlertOnly() {
+				t.Fatalf("profile=%s finding=%+v all=%v", profile, finding, FindingStrings(findings))
+			}
+		})
+	}
+}
+
+func TestCloudIAMWildcardInlinePolicyRejectsNearMisses(t *testing.T) {
+	for _, command := range []string{
+		`put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"s3:*","Resource":"*"}]}'`,
+		`put-user-policy --user-name existing --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*","Condition":{}}]}'`,
+		`put-user-policy --user-name $USER --policy-name Admin --policy-document '{"Version":"2012-10-17","Statement":[{"Effect":"Allow","Action":"*","Resource":"*"}]}'`,
+	} {
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: cloudIAMGatewayInput(t, command), EnforcementCapable: true,
+		})
+		if findingWithID(findings, cloudIAMWildcardInlinePolicyRuleID) != nil {
+			t.Fatalf("near miss matched: %q", command)
+		}
+	}
+}
 
 func TestCloudIAMAdministratorAttachmentProfilePosture(t *testing.T) {
 	profiles := []struct {

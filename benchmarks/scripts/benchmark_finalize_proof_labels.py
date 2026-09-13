@@ -76,7 +76,11 @@ def literal_machine_witness(command: str, category: str) -> tuple[bool, str]:
         or re.search(r"\bsocat\b[^\n]{0,300}\btcp-listen:[^\s]+[^\n]{0,300}\bexec:[^\n]{0,80}\bsh\b", value)
     )
     broad_wipe = bool(
-        re.search(r"\brm\b[^\n;&|]{0,160}(?:-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)[^\n;&|]{0,160}(?:\s|^)(?:/|~|\$home)(?:[/\\*\s]|$)", value)
+        re.search(
+            r"\brm\b[^\n;&|]{0,160}(?:-[^\s]*r[^\s]*f|-[^\s]*f[^\s]*r)"
+            r"[^\n;&|]{0,160}(?:\s|^)(?:/|~|\$home)(?:[/\\*\s]|$)",
+            value,
+        )
         or re.search(r"\bfind\s+(?:/|~|\$home)(?:\s|/)[^\n;&|]{0,240}\s-delete(?:\s|$)", value)
         or re.search(r"\bmkfs(?:\.[a-z0-9]+)?\b[^\n;&|]{0,200}\s/dev/(?:sd|hd|vd|xvd|nvme|mmcblk)[a-z0-9]*", value)
         or re.search(r"\bdd\b[^\n;&|]{0,240}\bof=/dev/(?:sd|hd|vd|xvd|nvme|mmcblk)[a-z0-9]*", value)
@@ -90,7 +94,11 @@ def literal_machine_witness(command: str, category: str) -> tuple[bool, str]:
         return broad_wipe, "broad_wipe_literal" if broad_wipe else "broad_wipe_witness_absent"
     if category == "defense_disable_plus_attack":
         defense_disable = bool(
-            re.search(r"\b(?:disable|stop|uninstall|remove)\b[^\n;&|]{0,120}\b(?:antivirus|defender|edr|falcon|firewall|security|sentinel)\b", value)
+            re.search(
+                r"\b(?:disable|stop|uninstall|remove)\b[^\n;&|]{0,120}"
+                r"\b(?:antivirus|defender|edr|falcon|firewall|security|sentinel)\b",
+                value,
+            )
         )
         attack = reverse_shell or bind_shell or broad_wipe
         accepted = defense_disable and attack

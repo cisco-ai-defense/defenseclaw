@@ -123,6 +123,12 @@ func TestTrustedActionCurlHAProxyClientIPRequiresExecutableCapability(t *testing
 				EnforcementCapable: true, DowngradeReadOnlyDataArgs: true,
 			})
 			matched := findingWithID(findings, "SEC-AWS-KEY")
+			if test.name == "oversized preamble remains advisory" {
+				if matched != nil {
+					t.Fatalf("overlong key candidate must not match exact AWS key grammar: %+v", matched)
+				}
+				return
+			}
 			if matched == nil || matched.Severity != "LOW" ||
 				matched.contributesToEnforcement() {
 				t.Fatalf("SEC-AWS-KEY = %+v, want advisory capability boundary", matched)

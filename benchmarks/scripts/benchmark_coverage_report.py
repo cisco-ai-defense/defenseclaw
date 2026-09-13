@@ -51,6 +51,13 @@ REPORT_DOMAINS = (
     "yara_content",
 )
 PUBLIC_PROFILES = {"default", "balanced", "permissive", "strict", "all"}
+METRIC_FOCUSES = {"detection", "enforcement", "both"}
+ENFORCEMENT_INTENDED_USES = {
+    "cloud-policy-conformance",
+    "database-policy-conformance",
+    "infrastructure-policy-conformance",
+    "kubernetes-policy-conformance",
+}
 SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}$")
 CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 WINDOWS_ABSOLUTE_PATH = re.compile(r"(?i)(?:^|\s)[A-Z]:\\[^\s|,;)]*")
@@ -260,6 +267,9 @@ def load_mapping(
         status = entry.get("status")
         if status is not None and status not in ALLOWED_STATUSES:
             raise ValueError("dataset mapping contains an unsupported status")
+        metric_focus = entry.get("metric_focus")
+        if metric_focus is not None and metric_focus not in METRIC_FOCUSES:
+            raise ValueError("dataset mapping contains an unsupported metric focus")
         counts: dict[str, int] = {}
         for field in ("case_count", "applicable_count"):
             if field in entry:
@@ -272,6 +282,7 @@ def load_mapping(
             "intended_use": string_list(entry.get("intended_use"), "mapping intended use", redactions),
             "limitations": string_list(entry.get("limitations"), "mapping limitations", redactions),
             "status": status,
+            **({"metric_focus": metric_focus} if metric_focus is not None else {}),
             **counts,
         }
     raw_selectors = require_object(raw.get("domain_group_selectors", {}), "domain group selectors")
@@ -291,9 +302,13 @@ def non_negative_int(value: Any, description: str) -> int:
     return value
 
 
-def confusion_from_metric(value: Any, description: str, applicable: int) -> dict[str, int]:
+def confusion_from_metric(
+    value: Any, description: str, applicable: int
+) -> dict[str, int] | None:
+    if value is None:
+        return None
     metric = require_object(value, description)
-    confusion = require_object(metric.get("confusion", {}), f"{description} confusion")
+    confusion = require_object(metric.get("confusion"), f"{description} confusion")
     counts = {
         "tp": non_negative_int(confusion.get("true_positive", 0), f"{description} true positives"),
         "tn": non_negative_int(confusion.get("true_negative", 0), f"{description} true negatives"),
@@ -312,8 +327,8 @@ def metric_from_group(group: Mapping[str, Any]) -> dict[str, Any]:
     metrics = {
         "cases": cases,
         "applicable": applicable,
-        "detection": confusion_from_metric(group.get("detection", {}), "detection", applicable),
-        "enforcement": confusion_from_metric(group.get("enforcement", {}), "enforcement", applicable),
+        "detection": confusion_from_metric(group.get("detection"), "detection", applicable),
+        "enforcement": confusion_from_metric(group.get("enforcement"), "enforcement", applicable),
         "benign_blocks": non_negative_int(block_rate.get("numerator", 0), "benign blocks"),
         "benign_total": non_negative_int(block_rate.get("denominator", 0), "benign block denominator"),
     }
@@ -333,6 +348,7 @@ def calculated_confusion(counts: Mapping[str, int]) -> dict[str, Any]:
     )
     fpr = fp / (fp + tn) if fp + tn else None
     return {
+        "available": True,
         "tp": tp,
         "tn": tn,
         "fp": fp,
@@ -344,17 +360,45 @@ def calculated_confusion(counts: Mapping[str, int]) -> dict[str, Any]:
     }
 
 
+def unavailable_confusion() -> dict[str, Any]:
+    return {
+        "available": False,
+        "tp": None,
+        "tn": None,
+        "fp": None,
+        "fn": None,
+        "precision": None,
+        "recall": None,
+        "f1": None,
+        "fpr": None,
+    }
+
+
 def rendered_metrics(counts: Mapping[str, Any]) -> dict[str, Any]:
     blocks = int(counts["benign_blocks"])
     benign_total = int(counts["benign_total"])
+    enforcement_counts = counts["enforcement"]
+    enforcement = (
+        calculated_confusion(enforcement_counts)
+        if enforcement_counts is not None
+        else unavailable_confusion()
+    )
+    enforcement.update(
+        {
+            "benign_blocks": blocks,
+            "benign_total": benign_total,
+            "benign_block_rate": blocks / benign_total if benign_total else None,
+        }
+    )
     return {
         "cases": int(counts["cases"]),
         "applicable": int(counts["applicable"]),
-        "detection": calculated_confusion(counts["detection"]),
-        "enforcement": calculated_confusion(counts["enforcement"]),
-        "benign_blocks": blocks,
-        "benign_total": benign_total,
-        "benign_block_rate": blocks / benign_total if benign_total else None,
+        "detection": (
+            calculated_confusion(counts["detection"])
+            if counts["detection"] is not None
+            else unavailable_confusion()
+        ),
+        "enforcement": enforcement,
     }
 
 
@@ -481,12 +525,19 @@ def sum_profile_metrics(metrics: Iterable[Mapping[str, Any]]) -> dict[str, Any] 
     if not rows:
         return None
     counts = zero_counts()
+    metric_availability = {metric_type: True for metric_type in ("detection", "enforcement")}
     for row in rows:
         for key in ("cases", "applicable", "benign_blocks", "benign_total"):
             counts[key] += int(row[key])
         for metric_type in ("detection", "enforcement"):
+            if row[metric_type] is None:
+                metric_availability[metric_type] = False
+                continue
             for key in ("tp", "tn", "fp", "fn"):
                 counts[metric_type][key] += int(row[metric_type][key])
+    for metric_type, available in metric_availability.items():
+        if not available:
+            counts[metric_type] = None
     return rendered_metrics(counts)
 
 
@@ -578,6 +629,13 @@ def build_report(
         configured = mapping.get(dataset_id, {})
         purposes = string_list(locked.get("purpose"), "dataset purpose", redactions)
         intended_use = list(configured.get("intended_use") or purposes)
+        metric_focus = configured.get("metric_focus")
+        if metric_focus is None:
+            metric_focus = (
+                "enforcement"
+                if ENFORCEMENT_INTENDED_USES.intersection(intended_use)
+                else "both"
+            )
         domains = list(configured.get("domains") or [])
         limitations = list(configured.get("limitations") or [])
         profile_metrics: dict[str, dict[str, Any]] = {}
@@ -642,9 +700,12 @@ def build_report(
                 "source": {"link": source, "revision": sanitize_text(locked.get("revision"), redactions)},
                 "intended_use": intended_use,
                 "domains": domains,
+                "metric_focus": metric_focus,
                 "status": status,
-                "case_count": case_count,
-                "applicable_count": applicable_count,
+                "case_count": case_count if len(set(selected_cases)) <= 1 else None,
+                "applicable_count": (
+                    applicable_count if len(set(selected_applicable)) <= 1 else None
+                ),
                 "profiles": profile_metrics,
                 "limitations": sorted(set(sanitize_text(item, redactions) for item in limitations if item)),
             }
@@ -684,6 +745,8 @@ def source_markdown(source: Mapping[str, Any]) -> str:
 
 
 def confusion_markdown_cells(metrics: Mapping[str, Any]) -> list[str]:
+    if not metrics["available"]:
+        return ["—"] * 8
     return [
         str(metrics["tp"]),
         str(metrics["tn"]),
@@ -702,8 +765,8 @@ def profile_markdown_cells(metrics: Mapping[str, Any]) -> list[str]:
         str(metrics["applicable"]),
         *confusion_markdown_cells(metrics["detection"]),
         *confusion_markdown_cells(metrics["enforcement"]),
-        f'{metrics["benign_blocks"]}/{metrics["benign_total"]}',
-        percent(metrics["benign_block_rate"]),
+        f'{metrics["enforcement"]["benign_blocks"]}/{metrics["enforcement"]["benign_total"]}',
+        percent(metrics["enforcement"]["benign_block_rate"]),
     ]
 
 
@@ -718,8 +781,9 @@ def render_markdown(report: Mapping[str, Any]) -> str:
         "",
         "## Dataset coverage",
         "",
-        "| Dataset | Source and revision | Intended use | Status | Cases | Applicable | Profiles | Limitations |",
-        "|---|---|---|---:|---:|---:|---|---|",
+        "| Dataset | Source and revision | Intended use | Metric focus | Status | Cases | Applicable | Profiles | "
+        "Limitations |",
+        "|---|---|---|---|---:|---:|---:|---|---|",
     ]
     for row in report["datasets"]:
         limitations = "; ".join(row["limitations"]) or "None"
@@ -730,9 +794,10 @@ def render_markdown(report: Mapping[str, Any]) -> str:
                     markdown_escape(row["dataset_id"]),
                     source_markdown(row["source"]),
                     markdown_escape(", ".join(row["intended_use"]) or "Unspecified"),
+                    markdown_escape(row["metric_focus"]),
                     markdown_escape(row["status"]),
-                    str(row["case_count"]),
-                    str(row["applicable_count"]),
+                    str(row["case_count"]) if row["case_count"] is not None else "varies by profile",
+                    str(row["applicable_count"]) if row["applicable_count"] is not None else "varies by profile",
                     markdown_escape(", ".join(row["profiles"]) or "—"),
                     markdown_escape(limitations),
                 ]
@@ -826,7 +891,8 @@ def render_markdown(report: Mapping[str, Any]) -> str:
             "",
             "- A dataset is `scored` only when an aggregate dataset group has at least one applicable case.",
             "- Detection evaluates whether a rule produced a finding; enforcement evaluates the resulting block "
-            "decision. Policy-conformance fixtures should be interpreted using enforcement metrics.",
+            "decision. `metric_focus` identifies the primary interpretation for a dataset; non-primary metrics "
+            "remain visible but must not be presented as the dataset's headline score.",
             "- `normalized-only`, `normalized-mining-only`, `label-only`, `gated`, and `inaccessible` statuses "
             "can be supplied by the optional mapping.",
             "- Precision, recall, F1, FPR, and benign-block rate are unavailable when their denominator is zero.",

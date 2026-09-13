@@ -154,7 +154,15 @@ func syntacticActiveAgentFileCandidate(filePath string) bool {
 }
 
 func canonicalActiveAgentFileName(value string) (string, bool) {
-	for _, canonical := range []string{"AGENTS.md", "MEMORY.md"} {
+	for _, canonical := range []string{
+		"AGENTS.md",
+		"CLAUDE.md",
+		"gateway.json",
+		"IDENTITY.md",
+		"MEMORY.md",
+		"SOUL.md",
+		"TOOLS.md",
+	} {
 		if activeAgentASCIIEqualFold(value, canonical) {
 			return canonical, true
 		}
@@ -172,7 +180,10 @@ func nativePOSIXFilenameCaseInsensitive(filePath string, info os.FileInfo) bool 
 	base := filepath.Base(filePath)
 	aliasPath := filepath.Join(filepath.Dir(filePath), strings.ToLower(base))
 	if aliasPath == filePath {
-		return false
+		aliasPath = filepath.Join(filepath.Dir(filePath), strings.ToUpper(base))
+		if aliasPath == filePath {
+			return false
+		}
 	}
 	aliasInfo, err := os.Lstat(aliasPath)
 	if err != nil || !aliasInfo.Mode().IsRegular() ||

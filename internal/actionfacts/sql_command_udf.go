@@ -189,11 +189,17 @@ func exactMySQLCLIIdentityScalar(value string) bool {
 func exactPostgreSQLCommandUDFQuery(
 	query string,
 ) (SQLCommandUDFOperation, string, bool) {
-	if function, body, symbol, language, replace, ok := parsePostgreSQLUDFCreate(query); ok {
+	if function, body, symbol, language, tail, replace, ok := parsePostgreSQLUDFCreate(query); ok {
 		if commandExecutingPostgreSQLUDF(function, body, symbol, language) {
+			// Atomic creation facts require exactly one SQL statement. A batch can
+			// alter state after creation and must be decomposed into result-linked
+			// events before it can participate in a bounded chain.
+			if tail != "" {
+				return "", "", false
+			}
 			return SQLCommandUDFCreate, function, true
 		}
-		if replace {
+		if replace && tail == "" {
 			return SQLCommandUDFBarrier, function, true
 		}
 	}
@@ -224,50 +230,50 @@ func exactMySQLCommandUDFQuery(
 
 func parsePostgreSQLUDFCreate(
 	query string,
-) (function, body, symbol, language string, replace, ok bool) {
+) (function, body, symbol, language, tail string, replace, ok bool) {
 	p := postgreSQLCopyParser{source: query}
 	p.space()
 	if !p.keyword("create") || !p.requiredSpace() {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	if p.keyword("or") {
 		if !p.requiredSpace() || !p.keyword("replace") || !p.requiredSpace() {
-			return "", "", "", "", false, false
+			return "", "", "", "", "", false, false
 		}
 		replace = true
 	}
 	if !p.keyword("function") || !p.requiredSpace() {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	function, ok = parseSimpleQualifiedIdentifier(&p)
 	if !ok {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	p.space()
 	if !parseStaticFunctionSignature(&p) || !p.requiredSpace() ||
 		!p.keyword("returns") || !p.requiredSpace() || !parseSimpleReturnType(&p) ||
 		!p.requiredSpace() || !p.keyword("as") || !p.requiredSpace() {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	body, ok = parseSQLBodyLiteral(&p)
 	if !ok || body == "" || len(body) > maxSQLUDFBodyBytes {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	separation := p.space()
 	if p.take(',') {
 		p.space()
 		symbol, ok = p.stringLiteral()
 		if !ok || symbol == "" || len(symbol) > maxScalarBytes {
-			return "", "", "", "", false, false
+			return "", "", "", "", "", false, false
 		}
 		separation = p.space()
 	}
 	if separation == 0 || !p.keyword("language") || !p.requiredSpace() {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	language, ok = parseSimpleIdentifier(&p)
 	if !ok {
-		return "", "", "", "", false, false
+		return "", "", "", "", "", false, false
 	}
 	language = strings.ToLower(language)
 	p.space()
@@ -276,8 +282,11 @@ func parsePostgreSQLUDFCreate(
 	}
 	if p.take(';') {
 		p.space()
+		if !p.done() {
+			tail = p.source[p.index:]
+		}
 	}
-	return function, body, symbol, language, replace, p.done()
+	return function, body, symbol, language, tail, replace, p.done() || tail != ""
 }
 
 func parseSQLCommandUDFFunctionDrop(query string, postgres bool) (string, bool) {

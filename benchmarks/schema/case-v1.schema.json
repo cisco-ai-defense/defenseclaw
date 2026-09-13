@@ -38,6 +38,10 @@
         "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
         "filename": {"type": "string", "maxLength": 4096},
         "target": {"type": "string", "maxLength": 4096},
+        "annotation_spans": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/action_span"}
+        },
         "events": {
           "type": "array",
           "minItems": 2,
@@ -71,6 +75,7 @@
         "label_confidence": {"enum": ["high", "medium", "low"]},
         "label_source": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
         "enforcement_lens": {"enum": ["monitor", "egress"]},
+        "stateful_lens": {"enum": ["atomic_terminal", "bounded_intent", "bounded_completed"]},
         "applicability": {"enum": ["in_scope", "out_of_scope"]},
         "expected_disposition": {"enum": ["allow", "detect_only", "block"]},
         "expected_profile_actions": {
@@ -94,6 +99,10 @@
         {
           "if": {"properties": {"applicability": {"const": "out_of_scope"}}},
           "then": {"required": ["exclusion_reason"]}
+        },
+        {
+          "if": {"properties": {"stateful_lens": {"const": "bounded_intent"}}, "required": ["stateful_lens"]},
+          "then": {"properties": {"expected_disposition": {"enum": ["allow", "detect_only"]}}}
         }
       ]
     },
@@ -102,6 +111,7 @@
       "additionalProperties": false,
       "properties": {
         "platform": {"type": "string", "maxLength": 80},
+        "provider": {"type": "string", "maxLength": 80},
         "dialect": {"type": "string", "maxLength": 80},
         "language": {"type": "string", "maxLength": 80},
         "ecosystem": {"type": "string", "maxLength": 80},
@@ -128,6 +138,26 @@
       ]
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "surface": {"const": "stateful"},
+          "truth": {"required": ["stateful_lens"]}
+        },
+        "required": ["surface", "truth"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "properties": {
+              "events": {"items": {"required": ["outcome"]}}
+            }
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "span": {
       "type": "object",
@@ -138,6 +168,18 @@
         "end": {"type": "integer", "minimum": 1},
         "label": {"type": "string", "minLength": 1, "maxLength": 120},
         "rule_id": {"type": "string", "minLength": 1, "maxLength": 160}
+      }
+    },
+    "action_span": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "label"],
+      "properties": {
+        "start": {"type": "integer", "minimum": 0},
+        "end": {"type": "integer", "minimum": 1},
+        "label": {"type": "string", "minLength": 1, "maxLength": 120},
+        "rule_id": {"type": "string", "minLength": 1, "maxLength": 160},
+        "event_index": {"type": "integer", "minimum": 0, "maximum": 63}
       }
     }
   }

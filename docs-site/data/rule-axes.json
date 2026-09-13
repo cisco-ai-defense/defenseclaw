@@ -447,6 +447,18 @@
       "axes": []
     },
     {
+      "id": "impact.protected_access_control_change",
+      "axes": []
+    },
+    {
+      "id": "impact.protected_device_wipe",
+      "axes": []
+    },
+    {
+      "id": "impact.protected_filesystem_format",
+      "axes": []
+    },
+    {
       "id": "integrity.git_hooks_bypass",
       "axes": []
     },

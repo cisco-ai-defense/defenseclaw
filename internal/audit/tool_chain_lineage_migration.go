@@ -241,6 +241,116 @@ func migrateToolChainEighteenSlotWideMaskState(ex dbExecer) error {
 	return migrateToolChainWideMaskState(ex)
 }
 
+// migrateToolChainTwentySlotValueLineageState widens the fixed catalog and
+// adds a content-free value lineage column. Pending and window rows are
+// ephemeral and intentionally reset: prior widths cannot represent the new
+// projection, and keyed value identities cannot survive a process restart.
+// Already committed deny receipts remain durable and replayable.
+func migrateToolChainTwentySlotValueLineageState(ex dbExecer) error {
+	if _, err := ex.Exec(`
+		DELETE FROM guardrail_chain_pending_actions;
+		DELETE FROM guardrail_chain_events;
+		DELETE FROM guardrail_chain_partitions;
+		DROP TABLE guardrail_chain_pending_actions;
+		DROP TABLE guardrail_chain_events;
+	`); err != nil {
+		return fmt.Errorf("reset pre-value-lineage guardrail chain state: %w", err)
+	}
+	if err := migrateToolChainState(ex); err != nil {
+		return fmt.Errorf("rebuild value-lineage guardrail chain state: %w", err)
+	}
+	if err := migrateToolChainPendingState(ex); err != nil {
+		return fmt.Errorf("rebuild value-lineage pending chain state: %w", err)
+	}
+	return nil
+}
+
+// migrateToolChainAppendOnlyMaskCapacity reserves every positive bit supported
+// by SQLite INTEGER while preserving all durable and ephemeral chain state.
+// Runtime validation still rejects bits absent from the fixed catalog.
+func migrateToolChainAppendOnlyMaskCapacity(ex dbExecer) error {
+	for _, statement := range []string{
+		`ALTER TABLE guardrail_chain_deny_receipts
+			RENAME TO guardrail_chain_deny_receipts_pre_capacity`,
+		`ALTER TABLE guardrail_chain_pending_actions
+			RENAME TO guardrail_chain_pending_actions_pre_capacity`,
+		`ALTER TABLE guardrail_chain_events
+			RENAME TO guardrail_chain_events_pre_capacity`,
+	} {
+		if _, err := ex.Exec(statement); err != nil {
+			return fmt.Errorf("stage pre-capacity guardrail chain state: %w", err)
+		}
+	}
+	if err := migrateToolChainState(ex); err != nil {
+		return fmt.Errorf("create capacity-ready guardrail chain state: %w", err)
+	}
+	if err := migrateToolChainPendingState(ex); err != nil {
+		return fmt.Errorf("create capacity-ready pending chain state: %w", err)
+	}
+	for _, statement := range []string{
+		`INSERT INTO guardrail_chain_events (
+			semantic_event_id, connector_instance_id, session_value_digest, sequence,
+			received_time_unix_nano, input_fingerprint, projection_fingerprint,
+			ruleset_fingerprint, parse_status, detection_step_mask,
+			enforcement_step_mask, enforcement_join_digests,
+			enforcement_output_join_digests, value_join_digests,
+			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
+			stable_action_id
+		) SELECT semantic_event_id, connector_instance_id, session_value_digest,
+			sequence, received_time_unix_nano, input_fingerprint,
+			projection_fingerprint, ruleset_fingerprint, parse_status,
+			detection_step_mask, enforcement_step_mask, enforcement_join_digests,
+			enforcement_output_join_digests, value_join_digests,
+			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
+			stable_action_id
+		FROM guardrail_chain_events_pre_capacity`,
+		`INSERT INTO guardrail_chain_pending_actions (
+			connector_instance_id, tool_invocation_digest, session_value_digest,
+			pre_semantic_event_id, pre_input_fingerprint, projection_fingerprint,
+			ruleset_fingerprint, parse_status, detection_step_mask,
+			enforcement_step_mask, enforcement_join_digests,
+			enforcement_output_join_digests, prepared_time_unix_nano,
+			expires_time_unix_nano
+		) SELECT connector_instance_id, tool_invocation_digest,
+			session_value_digest, pre_semantic_event_id, pre_input_fingerprint,
+			projection_fingerprint, ruleset_fingerprint, parse_status,
+			detection_step_mask, enforcement_step_mask, enforcement_join_digests,
+			enforcement_output_join_digests, prepared_time_unix_nano,
+			expires_time_unix_nano
+		FROM guardrail_chain_pending_actions_pre_capacity`,
+		`INSERT INTO guardrail_chain_deny_receipts (
+			receipt_id, final_semantic_event_id, predecessor_semantic_event_id,
+			connector_instance_id, session_value_digest, input_fingerprint,
+			ruleset_fingerprint, chain_fingerprint, chain_id, chain_version,
+			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
+			stable_action_id, severity, delivery_count,
+			first_observed_time_unix_nano, last_observed_time_unix_nano,
+			expires_time_unix_nano, evaluation_id, audit_event_id
+		) SELECT receipt_id, final_semantic_event_id, predecessor_semantic_event_id,
+			connector_instance_id, session_value_digest, input_fingerprint,
+			ruleset_fingerprint, chain_fingerprint, chain_id, chain_version,
+			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask,
+			stable_action_id, severity, delivery_count,
+			first_observed_time_unix_nano, last_observed_time_unix_nano,
+			expires_time_unix_nano, evaluation_id, audit_event_id
+		FROM guardrail_chain_deny_receipts_pre_capacity`,
+		`DROP TABLE guardrail_chain_deny_receipts_pre_capacity`,
+		`DROP TABLE guardrail_chain_pending_actions_pre_capacity`,
+		`DROP TABLE guardrail_chain_events_pre_capacity`,
+	} {
+		if _, err := ex.Exec(statement); err != nil {
+			return fmt.Errorf("copy pre-capacity guardrail chain state: %w", err)
+		}
+	}
+	if err := migrateToolChainState(ex); err != nil {
+		return fmt.Errorf("index capacity-ready guardrail chain state: %w", err)
+	}
+	if err := migrateToolChainPendingState(ex); err != nil {
+		return fmt.Errorf("index capacity-ready pending chain state: %w", err)
+	}
+	return nil
+}
+
 func migrateToolChainWideMaskState(ex dbExecer) error {
 	for _, statement := range []string{
 		`ALTER TABLE guardrail_chain_deny_receipts

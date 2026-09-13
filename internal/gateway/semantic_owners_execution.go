@@ -16,7 +16,11 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
+import (
+	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+)
 
 const (
 	// Registered owner prerequisites prove the exact source-to-interpreter
@@ -59,4 +63,42 @@ func base64DecodeExecPrerequisite(facts actionfacts.Facts) bool {
 
 func remoteIPStagedExecPrerequisite(facts actionfacts.Facts) bool {
 	return actionfacts.StaticRemoteIPDownloadExecuteSameArtifact(facts)
+}
+
+// appendTrustedFIFOListenerBindShellFinding bridges the exact listener-side
+// FIFO proof to the existing netcat reverse-shell rule. The legacy regex does
+// not select this syntax, so no finding is materialized unless ActionFacts has
+// already closed the listener → shell → same-FIFO feedback loop.
+func appendTrustedFIFOListenerBindShellFinding(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	if !actionfacts.ExactPOSIXFIFOListenerBindShell(facts) {
+		return findings
+	}
+	for _, finding := range findings {
+		if finding.RuleID == "CMD-REVSHELL-NC" {
+			return findings
+		}
+	}
+	commandText := trustedActionInputText(input, "")
+	if strings.TrimSpace(commandText) == "" {
+		return findings
+	}
+	_, rule, ok := trustedActionCatalogRule(generation, "CMD-REVSHELL-NC")
+	if !ok {
+		return findings
+	}
+	return append(findings, adjustConfidence(input.Tool, RuleFinding{
+		RuleID:      rule.ID,
+		Title:       rule.Title,
+		Severity:    rule.Severity,
+		Confidence:  rule.Confidence,
+		Evidence:    commandText,
+		Tags:        append([]string(nil), rule.Tags...),
+		LineNumber:  1,
+		enforcement: findingEnforcementAllowed,
+	}))
 }

@@ -3,6 +3,7 @@ category: cloud-production-protection
 rules:
   - id: impact.cloud_bulk_data_delete
     expression: >-
+      f.tool in ['aws.cloudtrail_event', 'azure.activity_event'] ||
       f.commands.exists(c, c.argv_complete && ((c.program == 'aws' &&
       (('s3' in c.argv && 'rm' in c.argv && '--recursive' in c.argv) ||
       ('s3api' in c.argv && 'delete-objects' in c.argv))) ||
@@ -31,6 +32,15 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [destructive, cloud, production-safety]
+
+  - id: impact.cloud_observed_resource_delete
+    expression: "f.tool in ['aws.cloudtrail_event', 'azure.activity_event']"
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Observed deletion of an exact protected cloud disk or IAM binding"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, cloud, production-safety, observed, bounded-lineage]
 
   - id: tamper.cloud_audit_control_destruction
     expression: >-

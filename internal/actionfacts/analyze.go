@@ -105,7 +105,8 @@ func analyze(input Input) Facts {
 	}
 
 	command := input.Command
-	if command != "" && extracted.command != "" && command != extracted.command {
+	if command != "" && extracted.command != "" &&
+		!equivalentExtractedCommand(input.Tool, command, extracted.command) {
 		base.markAmbiguous(IssueConflictingSources)
 	} else if command == "" {
 		command = extracted.command
@@ -194,14 +195,22 @@ func analyze(input Input) Facts {
 		enforceAnalyzeAuthority(&parsed)
 		base.merge(parsed)
 	}
+	if extracted.policyBypass {
+		for index := range base.commands {
+			if base.commands[index].Effect == EffectExecute {
+				addOperation(&base.commands[index], OperationPolicyBypass)
+			}
+		}
+	}
 
+	activeHome, _ := normalizeActiveHome(input.ActiveHome)
+	projectTrustedPOSIXHomeCatRead(&base, activeHome)
 	addToolArgumentFacts(&base, input.Tool, extracted)
 	if base.hasFacts() && base.status == StatusNotApplicable {
 		base.status = StatusComplete
 	}
 	finalizePOSIXNoExecPreviews(&base)
 	deduplicateFacts(&base)
-	activeHome, _ := normalizeActiveHome(input.ActiveHome)
 	facts := base.factsWithContext(
 		safeToolName(input.Tool),
 		safeScalar(cwd, maxScalarBytes),
@@ -221,20 +230,101 @@ func analyze(input Input) Facts {
 	facts.SQLServerCommandExecutions =
 		projectSQLServerCommandExecutions(input)
 	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
+	facts.SQLSensitiveServerFileReads =
+		projectSQLSensitiveServerFileReads(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
+	facts.SQLMutations = projectSQLMutations(input, facts)
+	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
+	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)
 	facts.PrivilegedKubernetesOperations =
 		projectPrivilegedKubernetesOperations(input, facts)
 	facts.KubernetesCronJobOperations =
 		projectKubernetesCronJobOperations(input, facts)
+	facts.KubernetesPodRuns = projectKubernetesPodRuns(input, facts)
+	facts.KubernetesCronJobReverseShells =
+		projectKubernetesCronJobReverseShells(input, facts)
+	facts.KubernetesSensitiveAccesses =
+		projectKubernetesSensitiveAccesses(input, facts)
+	facts.StructuredPortForwards = projectStructuredPortForwards(input)
 	facts.WirelessCaptureDeauthOperations =
 		projectWirelessCaptureDeauthOperations(input)
 	facts.CloudIAMPrincipalOperations =
 		projectCloudIAMPrincipalOperations(input, facts)
+	facts.CloudResourceMutations = projectCloudResourceMutations(input, facts)
+	facts.CloudAuditSecurityOperations = projectCloudAuditSecurityOperations(input)
+	facts.EndpointSecurityControlMutations = projectEndpointSecurityControlMutations(input)
+	facts.WindowsSecurityControlMutations = projectWindowsSecurityControlMutations(facts)
 	facts.CredentialRemoteExecutionOperations =
 		projectCredentialRemoteExecutionOperations(input)
+	facts.DirectoryCredentialAcquisitions =
+		projectDirectoryCredentialAcquisitions(input, &facts)
 	facts.StagedPayloadPersistenceOperations =
 		projectStagedPayloadPersistenceOperations(input)
+	facts.CloudMetadataCredentialReads =
+		projectCloudMetadataCredentialReads(input)
+	facts.StructuredCredentialReads =
+		projectStructuredCredentialReads(input)
+	facts.LiteralSensitiveUploads = projectLiteralSensitiveUploads(facts)
+	facts.CredentialFileUploads = projectCredentialFileUploads(facts)
+	facts.SourceArchiveUploads = projectSourceArchiveUploads(facts)
+	facts.PowerShellTCPCommandLoops = projectPowerShellTCPCommandLoops(input, facts)
+	facts.MaliciousPersistencePayloads = projectMaliciousPersistencePayloads(input)
+	facts.CustomRootSUIDImplants = projectCustomRootSUIDImplants(input)
+	facts.PKRootSetuidShells = projectPKRootSetuidShells(input)
+	facts.ResourceReads, facts.ArtifactTransfers =
+		projectStructuredResourceArtifactFacts(input)
+	facts.ResourceMutations = projectStructuredResourceMutations(input)
+	facts.POSIXNonRootUIDZeroAccountWrites =
+		projectPOSIXNonRootUIDZeroAccountWrites(input)
+	facts.POSIXUnrestrictedSudoersGrantWrites =
+		projectPOSIXUnrestrictedSudoersGrantWrites(input)
 	return facts
+}
+
+func equivalentExtractedCommand(tool, direct, extracted string) bool {
+	if direct == extracted {
+		return true
+	}
+	if !exactTerminalKeystrokesTool(tool) {
+		return false
+	}
+	trimmed := ""
+	switch {
+	case strings.HasSuffix(direct, "\r\n"):
+		trimmed = strings.TrimSuffix(direct, "\r\n")
+	case strings.HasSuffix(direct, "\n"):
+		trimmed = strings.TrimSuffix(direct, "\n")
+	default:
+		return false
+	}
+	return !strings.ContainsAny(trimmed, "\r\n") && trimmed == extracted
+}
+
+// projectTrustedPOSIXHomeCatRead retains a narrow exact path fact when the
+// shell parser correctly marks an unquoted leading tilde as an expansion. A
+// trusted active-home context makes this one expansion deterministic, but the
+// command remains non-authoritative so no unrelated dynamic syntax is
+// promoted. This fact is useful to prove a sensitive source in a typed
+// read-to-upload pipeline.
+func projectTrustedPOSIXHomeCatRead(out *parseOutput, activeHome string) {
+	if out == nil || !strings.HasPrefix(activeHome, "/") {
+		return
+	}
+	for index := range out.commands {
+		command := &out.commands[index]
+		if command.Dialect != DialectPOSIX || command.Program != "cat" ||
+			len(command.Arguments) != 2 ||
+			!hasFactOperation(*command, OperationRead) {
+			continue
+		}
+		target := command.Arguments[1]
+		if target.Value != "" || !target.Expands || target.Quote != QuoteNone ||
+			!strings.HasPrefix(target.StaticGlob, "~/") ||
+			strings.ContainsAny(target.StaticGlob, "*?[") {
+			continue
+		}
+		appendCommandPath(out, command, PathAccessRead, target.StaticGlob)
+	}
 }
 
 func analyzeStructuredArgv(
@@ -298,6 +388,22 @@ func analyzeStructuredArgv(
 			wrapperDepth+1,
 			DialectPOSIX,
 		)
+	case "su":
+		nested, ok := exactRootSuCommand(command)
+		if !ok {
+			return out
+		}
+		// A generic structured exec schema authenticates argv boundaries, but
+		// `su -c` introduces a second shell-language string that the tool owner
+		// did not type separately. Retain its useful nested facts for fallback
+		// detection without promoting the whole action to enforcement authority.
+		out.markPartial(IssueUnsupportedConstruct)
+		if wrapperDepth >= maxWrapperDepth {
+			out.markLimit(IssueWrapperLimit)
+			return out
+		}
+		nestedDialect = DialectPOSIX
+		child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 	case "eval":
 		if len(argv) < 2 {
 			return out
@@ -1064,7 +1170,7 @@ func argsExecutionTool(tool string) bool {
 		return true
 	}
 	switch name {
-	case "aws_cli":
+	case "aws_cli", "kubectl", "bash_command":
 		return true
 	case "powershell", "powershell.exe", "pwsh", "pwsh.exe",
 		"cmd", "cmd.exe",
@@ -1302,6 +1408,7 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 	case "search",
 		"searchfiles", "search_files", "search-files",
 		"filesearch", "file_search", "file-search",
+		"grep", "search_code",
 		"glob", "globfiles", "glob_files", "glob-files":
 		return pathToolSemantics(PathAccessRead, OperationSearch), true
 	case "copyfile", "copy_file", "copy-file":

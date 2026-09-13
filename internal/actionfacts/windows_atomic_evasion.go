@@ -185,22 +185,29 @@ func exactPowerShellErrorAction(value string) bool {
 
 func exactWindowsTelemetryMutation(command CommandFact) bool {
 	mutation, ok := exactWindowsAtomicRegistryMutation(command)
-	if !ok || mutation.value != "0" {
+	if !ok {
 		return false
 	}
 	switch {
 	case mutation.name == "COMPLUS_ETWENABLED" &&
+		mutation.value == "0" &&
 		(mutation.path == "HKCU/ENVIRONMENT" ||
 			mutation.path == "HKLM/SYSTEM/CURRENTCONTROLSET/CONTROL/SESSION MANAGER/ENVIRONMENT"):
 		return mutation.valueType == "REG_SZ" || mutation.valueType == "STRING"
 	case mutation.name == "ETWENABLED" &&
+		mutation.value == "0" &&
 		mutation.path == "HKLM/SOFTWARE/MICROSOFT/.NETFRAMEWORK":
 		return mutation.valueType == "REG_DWORD" || mutation.valueType == "DWORD"
 	case mutation.name == "ENABLED" &&
+		mutation.value == "0" &&
 		mutation.path == "HKLM/SOFTWARE/MICROSOFT/WINDOWS/CURRENTVERSION/WINEVT/CHANNELS/MICROSOFT-WINDOWS-WINDOWS DEFENDER/OPERATIONAL":
 		return mutation.valueType == "REG_DWORD" || mutation.valueType == "DWORD"
 	case mutation.name == "START" &&
+		mutation.value == "0" &&
 		mutation.path == "HKLM/SYSTEM/CURRENTCONTROLSET/CONTROL/WMI/AUTOLOGGER/EVENTLOG-APPLICATION":
+		return mutation.valueType == "REG_DWORD" || mutation.valueType == "DWORD"
+	case mutation.name == "START" && mutation.value == "4" &&
+		mutation.path == "HKLM/SYSTEM/CURRENTCONTROLSET/SERVICES/EVENTLOG":
 		return mutation.valueType == "REG_DWORD" || mutation.valueType == "DWORD"
 	default:
 		return false

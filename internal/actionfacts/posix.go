@@ -879,6 +879,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parsePOSIX(strings.Join(command.Argv[1:], " "), out.nextID, wrapperDepth+1)
+		case "su":
+			nested, ok := exactRootSuCommand(command)
+			if !ok {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
 			nested, dialect, ok, unsafe := nestedCommand(command.Argv, program)
 			if unsafe {
@@ -936,6 +946,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		out.mergeNested(child)
 	}
+}
+
+func exactRootSuCommand(command CommandFact) (string, bool) {
+	if command.Program != "su" || !command.ArgvComplete ||
+		len(command.Argv) != 3 || command.Argv[1] != "-c" ||
+		strings.TrimSpace(command.Argv[2]) == "" ||
+		!staticArguments(command.Arguments) {
+		return "", false
+	}
+	return command.Argv[2], true
 }
 
 var (

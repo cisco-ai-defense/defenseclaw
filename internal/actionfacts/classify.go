@@ -304,6 +304,14 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	}
 
 	switch program {
+	case "impacket-secretsdump", "secretsdump.py", "impacket-getuserspns",
+		"getuserspns.py", "impacket-getnpusers", "getnpusers.py", "hashcat",
+		"hashcat.exe":
+		if _, ok := exactDirectoryCredentialCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())
@@ -418,6 +426,37 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		if !classifyEndpointSecurityControl(out, command) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "sentinelctl":
+		if !classifyEndpointSecurityControl(out, command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
+	case "auditpol", "auditpol.exe":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			if _, ok := exactWindowsAuditPolicyWipeStep(windowsWordsFromArguments(command.Arguments[1:])); ok {
+				addOperation(command, OperationConfigChange)
+				addOperation(command, OperationPolicyBypass)
+			} else {
+				out.markPartial(IssueUnknownOperandGrammar)
+			}
+		}
+	case "set-mppreference":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			_, disabled, ok := exactWindowsDefenderDisableSetting(
+				windowsWordsFromArguments(command.Arguments[1:]),
+			)
+			if !ok {
+				out.markPartial(IssueUnknownOperandGrammar)
+			} else {
+				addOperation(command, OperationConfigChange)
+				if disabled {
+					addOperation(command, OperationPolicyBypass)
+				}
+			}
+		}
+	case "add-mppreference":
+		if !classifyExactWindowsSecurityControlMutation(command) {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "iptables":
 		if !classifyCompleteFirewallRelaxationStep(out, command) {
 			out.markPartial(IssueUnknownOperandGrammar)
@@ -425,7 +464,7 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "tee":
 		classifyTee(out, command)
 	case "sed":
-		classifyPOSIXSedInPlace(out, command)
+		classifyPOSIXSed(out, command)
 		classifyPOSIXLoggingHardeningControl(out, command)
 	case "add-content":
 		classifyStructuredPowerShellPathMutator(out, command, program)
@@ -553,7 +592,9 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyWipeFS(out, command)
 	case "sgdisk":
 		classifySGDisk(out, command)
-	case "shred", "blkdiscard", "cryptsetup", "hdparm", "nvme", "parted",
+	case "shred":
+		classifyShred(out, command)
+	case "blkdiscard", "cryptsetup", "hdparm", "nvme", "parted",
 		"diskutil":
 		classifyDestructiveDeviceTool(out, command, program)
 	case "format":
@@ -585,7 +626,11 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyMacOSUpdateCredentialPrompt(out, command)
 	case "auditctl", "setenforce":
 		classifyLinuxSecurityControl(out, command)
-	case "service", "sysrc", "sysctl", "ufw":
+	case "service":
+		if !classifyPOSIXLoggingHardeningControl(out, command) {
+			classifyLinuxSecurityControl(out, command)
+		}
+	case "sysrc", "sysctl", "ufw":
 		if !classifyPOSIXLoggingHardeningControl(out, command) {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
@@ -609,6 +654,15 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 			out,
 			command,
 			windowsClassifyLSASSDump,
+			DialectCMD,
+			DialectPowerShell,
+			DialectArgv,
+		)
+	case "ntdsutil", "ntdsutil.exe":
+		classifyStructuredWindowsArgv(
+			out,
+			command,
+			windowsClassifyNTDSIFMDump,
 			DialectCMD,
 			DialectPowerShell,
 			DialectArgv,
@@ -637,6 +691,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyContainer(out, command)
 	case "nsenter":
 		classifyNSEnter(out, command)
+	case "mount":
+		classifyExactPOSIXBindMount(out, command)
 	case "chroot":
 		classifyChroot(out, command)
 	case "kubectl", "oc":
@@ -653,8 +709,16 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		classifyCredentialCLI(out, command, program)
 		classifyCloudAuditControlDestruction(command)
 		classifyCloudIAMPrincipalAdministration(command)
+	case "nxc", "netexec", "crackmapexec", "john", "john.exe":
+		if _, ok := exactDirectoryCredentialCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "psql", "mysql", "mariadb", "sqlcmd", "snowsql":
 		classifySQLClient(out, command, program)
+	case "sqlite3":
+		classifySQLiteClientShellEscape(out, command)
 	case "bash", "sh", "zsh", "dash", "ksh", "mksh", "fish":
 		classifyShellInvocation(out, command)
 	case "python", "python2", "python3", "perl", "ruby":
@@ -819,6 +883,11 @@ func commandProgram(executable string) string {
 		return ""
 	}
 	executable = strings.ReplaceAll(executable, `\`, "/")
+	if executable == "/opt/sentinelone/bin/sentinelctl" {
+		// Trust only the exact vendor-installed endpoint-control path. An
+		// arbitrary /opt basename must remain opaque.
+		return "sentinelctl"
+	}
 	if strings.Contains(executable, "/") && !trustedExecutablePath(executable) {
 		return ""
 	}
@@ -2408,7 +2477,10 @@ func classifyStructuredICACLS(
 	out *parseOutput,
 	command *CommandFact,
 ) {
-	if !requireCommandDialect(out, command, DialectCMD) {
+	// icacls is a native Windows executable with the same argv grammar when
+	// launched from cmd.exe or PowerShell. Shell quoting is resolved before
+	// this classifier receives the arguments.
+	if !requireCommandDialect(out, command, DialectCMD, DialectPowerShell) {
 		return
 	}
 	if len(command.Argv) < 2 {
@@ -3154,14 +3226,68 @@ func ApplyStaticPOSIXSedInPlaceLiteralMutation(
 	}
 }
 
-func classifyPOSIXSedInPlace(out *parseOutput, command *CommandFact) {
+func classifyPOSIXSed(out *parseOutput, command *CommandFact) {
 	_, target, ok := StaticPOSIXSedInPlaceLiteralMutation(*command)
-	if !ok {
-		out.markPartial(IssueUnknownOperandGrammar)
+	if ok {
+		addOperation(command, OperationWrite)
+		appendCommandPath(out, command, PathAccessWrite, target)
 		return
 	}
-	addOperation(command, OperationWrite)
-	appendCommandPath(out, command, PathAccessWrite, target)
+	if targets, readOnly := staticPOSIXSedNumericPrintTargets(*command); readOnly {
+		addOperation(command, OperationRead)
+		for _, pathValue := range targets {
+			appendCommandPath(out, command, PathAccessRead, pathValue)
+		}
+		return
+	}
+	out.markPartial(IssueUnknownOperandGrammar)
+}
+
+// staticPOSIXSedNumericPrintTargets owns the narrow read-only grammar used by
+// coding agents to inspect a bounded line or line range. General sed programs
+// remain non-authoritative because GNU/BSD extensions can execute commands or
+// read and write additional files.
+func staticPOSIXSedNumericPrintTargets(command CommandFact) ([]string, bool) {
+	if (command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!command.ArgvComplete || len(command.Argv) < 4 ||
+		len(command.Arguments) != len(command.Argv) ||
+		command.Program != "sed" ||
+		!exactCaseSensitivePOSIXProgram(&command, "sed") ||
+		(command.Argv[1] != "-n" && command.Argv[1] != "--quiet" &&
+			command.Argv[1] != "--silent") {
+		return nil, false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Expands || argument.Quote == QuoteMixed {
+			return nil, false
+		}
+	}
+	script := command.Argv[2]
+	if len(script) < 2 || script[len(script)-1] != 'p' {
+		return nil, false
+	}
+	address := script[:len(script)-1]
+	commaCount := 0
+	for _, character := range address {
+		switch {
+		case character >= '0' && character <= '9':
+		case character == ',' && commaCount == 0:
+			commaCount++
+		default:
+			return nil, false
+		}
+	}
+	parts := strings.Split(address, ",")
+	if len(parts) > 2 || parts[0] == "" || len(parts) == 2 && parts[1] == "" {
+		return nil, false
+	}
+	targets := command.Argv[3:]
+	for _, target := range targets {
+		if target == "" || target == "-" || strings.HasPrefix(target, "-") {
+			return nil, false
+		}
+	}
+	return targets, true
 }
 
 func classifyPOSIXPermissionChange(
@@ -7959,18 +8085,6 @@ func classifyDestructiveDeviceTool(
 	destructive := false
 	complete := true
 	switch program {
-	case "shred":
-		parsed := parseOwnedPOSIXOptions(
-			command.Argv,
-			exactOptionSet("-n", "--iterations", "-s", "--size"),
-			exactOptionSet("-f", "--force", "-v", "--verbose", "-z", "--zero"),
-			exactOptionSet("--help", "--version"),
-		)
-		complete = parsed.complete && len(parsed.positionals) == 1
-		if len(parsed.positionals) == 1 {
-			target = parsed.positionals[0]
-			destructive = true
-		}
 	case "blkdiscard":
 		parsed := parseOwnedPOSIXOptions(
 			command.Argv,
@@ -8060,6 +8174,55 @@ func classifyDestructiveDeviceTool(
 	addOperation(command, OperationWrite)
 	addOperation(command, OperationDiskWrite)
 	appendCommandPath(out, command, PathAccessWrite, target)
+}
+
+// classifyShred distinguishes ordinary file overwrite/removal from raw-device
+// destruction. GNU shred accepts more than one file operand; treating those
+// calls as opaque loses exact credential-file deletion evidence. Only the
+// closed option grammar below produces path facts, and --remove is represented
+// as a delete because the named files no longer exist after a successful call.
+func classifyShred(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	if len(command.Argv) == 2 &&
+		(command.Argv[1] == "--help" || command.Argv[1] == "--version") {
+		command.Effect = EffectPreview
+		return
+	}
+	parsed := parseOwnedPOSIXOptions(
+		command.Argv,
+		exactOptionSet("-n", "--iterations", "-s", "--size"),
+		exactOptionSet(
+			"-f", "--force", "-u", "--remove", "-v", "--verbose", "-z", "--zero",
+		),
+		exactOptionSet("--help", "--version"),
+	)
+	if !parsed.complete || len(parsed.positionals) == 0 {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	remove := hasAnyArgument(command.Argv, "-u", "--remove")
+	if len(parsed.positionals) == 1 && isRawBlockDeviceTarget(parsed.positionals[0]) {
+		addOperation(command, OperationWrite)
+		addOperation(command, OperationDiskWrite)
+		appendCommandPath(out, command, PathAccessWrite, parsed.positionals[0])
+		return
+	}
+	addOperation(command, OperationWrite)
+	access := PathAccessWrite
+	if remove {
+		addOperation(command, OperationDelete)
+		access = PathAccessDelete
+	}
+	for _, target := range parsed.positionals {
+		if isRawBlockDeviceTarget(target) {
+			// Mixing device and file operands is not an enforcement-safe shape.
+			out.markPartial(IssueUnknownOperandGrammar)
+			return
+		}
+		appendCommandPath(out, command, access, target)
+	}
 }
 
 func classifyWindowsFormat(out *parseOutput, command *CommandFact) {
@@ -9379,6 +9542,13 @@ func classifyWorkload(out *parseOutput, command *CommandFact, program string) {
 	switch subcommand {
 	case "exec", "debug", "attach":
 		addOperation(command, OperationWorkloadExec)
+		if subcommand == "exec" && (program == "kubectl" || program == "kubectl.exe") {
+			if cleaned, _, ok := stripExactKubectlNamespace(command.Argv, ""); ok &&
+				exactKubectlWorkloadIdentityTokenRead(cleaned) {
+				addOperation(command, OperationRead)
+				return
+			}
+		}
 		out.markPartial(IssueUnsupportedConstruct)
 	case "rsh":
 		if program == "oc" || program == "oc.exe" {
@@ -9427,9 +9597,58 @@ func classifyWorkload(out *parseOutput, command *CommandFact, program string) {
 			return
 		}
 		addOperation(command, OperationDelete)
+	case "create":
+		if exactKubernetesClusterAdminBinding(command.Argv[index:]) {
+			addOperation(command, OperationPermissionChange)
+			addOperation(command, OperationPrivilege)
+			return
+		}
+		out.markPartial(IssueUnknownOperandGrammar)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func exactKubernetesClusterAdminBinding(argv []string) bool {
+	if len(argv) < 5 || argv[0] != "create" ||
+		(argv[1] != "rolebinding" && argv[1] != "clusterrolebinding") ||
+		!exactKubernetesIdentity(argv[2]) {
+		return false
+	}
+	clusterRole := ""
+	serviceAccount := ""
+	namespace := ""
+	for index := 3; index < len(argv); index++ {
+		key, joinedValue, joined := strings.Cut(argv[index], "=")
+		if key != "--clusterrole" && key != "--serviceaccount" &&
+			key != "-n" && key != "--namespace" {
+			return false
+		}
+		value, found := classifierOptionValue(argv, &index, joinedValue, joined)
+		if !found {
+			return false
+		}
+		switch key {
+		case "--clusterrole":
+			if clusterRole != "" {
+				return false
+			}
+			clusterRole = value
+		case "--serviceaccount":
+			if serviceAccount != "" {
+				return false
+			}
+			serviceAccount = value
+		case "-n", "--namespace":
+			if namespace != "" || !exactKubernetesIdentity(value) {
+				return false
+			}
+			namespace = value
+		}
+	}
+	principal := strings.Split(serviceAccount, ":")
+	return clusterRole == "cluster-admin" && len(principal) == 2 &&
+		exactKubernetesIdentity(principal[0]) && exactKubernetesIdentity(principal[1])
 }
 
 func classifyInfrastructureAsCode(
@@ -9703,9 +9922,19 @@ func classifyGit(out *parseOutput, command *CommandFact) {
 		}
 	case "bundle":
 		classifyGitBundleProducer(out, command, index)
+	case "archive":
+		classifyGitArchiveStdout(out, command, index)
 	default:
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
+}
+
+func classifyGitArchiveStdout(out *parseOutput, command *CommandFact, index int) {
+	if index+2 != len(command.Argv) || command.Argv[index+1] != "HEAD" {
+		out.markPartial(IssueUnknownOperandGrammar)
+		return
+	}
+	addOperation(command, OperationRead)
 }
 
 func classifyGitReadOutput(
@@ -10501,7 +10730,7 @@ func classifyCredentialCLI(
 	switch program {
 	case "aws", "aws.exe", "aws.cmd":
 		valueOptions := exactOptionSet(
-			"--bucket", "--db-instance-identifier", "--delete",
+			"--bucket", "--key", "--db-instance-identifier", "--delete",
 			"--instance-ids", "--stack-name", "--table-name",
 			"--ca-bundle", "--cli-connect-timeout", "--cli-read-timeout",
 			"--cli-binary-format", "--cli-input-json", "--cli-input-yaml",
@@ -10514,7 +10743,8 @@ func classifyCredentialCLI(
 			"--serial-number", "--source-identity", "--starting-token",
 			"--tags", "--token-code", "--transitive-tag-keys",
 			"--user-name", "--role-name", "--path",
-			"--assume-role-policy-document", "--policy-arn",
+			"--assume-role-policy-document", "--policy-arn", "--policy-name",
+			"--policy-document",
 			"--version-id", "--version-stage", "--web-identity-token",
 		)
 		parsed := parseOwnedPOSIXOptions(
@@ -10527,7 +10757,8 @@ func classifyCredentialCLI(
 				"--no-recursive", "--no-sign-request",
 				"--no-retain-automated-backups", "--no-skip-final-snapshot",
 				"--no-verify-ssl", "--no-with-decryption",
-				"--recursive", "--retain-automated-backups",
+				"--recursive", "--force", "--only-show-errors", "--quiet",
+				"--retain-automated-backups",
 				"--skip-final-snapshot", "--with-decryption",
 			),
 			exactOptionSet("--help", "--version"),
@@ -10560,6 +10791,10 @@ func classifyCredentialCLI(
 		}
 		if !complete {
 			out.markPartial(IssueUnknownOperandGrammar)
+		}
+		if _, ok := exactAWSCloudResourceMutation(command.Argv); ok {
+			addOperation(command, OperationDelete)
+			addOperation(command, OperationWrite)
 		}
 		match = positionalPrefixExact(positionals, "secretsmanager", "get-secret-value") ||
 			positionalPrefixExact(positionals, "secretsmanager", "batch-get-secret-value") ||
@@ -10699,7 +10934,7 @@ func classifySQLClient(out *parseOutput, command *CommandFact, program string) {
 		maxPositionals = 2
 	case "mysql", "mariadb":
 		valueOptions = exactOptionSet(
-			"-e", "--execute", "-h", "--host", "-P", "--port",
+			"-e", "--execute", "-D", "--database", "-h", "--host", "-P", "--port",
 			"-u", "--user", "-p", "--password", "--protocol", "--socket",
 			"--ssl-mode",
 		)
@@ -10774,6 +11009,17 @@ func classifySQLClient(out *parseOutput, command *CommandFact, program string) {
 		positionals++
 	}
 	if positionals > maxPositionals {
+		out.markPartial(IssueUnknownOperandGrammar)
+	}
+}
+
+func classifySQLiteClientShellEscape(out *parseOutput, command *CommandFact) {
+	if !requireCommandDialect(out, command, DialectPOSIX, DialectArgv) {
+		return
+	}
+	if !command.ArgvComplete || !staticArguments(command.Arguments) ||
+		!exactCaseSensitivePOSIXProgram(command, "sqlite3") ||
+		!exactSQLiteShellEscapeArgv(command.Argv) {
 		out.markPartial(IssueUnknownOperandGrammar)
 	}
 }
@@ -11136,6 +11382,9 @@ func classifyPOSIXPrivilegeShell(out *parseOutput, command *CommandFact) {
 				(command.Argv[1] == "-" || command.Argv[1] == "-l" ||
 					command.Argv[1] == "--login") &&
 				command.Argv[2] == "root"
+		if _, commandMode := exactRootSuCommand(*command); commandMode {
+			exact = true
+		}
 	case "pkexec":
 		exact = exactPrivilegeShellArgv(command.Argv[1:])
 	}

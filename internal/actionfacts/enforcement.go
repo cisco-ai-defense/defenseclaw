@@ -39,11 +39,36 @@ func (f Facts) EnforcementProjection() Facts {
 			[]CloudIAMPrincipalOperationFact(nil),
 			f.CloudIAMPrincipalOperations...,
 		),
+		KubernetesPodRuns: append(
+			[]KubernetesPodRunFact(nil),
+			f.KubernetesPodRuns...,
+		),
+		StructuredPortForwards: append(
+			[]StructuredPortForwardFact(nil),
+			f.StructuredPortForwards...,
+		),
+		POSIXNonRootUIDZeroAccountWrites: append(
+			[]POSIXNonRootUIDZeroAccountWriteFact(nil),
+			f.POSIXNonRootUIDZeroAccountWrites...,
+		),
+		POSIXUnrestrictedSudoersGrantWrites: append(
+			[]POSIXUnrestrictedSudoersGrantWriteFact(nil),
+			f.POSIXUnrestrictedSudoersGrantWrites...,
+		),
+		SQLMutations: append(
+			[]SQLMutationFact(nil),
+			f.SQLMutations...,
+		),
 		Parse: ParseResult{
 			Status:  f.Parse.Status,
 			Dialect: f.Parse.Dialect,
 			Issues:  cloneSlice(f.Parse.Issues),
 		},
+	}
+	for _, mutation := range f.CloudResourceMutations {
+		if !mutation.Observed {
+			projected.CloudResourceMutations = append(projected.CloudResourceMutations, mutation)
+		}
 	}
 
 	executing := make(map[int64]struct{}, len(f.Commands))
@@ -119,6 +144,14 @@ func (f Facts) EnforcementProjection() Facts {
 	for _, fact := range f.Artifacts {
 		if ownsCommand(fact.CommandID, executing) {
 			appendProjectionArtifacts(&projected, []ArtifactFact{fact})
+		}
+	}
+	for _, fact := range f.SQLClientShellEscapes {
+		if ownsCommand(fact.CommandID, executing) {
+			projected.SQLClientShellEscapes = append(
+				projected.SQLClientShellEscapes,
+				fact,
+			)
 		}
 	}
 

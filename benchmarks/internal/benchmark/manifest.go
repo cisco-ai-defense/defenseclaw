@@ -27,6 +27,25 @@ type NormalizationManifest struct {
 	AdapterStatistics      map[string]map[string]int `json:"adapter_statistics"`
 	OutputSHA256           string                    `json:"output_sha256"`
 	Partition              *PartitionMetadata        `json:"partition,omitempty"`
+	Source                 *NormalizationSource      `json:"source,omitempty"`
+	TrajectorySource       json.RawMessage           `json:"trajectory_source,omitempty"`
+}
+
+// NormalizationSource binds a single-source adapter output to the exact local
+// public artifact that was normalized. It contains metadata only; source rows
+// and extracted values never enter the result bundle.
+type NormalizationSource struct {
+	Dataset        string   `json:"dataset"`
+	Revision       string   `json:"revision"`
+	License        string   `json:"license"`
+	Redistribution string   `json:"redistribution"`
+	Path           string   `json:"path"`
+	Paths          []string `json:"paths,omitempty"`
+	Bytes          int64    `json:"bytes"`
+	Files          int      `json:"files,omitempty"`
+	SHA256         string   `json:"sha256"`
+	SourceURL      string   `json:"source_url,omitempty"`
+	URL            string   `json:"url,omitempty"`
 }
 
 type PartitionMetadata struct {
@@ -172,6 +191,15 @@ func buildCorpusManifest(
 	}
 	if !equalCounts(manifest.DatasetCounts, normalized.Counts) {
 		return CorpusManifest{}, fmt.Errorf("normalization manifest counts differ from corpus")
+	}
+	if normalized.Source != nil {
+		source := normalized.Source
+		if source.Dataset == "" || normalized.Counts[source.Dataset] == 0 ||
+			source.Revision == "" || source.License == "" || source.Redistribution == "" ||
+			(source.Path == "" && len(source.Paths) == 0) || source.Bytes < 0 ||
+			!validSHA256(source.SHA256) {
+			return CorpusManifest{}, fmt.Errorf("normalization source metadata is invalid")
+		}
 	}
 	if normalized.Partition != nil {
 		partition := normalized.Partition

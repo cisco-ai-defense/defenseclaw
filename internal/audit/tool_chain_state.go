@@ -202,6 +202,64 @@ func decodeToolChainJoinDigests(
 	return digests, nil
 }
 
+func encodeToolChainValueJoinDigests(
+	digests [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests,
+) string {
+	last := -1
+	chains := make([]string, guardrail.ToolChainCount)
+	for chainIndex, chain := range digests {
+		values := make([]string, 0, len(chain))
+		for _, digest := range chain {
+			if digest == "" {
+				break
+			}
+			decoded, err := hex.DecodeString(digest)
+			if err != nil || len(decoded) != sha256.Size {
+				return ""
+			}
+			values = append(values, base64.RawURLEncoding.EncodeToString(decoded))
+		}
+		if len(values) != 0 {
+			last = chainIndex
+			chains[chainIndex] = strings.Join(values, ",")
+		}
+	}
+	if last < 0 {
+		return ""
+	}
+	return strings.Join(chains[:last+1], ";")
+}
+
+func decodeToolChainValueJoinDigests(
+	encoded string,
+) ([guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests, error) {
+	var result [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
+	if encoded == "" {
+		return result, nil
+	}
+	chains := strings.Split(encoded, ";")
+	if len(chains) > guardrail.ToolChainCount {
+		return result, ErrToolChainIntegrity
+	}
+	for chainIndex, chain := range chains {
+		if chain == "" {
+			continue
+		}
+		values := strings.Split(chain, ",")
+		if len(values) > guardrail.ToolChainMaxValueJoinDigests {
+			return result, ErrToolChainIntegrity
+		}
+		for valueIndex, value := range values {
+			decoded, err := base64.RawURLEncoding.DecodeString(value)
+			if err != nil || len(decoded) != sha256.Size {
+				return result, ErrToolChainIntegrity
+			}
+			result[chainIndex][valueIndex] = hex.EncodeToString(decoded)
+		}
+	}
+	return result, nil
+}
+
 func (repo *ToolChainRepository) observeTx(
 	ctx context.Context,
 	tx *sql.Tx,
@@ -295,15 +353,16 @@ func (repo *ToolChainRepository) observeTx(
 			semantic_event_id, connector_instance_id, session_value_digest, sequence,
 			received_time_unix_nano, input_fingerprint, projection_fingerprint,
 			ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
-			enforcement_join_digests, enforcement_output_join_digests,
+			enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
 			detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(input.SemanticEventID), string(input.ConnectorInstanceID), sessionDigest,
 		sequence, received, input.InputFingerprint, projectionFP, input.RulesetFingerprint,
 		string(input.Projection.ParseStatus), input.Projection.DetectionStepMask,
 		input.Projection.EnforcementStepMask,
 		encodeToolChainJoinDigests(input.Projection.EnforcementJoinDigests),
 		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
+		encodeToolChainValueJoinDigests(input.Projection.ValueJoinDigests),
 		matches.DetectedMask, matches.EnforcementSafeMask,
 		denied, nullStr(stableActionID))
 	if err != nil {
@@ -359,6 +418,7 @@ type persistedToolChainEvent struct {
 	detectionSteps, enforcementSteps                                              uint64
 	enforcementJoinDigests                                                        [guardrail.ToolChainCount]string
 	enforcementOutputJoinDigests                                                  [guardrail.ToolChainCount]string
+	valueJoinDigests                                                              [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	detected, enforcementSafe, denied                                             uint32
 }
 
@@ -382,6 +442,7 @@ func (repo *ToolChainRepository) loadExistingEvent(
 		event.enforcementSteps != input.Projection.EnforcementStepMask ||
 		event.enforcementJoinDigests != input.Projection.EnforcementJoinDigests ||
 		event.enforcementOutputJoinDigests != input.Projection.EnforcementOutputJoinDigests ||
+		event.valueJoinDigests != input.Projection.ValueJoinDigests ||
 		(event.denied != 0 && event.stableAction != stableToolChainActionID(input, event.denied)) {
 		return ToolChainObserveResult{}, true, ErrToolChainIntegrity
 	}
@@ -499,17 +560,17 @@ func scanPersistedToolChainEvent(
 ) (persistedToolChainEvent, bool, error) {
 	var event persistedToolChainEvent
 	var stable sql.NullString
-	var enforcementJoinDigests, enforcementOutputJoinDigests string
+	var enforcementJoinDigests, enforcementOutputJoinDigests, valueJoinDigests string
 	err := tx.QueryRowContext(ctx, `SELECT connector_instance_id, session_value_digest,
 		sequence, received_time_unix_nano, input_fingerprint, projection_fingerprint,
 		ruleset_fingerprint, parse_status, detection_step_mask, enforcement_step_mask,
-		enforcement_join_digests, enforcement_output_join_digests,
+		enforcement_join_digests, enforcement_output_join_digests, value_join_digests,
 		detected_chain_mask, enforcement_safe_chain_mask, denied_chain_mask, stable_action_id
 		FROM guardrail_chain_events WHERE semantic_event_id=?`, string(eventID)).Scan(
 		&event.connector, &event.session, &event.sequence, &event.received, &event.inputFP,
 		&event.projectionFP, &event.ruleset, &event.parseStatus, &event.detectionSteps,
 		&event.enforcementSteps, &enforcementJoinDigests,
-		&enforcementOutputJoinDigests, &event.detected,
+		&enforcementOutputJoinDigests, &valueJoinDigests, &event.detected,
 		&event.enforcementSafe, &event.denied, &stable)
 	if errors.Is(err, sql.ErrNoRows) {
 		return event, false, nil
@@ -528,6 +589,11 @@ func scanPersistedToolChainEvent(
 		return event, true, ErrToolChainIntegrity
 	}
 	event.enforcementOutputJoinDigests = outputJoins
+	valueJoins, valueJoinErr := decodeToolChainValueJoinDigests(valueJoinDigests)
+	if valueJoinErr != nil {
+		return event, true, ErrToolChainIntegrity
+	}
+	event.valueJoinDigests = valueJoins
 	if err := validatePersistedToolChainEvent(event); err != nil {
 		return event, true, ErrToolChainIntegrity
 	}
@@ -540,6 +606,7 @@ func validatePersistedToolChainEvent(event persistedToolChainEvent) error {
 		DetectionStepMask: event.detectionSteps, EnforcementStepMask: event.enforcementSteps,
 		EnforcementJoinDigests:       event.enforcementJoinDigests,
 		EnforcementOutputJoinDigests: event.enforcementOutputJoinDigests,
+		ValueJoinDigests:             event.valueJoinDigests,
 	}
 	projectionFP, err := guardrail.ToolChainProjectionFingerprint(projection)
 	if err != nil || projectionFP != event.projectionFP ||
@@ -607,7 +674,7 @@ func (repo *ToolChainRepository) loadWindow(
 	rows, err := tx.QueryContext(ctx, `SELECT semantic_event_id, sequence,
 		received_time_unix_nano, parse_status, detection_step_mask,
 		enforcement_step_mask, enforcement_join_digests,
-		enforcement_output_join_digests, projection_fingerprint
+		enforcement_output_join_digests, value_join_digests, projection_fingerprint
 		FROM guardrail_chain_events
 		WHERE connector_instance_id=? AND session_value_digest=? AND ruleset_fingerprint=?
 			AND sequence>=? AND sequence<? AND received_time_unix_nano>=?
@@ -624,12 +691,13 @@ func (repo *ToolChainRepository) loadWindow(
 			eventID, parseStatus, projectionFP string
 			enforcementJoinDigests             string
 			enforcementOutputJoinDigests       string
+			valueJoinDigests                   string
 			seq, receivedNano                  int64
 			detection, enforcement             uint64
 		)
 		if err := rows.Scan(&eventID, &seq, &receivedNano, &parseStatus,
 			&detection, &enforcement, &enforcementJoinDigests,
-			&enforcementOutputJoinDigests, &projectionFP); err != nil {
+			&enforcementOutputJoinDigests, &valueJoinDigests, &projectionFP); err != nil {
 			return nil, err
 		}
 		joins, joinErr := decodeToolChainJoinDigests(enforcementJoinDigests)
@@ -640,11 +708,16 @@ func (repo *ToolChainRepository) loadWindow(
 		if outputJoinErr != nil {
 			return nil, ErrToolChainIntegrity
 		}
+		valueJoins, valueJoinErr := decodeToolChainValueJoinDigests(valueJoinDigests)
+		if valueJoinErr != nil {
+			return nil, ErrToolChainIntegrity
+		}
 		projection := guardrail.ToolChainProjection{
 			ParseStatus:       actionfacts.ParseStatus(parseStatus),
 			DetectionStepMask: detection, EnforcementStepMask: enforcement,
 			EnforcementJoinDigests:       joins,
 			EnforcementOutputJoinDigests: outputJoins,
+			ValueJoinDigests:             valueJoins,
 		}
 		expected, fingerprintErr := guardrail.ToolChainProjectionFingerprint(projection)
 		if fingerprintErr != nil || expected != projectionFP || seq < 1 || receivedNano < 1 {

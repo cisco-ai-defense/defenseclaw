@@ -56,31 +56,36 @@ func TestTrustedActionContainerSocketPassiveAccessIsAuditOnly(t *testing.T) {
 }
 
 func TestTrustedActionContainerSocketAuthoritativeUseRemainsAlertCapable(t *testing.T) {
-	generation := containerSocketDispositionGeneration(t, "default")
-	for _, command := range []string{
-		"docker -H unix:///var/run/docker.sock ps",
-		"curl --unix-socket /run/containerd/containerd.sock http://localhost/version",
-		"docker run -v /var/run/docker.sock:/var/run/docker.sock alpine",
-	} {
-		command := command
-		t.Run(command, func(t *testing.T) {
-			facts := actionfacts.Analyze(actionfacts.Input{
-				Tool:       "shell",
-				Command:    command,
-				CWD:        "/repo",
-				ActiveHome: "/home/alice",
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		profile := profile
+		for _, command := range []string{
+			"docker -H unix:///var/run/docker.sock ps",
+			"curl --unix-socket /run/containerd/containerd.sock http://localhost/version",
+			"docker run -v /var/run/docker.sock:/var/run/docker.sock alpine",
+		} {
+			command := command
+			t.Run(profile+"/"+command, func(t *testing.T) {
+				const connector = "container-socket-alert-only"
+				installToolCallCorpusProfileConnector(t, connector, profile)
+				findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+					Input: actionfacts.Input{
+						Tool:       "shell",
+						Command:    command,
+						CWD:        "/repo",
+						ActiveHome: "/home/alice",
+					},
+					LegacyText:         command,
+					Connector:          connector,
+					EnforcementCapable: true,
+				})
+				finding := findingWithID(findings, containerSocketDispositionRuleID)
+				if finding == nil || finding.contributesToEnforcement() ||
+					!finding.contributesToAlertOnly() ||
+					!finding.proof.authorizes(finding.RuleID) {
+					t.Fatalf("authoritative socket use = %#v, want visible alert-only proof", finding)
+				}
 			})
-			got := applyTrustedActionContextDisposition(
-				generation,
-				facts,
-				[]RuleFinding{containerSocketDispositionFinding(t, generation)},
-			)
-			if len(got) != 1 || !got[0].contributesToEnforcement() ||
-				got[0].disposition == findingDispositionAudit ||
-				!got[0].proof.authorizes(got[0].RuleID) {
-				t.Fatalf("authoritative socket use = %#v, want alert-capable complete proof", got)
-			}
-		})
+		}
 	}
 }
 
@@ -113,9 +118,10 @@ func TestTrustedActionContainerSocketStructuredWriteRemainsAlertCapable(t *testi
 		facts,
 		[]RuleFinding{containerSocketDispositionFinding(t, generation)},
 	)
-	if len(got) != 1 || !got[0].contributesToEnforcement() ||
+	if len(got) != 1 || got[0].contributesToEnforcement() ||
+		!got[0].contributesToAlertOnly() ||
 		!got[0].proof.authorizes(got[0].RuleID) {
-		t.Fatalf("authoritative socket write = %#v, want alert-capable complete proof", got)
+		t.Fatalf("authoritative socket write = %#v, want alert-only complete proof", got)
 	}
 }
 

@@ -1704,6 +1704,10 @@ func windowsClassifyPowerShell(
 	case "echo", "write-output", "write-host", "get-date", "whoami", "whoami.exe",
 		"hostname", "hostname.exe", "pwd":
 		return
+	case "icacls", "icacls.exe":
+		// icacls is a native executable; PowerShell resolves quoting before the
+		// program receives the same slash-option grammar used from cmd.exe.
+		windowsClassifyICACLS(command, args, builder)
 	case "get-content", "gc", "cat", "type":
 		filesystem, environment := windowsAddPowerShellPaths(
 			"get-content",
@@ -1797,6 +1801,8 @@ func windowsClassifyPowerShell(
 		windowsClassifyRegistry(command, args, builder)
 	case "procdump", "procdump.exe":
 		windowsClassifyLSASSDump(command, args, builder)
+	case "ntdsutil", "ntdsutil.exe":
+		windowsClassifyNTDSIFMDump(command, args, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":
@@ -1807,6 +1813,8 @@ func windowsClassifyPowerShell(
 		windowsClassifyAuditPol(command, args, builder)
 	case "set-mppreference":
 		windowsClassifySetMPPreference(command, args, builder)
+	case "add-mppreference":
+		windowsClassifyAddMPPreference(command, builder)
 	case "wbadmin", "wbadmin.exe", "wmic", "wmic.exe":
 		windowsClassifyRecoveryStore(command, args, builder)
 	case "nmap", "nmap.exe", "masscan", "masscan.exe", "fping", "fping.exe":
@@ -2008,6 +2016,8 @@ func windowsClassifyCMD(
 		windowsClassifyRegistry(command, args, builder)
 	case "procdump", "procdump.exe":
 		windowsClassifyLSASSDump(command, args, builder)
+	case "ntdsutil", "ntdsutil.exe":
+		windowsClassifyNTDSIFMDump(command, args, builder)
 	case "fsutil", "fsutil.exe":
 		windowsClassifyFSUtil(command, args, builder)
 	case "vssadmin", "vssadmin.exe":

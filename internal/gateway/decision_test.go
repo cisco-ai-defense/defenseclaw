@@ -250,7 +250,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		v := &ScanVerdict{
 			Action:   guardrailActionBlock,
 			Severity: "HIGH",
-			Reason:   "matched: CMD-NETCAT-LISTEN:Netcat listener",
+			Reason:   "matched: CMD-NETCAT-LISTEN:Netcat network-listener exposure",
 			Findings: []string{"CMD-NETCAT-LISTEN"},
 		}
 		clampPromptDirectionVerdict(v, "prompt")
@@ -266,7 +266,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		// Reason must keep the original match text AND add the
 		// audit marker — otherwise operators who grep for the
 		// rule ID lose the original signal.
-		if !strings.Contains(v.Reason, "CMD-NETCAT-LISTEN:Netcat listener") {
+		if !strings.Contains(v.Reason, "CMD-NETCAT-LISTEN:Netcat network-listener exposure") {
 			t.Errorf("original reason lost; got %q", v.Reason)
 		}
 		if !strings.Contains(v.Reason, "policy-action=block") {

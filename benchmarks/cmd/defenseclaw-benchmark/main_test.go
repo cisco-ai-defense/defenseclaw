@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/benchmarks/internal/benchmark"
@@ -136,6 +137,85 @@ func TestRunBenchmarkEvaluatesRowsPromotedByTruthOverlay(t *testing.T) {
 	}
 	if !predictions[0].Applicable || predictions[0].Action == "not_applicable" {
 		t.Fatalf("prediction=%+v, want evaluated in-scope row", predictions[0])
+	}
+	var environment benchmark.Environment
+	environmentData, err := os.ReadFile(filepath.Join(outputDir, "environment.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(environmentData, &environment); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(environment.Profiles, []string{"default"}) ||
+		len(environment.OptInPolicyPacks) != 0 || environment.OptInPolicyRoot != "" ||
+		len(environment.PolicyPostures) != 0 {
+		t.Fatalf("standard-only environment changed: %+v", environment)
+	}
+}
+
+func TestRunBenchmarkLoadsAndLabelsOptInPolicyPack(t *testing.T) {
+	dir := t.TempDir()
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	outputDir := filepath.Join(dir, "output")
+	if err := runBenchmark([]string{
+		"--corpus", filepath.Join(repoRoot, "benchmarks", "fixtures", "cloud-production-conformance-v1.jsonl"),
+		"--dataset-lock", filepath.Join(repoRoot, "benchmarks", "datasets.lock.json"),
+		"--repo-root", repoRoot,
+		"--profiles", "default",
+		"--opt-in-packs", "cloud-production-protection",
+		"--run-id", "opt-in-pack-cli-test",
+		"--output", outputDir,
+	}, &bytes.Buffer{}); err != nil {
+		t.Fatal(err)
+	}
+	predictions, err := readPredictions(filepath.Join(outputDir, "predictions.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(predictions) != 58 {
+		t.Fatalf("predictions=%d, want 58", len(predictions))
+	}
+	var selected benchmark.Prediction
+	for _, prediction := range predictions {
+		if prediction.Profile == "opt-in/cloud-production-protection" &&
+			prediction.CaseID == "cloud-v1/aws-s3-recursive" {
+			selected = prediction
+		}
+	}
+	if selected.Action != "block" || selected.Severity != "CRITICAL" {
+		t.Fatalf("selected opt-in prediction=%+v", selected)
+	}
+	var environment benchmark.Environment
+	environmentData, err := os.ReadFile(filepath.Join(outputDir, "environment.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(environmentData, &environment); err != nil {
+		t.Fatal(err)
+	}
+	wantProfiles := []string{"default", "opt-in/cloud-production-protection"}
+	if !reflect.DeepEqual(environment.Profiles, wantProfiles) ||
+		!reflect.DeepEqual(environment.OptInPolicyPacks, []string{"cloud-production-protection"}) ||
+		environment.PolicyPostures["opt-in/cloud-production-protection"] != "default" ||
+		environment.PolicyDigests["opt-in/cloud-production-protection"] == "" {
+		t.Fatalf("opt-in environment=%+v", environment)
+	}
+}
+
+func TestParseOptInPolicyPacks(t *testing.T) {
+	got, err := parseOptInPolicyPacks("cloud-production-protection, privacy-high-assurance,cloud-production-protection")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"cloud-production-protection", "privacy-high-assurance"}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("packs=%v, want %v", got, want)
+	}
+	if _, err := parseOptInPolicyPacks("../strict"); err == nil {
+		t.Fatal("path-like opt-in policy pack was accepted")
 	}
 }
 

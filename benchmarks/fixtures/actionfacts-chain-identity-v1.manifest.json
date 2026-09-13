@@ -252,7 +252,7 @@
     "chain.download_decode_execute_same_artifact": 2,
     "chain.secret_read_then_egress": 8
   },
-  "corpus_sha256": "18629ffabf30e23f9c067c8e191597349b72abfb167669755efa86721f4e3e6e",
+  "corpus_sha256": "97ca7f9aec77a177db8fd2b42a6b3bf2db24856b26b972c7b57f27a3dae6c45e",
   "dataset_lock": "benchmarks/fixtures/actionfacts-chain-identity-v1.datasets.lock.json",
   "execution_performed": false,
   "fixture": "benchmarks/fixtures/actionfacts-chain-identity-v1.jsonl",

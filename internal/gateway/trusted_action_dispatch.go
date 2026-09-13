@@ -161,6 +161,7 @@ func dispatchTrustedAction(
 
 	excluded := make(map[string]struct{})
 	semanticFindings := make([]RuleFinding, 0, len(generation.semanticRules))
+	matchedSemanticOwnerIDs := make(map[string]struct{})
 	var enforcementFacts actionfacts.Facts
 	var enforcementProjection *semanticpb.Facts
 	enforcementProjected := false
@@ -171,6 +172,9 @@ func dispatchTrustedAction(
 		if ctx.Err() != nil ||
 			consumedCost >= trustedActionDispatchMaxCost {
 			break
+		}
+		if _, alreadyMatched := matchedSemanticOwnerIDs[candidate.rule.ID]; alreadyMatched {
+			continue
 		}
 		if !candidate.owner.eligible(facts) {
 			if candidate.owner.suppressFallback != nil &&
@@ -220,6 +224,9 @@ func dispatchTrustedAction(
 		}
 
 		excludeSemanticOwner(excluded, candidate.owner, true)
+		for _, claimedID := range candidate.owner.claimedIDs(true) {
+			matchedSemanticOwnerIDs[claimedID] = struct{}{}
+		}
 		finding := RuleFinding{
 			RuleID:      candidate.rule.ID,
 			Title:       candidate.rule.Title,
@@ -283,6 +290,18 @@ func dispatchTrustedAction(
 		request.Input.Tool,
 		options,
 	)
+	legacyFindings = appendTrustedFIFOListenerBindShellFinding(
+		legacyFindings,
+		generation,
+		request.Input,
+		facts,
+	)
+	legacyFindings = appendTrustedBoundedExactFallbackFindings(
+		legacyFindings,
+		generation,
+		request.Input,
+		facts,
+	)
 	legacyFindings = appendTrustedWindowsPathFactFindings(
 		legacyFindings,
 		facts,
@@ -342,12 +361,69 @@ func excludeSemanticOwner(
 }
 
 type exactFallbackContract struct {
-	proves                func(actionfacts.Input, actionfacts.Facts) bool
-	boundedSubgraphProves func(actionfacts.Input, actionfacts.Facts) bool
-	detectionOnly         bool
+	proves                      func(actionfacts.Input, actionfacts.Facts) bool
+	boundedSubgraphProves       func(actionfacts.Input, actionfacts.Facts) bool
+	requiresExactDetectionProof bool
+	detectionOnly               bool
+	codeOwnedDetection          bool
+	alertOnly                   bool
 }
 
 var exactFallbackContracts = map[string]exactFallbackContract{
+	"integrity.dpkg_status_direct_mutation": {
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXDPKGStatusMutation(facts) ||
+				actionfacts.ExactSubmittedPOSIXDPKGStatusHeredocMutation(input)
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			return actionfacts.ExactSubmittedPOSIXDPKGStatusHeredocMutation(input)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
+	"integrity.kernel_control_bind_override": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXKernelControlBindOverride(facts)
+		},
+		requiresExactDetectionProof: true,
+		detectionOnly:               true,
+	},
+	"impact.protected_kernel_control_bind_override": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXKernelControlBindOverride(facts)
+		},
+		requiresExactDetectionProof: true,
+	},
+	"PATH-ETC-SHADOW": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return shadowContentAccessPrerequisite(facts)
+		},
+	},
+	"privilege.posix_non_root_uid_zero_account_write": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXNonRootUIDZeroAccountWrite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXNonRootUIDZeroAccountWrite(facts)
+		},
+	},
+	"privilege.sudoers_unrestricted_nopasswd": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPOSIXUnrestrictedSudoersGrantWrite(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
+	"persistence.malicious_download_execute_payload": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactMaliciousPersistencePayload(facts)
+		},
+		detectionOnly: true,
+	},
 	"persistence.global_ld_preload_install": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return globalLDPreloadInstallPrerequisite(facts)
@@ -373,6 +449,16 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		detectionOnly: true,
 	},
+	"credential.windows_ntds_ifm_dump": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactWindowsNTDSIFMDump(facts)
+		},
+	},
+	"credential.directory_credential_acquisition": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactDirectoryCredentialAcquisition(facts)
+		},
+	},
 	"impact.windows_delete_all_shadow_copies": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactWindowsVSSDeleteAllShadows(facts)
@@ -387,6 +473,14 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactWindowsUSNJournalDelete(facts)
+		},
+	},
+	"tamper.windows_recursive_everyone_full_control": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactWindowsRecursiveEveryoneFullControl(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactWindowsRecursiveEveryoneFullControl(facts)
 		},
 	},
 	"impact.windows_recovery_disable_pair": {
@@ -581,6 +675,33 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactPOSIXSystemLogDestruction(facts)
 		},
+		detectionOnly: true,
+	},
+	"privilege.temporary_setuid_executable": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactTemporarySetuidExecutable(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactTemporarySetuidExecutable(facts)
+		},
+	},
+	"privilege.custom_root_suid_implant": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactCustomRootSUIDImplant(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactCustomRootSUIDImplant(facts)
+		},
+		requiresExactDetectionProof: true,
+	},
+	"privilege.pkroot_setuid_shell": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPKRootSetuidShell(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPKRootSetuidShell(facts)
+		},
+		requiresExactDetectionProof: true,
 	},
 	"exec.remote_ip_download_execute_same_artifact": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -633,6 +754,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return filesystemWipePrerequisite(facts)
 		},
+		detectionOnly: true,
 	},
 	"CMD-CRONTAB": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -685,6 +807,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"wget.exe",
 			)
 		},
+		detectionOnly: true,
 	},
 	"CMD-PIPE-BASE64": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -695,6 +818,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 				"base64.exe",
 			)
 		},
+		detectionOnly: true,
 	},
 	"CMD-REVSHELL-BASH": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -706,6 +830,9 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return staticReverseShellPrerequisite(facts)
 		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return staticReverseShellPrerequisite(facts)
+		},
 	},
 	"CMD-SOCAT-EXEC": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -714,13 +841,26 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 	},
 	"CMD-REVSHELL-DEVTCP": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
-			return devTCPFallbackProof(facts, false)
+			return devTCPFallbackProof(facts, false) ||
+				scriptDevTCPReverseShellProof(facts)
 		},
 	},
 	"CMD-REVSHELL-PYTHON": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return pythonSocketFallbackProof(facts)
 		},
+	},
+	"CMD-REVSHELL-POWERSHELL-TCP": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPowerShellTCPCommandLoop(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactPowerShellTCPCommandLoop(facts)
+		},
+		// The PowerShell parser intentionally remains partial around dynamic
+		// evaluation. Preserve the exact closed-grammar proof as detection-only.
+		requiresExactDetectionProof: true,
+		detectionOnly:               true,
 	},
 	"exec.reverse_tunnel": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -756,6 +896,7 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return hostNamespaceEntryFallbackProof(facts)
 		},
+		detectionOnly: true,
 	},
 	"privilege.container_host_escape": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
@@ -1029,13 +1170,16 @@ func devTCPFallbackProof(
 			requireShell && !shellProgram(command.Program) {
 			continue
 		}
+		if !actionfacts.ProvesPOSIXInteractiveShell(command) {
+			continue
+		}
 		if hasCommandDataFlow(
 			facts,
 			command.ID,
 			0,
 			actionfacts.DataProcess,
 			actionfacts.DataNetwork,
-		) || hasCommandDataFlow(
+		) && hasCommandDataFlow(
 			facts,
 			0,
 			command.ID,
@@ -1049,14 +1193,13 @@ func devTCPFallbackProof(
 		// `exec N<>/dev/tcp/...`. Require both directions on the same typed
 		// command so one-way health probes and file transfers do not inherit
 		// reverse-shell ownership.
-		if actionfacts.ProvesPOSIXInteractiveShell(command) &&
-			hasCommandDataFlow(
-				facts,
-				0,
-				command.ID,
-				actionfacts.DataNetwork,
-				actionfacts.DataStdin,
-			) && hasCommandDataFlow(
+		if hasCommandDataFlow(
+			facts,
+			0,
+			command.ID,
+			actionfacts.DataNetwork,
+			actionfacts.DataStdin,
+		) && hasCommandDataFlow(
 			facts,
 			command.ID,
 			0,
@@ -1075,6 +1218,35 @@ func devTCPFallbackProof(
 				len(command.Redirects) != 0 {
 				return true
 			}
+		}
+	}
+	return false
+}
+
+func scriptDevTCPReverseShellProof(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if command.Dialect != actionfacts.DialectPOSIX ||
+			command.ControlFlowUncertain || command.ParentCommandID != 0 ||
+			command.PipelineID != 0 || command.Effect != actionfacts.EffectExecute ||
+			command.Program != "script" || !command.ArgvComplete ||
+			len(command.Wrappers) != 0 || len(command.Redirects) != 0 {
+			continue
+		}
+		var nested string
+		switch {
+		case len(command.Argv) == 4 && command.Argv[1] == "-qc" && command.Argv[3] == "/dev/null":
+			nested = command.Argv[2]
+		case len(command.Argv) == 5 && command.Argv[1] == "-q" &&
+			command.Argv[2] == "-c" && command.Argv[4] == "/dev/null":
+			nested = command.Argv[3]
+		default:
+			continue
+		}
+		projected := actionfacts.Analyze(actionfacts.Input{
+			Tool: "shell", Command: nested, DialectHint: actionfacts.DialectPOSIX,
+		})
+		if devTCPFallbackProof(projected, true) {
+			return true
 		}
 	}
 	return false
@@ -1330,6 +1502,9 @@ func filterExactFallbackFindings(
 				getNestedActions(),
 			)
 		}
+		if contract.requiresExactDetectionProof && !matched {
+			continue
+		}
 		if !preserveUnstructured && !matched {
 			continue
 		}
@@ -1347,7 +1522,9 @@ func filterExactFallbackFindings(
 			)
 		}
 		proven = proven || boundedSubgraphProven
-		if contract.detectionOnly || !enforcementCapable || !proven {
+		if contract.alertOnly && enforcementCapable && matched {
+			finding.enforcement = findingEnforcementAlertOnly
+		} else if contract.detectionOnly || !enforcementCapable || !proven {
 			finding.enforcement = findingEnforcementDetectionOnly
 		} else {
 			finding.enforcement = findingEnforcementAllowed
@@ -1449,6 +1626,18 @@ func dispatchTrustedFallback(
 		request.Input.Tool,
 		options,
 	)
+	findings = appendTrustedFIFOListenerBindShellFinding(
+		findings,
+		generation,
+		request.Input,
+		facts,
+	)
+	findings = appendTrustedBoundedExactFallbackFindings(
+		findings,
+		generation,
+		request.Input,
+		facts,
+	)
 	findings = appendTrustedWindowsPathFactFindings(
 		findings,
 		facts,
@@ -1495,18 +1684,103 @@ func dispatchTrustedFallback(
 	), fallbackTelemetry
 }
 
+// appendTrustedBoundedExactFallbackFindings scans the extracted trusted
+// command, not its JSON serialization, for rules whose code-owned contract
+// proves an exact bounded subgraph. Go's JSON encoder escapes shell redirect
+// characters such as '>', which can otherwise hide a valid catalog candidate.
+// Most recoveries require both the active profile's regex and deterministic
+// contract. A contract may explicitly declare a code-owned detection grammar;
+// that lane still requires the rule to exist in the active profile catalog.
+func appendTrustedBoundedExactFallbackFindings(
+	findings []RuleFinding,
+	generation *compiledRulePackCategories,
+	input actionfacts.Input,
+	facts actionfacts.Facts,
+) []RuleFinding {
+	commandText := trustedActionInputText(input, "")
+	seen := make(map[string]struct{}, len(findings))
+	for _, finding := range findings {
+		seen[finding.RuleID] = struct{}{}
+	}
+	for ruleID, contract := range exactFallbackContracts {
+		if contract.boundedSubgraphProves == nil ||
+			!contract.boundedSubgraphProves(input, facts) {
+			continue
+		}
+		if _, ok := seen[ruleID]; ok {
+			continue
+		}
+		_, rule, ok := trustedActionCatalogRule(generation, ruleID)
+		if !ok || (!contract.codeOwnedDetection &&
+			(strings.TrimSpace(commandText) == "" || rule.Pattern == nil || !rule.Pattern.MatchString(commandText))) {
+			continue
+		}
+		evidence := commandText
+		if strings.TrimSpace(evidence) == "" {
+			evidence = input.Tool
+		}
+		finding := RuleFinding{
+			RuleID:      rule.ID,
+			Title:       rule.Title,
+			Severity:    rule.Severity,
+			Confidence:  rule.Confidence,
+			Evidence:    evidence,
+			Tags:        append([]string(nil), rule.Tags...),
+			LineNumber:  1,
+			enforcement: findingEnforcementAllowed,
+		}
+		findings = append(findings, adjustConfidence(input.Tool, finding))
+		seen[ruleID] = struct{}{}
+	}
+	return findings
+}
+
 func finalizeTrustedActionFindings(
 	generation *compiledRulePackCategories,
 	request trustedActionRequest,
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) []RuleFinding {
+	findings = deduplicateTrustedActionFindings(findings)
 	findings = applyTrustedActionContextDisposition(
 		generation,
 		facts,
 		findings,
 	)
 	return applyTrustedActionProofBoundary(findings, request.EnforcementCapable)
+}
+
+// deduplicateTrustedActionFindings collapses both exact duplicate rule IDs and
+// equivalent aliases claimed by one semantic owner. Recovery lanes may prove
+// the same action independently; that strengthens provenance but must not
+// inflate finding counts or operator noise.
+func deduplicateTrustedActionFindings(findings []RuleFinding) []RuleFinding {
+	deduplicated := make([]RuleFinding, 0, len(findings))
+	positions := make(map[string]int, len(findings))
+	for _, finding := range findings {
+		key := canonicalTrustedRuleID(finding.RuleID)
+		owner, claimed := trustedSemanticOwnerClaimingRule(finding.RuleID)
+		if claimed {
+			key = canonicalTrustedRuleID(owner.id)
+		}
+		if position, duplicate := positions[key]; duplicate {
+			current := deduplicated[position]
+			candidateRank := severityRank[strings.ToUpper(strings.TrimSpace(finding.Severity))]
+			currentRank := severityRank[strings.ToUpper(strings.TrimSpace(current.Severity))]
+			candidateCanonical := claimed && canonicalTrustedRuleID(finding.RuleID) == key
+			currentCanonical := canonicalTrustedRuleID(current.RuleID) == key
+			if candidateRank > currentRank ||
+				(candidateRank == currentRank && finding.Confidence > current.Confidence) ||
+				(candidateRank == currentRank && finding.Confidence == current.Confidence &&
+					candidateCanonical && !currentCanonical) {
+				deduplicated[position] = finding
+			}
+			continue
+		}
+		positions[key] = len(deduplicated)
+		deduplicated = append(deduplicated, finding)
+	}
+	return deduplicated
 }
 
 // trustedFixtureSourceInspectionAction identifies the one tool-call shape in
@@ -1751,10 +2025,16 @@ func filterTrustedLegacyActionContext(
 			filtered = append(filtered, finding)
 			continue
 		}
-		if contract, ok := exactFallbackContracts[finding.RuleID]; ok &&
-			contract.detectionOnly && noRecoverableCommandFacts(facts) {
-			filtered = append(filtered, finding)
-			continue
+		if contract, ok := exactFallbackContracts[finding.RuleID]; ok {
+			proven := contract.proves != nil && contract.proves(input, facts)
+			if contract.requiresExactDetectionProof && !proven {
+				continue
+			}
+			if contract.detectionOnly &&
+				(noRecoverableCommandFacts(facts) || proven) {
+				filtered = append(filtered, finding)
+				continue
+			}
 		}
 		category := trustedLegacyRuleCategory(generation, finding.RuleID)
 		if downgradeReadOnlyDataArgs &&

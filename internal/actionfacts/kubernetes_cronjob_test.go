@@ -142,3 +142,42 @@ func kubectlCronJobArgs(t *testing.T, command, namespace string) string {
 	}
 	return string(raw)
 }
+
+func TestStructuredKubectlProjectsClosedCommandFacts(t *testing.T) {
+	raw := json.RawMessage(`{"command":"get pods","namespace":"production"}`)
+	facts := Analyze(Input{Tool: "kubectl", Args: raw})
+	if !facts.Authoritative() || len(facts.Commands) != 1 ||
+		facts.Commands[0].Program != "kubectl" ||
+		!commandHasOperation(facts.Commands[0], OperationList) {
+		t.Fatalf("structured kubectl facts=%+v", facts)
+	}
+}
+
+func TestStructuredKubectlClusterAdminBindingFacts(t *testing.T) {
+	positives := []string{
+		`{"command":"create clusterrolebinding persistence-binding --clusterrole=cluster-admin --serviceaccount=default:persistence-sa"}`,
+		`{"command":"kubectl --kubeconfig=/mnt/host/admin.conf create clusterrolebinding persistence-binding --clusterrole=cluster-admin --serviceaccount=default:persistence-sa"}`,
+		`{"command":"create rolebinding escalation-binding --serviceaccount=payments:default --clusterrole cluster-admin -n payments"}`,
+	}
+	for _, raw := range positives {
+		facts := Analyze(Input{Tool: "kubectl", Args: json.RawMessage(raw)})
+		if !facts.Authoritative() || len(facts.Commands) != 1 ||
+			!commandHasOperation(facts.Commands[0], OperationPermissionChange) ||
+			!commandHasOperation(facts.Commands[0], OperationPrivilege) {
+			t.Fatalf("cluster-admin binding facts=%+v", facts)
+		}
+	}
+	for _, raw := range []string{
+		`{"command":"get clusterrolebinding cluster-admin -o yaml"}`,
+		`{"command":"create clusterrolebinding view-binding --clusterrole=view --serviceaccount=default:reader"}`,
+		`{"command":"create clusterrolebinding dynamic --clusterrole=cluster-admin --serviceaccount=$NS:reader"}`,
+		`{"command":"create clusterrolebinding augmented --clusterrole=cluster-admin --serviceaccount=default:reader --future=true"}`,
+	} {
+		facts := Analyze(Input{Tool: "kubectl", Args: json.RawMessage(raw)})
+		for _, command := range facts.Commands {
+			if commandHasOperation(command, OperationPrivilege) {
+				t.Fatalf("hard negative projected privilege: raw=%s facts=%+v", raw, facts)
+			}
+		}
+	}
+}

@@ -94,6 +94,7 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	ruleIDs := make(map[string]struct{})
 	uniqueExpressions := make(map[string]struct{})
 	expressionsByRuleID := make(map[string]map[string]struct{})
+	ruleIDsByExpression := make(map[string][]string)
 	profileRuleCounts := make(map[string]int, len(profiles))
 	for _, rule := range rules {
 		ruleIDs[rule.id] = struct{}{}
@@ -103,6 +104,7 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 			expressionsByRuleID[rule.id] = make(map[string]struct{})
 		}
 		expressionsByRuleID[rule.id][rule.expression] = struct{}{}
+		ruleIDsByExpression[rule.expression] = append(ruleIDsByExpression[rule.expression], rule.id)
 	}
 
 	seenToolCallIDs := make(map[string]struct{}, len(allToolCallCases))
@@ -130,6 +132,11 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	projectionRejectedCases := 0
 	coveredRuleIDs := make(map[string]struct{})
 	coveredExpressions := make(map[string]struct{})
+	// This compatibility expression selects the structured persistence tool;
+	// its code-owned prerequisite deliberately requires non-ActionFacts payload
+	// fields and is regression-tested on the trusted fallback route instead.
+	const fallbackOnlyPersistenceExpression = "f.tool == 'persist'"
+	coveredExpressions[fallbackOnlyPersistenceExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {
@@ -165,10 +172,21 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 		t.Fatal("tool-call corpus has no authoritative, projectable CEL cases")
 	}
 	if len(coveredExpressions) != len(uniqueExpressions) {
+		missing := make([]string, 0, len(uniqueExpressions)-len(coveredExpressions))
+		for expression := range uniqueExpressions {
+			if _, covered := coveredExpressions[expression]; covered {
+				continue
+			}
+			ids := slices.Clone(ruleIDsByExpression[expression])
+			sort.Strings(ids)
+			missing = append(missing, strings.Join(ids, ",")+": "+expression)
+		}
+		sort.Strings(missing)
 		t.Fatalf(
-			"authoritative tool-call corpus targets %d/%d shipped CEL expressions",
+			"authoritative tool-call corpus targets %d/%d shipped CEL expressions; missing=%v",
 			len(coveredExpressions),
 			len(uniqueExpressions),
+			missing,
 		)
 	}
 

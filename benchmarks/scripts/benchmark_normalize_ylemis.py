@@ -124,7 +124,8 @@ def main() -> int:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
     manifest["output_sha256"] = sha256_file(args.output)
     args.output.with_suffix(".manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n")
-    print(json.dumps({key: manifest[key] for key in ("cases", "sensitive_cases", "benign_cases", "output_sha256")}, sort_keys=True))
+    summary_keys = ("cases", "sensitive_cases", "benign_cases", "output_sha256")
+    print(json.dumps({key: manifest[key] for key in summary_keys}, sort_keys=True))
     return 0
 
 

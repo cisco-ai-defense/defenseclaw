@@ -55,6 +55,31 @@ go run ./benchmarks/cmd/defenseclaw-benchmark verify \
 The runner writes case-level predictions, environment and policy inventories,
 aggregate metrics, corpus and dataset manifests, and checksums.
 
+## Run an opt-in policy pack
+
+Opt-in policy packs are separate benchmark lanes, not additional runtime
+profiles. Select them by their repository name; each runs with the balanced
+(`default`) action posture and is reported under an `opt-in/<name>` label:
+
+```bash
+go run ./benchmarks/cmd/defenseclaw-benchmark run \
+  --corpus benchmarks/fixtures/cloud-production-conformance-v1.jsonl \
+  --dataset-lock benchmarks/datasets.lock.json \
+  --profiles default \
+  --opt-in-packs cloud-production-protection \
+  --output outputs/benchmarks/cloud-production-conformance
+
+go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/cloud-production-conformance
+```
+
+Supported names are `cloud-production-protection`,
+`database-destruction-protection`, `infrastructure-destruction-protection`,
+`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+environment records each lane's policy digest, policy root, and action posture.
+Standard `default`, `permissive`, and `strict` runs are unchanged when
+`--opt-in-packs` is omitted.
+
 ## Prepare public sources
 
 Set an ignored data root and download only the sources needed for a run:

@@ -31,6 +31,20 @@ func TestEndpointSecurityProductDisableProfilePosture(t *testing.T) {
 			cwd:     "/repo",
 		},
 		{
+			name:    "falcon sensor disable now",
+			command: "systemctl disable --now falcon-sensor",
+			dialect: actionfacts.DialectPOSIX,
+			tool:    "shell",
+			cwd:     "/repo",
+		},
+		{
+			name:    "sentinelone",
+			command: "sudo /opt/sentinelone/bin/sentinelctl control disable",
+			dialect: actionfacts.DialectPOSIX,
+			tool:    "shell",
+			cwd:     "/repo",
+		},
+		{
 			name: "carbon black",
 			command: "sudo launchctl unload /Library/LaunchDaemons/com.carbonblack.daemon.plist\n" +
 				"sudo launchctl unload /Library/LaunchDaemons/com.carbonblack.defense.daemon.plist",
@@ -55,6 +69,20 @@ func TestEndpointSecurityProductDisableProfilePosture(t *testing.T) {
 		{
 			name:    "microsoft defender for endpoint",
 			command: "sudo mdatp config real-time-protection --value disabled",
+			dialect: actionfacts.DialectPOSIX,
+			tool:    "shell",
+			cwd:     "/repo",
+		},
+		{
+			name:    "sentinelone exact disable",
+			command: "sudo /opt/sentinelone/bin/sentinelctl control disable",
+			dialect: actionfacts.DialectPOSIX,
+			tool:    "shell",
+			cwd:     "/repo",
+		},
+		{
+			name:    "falcon disable now",
+			command: "systemctl disable --now falcon-sensor.service",
 			dialect: actionfacts.DialectPOSIX,
 			tool:    "shell",
 			cwd:     "/repo",
@@ -136,6 +164,42 @@ func TestEndpointSecurityProductDisableFallbackContract(t *testing.T) {
 		{
 			name:    "augmented sysmon uninstall",
 			command: "sysmon -u force",
+		},
+		{
+			name:    "exact sentinelone disable",
+			command: "/opt/sentinelone/bin/sentinelctl control disable",
+			want:    true,
+		},
+		{
+			name:    "nearby sentinelone executable",
+			command: "/tmp/sentinelctl control disable",
+		},
+		{
+			name:    "exact falcon disable now",
+			command: "systemctl disable --now falcon-sensor.service",
+			want:    true,
+		},
+		{
+			name:    "falcon disable without immediate stop",
+			command: "systemctl disable falcon-sensor",
+		},
+		{
+			name:    "sentinelone exact path",
+			command: "sudo /opt/sentinelone/bin/sentinelctl control disable",
+			want:    true,
+		},
+		{
+			name:    "sentinelone untrusted basename",
+			command: "sudo /tmp/sentinelctl control disable",
+		},
+		{
+			name:    "falcon disable now",
+			command: "systemctl disable --now falcon-sensor",
+			want:    true,
+		},
+		{
+			name:    "falcon disable without now",
+			command: "systemctl disable falcon-sensor",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

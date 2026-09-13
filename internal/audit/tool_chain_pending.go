@@ -73,6 +73,11 @@ type ToolChainResolvePendingInput struct {
 	RulesetFingerprint       string
 	TerminalSemanticEventID  SemanticEventID
 	TerminalInputFingerprint string
+	// SuccessfulReadPathDigest rebinds a result envelope's trusted path/type to
+	// the exact pre-tool sensitive-read projection. Value digests are keyed,
+	// bounded, and never accepted without that identity match.
+	SuccessfulReadPathDigest   string
+	SuccessfulReadValueDigests guardrail.ToolChainValueJoinDigests
 }
 
 type ToolChainResolvePendingResult struct {
@@ -392,6 +397,21 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		EnforcementStepMask:          pending.enforcementSteps,
 		EnforcementJoinDigests:       pending.enforcementJoinDigests,
 		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
+	}
+	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		)
+		definition, definitionOK := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainSensitiveReadValueExternalTransmit,
+		)
+		if !ok || !definitionOK ||
+			projection.DetectionStepMask&definition.Step1Bit == 0 ||
+			input.SuccessfulReadPathDigest == "" ||
+			input.SuccessfulReadPathDigest != projection.EnforcementJoinDigests[index] {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
+		projection.ValueJoinDigests[index] = input.SuccessfulReadValueDigests
 	}
 	if projection.DetectionStepMask == 0 {
 		// A successfully resolved but semantically unrelated tool call still
@@ -849,9 +869,44 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 		return err
 	}
 	if input.Outcome != ToolChainPendingOutcomeSuccess {
+		if input.SuccessfulReadPathDigest != "" ||
+			input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+			return errors.New("audit: unsuccessful pending result contains value lineage")
+		}
 		return nil
 	}
-	return validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true)
+	if err := validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true); err != nil {
+		return err
+	}
+	if input.SuccessfulReadValueDigests == (guardrail.ToolChainValueJoinDigests{}) {
+		if input.SuccessfulReadPathDigest != "" {
+			return errors.New("audit: read path digest has no value lineage")
+		}
+		return nil
+	}
+	if err := validateSHA256(
+		"successful read path digest", input.SuccessfulReadPathDigest, true,
+	); err != nil {
+		return err
+	}
+	index, ok := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	)
+	if !ok {
+		return ErrToolChainIntegrity
+	}
+	definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	)
+	if !ok {
+		return ErrToolChainIntegrity
+	}
+	projection := guardrail.ToolChainProjection{
+		ParseStatus:       actionfacts.StatusComplete,
+		DetectionStepMask: definition.Step1Bit,
+	}
+	projection.ValueJoinDigests[index] = input.SuccessfulReadValueDigests
+	return guardrail.ValidateToolChainProjection(projection)
 }
 
 func validateToolChainDiscardPendingInput(

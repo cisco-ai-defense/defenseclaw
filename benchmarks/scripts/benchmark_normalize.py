@@ -154,6 +154,9 @@ def make_case(
     hard_negative: bool = False,
     label_priority: int = 50,
     split_group: str = "",
+    deterministic_truth: str = "",
+    label_confidence: str = "",
+    label_source: str = "",
 ) -> dict[str, object]:
     dataset_id = str(locked["id"])
     group_material = split_group or original_id
@@ -162,6 +165,18 @@ def make_case(
         inferred_dialect = dialect
     cwd = r"C:\repo" if inferred_platform == "windows" else "/repo"
     active_home = r"C:\Users\alice" if inferred_platform == "windows" else "/home/alice"
+    truth: dict[str, object] = {
+        "source_truth": source_truth,
+        "applicability": "in_scope",
+        "expected_disposition": disposition,
+        "categories": categories,
+    }
+    if deterministic_truth:
+        truth["deterministic_truth"] = deterministic_truth
+    if label_confidence:
+        truth["label_confidence"] = label_confidence
+    if label_source:
+        truth["label_source"] = label_source
     return {
         "_label_priority": label_priority,
         "schema_version": SCHEMA_VERSION,
@@ -182,12 +197,7 @@ def make_case(
             "cwd": cwd,
             "active_home": active_home,
         },
-        "truth": {
-            "source_truth": source_truth,
-            "applicability": "in_scope",
-            "expected_disposition": disposition,
-            "categories": categories,
-        },
+        "truth": truth,
         "strata": {
             "platform": inferred_platform,
             "dialect": inferred_dialect,
@@ -445,16 +455,27 @@ def jsonl_rows(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
 
 
 def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Iterator[dict[str, object]]:
-    # Prefer the independently annotated replay subset. The source's Vi harm
-    # index is mapped conservatively: only 3-4 is block truth; 0-2 remains a
-    # malicious detection-positive but blocking-negative example.
+    # The dataset establishes that these commands came from authenticated
+    # honeypot attack sessions, but neither that context nor the response-level
+    # Vi harm index proves that an isolated command is deterministically
+    # malicious. Preserve every command as a source-positive, detect-only
+    # candidate. An independent proof finalizer may promote exact actions later.
+    statistics = ADAPTER_STATISTICS.setdefault("shell-attack-evolution", {})
     curated = root / "request_response" / "curated.jsonl"
     for line_number, row in jsonl_rows(curated):
+        statistics["curated_source_rows"] = statistics.get("curated_source_rows", 0) + 1
         command = normalize_command(str(row.get("command", "")))
         if not command:
+            statistics["empty_commands_excluded"] = statistics.get("empty_commands_excluded", 0) + 1
             continue
         severity = row.get("severity_vi")
-        disposition = "block" if isinstance(severity, int) and severity >= 3 else "detect_only"
+        severity_label = (
+            severity
+            if isinstance(severity, int) and not isinstance(severity, bool)
+            else "unknown"
+        )
+        severity_key = f"curated_harm_vi_{severity_label}"
+        statistics[severity_key] = statistics.get(severity_key, 0) + 1
         period = str(row.get("period", "unknown"))
         original_id = f"request_response/curated.jsonl:{line_number}"
         session_id = row.get("session_id")
@@ -470,17 +491,30 @@ def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Ite
             command,
             split,
             "malicious",
-            disposition,
-            ["honeypot-attack", "shell-attack", f"harm-vi-{severity}", f"period-{period}"],
+            "detect_only",
+            [
+                "honeypot-attack",
+                "provenance.silver",
+                "shell-attack",
+                f"harm-vi-{severity_label}",
+                f"period-{period}",
+            ],
             label_priority=100,
             split_group=group_material,
+            deterministic_truth="contextual_or_dual_use",
+            label_confidence="medium",
+            label_source="shell-attack-evolution:honeypot-capture-severity",
         )
 
     for path in sorted((root / "commands").glob("*.jsonl")):
         relative = path.relative_to(root).as_posix()
         for line_number, row in jsonl_rows(path):
+            statistics["command_source_rows"] = statistics.get("command_source_rows", 0) + 1
             command = normalize_command(str(row.get("command", "")))
             if not command:
+                statistics["empty_commands_excluded"] = (
+                    statistics.get("empty_commands_excluded", 0) + 1
+                )
                 continue
             period = str(row.get("period", path.stem))
             command_pattern = row.get("command_pattern")
@@ -496,9 +530,12 @@ def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Ite
                 split,
                 "malicious",
                 "detect_only",
-                ["honeypot-attack", "shell-attack", f"period-{period}"],
+                ["honeypot-attack", "provenance.silver", "shell-attack", f"period-{period}"],
                 label_priority=10,
                 split_group=group_material,
+                deterministic_truth="contextual_or_dual_use",
+                label_confidence="medium",
+                label_source="shell-attack-evolution:honeypot-capture",
             )
 
 

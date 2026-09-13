@@ -28,14 +28,16 @@ import (
 )
 
 type Runner struct {
-	RepoRoot     string
-	PolicyRoot   string
-	DataDir      string
-	RunID        string
-	Profiles     []string
-	SkillBinary  string
-	PluginBinary string
-	MCPBinary    string
+	RepoRoot         string
+	PolicyRoot       string
+	OptInPolicyRoot  string
+	DataDir          string
+	RunID            string
+	Profiles         []string
+	OptInPolicyPacks []string
+	SkillBinary      string
+	PluginBinary     string
+	MCPBinary        string
 	// MCPYARARulesDir selects a benchmark-owned YARA pack. MCP Scanner treats
 	// this directory as a replacement for its bundled rules, so callers should
 	// benchmark custom and upstream packs as separate, attributable lanes.
@@ -44,6 +46,13 @@ type Runner struct {
 	// EvaluateOutOfScope emits detector diagnostics for candidate corpora while
 	// keeping Applicable=false so those rows never enter publication scores.
 	EvaluateOutOfScope bool
+}
+
+type policyLane struct {
+	label    string
+	posture  string
+	packDir  string
+	standard bool
 }
 
 func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string]string, error) {
@@ -64,6 +73,11 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 			return nil, nil, err
 		}
 	}
+	for _, name := range r.OptInPolicyPacks {
+		if err := ValidateOptInPolicyPack(name); err != nil {
+			return nil, nil, err
+		}
+	}
 
 	embedded, err := guardrail.LoadRulePack("")
 	if err != nil {
@@ -74,25 +88,28 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 		_ = gateway.ApplyLocalPatternsOverride(embedded.LocalPatterns)
 	}()
 
+	lanes, err := r.policyLanes()
+	if err != nil {
+		return nil, nil, err
+	}
 	var predictions []Prediction
-	policyDigests := make(map[string]string, len(r.Profiles))
-	for _, profile := range r.Profiles {
-		profileDir := filepath.Join(r.policyRoot(), profile)
-		pack, err := guardrail.LoadRulePack(profileDir)
+	policyDigests := make(map[string]string, len(lanes))
+	for _, lane := range lanes {
+		pack, err := guardrail.LoadRulePack(lane.packDir)
 		if err != nil {
-			return nil, nil, fmt.Errorf("load %s profile: %w", profile, err)
+			return nil, nil, fmt.Errorf("load %s policy lane: %w", lane.label, err)
 		}
 		if err := gateway.ApplyRulePackOverrides(pack); err != nil {
-			return nil, nil, fmt.Errorf("activate %s profile rules: %w", profile, err)
+			return nil, nil, fmt.Errorf("activate %s policy lane rules: %w", lane.label, err)
 		}
 		if err := gateway.ApplyLocalPatternsOverride(pack.LocalPatterns); err != nil {
-			return nil, nil, fmt.Errorf("activate %s local patterns: %w", profile, err)
+			return nil, nil, fmt.Errorf("activate %s local patterns: %w", lane.label, err)
 		}
-		connector := "benchmark-" + profile
+		connector := "benchmark-" + strings.ReplaceAll(lane.label, "/", "-")
 		if err := gateway.ApplyConnectorRulePackOverrides(connector, pack); err != nil {
-			return nil, nil, fmt.Errorf("activate %s connector rules: %w", profile, err)
+			return nil, nil, fmt.Errorf("activate %s connector rules: %w", lane.label, err)
 		}
-		policyDigests[profile] = pack.Summary().Digest
+		policyDigests[lane.label] = pack.Summary().Digest
 		allowedRuleIDs := make(map[string]struct{})
 		for _, ruleFile := range pack.RuleFiles {
 			for _, definition := range ruleFile.Rules {
@@ -101,16 +118,16 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 		}
 		textInspector := gateway.NewGuardrailInspector("local", nil, nil, "")
 		textInspector.SetDetectionStrategy("regex_only", "", "", "", false)
-		textInspector.SetFallbackProfile(profile)
+		textInspector.SetFallbackProfile(lane.posture)
 
 		for _, benchmarkCase := range cases {
 			// Code and external artifact scanners own separate policies. Until a
 			// profile-specific scanner policy is selected by an adapter, run their
 			// public detector result exactly once instead of tripling the sample.
-			if profile != "default" && benchmarkCase.Surface != "text" && benchmarkCase.Surface != "action" && benchmarkCase.Surface != "stateful" && benchmarkCase.Surface != "e2e" {
+			if (!lane.standard || lane.label != "default") && benchmarkCase.Surface != "text" && benchmarkCase.Surface != "action" && benchmarkCase.Surface != "stateful" && benchmarkCase.Surface != "e2e" {
 				continue
 			}
-			prediction := r.runCase(ctx, profile, connector, textInspector, allowedRuleIDs, benchmarkCase)
+			prediction := r.runCase(ctx, lane.label, lane.posture, lane.packDir, connector, textInspector, allowedRuleIDs, benchmarkCase)
 			predictions = append(predictions, prediction)
 		}
 		gateway.RemoveConnectorRulePackOverrides(connector)
@@ -120,7 +137,7 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 
 func (r Runner) runCase(
 	ctx context.Context,
-	profile, connector string,
+	label, posture, packDir, connector string,
 	textInspector *gateway.GuardrailInspector,
 	allowedRuleIDs map[string]struct{},
 	benchmarkCase Case,
@@ -129,7 +146,7 @@ func (r Runner) runCase(
 		SchemaVersion: SchemaVersion,
 		RunID:         r.RunID,
 		CaseID:        benchmarkCase.ID,
-		Profile:       profile,
+		Profile:       label,
 		Applicable:    benchmarkCase.Truth.Applicability == InScope,
 		Action:        "not_applicable",
 		Severity:      "NONE",
@@ -147,15 +164,15 @@ func (r Runner) runCase(
 	case "text":
 		prediction = r.runText(caseCtx, textInspector, allowedRuleIDs, benchmarkCase, prediction)
 	case "action":
-		prediction = r.runAction(caseCtx, profile, connector, benchmarkCase, prediction)
+		prediction = r.runAction(caseCtx, posture, connector, benchmarkCase, prediction)
 	case "code":
 		prediction = r.runCode(caseCtx, benchmarkCase, prediction)
 	case "skill", "plugin", "mcp":
-		prediction = r.runArtifact(caseCtx, profile, benchmarkCase, prediction)
+		prediction = r.runArtifact(caseCtx, posture, benchmarkCase, prediction)
 	case "stateful":
-		prediction = r.runStateful(caseCtx, profile, connector, benchmarkCase, prediction)
+		prediction = r.runStateful(caseCtx, posture, connector, benchmarkCase, prediction)
 	case "e2e":
-		prediction = r.runE2E(caseCtx, profile, connector, benchmarkCase, prediction)
+		prediction = r.runE2E(caseCtx, posture, packDir, connector, benchmarkCase, prediction)
 	default:
 		prediction.Engine = engineForSurface(benchmarkCase.Surface)
 		prediction.Action = "error"
@@ -186,7 +203,7 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 			Args:             benchmarkRuntimeArgs(event.Args, event.Command != "" || len(event.Argv) != 0),
 			Command:          event.Command,
 			Argv:             append([]string(nil), event.Argv...),
-			CWD:              firstNonEmpty(event.CWD, "/repo"),
+			CWD:              benchmarkCWD(event.CWD, event.Args),
 			ActiveHome:       firstNonEmpty(event.ActiveHome, "/home/alice"),
 			ActiveAgentFiles: append([]string(nil), event.ActiveAgentFiles...),
 			DialectHint:      benchmarkDialect(event.Dialect),
@@ -210,9 +227,19 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 				EnforcementOutputJoinDigests: result.EnforcementOutputJoinDigests,
 			},
 		}
-		if event.Outcome != "" && event.Outcome != "succeeded" {
-			// A failed, denied, cancelled, or unresolved action cannot become a
-			// successful predecessor or sink in a deterministic sequence proof.
+		switch event.Outcome {
+		case "succeeded":
+		case "unknown":
+			// An unresolved result can support an attempted bounded-intent alert,
+			// but never a completed or enforcement-safe proof.
+			windowEvent.Projection.EnforcementStepMask = 0
+			windowEvent.Projection.EnforcementJoinDigests = [guardrail.ToolChainCount]string{}
+			windowEvent.Projection.EnforcementOutputJoinDigests = [guardrail.ToolChainCount]string{}
+		default:
+			// Failed, denied, cancelled, or missing outcomes cannot become a
+			// predecessor or sink in either proof lens. Missing outcomes are
+			// rejected by case validation; this default is defense in depth for
+			// callers that construct Case values directly.
 			windowEvent.Projection.DetectionStepMask = 0
 			windowEvent.Projection.EnforcementStepMask = 0
 			windowEvent.Projection.EnforcementJoinDigests = [guardrail.ToolChainCount]string{}
@@ -276,15 +303,14 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 	return prediction
 }
 
-func (r Runner) runE2E(ctx context.Context, profile, connector string, benchmarkCase Case, prediction Prediction) Prediction {
+func (r Runner) runE2E(ctx context.Context, profile, packDir, connector string, benchmarkCase Case, prediction Prediction) Prediction {
 	prediction.Engine = "gateway-http-inspect"
-	profileDir := filepath.Join(r.policyRoot(), profile)
 	result, err := gateway.EvaluateDeterministicHTTPMessage(
 		ctx,
 		benchmarkCase.Payload.Content,
 		benchmarkCase.Payload.Direction,
 		connector,
-		profileDir,
+		packDir,
 	)
 	if err != nil {
 		prediction.Action = "error"
@@ -307,6 +333,42 @@ func (r Runner) policyRoot() string {
 		return filepath.Clean(r.PolicyRoot)
 	}
 	return filepath.Join(r.RepoRoot, r.PolicyRoot)
+}
+
+func (r Runner) optInPolicyRoot() string {
+	if r.OptInPolicyRoot == "" {
+		return filepath.Join(r.RepoRoot, "policies", "guardrail-use-cases")
+	}
+	if filepath.IsAbs(r.OptInPolicyRoot) {
+		return filepath.Clean(r.OptInPolicyRoot)
+	}
+	return filepath.Join(r.RepoRoot, r.OptInPolicyRoot)
+}
+
+func (r Runner) policyLanes() ([]policyLane, error) {
+	lanes := make([]policyLane, 0, len(r.Profiles)+len(r.OptInPolicyPacks))
+	for _, profile := range r.Profiles {
+		lanes = append(lanes, policyLane{
+			label: profile, posture: profile,
+			packDir: filepath.Join(r.policyRoot(), profile), standard: true,
+		})
+	}
+	seen := make(map[string]struct{}, len(r.OptInPolicyPacks))
+	for _, name := range r.OptInPolicyPacks {
+		if _, exists := seen[name]; exists {
+			continue
+		}
+		seen[name] = struct{}{}
+		label, err := OptInPolicyLabel(name)
+		if err != nil {
+			return nil, err
+		}
+		lanes = append(lanes, policyLane{
+			label: label, posture: "default",
+			packDir: filepath.Join(r.optInPolicyRoot(), name),
+		})
+	}
+	return lanes, nil
 }
 
 func (r Runner) runText(
@@ -356,7 +418,7 @@ func (r Runner) runAction(ctx context.Context, profile, connector string, benchm
 		Args:             benchmarkRuntimeArgs(benchmarkCase.Payload.Args, benchmarkCase.Payload.Command != "" || len(benchmarkCase.Payload.Argv) != 0),
 		Command:          benchmarkCase.Payload.Command,
 		Argv:             append([]string(nil), benchmarkCase.Payload.Argv...),
-		CWD:              firstNonEmpty(benchmarkCase.Payload.CWD, "/repo"),
+		CWD:              benchmarkCWD(benchmarkCase.Payload.CWD, benchmarkCase.Payload.Args),
 		ActiveHome:       firstNonEmpty(benchmarkCase.Payload.ActiveHome, "/home/alice"),
 		ActiveAgentFiles: append([]string(nil), benchmarkCase.Payload.ActiveAgentFiles...),
 		DialectHint:      benchmarkDialect(benchmarkCase.Payload.Dialect),
@@ -457,6 +519,25 @@ func benchmarkRuntimeArgs(raw json.RawMessage, hasExplicitCommand bool) json.Raw
 		return nil
 	}
 	return clean
+}
+
+func benchmarkCWD(explicit string, rawArgs json.RawMessage) string {
+	if explicit != "" {
+		return explicit
+	}
+	var object map[string]json.RawMessage
+	if json.Unmarshal(rawArgs, &object) == nil {
+		if raw, present := object["cwd"]; present {
+			var cwd string
+			if json.Unmarshal(raw, &cwd) == nil && cwd != "" {
+				// The closed tool schema owns this context. Supplying the
+				// synthetic benchmark default as a second source would manufacture a
+				// conflict that is absent from the recorded call.
+				return ""
+			}
+		}
+	}
+	return "/repo"
 }
 
 func mergeEvaluationStatus(current, next string) string {

@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/csv"
 	"encoding/json"
+	"math"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -131,6 +132,217 @@ func TestCandidatePolicyRootMatchesCanonicalInventory(t *testing.T) {
 	}
 }
 
+func TestOptInPolicyPacksUseDistinctBalancedLanes(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	tests := []struct {
+		pack       string
+		fixture    string
+		positiveID string
+		ruleID     string
+	}{
+		{"cloud-production-protection", "cloud-production-conformance-v1.jsonl", "cloud-v1/aws-s3-recursive", "impact.cloud_bulk_data_delete"},
+		{"database-destruction-protection", "database-destruction-conformance-v1.jsonl", "sql-v1/psql-delete", "impact.sql_unbounded_delete"},
+		{"infrastructure-destruction-protection", "infrastructure-destruction-conformance-v1.jsonl", "iac-v1/terraform-destroy", "impact.iac_full_destroy"},
+		{"kubernetes-production-protection", "kubernetes-production-conformance-v1.jsonl", "kube-v1/kubectl-namespace", "impact.kubernetes_namespace_delete"},
+	}
+	for _, test := range tests {
+		t.Run(test.pack, func(t *testing.T) {
+			file, err := os.Open(filepath.Join(repoRoot, "benchmarks", "fixtures", test.fixture))
+			if err != nil {
+				t.Fatal(err)
+			}
+			cases, loadErr := LoadCases(file)
+			closeErr := file.Close()
+			if loadErr != nil {
+				t.Fatal(loadErr)
+			}
+			if closeErr != nil {
+				t.Fatal(closeErr)
+			}
+			predictions, digests, err := (Runner{
+				RepoRoot: repoRoot, RunID: "opt-in-pack-test",
+				Profiles: []string{"default"}, OptInPolicyPacks: []string{test.pack},
+			}).Run(context.Background(), cases)
+			if err != nil {
+				t.Fatal(err)
+			}
+			label, err := OptInPolicyLabel(test.pack)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if digests[label] == "" || digests["default"] == "" || digests[label] == digests["default"] {
+				t.Fatalf("policy digests do not distinguish %q from default: %+v", label, digests)
+			}
+			byCase := make(map[string]Prediction)
+			for _, prediction := range predictions {
+				if prediction.Profile == label {
+					byCase[prediction.CaseID] = prediction
+				}
+			}
+			if len(byCase) != len(cases) {
+				t.Fatalf("%s predictions=%d, want %d", label, len(byCase), len(cases))
+			}
+			blockedPositives := 0
+			for _, benchmarkCase := range cases {
+				prediction := byCase[benchmarkCase.ID]
+				if benchmarkCase.Truth.ExpectedDisposition == DispositionBlock && prediction.Action == "block" {
+					blockedPositives++
+				}
+				if benchmarkCase.Truth.ExpectedDisposition == DispositionAllow && prediction.Action == "block" {
+					t.Fatalf("%s unexpected block for %s: %+v", label, benchmarkCase.ID, prediction)
+				}
+			}
+			if blockedPositives == 0 {
+				t.Fatalf("%s did not block any pack-positive conformance case", label)
+			}
+			positive := byCase[test.positiveID]
+			if positive.Action != "block" || positive.Severity != "CRITICAL" ||
+				!positive.EnforcementEligible || !slices.Contains(positive.RuleIDs, test.ruleID) {
+				t.Fatalf("%s representative positive=%+v", label, positive)
+			}
+		})
+	}
+}
+
+func TestPrivacyOptInPolicyPackIsDistinctAndBlocksCriticalPII(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	benchmarkCase := Case{
+		SchemaVersion: SchemaVersion,
+		ID:            "privacy-opt-in/structured-ssn",
+		Source: Source{Dataset: "test", Revision: "1", OriginalID: "structured-ssn",
+			License: "test", Redistribution: "vendored"},
+		Split:   "development",
+		Surface: "text",
+		Payload: Payload{Direction: "completion", Content: "Applicant SSN: 731-42-8065"},
+		Truth: Truth{SourceTruth: TruthSensitive, Applicability: InScope,
+			ExpectedDisposition: DispositionBlock},
+	}
+	predictions, _, err := (Runner{
+		RepoRoot: repoRoot, RunID: "privacy-opt-in-test",
+		Profiles: []string{"default"}, OptInPolicyPacks: []string{"privacy-high-assurance"},
+	}).Run(context.Background(), []Case{benchmarkCase})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byProfile := make(map[string]Prediction, len(predictions))
+	for _, prediction := range predictions {
+		byProfile[prediction.Profile] = prediction
+	}
+	if got := byProfile["opt-in/privacy-high-assurance"]; got.Action != "block" || got.Severity != "CRITICAL" {
+		t.Fatalf("privacy opt-in prediction=%+v", got)
+	}
+	if got := byProfile["default"]; got.Action == "block" {
+		t.Fatalf("default profile changed behavior: %+v", got)
+	}
+}
+
+func TestCloudConformanceReportsExactProviderStrata(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	caseSchema := compileSchema(t, filepath.Join(repoRoot, "benchmarks", "schema", "case-v1.schema.json"))
+	file, err := os.Open(filepath.Join(repoRoot, "benchmarks", "fixtures", "cloud-production-conformance-v1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, loadErr := LoadCases(file)
+	closeErr := file.Close()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	for _, benchmarkCase := range cases {
+		data, err := json.Marshal(benchmarkCase)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value any
+		if err := json.Unmarshal(data, &value); err != nil {
+			t.Fatal(err)
+		}
+		if err := caseSchema.Validate(value); err != nil {
+			t.Fatalf("case %s: %v", benchmarkCase.ID, err)
+		}
+	}
+	predictions, _, err := (Runner{
+		RepoRoot: repoRoot, RunID: "cloud-provider-strata-test",
+		Profiles: []string{"default"}, OptInPolicyPacks: []string{"cloud-production-protection"},
+	}).Run(context.Background(), cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := Score(cases, predictions, 741983)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"aws": 14, "azure": 6, "gcp": 8}
+	got := make(map[string]int)
+	for _, group := range summary.Groups {
+		if group.Profile == "opt-in/cloud-production-protection" && group.Dimension == "provider" {
+			got[group.Group] = group.Cases
+		}
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("provider groups=%v, want %v", got, want)
+	}
+}
+
+func TestDatabaseOptInPolicyPackFixtureExactEnforcementMetrics(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	file, err := os.Open(filepath.Join(repoRoot, "benchmarks", "fixtures", "database-destruction-conformance-v1.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cases, loadErr := LoadCases(file)
+	closeErr := file.Close()
+	if loadErr != nil {
+		t.Fatal(loadErr)
+	}
+	if closeErr != nil {
+		t.Fatal(closeErr)
+	}
+	predictions, _, err := (Runner{
+		RepoRoot: repoRoot, RunID: "database-opt-in-metrics-test",
+		Profiles: []string{"default"}, OptInPolicyPacks: []string{"database-destruction-protection"},
+	}).Run(context.Background(), cases)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rollbackBoundary Prediction
+	for _, prediction := range predictions {
+		if prediction.Profile == "opt-in/database-destruction-protection" &&
+			prediction.CaseID == "sql-v1/delete-after-rollback" {
+			rollbackBoundary = prediction
+		}
+	}
+	if rollbackBoundary.Action != "block" || rollbackBoundary.Severity != "CRITICAL" ||
+		!rollbackBoundary.EnforcementEligible ||
+		!slices.Contains(rollbackBoundary.RuleIDs, "impact.sql_unbounded_delete") {
+		t.Fatalf("rollback-boundary prediction=%+v", rollbackBoundary)
+	}
+	summary, err := Score(cases, predictions, 741983)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range summary.Groups {
+		if group.Profile != "opt-in/database-destruction-protection" ||
+			group.Dimension != "overall" || group.Group != "all" {
+			continue
+		}
+		// Two independently labeled SnowSQL positives remain outside the current
+		// exact grammar. This test pins
+		// the honest pack score while separately requiring the rollback-boundary
+		// case above to block.
+		want := Confusion{TruePositive: 12, TrueNegative: 10, FalseNegative: 2}
+		if group.Enforcement.Confusion != want || math.Abs(group.Enforcement.F1-12.0/13.0) > 1e-12 ||
+			group.Enforcement.FPR != 0 || group.BenignBlockRate.Numerator != 0 {
+			t.Fatalf("database opt-in enforcement=%+v benign_block_rate=%+v", group.Enforcement, group.BenignBlockRate)
+		}
+		return
+	}
+	t.Fatal("missing database opt-in overall score")
+}
+
 func TestStatefulBenchmarkRequiresExactSecretEgressLineage(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	read := ActionEvent{
@@ -145,12 +357,18 @@ func TestStatefulBenchmarkRequiresExactSecretEgressLineage(t *testing.T) {
 		}
 	}
 	stateful := func(id string, events []ActionEvent) Case {
+		for index := range events {
+			if events[index].Outcome == "" {
+				events[index].Outcome = "succeeded"
+			}
+		}
 		return Case{
 			SchemaVersion: SchemaVersion, ID: id,
 			Source: Source{Dataset: "test", Revision: "1", OriginalID: id,
 				License: "test", Redistribution: "vendored"},
 			Split: "development", Surface: "stateful", Payload: Payload{Events: events},
 			Truth: Truth{SourceTruth: TruthUnknown, Applicability: InScope,
+				StatefulLens:        StatefulBoundedComplete,
 				ExpectedDisposition: DispositionDetectOnly},
 		}
 	}
@@ -182,7 +400,7 @@ func TestStatefulBenchmarkRequiresExactSecretEgressLineage(t *testing.T) {
 	}
 	for _, profile := range []string{"default", "permissive", "strict"} {
 		if got := byID[profile+"/same"]; !got.Detected || got.Severity != "CRITICAL" ||
-			got.Action != "block" || !got.EnforcementEligible || !got.Alerted ||
+			got.Action != "alert" || got.EnforcementEligible || !got.Alerted ||
 			got.AlertFindingCount != got.FindingCount {
 			t.Fatalf("%s same-resource proof=%+v", profile, got)
 		}
@@ -458,16 +676,19 @@ func TestBenchmarkSchemasAcceptFixtureAndPrediction(t *testing.T) {
 		FindingCount:      1,
 		AuditFindingCount: 1,
 	}
-	data, err := json.Marshal(prediction)
-	if err != nil {
-		t.Fatal(err)
-	}
-	var value any
-	if err := json.Unmarshal(data, &value); err != nil {
-		t.Fatal(err)
-	}
-	if err := resultSchema.Validate(value); err != nil {
-		t.Fatal(err)
+	for _, profile := range []string{"default", "opt-in/privacy-high-assurance"} {
+		prediction.Profile = profile
+		data, err := json.Marshal(prediction)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var value any
+		if err := json.Unmarshal(data, &value); err != nil {
+			t.Fatal(err)
+		}
+		if err := resultSchema.Validate(value); err != nil {
+			t.Fatalf("profile %s: %v", profile, err)
+		}
 	}
 }
 
@@ -573,6 +794,46 @@ func TestPartitionMetadataBindsEveryCaseToOneSplitGroup(t *testing.T) {
 	leaked[1].Split = "validation"
 	if _, err := BuildCorpusManifest(leaked, corpusDigest, data); err == nil || !strings.Contains(err.Error(), "appears in both") {
 		t.Fatalf("split leakage error=%v", err)
+	}
+}
+
+func TestNormalizationSourceMetadataIsStrictAndPreserved(t *testing.T) {
+	cases := []Case{minimalCase("source-bound", TruthBenign, DispositionAllow)}
+	corpusDigest := strings.Repeat("c", 64)
+	normalization := NormalizationManifest{
+		SchemaVersion:     SchemaVersion,
+		Datasets:          []string{"test"},
+		Cases:             1,
+		Counts:            map[string]int{"test": 1},
+		AdapterStatistics: map[string]map[string]int{},
+		OutputSHA256:      corpusDigest,
+		Source: &NormalizationSource{
+			Dataset: "test", Revision: "revision-1", License: "MIT",
+			Redistribution: "download-only", Path: "data/train.parquet",
+			Bytes: 42, SHA256: strings.Repeat("a", 64),
+		},
+	}
+	data, err := json.Marshal(normalization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := BuildCorpusManifest(cases, corpusDigest, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Normalization == nil || manifest.Normalization.Source == nil ||
+		manifest.Normalization.Source.SHA256 != strings.Repeat("a", 64) {
+		t.Fatalf("source metadata was not preserved: %+v", manifest.Normalization)
+	}
+
+	normalization.Source.SHA256 = "invalid"
+	data, err = json.Marshal(normalization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildCorpusManifest(cases, corpusDigest, data); err == nil ||
+		!strings.Contains(err.Error(), "source metadata") {
+		t.Fatalf("invalid source digest error=%v", err)
 	}
 }
 
@@ -889,6 +1150,40 @@ func TestBenchmarkScoreSeparatesDetectionAndBlocking(t *testing.T) {
 	}
 }
 
+func TestBenchmarkScoreReportsDatasetSplit(t *testing.T) {
+	development := minimalCase("development", TruthBenign, DispositionAllow)
+	development.Split = "development"
+	validation := minimalCase("validation", TruthBenign, DispositionAllow)
+	validation.Split = "validation"
+
+	summary, err := Score(
+		[]Case{development, validation},
+		[]Prediction{
+			minimalPrediction("development", false, "allow"),
+			minimalPrediction("validation", false, "allow"),
+		},
+		7,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]int{"development": 1, "validation": 1}
+	for _, group := range summary.Groups {
+		if group.Dimension != "split" {
+			continue
+		}
+		if expected, ok := want[group.Group]; ok {
+			if group.Cases != expected {
+				t.Fatalf("split %s cases=%d, want %d", group.Group, group.Cases, expected)
+			}
+			delete(want, group.Group)
+		}
+	}
+	if len(want) != 0 {
+		t.Fatalf("missing split score groups: %v", want)
+	}
+}
+
 func TestBenchmarkScoreUsesDeterministicTruthWithoutErasingSourceTruth(t *testing.T) {
 	contextual := minimalCase("contextual", TruthMalicious, DispositionAllow)
 	contextual.Truth.DeterministicTruth = DeterministicContextual
@@ -928,6 +1223,85 @@ func TestBenchmarkScoreUsesDeterministicTruthWithoutErasingSourceTruth(t *testin
 		return
 	}
 	t.Fatal("missing overall score")
+}
+
+func TestStatefulTruthLensValidationRejectsOptimisticTruth(t *testing.T) {
+	base := minimalCase("stateful", TruthMalicious, DispositionDetectOnly)
+	base.Surface = "stateful"
+	base.Payload = Payload{Events: []ActionEvent{
+		{ToolName: "shell", Command: "echo one", Outcome: "succeeded"},
+		{ToolName: "shell", Command: "echo two", Outcome: "succeeded", OffsetSeconds: 1},
+	}}
+	if err := base.Validate(); err != nil {
+		t.Fatalf("legacy unlensed stateful case should remain discovery-only: %v", err)
+	}
+
+	base.Truth.StatefulLens = StatefulBoundedComplete
+	base.Payload.Events[0].Outcome = ""
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "explicit outcome") {
+		t.Fatalf("missing outcome error=%v", err)
+	}
+	base.Payload.Events[0].Outcome = "unknown"
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "bounded_completed") {
+		t.Fatalf("unknown completed outcome error=%v", err)
+	}
+	base.Truth.StatefulLens = StatefulBoundedIntent
+	base.Truth.ExpectedDisposition = DispositionBlock
+	if err := base.Validate(); err == nil || !strings.Contains(err.Error(), "bounded_intent") {
+		t.Fatalf("intent block error=%v", err)
+	}
+}
+
+func TestStatefulTruthLensesExcludeAtomicLabelsAndRequireExpectedChainRule(t *testing.T) {
+	stateful := func(id, lens, disposition string, rules ...string) Case {
+		benchmarkCase := minimalCase(id, TruthMalicious, disposition)
+		benchmarkCase.Surface = "stateful"
+		benchmarkCase.Payload = Payload{Events: []ActionEvent{
+			{ToolName: "shell", Command: "echo one", Outcome: "succeeded"},
+			{ToolName: "shell", Command: "echo two", Outcome: "succeeded", OffsetSeconds: 1},
+		}}
+		benchmarkCase.Truth.StatefulLens = lens
+		benchmarkCase.Truth.RuleIDs = rules
+		benchmarkCase.Truth.DeterministicTruth = DeterministicMalicious
+		benchmarkCase.Truth.LabelConfidence = "high"
+		benchmarkCase.Truth.LabelSource = "fixture.stateful_truth_lens"
+		return benchmarkCase
+	}
+	cases := []Case{
+		stateful("atomic-terminal", StatefulAtomicTerminal, DispositionDetectOnly),
+		stateful("right-chain", StatefulBoundedComplete, DispositionBlock, "chain.expected"),
+		stateful("wrong-chain", StatefulBoundedComplete, DispositionDetectOnly, "chain.expected"),
+		stateful("chain-negative", StatefulBoundedComplete, DispositionAllow, "chain.expected"),
+	}
+	cases[3].Truth.DeterministicTruth = DeterministicBenign
+	predictions := []Prediction{
+		minimalPrediction("atomic-terminal", true, "alert"),
+		minimalPrediction("right-chain", true, "block"),
+		minimalPrediction("wrong-chain", true, "alert"),
+		minimalPrediction("chain-negative", true, "alert"),
+	}
+	predictions[0].RuleIDs = []string{"chain.unrelated"}
+	predictions[1].RuleIDs = []string{"chain.expected"}
+	predictions[2].RuleIDs = []string{"chain.wrong"}
+	predictions[3].RuleIDs = []string{"chain.expected"}
+
+	summary, err := Score(cases, predictions, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, group := range summary.Groups {
+		if group.Dimension != "surface" || group.Group != "stateful" {
+			continue
+		}
+		if group.Detection.Confusion != (Confusion{TruePositive: 1, FalsePositive: 1, FalseNegative: 1}) {
+			t.Fatalf("stateful detection confusion=%+v", group.Detection.Confusion)
+		}
+		if group.Enforcement.Confusion != (Confusion{TruePositive: 1, TrueNegative: 2}) {
+			t.Fatalf("stateful enforcement confusion=%+v", group.Enforcement.Confusion)
+		}
+		return
+	}
+	t.Fatal("missing stateful surface score")
 }
 
 func TestCompareRunsExcludesOutOfScopeRows(t *testing.T) {
@@ -1187,6 +1561,24 @@ func TestBenchmarkRuntimeArgsDropsOnlySyntheticActionFactsAnnotation(t *testing.
 	}
 	if clean := benchmarkRuntimeArgs(raw, true); clean != nil {
 		t.Fatalf("annotated args must not compete with an explicit command: %s", clean)
+	}
+}
+
+func TestBenchmarkCWDDefersToRecordedToolArgument(t *testing.T) {
+	multicase := []struct {
+		name, explicit, raw, want string
+	}{
+		{name: "explicit context wins", explicit: "/trusted", raw: `{"cwd":"/tool"}`, want: "/trusted"},
+		{name: "recorded tool context", raw: `{"command":"pwd","cwd":"/tool"}`, want: ""},
+		{name: "missing context uses fixture default", raw: `{"command":"pwd"}`, want: "/repo"},
+		{name: "invalid context uses fixture default", raw: `{"cwd":7}`, want: "/repo"},
+	}
+	for _, test := range multicase {
+		t.Run(test.name, func(t *testing.T) {
+			if got := benchmarkCWD(test.explicit, json.RawMessage(test.raw)); got != test.want {
+				t.Fatalf("benchmarkCWD()=%q, want %q", got, test.want)
+			}
+		})
 	}
 }
 
