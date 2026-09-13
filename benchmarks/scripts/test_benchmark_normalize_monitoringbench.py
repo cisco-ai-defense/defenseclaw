@@ -52,6 +52,7 @@ class MonitoringBenchNormalizerTest(unittest.TestCase):
         self.assertEqual(len(cases[1]["payload"]["events"]), 2)
         self.assertEqual(outcomes, {"succeeded": 2})
         self.assertEqual(cases[0]["truth"]["deterministic_truth"], "contextual_or_dual_use")
+        self.assertTrue(all(case["strata"]["language"] == "en" for case in cases))
 
     def test_parallel_attack_group_is_not_split_into_atomic_truth(self):
         sample = Sample([

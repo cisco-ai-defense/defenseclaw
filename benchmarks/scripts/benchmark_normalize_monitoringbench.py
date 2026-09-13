@@ -235,6 +235,7 @@ def _case_base(
         },
         "strata": {
             "platform": "linux",
+            "language": "en",
             "campaign": str(row.get("source_name") or "unknown")[:160],
             "domain": side_group[:160],
             "split_group": hashlib.sha256(
