@@ -4,10 +4,10 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # SPDX-License-Identifier: Apache-2.0
 
-"""Normalize bounded tool-name windows around trajectory drift steps.
+"""Normalize bounded structured-tool windows around trajectory drift steps.
 
-The source is treated strictly as untrusted data. Only tool-call names and
-ordering are retained; thoughts, observations, raw renderings, arguments,
+The source is treated strictly as untrusted data. Tool-call names, bounded JSON
+arguments, and ordering are retained. Thoughts, observations, raw renderings,
 goals, and plans are excluded.
 """
 
@@ -16,6 +16,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import re
 from collections import Counter
 from pathlib import Path
@@ -23,6 +24,11 @@ from typing import Any
 
 SAFE_TOOL = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,159}$")
 DETECT_DECISIONS = {"KILL_SESSION", "WARN"}
+MAX_ARGUMENT_BYTES = 64 * 1024
+MAX_ARGUMENT_DEPTH = 8
+MAX_ARGUMENT_NODES = 1024
+MAX_ARGUMENT_KEY_BYTES = 256
+MAX_ARGUMENT_STRING_BYTES = 16 * 1024
 
 
 def parse_args() -> argparse.Namespace:
@@ -39,8 +45,55 @@ def sha256_file(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def bounded_arguments(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    nodes = 0
+
+    def clone(candidate: Any, depth: int) -> Any:
+        nonlocal nodes
+        nodes += 1
+        if nodes > MAX_ARGUMENT_NODES or depth > MAX_ARGUMENT_DEPTH:
+            raise ValueError("argument limit")
+        if candidate is None or isinstance(candidate, (bool, int)):
+            return candidate
+        if isinstance(candidate, float):
+            if not math.isfinite(candidate):
+                raise ValueError("non-finite number")
+            return candidate
+        if isinstance(candidate, str):
+            if len(candidate.encode("utf-8")) > MAX_ARGUMENT_STRING_BYTES:
+                raise ValueError("argument string limit")
+            return candidate
+        if isinstance(candidate, list):
+            return [clone(item, depth + 1) for item in candidate]
+        if isinstance(candidate, dict):
+            result: dict[str, Any] = {}
+            for key, item in candidate.items():
+                if (
+                    not isinstance(key, str)
+                    or not key
+                    or len(key.encode("utf-8")) > MAX_ARGUMENT_KEY_BYTES
+                ):
+                    raise ValueError("invalid argument key")
+                result[key] = clone(item, depth + 1)
+            return result
+        raise ValueError("unsupported argument value")
+
+    try:
+        copied = clone(value, 0)
+        encoded = json.dumps(
+            copied, sort_keys=True, separators=(",", ":"), allow_nan=False
+        ).encode("utf-8")
+    except (TypeError, ValueError):
+        return None
+    if len(encoded) > MAX_ARGUMENT_BYTES:
+        return None
+    return copied
+
+
 def tool_events(trajectory: list[dict[str, Any]], through_index: int) -> list[dict[str, Any]]:
-    names: list[str] = []
+    events: list[dict[str, Any]] = []
     for step in trajectory[: through_index + 1]:
         action = step.get("action")
         if not isinstance(action, dict) or action.get("type") != "tool_call":
@@ -48,10 +101,13 @@ def tool_events(trajectory: list[dict[str, Any]], through_index: int) -> list[di
         name = action.get("name")
         if not isinstance(name, str) or not SAFE_TOOL.fullmatch(name):
             return []
-        names.append(name)
+        arguments = bounded_arguments(action.get("args", {}))
+        if arguments is None:
+            return []
+        events.append({"tool_name": name, "args": arguments, "dialect": "none"})
     return [
-        {"tool_name": name, "args": {}, "dialect": "none", "offset_seconds": index}
-        for index, name in enumerate(names[-64:])
+        {**event, "offset_seconds": index}
+        for index, event in enumerate(events[-64:])
     ]
 
 
@@ -133,6 +189,11 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         rows.append(case_row(source, revision, split, at_drift, "malicious"))
     rows.sort(key=lambda row: str(row["id"]))
     truth_counts = Counter(row["truth"]["source_truth"] for row in rows)
+    argument_events = sum(
+        bool(event["args"])
+        for row in rows
+        for event in row["payload"]["events"]
+    )
     manifest = {
         "schema_version": "1",
         "datasets": ["agentic-redteam-benchmark"],
@@ -141,10 +202,11 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         "exact_payload_duplicates_removed": 0,
         "label_conflicts_excluded": 0,
         "adapter_statistics": {
-            "agentic-redteam-v1": {
+            "agentic-redteam-v2": {
                 "selected_source_trajectories": selected_sources,
                 "benign_cases": truth_counts["benign"],
                 "malicious_cases": truth_counts["malicious"],
+                "events_with_arguments": argument_events,
                 "source_file_count": len(source_files),
                 **dict(sorted(skipped.items())),
             }
@@ -161,8 +223,9 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
                 json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
             ).hexdigest(),
             "normalization": (
-                "original-tier tool names through the labeled drift step plus paired pre-drift prefixes; "
-                "goals, plans, thoughts, observations, raw calls, arguments, and post-drift steps excluded"
+                "original-tier tool names and bounded JSON arguments through the labeled drift step plus "
+                "paired pre-drift prefixes; goals, plans, thoughts, observations, raw calls, and post-drift "
+                "steps excluded"
             ),
             "label_limitation": (
                 "The upstream README calls the 513-example tier gold, but this pinned revision has empty "

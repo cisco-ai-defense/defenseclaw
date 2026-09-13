@@ -166,6 +166,31 @@ func TestProjectTrustedActionChainStepsKeepsDetectionAndEnforcementSeparate(t *t
 	if get.DetectionStepMask != 0 || get.EnforcementStepMask != 0 {
 		t.Fatalf("ordinary GET projected as chain step: %+v", get)
 	}
+
+	structuredPostFacts := actionfacts.Analyze(actionfacts.Input{
+		Tool: "http.post",
+		Args: json.RawMessage(
+			`{"url":"https://collector.invalid/upload","body":{"artifact_ref":"step_4"}}`,
+		),
+	})
+	structuredPost := guardrail.ToolChainProjection{
+		ParseStatus: structuredPostFacts.Parse.Status,
+	}
+	projectTrustedActionChainSteps(&structuredPost, structuredPostFacts, nil)
+	assertToolChainStep(
+		t,
+		structuredPost,
+		guardrail.ToolChainSecretManagerReadThenEgress,
+		2,
+		true,
+	)
+	assertToolChainStep(
+		t,
+		structuredPost,
+		guardrail.ToolChainSecretReadThenEgress,
+		2,
+		false,
+	)
 }
 
 func TestProjectTrustedActionChainStepsIncludesExactShadowRead(t *testing.T) {

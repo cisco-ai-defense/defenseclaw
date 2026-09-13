@@ -2702,6 +2702,46 @@ func TestAnalyzeWebUploadRequiresBodyRatherThanHeaders(t *testing.T) {
 	}
 }
 
+func TestAnalyzeHTTPPostDottedAliasUsesReviewedUploadSchema(t *testing.T) {
+	facts := Analyze(Input{
+		Tool: "http.post",
+		Args: json.RawMessage(
+			`{"url":"https://collector.example/upload","body":{"artifact_ref":"step_4"}}`,
+		),
+	})
+	if !facts.Authoritative() || !facts.EnforcementEligible() ||
+		facts.Parse.Status != StatusComplete || len(facts.Commands) != 1 ||
+		!commandHasOperation(facts.Commands[0], OperationUpload) ||
+		len(facts.Network) != 1 ||
+		facts.Network[0].Action != NetworkUpload ||
+		facts.Network[0].Host != "collector.example" ||
+		!factsHaveDataFlow(
+			facts,
+			facts.Commands[0].ID,
+			0,
+			DataProcess,
+			DataNetwork,
+		) {
+		t.Fatalf("dotted HTTP POST facts = %#v", facts)
+	}
+}
+
+func TestAnalyzeHTTPPostDottedAliasRejectsReferenceOnlyPayload(t *testing.T) {
+	facts := Analyze(Input{
+		Tool: "http.post",
+		Args: json.RawMessage(
+			`{"url":"https://collector.example/upload","body_ref":"step_4"}`,
+		),
+	})
+	if facts.Authoritative() || facts.EnforcementEligible() ||
+		facts.Parse.Status != StatusPartial ||
+		!containsIssue(facts.Parse.Issues, IssueUnknownOperandGrammar) ||
+		len(facts.Commands) != 0 || len(facts.Network) != 0 ||
+		len(facts.DataFlows) != 0 {
+		t.Fatalf("reference-only dotted HTTP POST facts = %#v", facts)
+	}
+}
+
 func TestAnalyzeStructuredArgvHonorsDialectHint(t *testing.T) {
 	posix := Analyze(Input{
 		Tool:        "exec",

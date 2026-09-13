@@ -1445,7 +1445,7 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 		return semantics, true
 	case "webupload", "web_upload", "web-upload",
 		"uploadurl", "upload_url", "upload-url",
-		"httppost", "http_post", "http-post":
+		"httppost", "http_post", "http-post", "http.post":
 		semantics := networkToolSemantics(NetworkUpload, OperationUpload)
 		semantics.acceptsMethod = true
 		semantics.acceptsHTTPPayload = true
