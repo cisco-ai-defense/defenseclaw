@@ -587,6 +587,17 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 			return actionfacts.ExactCompleteFirewallRelaxation(facts)
 		},
 	},
+	"tamper.complete_firewall_relaxation_attempt": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactCompleteFirewallRelaxationAttempt(facts)
+		},
+		boundedSubgraphProves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return actionfacts.ExactCompleteFirewallRelaxationAttempt(facts)
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+		alertOnly:                   true,
+	},
 	"tamper.cloud_audit_control_destruction": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactCloudAuditControlDestruction(facts)

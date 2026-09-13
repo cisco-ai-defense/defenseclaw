@@ -13,7 +13,10 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
-const completeFirewallRelaxationRuleID = "tamper.complete_firewall_relaxation"
+const (
+	completeFirewallRelaxationRuleID        = "tamper.complete_firewall_relaxation"
+	completeFirewallRelaxationAttemptRuleID = "tamper.complete_firewall_relaxation_attempt"
+)
 
 func TestCompleteFirewallRelaxationProfilePosture(t *testing.T) {
 	positives := []string{
@@ -133,6 +136,88 @@ func TestCompleteFirewallRelaxationSemanticOwnerRejectsPartialAndInertText(t *te
 		)
 		if proof.authorizes(completeFirewallRelaxationRuleID) {
 			t.Fatalf("negative escaped exact owner: command=%q proof=%+v facts=%+v", command, proof, facts)
+		}
+	}
+}
+
+func TestCompleteFirewallRelaxationAttemptAlertsInEveryProfile(t *testing.T) {
+	positives := []string{
+		"iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT",
+		"iptables -P INPUT ACCEPT && iptables -P OUTPUT ACCEPT && iptables -P FORWARD ACCEPT && echo 'Default policies set to ACCEPT'",
+	}
+	owner := semanticOwners[completeFirewallRelaxationAttemptRuleID]
+	if owner.prerequisite == nil || owner.detectionOnly || !owner.alertOnly {
+		t.Fatalf("attempt owner posture=%+v", owner)
+	}
+	contract, ok := exactFallbackContracts[completeFirewallRelaxationAttemptRuleID]
+	if !ok || contract.proves == nil || contract.boundedSubgraphProves == nil ||
+		!contract.requiresExactDetectionProof || !contract.codeOwnedDetection ||
+		!contract.alertOnly || contract.detectionOnly {
+		t.Fatalf("attempt fallback contract=%+v", contract)
+	}
+
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		t.Run(profile, func(t *testing.T) {
+			const connector = "codex"
+			installToolCallCorpusProfileConnector(t, connector, profile)
+			cfg := &config.Config{}
+			cfg.Guardrail.Mode = "action"
+			cfg.Guardrail.Connector = connector
+			cfg.Guardrail.RulePackDir = filepath.Join(guardrailPoliciesRoot(t), profile)
+			for _, command := range positives {
+				input := actionfacts.Input{
+					Tool: "shell", Command: command, CWD: "/repo",
+					DialectHint: actionfacts.DialectPOSIX,
+				}
+				facts := actionfacts.Analyze(input)
+				if facts.Authoritative() || !owner.eligible(facts) ||
+					!contract.proves(input, facts) {
+					t.Fatalf("attempt not exactly owned: facts=%+v", facts)
+				}
+				response := (&APIServer{scannerCfg: cfg}).evaluateCodexHook(
+					t.Context(),
+					codexHookRequest{
+						HookEventName: "PreToolUse",
+						ToolName:      "shell",
+						CWD:           "/repo",
+						ToolInput: map[string]interface{}{
+							"command": command,
+						},
+					},
+				)
+				if response.Action != guardrailActionAlert ||
+					response.RawAction != guardrailActionAlert ||
+					response.Severity != "HIGH" || response.WouldBlock ||
+					!findingStringHasRuleID(response.Findings, completeFirewallRelaxationAttemptRuleID) {
+					t.Fatalf("profile=%s response=%+v", profile, response)
+				}
+			}
+		})
+	}
+}
+
+func TestCompleteFirewallRelaxationAttemptRejectsUnsafeNearMisses(t *testing.T) {
+	for _, command := range []string{
+		"iptables -P INPUT ACCEPT || iptables -P FORWARD ACCEPT || iptables -P OUTPUT ACCEPT",
+		"iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT || iptables -P OUTPUT ACCEPT",
+		"iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT",
+		"sudo iptables -P INPUT ACCEPT && sudo iptables -P FORWARD ACCEPT && sudo iptables -P OUTPUT ACCEPT",
+		"iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT > /tmp/status",
+		"iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && whoami",
+	} {
+		input := actionfacts.Input{
+			Tool: "shell", Command: command, CWD: "/repo",
+			DialectHint: actionfacts.DialectPOSIX,
+		}
+		facts := actionfacts.Analyze(input)
+		if semanticOwners[completeFirewallRelaxationAttemptRuleID].eligible(facts) {
+			t.Fatalf("near miss escaped owner: command=%q facts=%+v", command, facts)
+		}
+		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+			Input: input, LegacyText: command, EnforcementCapable: true,
+		})
+		if findingWithID(findings, completeFirewallRelaxationAttemptRuleID) != nil {
+			t.Fatalf("near miss produced attempt finding: command=%q findings=%v", command, FindingStrings(findings))
 		}
 	}
 }

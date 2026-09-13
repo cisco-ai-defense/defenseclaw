@@ -7,6 +7,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -520,6 +521,73 @@ func TestParsePOSIXControlFlowRetainsPositiveFactsWithoutAuthority(t *testing.T)
 				t.Fatalf("paths = %#v", out.paths)
 			}
 		})
+	}
+}
+
+func TestParsePOSIXControlFlowOperatorIsClosedAndValueFree(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   []CommandControlFlowOperator
+	}{
+		{
+			name:   "unconditional",
+			source: "first\nsecond",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorNone, ControlFlowOperatorNone},
+		},
+		{
+			name:   "and only",
+			source: "first && second && third",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorAnd, ControlFlowOperatorAnd, ControlFlowOperatorAnd},
+		},
+		{
+			name:   "or only",
+			source: "first || second || third",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorOr, ControlFlowOperatorOr, ControlFlowOperatorOr},
+		},
+		{
+			name:   "mixed short circuit",
+			source: "first && second || third",
+			want: []CommandControlFlowOperator{
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorOr,
+			},
+		},
+		{
+			name:   "nested unsupported context",
+			source: "(first && second)",
+			want: []CommandControlFlowOperator{
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorMixedOrUnsupported,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := parsePOSIX(test.source, 1, 0)
+			if len(out.commands) != len(test.want) {
+				t.Fatalf("commands=%#v want %d", out.commands, len(test.want))
+			}
+			for index, command := range out.commands {
+				if command.ControlFlowOperator != test.want[index] {
+					t.Fatalf("command %d operator=%q want=%q", index, command.ControlFlowOperator, test.want[index])
+				}
+			}
+		})
+	}
+}
+
+func TestCommandControlFlowOperatorIsNotSerialized(t *testing.T) {
+	encoded, err := json.Marshal(CommandFact{
+		ControlFlowOperator: ControlFlowOperatorAnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "ControlFlowOperator") ||
+		strings.Contains(string(encoded), `"and"`) {
+		t.Fatalf("private control-flow operator crossed serialization boundary: %s", encoded)
 	}
 }
 

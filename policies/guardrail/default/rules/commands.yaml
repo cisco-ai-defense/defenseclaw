@@ -493,6 +493,20 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [defense-evasion, tampering, firewall, bounded-lineage]
+  - id: tamper.complete_firewall_relaxation_attempt
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'iptables' &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONFIG_CHANGE in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_POLICY_BYPASS in c.operations)
+    # Candidate only. The code-owned ActionFacts proof requires exactly the
+    # INPUT, FORWARD, and OUTPUT ACCEPT commands joined only by &&, optionally
+    # followed by one literal echo. Conditional outcome keeps this alert-only.
+    pattern: 'a^'
+    title: "Attempt to completely relax the host iptables firewall"
+    severity: HIGH
+    confidence: 0.99
+    tags: [defense-evasion, tampering, firewall, conditional, bounded-lineage]
   - id: tamper.cloud_audit_control_destruction
     tool_call_only: true
     expression: >-

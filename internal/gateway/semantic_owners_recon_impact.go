@@ -162,6 +162,11 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		prerequisite:     actionfacts.ExactCompleteFirewallRelaxation,
 		suppressFallback: authoritativeSemanticSafeNegative,
 	},
+	"tamper.complete_firewall_relaxation_attempt": {
+		prerequisite:     actionfacts.ExactCompleteFirewallRelaxationAttempt,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		alertOnly:        true,
+	},
 	"tamper.cloud_audit_control_destruction": {
 		prerequisite:     actionfacts.ExactCloudAuditControlDestruction,
 		suppressFallback: authoritativeSemanticSafeNegative,

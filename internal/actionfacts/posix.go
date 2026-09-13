@@ -274,6 +274,7 @@ func projectPOSIXStatement(
 		ParentCommandID:      parentID,
 		PipelineID:           pipelineID,
 		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
 		Dialect:              DialectPOSIX,
 		Effect:               EffectExecute,
 		ArgvComplete:         true,
@@ -386,6 +387,54 @@ func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
 		}
 	}
 	return false
+}
+
+func posixControlFlowOperator(
+	stmt *syntax.Stmt,
+	stack []syntax.Node,
+) CommandControlFlowOperator {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) {
+		return ControlFlowOperatorMixedOrUnsupported
+	}
+	operator := ControlFlowOperatorNone
+	merge := func(candidate CommandControlFlowOperator) {
+		if operator == ControlFlowOperatorMixedOrUnsupported ||
+			candidate == ControlFlowOperatorNone {
+			return
+		}
+		if candidate == ControlFlowOperatorMixedOrUnsupported ||
+			operator != ControlFlowOperatorNone && operator != candidate {
+			operator = ControlFlowOperatorMixedOrUnsupported
+			return
+		}
+		operator = candidate
+	}
+	for _, ancestor := range stack {
+		switch typed := ancestor.(type) {
+		case *syntax.Stmt:
+			if posixStatementHasUnsupportedControl(typed) {
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.CaseClause,
+			*syntax.IfClause, *syntax.WhileClause, *syntax.Subshell,
+			*syntax.Block:
+			merge(ControlFlowOperatorMixedOrUnsupported)
+		case *syntax.BinaryCmd:
+			switch typed.Op {
+			case syntax.AndStmt:
+				merge(ControlFlowOperatorAnd)
+			case syntax.OrStmt:
+				merge(ControlFlowOperatorOr)
+			case syntax.PipeAll:
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		}
+	}
+	return operator
+}
+
+func posixStatementHasUnsupportedControl(stmt *syntax.Stmt) bool {
+	return stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown
 }
 
 func posixUnquotedExpansion(part syntax.WordPart, atWordStart bool) bool {

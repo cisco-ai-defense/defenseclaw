@@ -128,3 +128,101 @@ func TestExactCompleteFirewallRelaxationHardNegatives(t *testing.T) {
 		})
 	}
 }
+
+func TestExactCompleteFirewallRelaxationAttemptSourceForms(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{
+			name: "input forward output",
+			command: "iptables -P INPUT ACCEPT && " +
+				"iptables -P FORWARD ACCEPT && " +
+				"iptables -P OUTPUT ACCEPT",
+		},
+		{
+			name: "input output forward with report",
+			command: "iptables -P INPUT ACCEPT && " +
+				"iptables -P OUTPUT ACCEPT && " +
+				"iptables -P FORWARD ACCEPT && " +
+				`echo "Default policies set to ACCEPT"`,
+		},
+		{
+			name:    "forward input output",
+			command: "iptables -P FORWARD ACCEPT && iptables -P INPUT ACCEPT && iptables -P OUTPUT ACCEPT",
+		},
+		{
+			name:    "forward output input",
+			command: "iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && iptables -P INPUT ACCEPT",
+		},
+		{
+			name:    "output input forward",
+			command: "iptables -P OUTPUT ACCEPT && iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT",
+		},
+		{
+			name:    "output forward input",
+			command: "iptables -P OUTPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P INPUT ACCEPT",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: test.command, CWD: "/repo",
+				DialectHint: DialectPOSIX,
+			})
+			if facts.Authoritative() || !ExactCompleteFirewallRelaxationAttempt(facts) {
+				t.Fatalf("attempt proof rejected: parse=%+v commands=%+v", facts.Parse, facts.Commands)
+			}
+			if ExactCompleteFirewallRelaxation(facts) {
+				t.Fatalf("conditional attempt became completed proof: %+v", facts)
+			}
+			for _, command := range facts.Commands {
+				if command.Program == "iptables" &&
+					(!hasFactOperation(command, OperationConfigChange) ||
+						!hasFactOperation(command, OperationPolicyBypass)) {
+					t.Fatalf("iptables step lacks semantics: %+v", command)
+				}
+			}
+		})
+	}
+}
+
+func TestExactCompleteFirewallRelaxationAttemptHardNegatives(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{name: "unconditional newlines", command: "iptables -P INPUT ACCEPT\niptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT"},
+		{name: "semicolon separators", command: "iptables -P INPUT ACCEPT; iptables -P FORWARD ACCEPT; iptables -P OUTPUT ACCEPT"},
+		{name: "or separators", command: "iptables -P INPUT ACCEPT || iptables -P FORWARD ACCEPT || iptables -P OUTPUT ACCEPT"},
+		{name: "mixed and or", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT || iptables -P OUTPUT ACCEPT"},
+		{name: "mixed and newline", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT\niptables -P OUTPUT ACCEPT"},
+		{name: "partial", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT"},
+		{name: "duplicate", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P INPUT ACCEPT"},
+		{name: "conflicting verdict", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT DROP"},
+		{name: "flush command", command: "iptables -F && iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT"},
+		{name: "sudo wrapper", command: "sudo iptables -P INPUT ACCEPT && sudo iptables -P FORWARD ACCEPT && sudo iptables -P OUTPUT ACCEPT"},
+		{name: "variable", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P $CHAIN ACCEPT"},
+		{name: "glob", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUT* ACCEPT"},
+		{name: "redirect", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT > /tmp/status"},
+		{name: "pipeline", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT | tee /tmp/status"},
+		{name: "substitution", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && echo \"$(date)\""},
+		{name: "report before completion", command: "iptables -P INPUT ACCEPT && echo done && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT"},
+		{name: "two reports", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && echo changed && echo done"},
+		{name: "empty report", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && echo"},
+		{name: "extra command", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT && whoami"},
+		{name: "subshell", command: "(iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT)"},
+		{name: "brace group", command: "{ iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT; }"},
+		{name: "negated", command: "! iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT"},
+		{name: "background", command: "iptables -P INPUT ACCEPT && iptables -P FORWARD ACCEPT && iptables -P OUTPUT ACCEPT &"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: test.command, CWD: "/repo",
+				DialectHint: DialectPOSIX,
+			})
+			if ExactCompleteFirewallRelaxationAttempt(facts) {
+				t.Fatalf("hard negative proved: parse=%+v commands=%+v", facts.Parse, facts.Commands)
+			}
+		})
+	}
+}

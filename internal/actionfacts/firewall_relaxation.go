@@ -113,6 +113,59 @@ func ExactCompleteFirewallRelaxation(facts Facts) bool {
 		len(steps) == 3 && completeFirewallAcceptPolicySet(policySteps)
 }
 
+// ExactCompleteFirewallRelaxationAttempt proves one static POSIX shell attempt
+// consisting only of the INPUT, FORWARD, and OUTPUT default-policy changes to
+// ACCEPT, each exactly once and joined exclusively by &&. One final literal,
+// side-effect-free echo report is allowed behind the same operator. The proof
+// deliberately remains distinct from ExactCompleteFirewallRelaxation because
+// short-circuit execution cannot prove that every submitted command succeeds.
+func ExactCompleteFirewallRelaxationAttempt(facts Facts) bool {
+	if facts.Parse.Dialect != DialectPOSIX || facts.Parse.Status != StatusPartial ||
+		len(facts.Parse.Issues) != 1 ||
+		facts.Parse.Issues[0] != IssueUnsupportedConstruct ||
+		(len(facts.Commands) != 3 && len(facts.Commands) != 4) {
+		return false
+	}
+	policySteps := make(map[string]bool, 3)
+	for index, command := range facts.Commands {
+		if !exactFirewallRelaxationAndCommand(command) {
+			return false
+		}
+		if command.Program == "echo" {
+			return index == len(facts.Commands)-1 && len(facts.Commands) == 4 &&
+				len(command.Argv) > 1 &&
+				len(StaticPOSIXEchoStdoutSegments(command)) == 1 &&
+				completeFirewallAcceptPolicySet(policySteps)
+		}
+		step, ok := exactFirewallRelaxationArgvStep(command)
+		if !ok || step != firewallStepAcceptInput &&
+			step != firewallStepAcceptForward &&
+			step != firewallStepAcceptOutput || policySteps[step] {
+			return false
+		}
+		policySteps[step] = true
+	}
+	return len(facts.Commands) == 3 && completeFirewallAcceptPolicySet(policySteps)
+}
+
+func exactFirewallRelaxationAndCommand(command CommandFact) bool {
+	if !command.ControlFlowUncertain ||
+		command.ControlFlowOperator != ControlFlowOperatorAnd ||
+		command.ParentCommandID != 0 || command.PipelineID != 0 ||
+		command.Kind != CommandKindProcess || command.Dialect != DialectPOSIX ||
+		command.Effect != EffectExecute || !command.ArgvComplete ||
+		len(command.Wrappers) != 0 || len(command.Redirects) != 0 ||
+		!staticArguments(command.Arguments) {
+		return false
+	}
+	for _, argument := range command.Arguments {
+		if argument.Quote == QuoteMixed {
+			return false
+		}
+	}
+	return true
+}
+
 func completeFirewallAcceptPolicySet(steps map[string]bool) bool {
 	return len(steps) == 3 && steps[firewallStepAcceptInput] &&
 		steps[firewallStepAcceptForward] && steps[firewallStepAcceptOutput]
