@@ -1809,6 +1809,10 @@ var migrations = []migration{
 		description: "guardrails: reserve append-only bounded chain mask capacity",
 		apply:       migrateToolChainAppendOnlyMaskCapacity,
 	},
+	{
+		description: "guardrails: bind pending SQL value sources to authoritative results",
+		apply:       migrateToolChainSQLValueSourceState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

@@ -57,6 +57,14 @@ type ToolChainPreparePendingInput struct {
 	PreInputFingerprint  string
 	RulesetFingerprint   string
 	Projection           guardrail.ToolChainProjection
+	SQLValueSource       ToolChainPendingSQLValueSource `json:"-"`
+}
+
+// ToolChainPendingSQLValueSource is a value-free descriptor of one exact
+// sensitive SQL read. It deliberately carries neither SQL nor result values.
+type ToolChainPendingSQLValueSource struct {
+	TableClass             actionfacts.SensitiveSQLTableClass `json:"-"`
+	DatabaseIdentityDigest string                             `json:"-"`
 }
 
 type ToolChainPreparePendingResult struct {
@@ -83,6 +91,10 @@ type ToolChainResolvePendingInput struct {
 type ToolChainResolvePendingResult struct {
 	Status      ToolChainPendingStatus
 	Observation ToolChainObserveResult
+	// SQLValueSource is released only after exact-session, exact-invocation,
+	// ruleset-consistent authoritative success. JSON exclusion prevents this
+	// internal handoff from becoming an accidental serialization boundary.
+	SQLValueSource ToolChainPendingSQLValueSource `json:"-"`
 }
 
 // ToolChainDiscardPendingForEventSessionInput identifies an authoritative
@@ -126,6 +138,7 @@ type persistedToolChainPending struct {
 	enforcementJoinDigests                                           [guardrail.ToolChainCount]string
 	enforcementOutputJoinDigests                                     [guardrail.ToolChainCount]string
 	prepared, expires                                                int64
+	sqlValueSourceTableClass, sqlValueSourceResourceDigest           string
 }
 
 type persistedToolChainPendingBoundary struct {
@@ -278,14 +291,16 @@ func (repo *ToolChainRepository) preparePendingTx(
 		enforcement_step_mask, enforcement_join_digests,
 		enforcement_output_join_digests,
 		prepared_time_unix_nano, expires_time_unix_nano
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		, sql_value_source_table_class, sql_value_source_resource_digest
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(input.ConnectorInstanceID), input.ToolInvocationDigest, session,
 		string(input.PreSemanticEventID), input.PreInputFingerprint, projectionFP,
 		input.RulesetFingerprint, string(input.Projection.ParseStatus),
 		input.Projection.DetectionStepMask, input.Projection.EnforcementStepMask,
 		encodeToolChainJoinDigests(input.Projection.EnforcementJoinDigests),
 		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
-		unixNano(now), unixNano(expires))
+		unixNano(now), unixNano(expires), string(input.SQLValueSource.TableClass),
+		input.SQLValueSource.DatabaseIdentityDigest)
 	if err != nil {
 		return ToolChainPreparePendingResult{}, err
 	}
@@ -429,6 +444,9 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		if observeErr != nil {
 			return ToolChainResolvePendingResult{}, observeErr
 		}
+		if observation.Status == ToolChainObserveNoJoin {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
 		if err := deleteToolChainPending(
 			ctx, tx, repo, input.ConnectorInstanceID, session,
 			input.ToolInvocationDigest,
@@ -437,6 +455,7 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		}
 		return ToolChainResolvePendingResult{
 			Status: ToolChainPendingResolved, Observation: observation,
+			SQLValueSource: pendingSQLValueSource(pending),
 		}, nil
 	}
 	observation, err := repo.observeTx(ctx, tx, ToolChainObserveInput{
@@ -461,6 +480,7 @@ func (repo *ToolChainRepository) resolvePendingTx(
 	}
 	return ToolChainResolvePendingResult{
 		Status: ToolChainPendingResolved, Observation: observation,
+		SQLValueSource: pendingSQLValueSource(pending),
 	}, nil
 }
 
@@ -841,6 +861,9 @@ func validateToolChainPreparePendingInput(input ToolChainPreparePendingInput) er
 	if err := validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true); err != nil {
 		return err
 	}
+	if err := validatePendingSQLValueSource(input.SQLValueSource); err != nil {
+		return err
+	}
 	return validatePendingToolChainProjection(input.Projection)
 }
 
@@ -999,7 +1022,8 @@ func loadToolChainPending(
 		pre_input_fingerprint, projection_fingerprint, ruleset_fingerprint,
 		parse_status, detection_step_mask, enforcement_step_mask,
 		enforcement_join_digests, enforcement_output_join_digests,
-		prepared_time_unix_nano, expires_time_unix_nano
+		prepared_time_unix_nano, expires_time_unix_nano,
+		sql_value_source_table_class, sql_value_source_resource_digest
 		FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
 		AND tool_invocation_digest=?`,
@@ -1010,6 +1034,7 @@ func loadToolChainPending(
 		&pending.enforcementSteps, &enforcementJoinDigests,
 		&enforcementOutputJoinDigests,
 		&pending.prepared, &pending.expires,
+		&pending.sqlValueSourceTableClass, &pending.sqlValueSourceResourceDigest,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return persistedToolChainPending{}, false, nil
@@ -1239,6 +1264,9 @@ func validatePersistedToolChainPending(pending persistedToolChainPending) error 
 	if err := validatePendingToolChainProjection(projection); err != nil {
 		return ErrToolChainIntegrity
 	}
+	if err := validatePendingSQLValueSource(pendingSQLValueSource(pending)); err != nil {
+		return ErrToolChainIntegrity
+	}
 	projectionFP, err := guardrail.ToolChainProjectionFingerprint(projection)
 	if err != nil || projectionFP != pending.projectionFP {
 		return ErrToolChainIntegrity
@@ -1281,7 +1309,33 @@ func sameToolChainPending(
 		pending.detectionSteps == input.Projection.DetectionStepMask &&
 		pending.enforcementSteps == input.Projection.EnforcementStepMask &&
 		pending.enforcementJoinDigests == input.Projection.EnforcementJoinDigests &&
-		pending.enforcementOutputJoinDigests == input.Projection.EnforcementOutputJoinDigests
+		pending.enforcementOutputJoinDigests == input.Projection.EnforcementOutputJoinDigests &&
+		pendingSQLValueSource(pending) == input.SQLValueSource
+}
+
+func pendingSQLValueSource(pending persistedToolChainPending) ToolChainPendingSQLValueSource {
+	return ToolChainPendingSQLValueSource{
+		TableClass:             actionfacts.SensitiveSQLTableClass(pending.sqlValueSourceTableClass),
+		DatabaseIdentityDigest: pending.sqlValueSourceResourceDigest,
+	}
+}
+
+func validatePendingSQLValueSource(source ToolChainPendingSQLValueSource) error {
+	if source == (ToolChainPendingSQLValueSource{}) {
+		return nil
+	}
+	switch source.TableClass {
+	case actionfacts.SensitiveSQLTableCredentials,
+		actionfacts.SensitiveSQLTableOAuthTokens,
+		actionfacts.SensitiveSQLTableEmployees:
+	default:
+		return errors.New("audit: invalid pending SQL value source table class")
+	}
+	return validateSHA256(
+		"pending SQL value source resource digest",
+		source.DatabaseIdentityDigest,
+		true,
+	)
 }
 
 func deleteToolChainPending(

@@ -84,6 +84,7 @@ type toolChainHookCapture struct {
 	facts               actionfacts.Facts
 	findings            []RuleFinding
 	artifactProjections []guardrail.ToolChainProjection
+	successfulSQLResult *toolValueLineageSQLSuccessfulProjection
 	recorded            bool
 }
 
@@ -343,6 +344,11 @@ func (a *APIServer) applyAgentHookToolChains(
 		resolvedSuccess = outcome == connector.ToolLifecycleOutcomeSuccess &&
 			resolvedInvocation
 		if resolvedSuccess {
+			if sqlProjection, ok := projectBoundSuccessfulSQLResult(
+				ctx, req, resolved.SQLValueSource,
+			); ok {
+				req.toolChain.successfulSQLResult = &sqlProjection
+			}
 			// Terminal-success-only chains are deliberately absent from the
 			// synchronous pre-tool observation. Their exact pending projection is
 			// matched only after this authenticated success result promotes it.
@@ -507,6 +513,7 @@ func (a *APIServer) applyAgentHookToolChains(
 				PreInputFingerprint:  inputFingerprint,
 				RulesetFingerprint:   rulesetFingerprint,
 				Projection:           predecessorProjection,
+				SQLValueSource:       pendingSQLValueSource(req.toolChain),
 			},
 		); prepareErr != nil {
 			// Pending state is an additive experimental lane. A persistence

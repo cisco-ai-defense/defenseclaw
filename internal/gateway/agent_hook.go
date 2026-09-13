@@ -297,6 +297,11 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 		} else {
 			req = correlatedReq
 		}
+		// Only the scoped hook credential, connector-owned server metadata,
+		// and the correlated connector instance may mint a tool resource
+		// identity. The request-scoped projection is re-bound to the exact
+		// native tool name by each typed evaluator below.
+		ctx = withAuthenticatedToolResource(ctx, req, rawBody)
 		// Capture trusted ActionFacts even when correlation persistence is
 		// degraded. Durable cross-call joins require correlation, but the
 		// experimental final-artifact execution gate is a same-request
@@ -1866,6 +1871,12 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 		if req.ToolArgsProjectionUncertain {
 			a.recordParserUncertaintyMetricV8(ctx, req.ConnectorName, 1)
 		}
+		fallbackTool := agentHookTrustedActionTool(
+			req.ConnectorName, req.ToolName, runtime.GOOS,
+		)
+		actionTool, resourceIdentity := trustedToolActionFromContext(
+			ctx, req.ConnectorName, req.ToolName, fallbackTool,
+		)
 		toolRequest := &ToolInspectRequest{
 			Tool:          req.ToolName,
 			Args:          req.ToolArgs,
@@ -1877,10 +1888,11 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 			eventIn(req.HookEventName, profile.Capabilities.BlockEvents)
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       agentHookTrustedActionTool(req.ConnectorName, req.ToolName, runtime.GOOS),
-				Args:       req.ToolArgs,
-				CWD:        req.CWD,
-				ActiveHome: trustedSameHostHome(),
+				Tool:                 actionTool,
+				Args:                 req.ToolArgs,
+				CWD:                  req.CWD,
+				ActiveHome:           trustedSameHostHome(),
+				ToolResourceIdentity: resourceIdentity,
 			},
 			LegacyText:         string(req.ToolArgs),
 			Connector:          req.ConnectorName,
