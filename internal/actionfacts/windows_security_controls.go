@@ -184,6 +184,8 @@ func exactWindowsDefenderDisableSetting(args []windowsWord) (string, bool, bool)
 		setting = "real-time-monitoring"
 	case "-disablebehaviormonitoring", "-dbm":
 		setting = "behavior-monitoring"
+	case "-disableioavprotection":
+		setting = "ioav-protection"
 	case "-disablescriptscanning", "-dscrptsc":
 		setting = "script-scanning"
 	case "-disableblockatfirstseen", "-dbaf":
@@ -215,6 +217,13 @@ func exactWindowsDefenderDisableSetting(args []windowsWord) (string, bool, bool)
 // commands inside a four-command window. Single-control maintenance remains
 // outside this deterministic proof.
 func ExactWindowsDefenderMultiControlDisable(facts Facts) bool {
+	if exactDirectWindowsDefenderMultiControlDisable(facts) {
+		return true
+	}
+	return exactNetExecWindowsDefenderMultiControlDisable(facts)
+}
+
+func exactDirectWindowsDefenderMultiControlDisable(facts Facts) bool {
 	if facts.Parse.Dialect != DialectPowerShell {
 		return false
 	}
@@ -246,6 +255,169 @@ func ExactWindowsDefenderMultiControlDisable(facts Facts) bool {
 		}
 	}
 	return false
+}
+
+// exactNetExecWindowsDefenderMultiControlDisable recognizes the closed
+// real-trace shape in which NetExec submits one literal PowerShell command over
+// SMB. The outer command must use the reviewed smbexec grammar with one static
+// target, username, credential, and -x body. The inner command must contain
+// only three or four direct Set-MpPreference disable operations.
+func exactNetExecWindowsDefenderMultiControlDisable(facts Facts) bool {
+	for _, command := range facts.Commands {
+		body, ok := exactNetExecPowerShellCommand(command)
+		if !ok {
+			continue
+		}
+		inner := Analyze(Input{
+			Tool:        "powershell",
+			Command:     body,
+			DialectHint: DialectPowerShell,
+		})
+		if !exactNetExecPowerShellParseStatus(inner.Parse) ||
+			len(inner.Commands) < 3 || len(inner.Commands) > windowsSecurityControlPairWindow ||
+			!exactDirectWindowsDefenderMultiControlDisable(inner) {
+			continue
+		}
+		allDisableCommands := true
+		for _, child := range inner.Commands {
+			if child.ParentCommandID != 0 || child.PipelineID != 0 ||
+				child.ControlFlowUncertain || len(child.Wrappers) != 0 ||
+				len(child.Redirects) != 0 || !child.ArgvComplete ||
+				child.Program != "set-mppreference" || len(child.Arguments) != 3 {
+				allDisableCommands = false
+				break
+			}
+			_, disabled, exact := exactWindowsDefenderDisableSetting(
+				windowsWordsFromArguments(child.Arguments[1:]),
+			)
+			if !exact || !disabled {
+				allDisableCommands = false
+				break
+			}
+		}
+		if allDisableCommands {
+			return true
+		}
+	}
+	return false
+}
+
+func exactNetExecPowerShellParseStatus(parse ParseResult) bool {
+	if parse.Status == StatusComplete {
+		return true
+	}
+	// The PowerShell parser currently reports semicolon-separated statements as
+	// unsupported after still projecting each complete command. This wrapper
+	// grammar independently requires that every projected statement is one exact
+	// Defender disable, so that single syntax marker is safe to consume here.
+	return parse.Status == StatusPartial && len(parse.Issues) == 1 &&
+		parse.Issues[0] == IssueUnsupportedConstruct
+}
+
+func exactNetExecPowerShellCommand(command CommandFact) (string, bool) {
+	if !exactUnconditionalTopLevelCommand(command) || !command.ArgvComplete ||
+		(command.Dialect != DialectPOSIX && command.Dialect != DialectArgv) ||
+		!staticArguments(command.Arguments) ||
+		!exactPOSIXProgramIdentity(command.Executable, command.Program) {
+		return "", false
+	}
+	switch command.Program {
+	case "nxc", "netexec", "crackmapexec":
+	default:
+		return "", false
+	}
+	if len(command.Argv) < 11 || !strings.EqualFold(command.Argv[1], "smb") {
+		return "", false
+	}
+
+	usernameSeen, credentialSeen, domainSeen, methodSeen := false, false, false, false
+	targets, body := 0, ""
+	seenOption := false
+	for index := 2; index < len(command.Argv); index++ {
+		argument := command.Argv[index]
+		if unresolvedCredentialRemoteScalar(argument) {
+			return "", false
+		}
+		if !strings.HasPrefix(argument, "-") {
+			if seenOption {
+				return "", false
+			}
+			targets++
+			continue
+		}
+		seenOption = true
+		if index+1 >= len(command.Argv) {
+			return "", false
+		}
+		value := command.Argv[index+1]
+		if value == "" || unresolvedCredentialRemoteScalar(value) {
+			return "", false
+		}
+		valueIndex := index + 1
+		index++
+		switch argument {
+		case "-u", "--username":
+			if usernameSeen || strings.HasPrefix(value, "-") {
+				return "", false
+			}
+			usernameSeen = true
+		case "-p", "--password", "-H", "--hash":
+			if credentialSeen || strings.HasPrefix(value, "-") {
+				return "", false
+			}
+			credentialSeen = true
+		case "-d", "--domain":
+			if domainSeen || strings.HasPrefix(value, "-") {
+				return "", false
+			}
+			domainSeen = true
+		case "--exec-method":
+			if methodSeen || !strings.EqualFold(value, "smbexec") {
+				return "", false
+			}
+			methodSeen = true
+		case "-x":
+			if body != "" || command.Dialect == DialectPOSIX &&
+				command.Arguments[valueIndex].Quote != QuoteSingle {
+				return "", false
+			}
+			body = value
+		default:
+			return "", false
+		}
+	}
+	if targets != 1 || !usernameSeen || !credentialSeen || !methodSeen || body == "" {
+		return "", false
+	}
+	return exactNetExecPowerShellBody(body)
+}
+
+func exactNetExecPowerShellBody(source string) (string, bool) {
+	probe := newParseOutput(DialectCMD, 1)
+	lexemes, ok := windowsLex(source, windowsCMD, &probe)
+	if !ok || probe.status != StatusComplete {
+		return "", false
+	}
+	commands, edges, ok := windowsBuildCommands(lexemes, &probe)
+	if !ok || len(commands) != 1 || len(edges) != 0 ||
+		len(commands[0].redirects) != 0 || commands[0].callOperator ||
+		len(commands[0].words) != 3 {
+		return "", false
+	}
+	words := commands[0].words
+	for _, word := range words {
+		if word.expands || word.wildcard || word.nativeArgvUncertain {
+			return "", false
+		}
+	}
+	program := strings.ToLower(words[0].value)
+	if program != "powershell" && program != "powershell.exe" ||
+		words[0].quote != QuoteNone || words[1].quote != QuoteNone ||
+		!strings.EqualFold(words[1].value, "-command") ||
+		words[2].quote != QuoteDouble || strings.TrimSpace(words[2].value) == "" {
+		return "", false
+	}
+	return words[2].value, true
 }
 
 // ExactWindowsRegistrySecurityControlDisable recognizes either one exact
