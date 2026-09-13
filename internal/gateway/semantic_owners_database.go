@@ -17,11 +17,22 @@ const semanticSQLDestructiveMutationExpression = `f.tool == 'sql_query' || f.com
 
 const semanticHTTPSQLInjectionExpression = `f.tool == 'http_request'`
 
+const semanticHTTPCommandInjectionExpression = `f.tool == 'http_request'`
+
 const semanticSQLiteClientShellEscapeExpression = `f.commands.exists(c, c.argv_complete && c.program == 'sqlite3')`
 
 const semanticMySQLClientShellEscapeExpression = `f.commands.exists(c, c.argv_complete && c.program in ['mysql', 'mariadb'])`
 
 var semanticDatabaseOwners = map[string]semanticOwner{
+	"attack.http_command_injection": {
+		prerequisite:     httpCommandInjectionPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The recognizer proves literal shell-control syntax followed by one
+		// reviewed harmless proof command in a closed structured HTTP request.
+		// It remains alert-only because the request does not establish target
+		// authorization or whether a downstream application is vulnerable.
+		alertOnly: true,
+	},
 	"attack.http_sql_injection": {
 		prerequisite:     httpSQLInjectionPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -113,6 +124,10 @@ func sqlDestructiveMutationPrerequisite(facts actionfacts.Facts) bool {
 
 func httpSQLInjectionPrerequisite(facts actionfacts.Facts) bool {
 	return len(actionfacts.ExactHTTPSQLInjections(facts)) != 0
+}
+
+func httpCommandInjectionPrerequisite(facts actionfacts.Facts) bool {
+	return actionfacts.ExactHTTPCommandInjection(facts)
 }
 
 func postgreSQLCopyProgramPrerequisite(facts actionfacts.Facts) bool {

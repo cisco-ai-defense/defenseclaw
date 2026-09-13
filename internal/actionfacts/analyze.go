@@ -235,6 +235,7 @@ func analyze(input Input) Facts {
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
 	facts.SQLMutations = projectSQLMutations(input, facts)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
+	facts.HTTPCommandInjections = projectHTTPCommandInjections(input)
 	facts.SQLClientShellEscapes = projectSQLClientShellEscapes(facts)
 	facts.PrivilegedKubernetesOperations =
 		projectPrivilegedKubernetesOperations(input, facts)

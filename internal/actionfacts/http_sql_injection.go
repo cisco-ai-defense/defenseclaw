@@ -86,7 +86,26 @@ func projectHTTPSQLInjections(input Input) []HTTPSQLInjectionFact {
 
 func exactHTTPRequestInput(raw json.RawMessage) (exactHTTPRequest, bool) {
 	object, problem := exactJSONObject(raw)
-	if problem.status != "" || len(object) < 2 || len(object) > 4 {
+	if problem.status != "" {
+		return exactHTTPRequest{}, false
+	}
+	if _, hasURL := object["url"]; hasURL {
+		return exactHTTPURLRequestInput(object)
+	}
+	return exactHTTPPathRequestInput(object)
+}
+
+func selectsHTTPPathRequestSchema(raw json.RawMessage) bool {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" {
+		return false
+	}
+	_, selected := object["query"]
+	return selected
+}
+
+func exactHTTPURLRequestInput(object map[string]any) (exactHTTPRequest, bool) {
+	if len(object) < 2 || len(object) > 4 {
 		return exactHTTPRequest{}, false
 	}
 	for key := range object {
@@ -132,6 +151,94 @@ func exactHTTPRequestInput(raw json.RawMessage) (exactHTTPRequest, bool) {
 	}
 	values = append(values, bodyValues...)
 	return exactHTTPRequest{values: values}, true
+}
+
+// exactHTTPPathRequestInput accepts the normalized fuzz-agent request shape.
+// It is intentionally a separate closed schema from the URL/header/body shape
+// above: mixing fields, adding transport controls, or nesting values fails
+// closed. Only scalar query/body strings are returned to reviewed recognizers.
+func exactHTTPPathRequestInput(object map[string]any) (exactHTTPRequest, bool) {
+	if len(object) < 3 || len(object) > 4 {
+		return exactHTTPRequest{}, false
+	}
+	for key := range object {
+		if key != "method" && key != "path" && key != "query" && key != "body" {
+			return exactHTTPRequest{}, false
+		}
+	}
+	method, methodOK := object["method"].(string)
+	rawPath, pathOK := object["path"].(string)
+	if !methodOK || !pathOK || !exactStructuredHTTPMethod(method) ||
+		!exactStructuredHTTPPath(rawPath) {
+		return exactHTTPRequest{}, false
+	}
+	queryValues, ok := exactHTTPScalarObjectValues(object["query"], true)
+	if !ok {
+		return exactHTTPRequest{}, false
+	}
+	bodyValue, hasBody := object["body"]
+	bodyValues := []string(nil)
+	if hasBody {
+		bodyValues, ok = exactHTTPScalarObjectValues(bodyValue, true)
+		if !ok {
+			return exactHTTPRequest{}, false
+		}
+	}
+	if (method == "GET" || method == "DELETE") && len(bodyValues) != 0 {
+		return exactHTTPRequest{}, false
+	}
+	return exactHTTPRequest{values: append(queryValues, bodyValues...)}, true
+}
+
+func exactStructuredHTTPMethod(method string) bool {
+	switch method {
+	case "GET", "POST", "PUT", "PATCH", "DELETE":
+		return true
+	default:
+		return false
+	}
+}
+
+func exactStructuredHTTPPath(rawPath string) bool {
+	if rawPath == "" || len(rawPath) > maxScalarBytes || !utf8.ValidString(rawPath) ||
+		strings.TrimSpace(rawPath) != rawPath || !strings.HasPrefix(rawPath, "/") ||
+		strings.HasPrefix(rawPath, "//") || strings.ContainsAny(rawPath, "\\?#%") ||
+		unresolvedHTTPValue(rawPath) {
+		return false
+	}
+	for _, segment := range strings.Split(rawPath, "/") {
+		if segment == "." || segment == ".." {
+			return false
+		}
+	}
+	return true
+}
+
+func exactHTTPScalarObjectValues(value any, allowEmpty bool) ([]string, bool) {
+	object, ok := value.(map[string]any)
+	if !ok || len(object) > 64 || (!allowEmpty && len(object) == 0) {
+		return nil, false
+	}
+	values := make([]string, 0, len(object))
+	for key, rawValue := range object {
+		if !httpFieldNamePattern.MatchString(key) {
+			return nil, false
+		}
+		switch scalar := rawValue.(type) {
+		case string:
+			if len(scalar) > maxScalarBytes || !utf8.ValidString(scalar) ||
+				strings.Contains(scalar, "%") || unresolvedHTTPValue(scalar) {
+				return nil, false
+			}
+			values = append(values, scalar)
+		case json.Number, bool, nil:
+			// Exact JSON scalars are accepted as part of the closed request but
+			// cannot contain shell syntax and therefore need no projection.
+		default:
+			return nil, false
+		}
+	}
+	return values, true
 }
 
 func exactHTTPHeaders(value any) (string, bool) {

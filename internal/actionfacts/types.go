@@ -126,6 +126,12 @@ type Facts struct {
 	// parameter names, SQL text, and destinations are discarded before Facts
 	// crosses the ActionFacts boundary. These facts are alert-only evidence.
 	HTTPSQLInjections []HTTPSQLInjectionFact `json:"-"`
+	// HTTPCommandInjections records only that one closed structured HTTP
+	// request scalar contains exact literal shell control syntax invoking a
+	// reviewed harmless proof command. Request values, parameter names, paths,
+	// methods, commands, and control operators are discarded. This private fact
+	// is alert-only evidence.
+	HTTPCommandInjections []HTTPCommandInjectionFact `json:"-"`
 	// SQLClientShellEscapes contains only direct, exact SQL client meta-command
 	// escapes to a reviewed POSIX shell. Query text, database identities,
 	// connection arguments, and shell arguments are discarded. CommandID binds
@@ -731,6 +737,10 @@ const (
 type HTTPSQLInjectionFact struct {
 	Technique HTTPSQLInjectionTechnique
 }
+
+// HTTPCommandInjectionFact is deliberately value-free. Existence proves the
+// complete closed request and literal proof-command grammar.
+type HTTPCommandInjectionFact struct{}
 
 // SQLClientShellEscapeClient is the closed SQL client vocabulary for literal
 // local-shell meta-commands. It deliberately does not model arbitrary SQL or

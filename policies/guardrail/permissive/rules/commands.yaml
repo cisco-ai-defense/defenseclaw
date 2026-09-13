@@ -528,6 +528,16 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [attack, web, database, sql-injection, bounded-lineage]
+  - id: attack.http_command_injection
+    tool_call_only: true
+    expression: "f.tool == 'http_request'"
+    # Exact ActionFacts owner only. Request values remain private; the finding
+    # retains only the existence of one closed literal command-injection proof.
+    pattern: 'a^'
+    title: "Literal command injection in a structured HTTP request"
+    severity: HIGH
+    confidence: 0.99
+    tags: [attack, web, command-injection, execution, bounded-lineage]
   - id: exec.sqlserver_xp_cmdshell_invoke
     tool_call_only: true
     expression: "f.tool == 'sql_query'"

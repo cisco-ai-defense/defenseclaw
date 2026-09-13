@@ -186,6 +186,15 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 			return extractedInput{status: StatusComplete}
 		}
 	}
+	if tool == "http_request" && selectsHTTPPathRequestSchema(raw) {
+		if _, ok := exactHTTPRequestInput(raw); ok {
+			// The reviewed HTTP recognizers own both accepted request schemas.
+			// Request values remain private and are never reinterpreted as shell
+			// commands or projected into generic command, path, or payload facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if strings.EqualFold(tool, "kubectl") {
 		if exactKubernetesCronJobInputSchema(raw) || exactKubernetesPodRunInputSchema(raw) ||
 			exactKubernetesCronJobReverseShellInputSchema(raw) {
