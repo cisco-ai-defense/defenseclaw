@@ -66,6 +66,13 @@ class EnigmaNormalizerTest(unittest.TestCase):
         self.assertEqual("open notes.txt", events[0]["command"])
         self.assertEqual(["open", "notes.txt"], events[0]["argv"])
         self.assertEqual("submit", events[-1]["tool_name"])
+        self.assertEqual("malicious", cases[0]["truth"]["source_truth"])
+        self.assertEqual("contextual_or_dual_use", cases[0]["truth"]["deterministic_truth"])
+        self.assertEqual("out_of_scope", cases[0]["truth"]["applicability"])
+        self.assertEqual("detect_only", cases[0]["truth"]["expected_disposition"])
+        self.assertIn("hidden_source_observation_lineage", cases[0]["truth"]["categories"])
+        self.assertIn("detector_visible_proof_absent", cases[0]["truth"]["categories"])
+        self.assertIn("payload.events", cases[0]["truth"]["exclusion_reason"])
         self.assertEqual(1, manifest["audit"]["successful_outcome_closure"])
         self.assertEqual({"8": 1}, manifest["audit"]["proof_event_lengths"])
 
