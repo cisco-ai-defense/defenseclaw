@@ -266,6 +266,7 @@ func TestCanonicalIDFromRuleID(t *testing.T) {
 		{"IMPACT.MASS_PROCESS_TERMINATION", "impact.mass_process_termination"},
 		{"Persistence.Shell_Profile_Write", "persistence.shell_profile_write"},
 		{"chain.secret_read_then_egress", "chain.secret_read_then_egress"},
+		{"chain.adcs_certificate_request_then_pfx_authentication", "chain.adcs_certificate_request_then_pfx_authentication"},
 	}
 
 	for _, tt := range tests {

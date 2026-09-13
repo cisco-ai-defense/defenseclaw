@@ -252,9 +252,20 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		// account-and-credential chain; the bounded matcher is the sole owner.
 		detectionOnly: true,
 	},
+	"chain.adcs_certificate_request_then_pfx_authentication": {
+		prerequisite:     adcsCertificateImpersonationCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this result-gated
+		// PFX artifact chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
 })
 
 func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func adcsCertificateImpersonationCatalogPrerequisite(actionfacts.Facts) bool {
 	return false
 }
 
