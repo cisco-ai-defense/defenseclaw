@@ -171,6 +171,49 @@ class CochiseNormalizerTests(unittest.TestCase):
         self.assertEqual(adapter_stats(manifest)["deterministic_tool_result_cases"], 3)
         self.assertEqual(adapter_stats(manifest)["tool_result_hard_negatives"], 1)
 
+    def test_kerberos_ticket_forgery_requires_exact_key_grammar_and_saved_artifact_identity(self) -> None:
+        ticket_result = "\n".join(
+            [
+                "[*] Creating basic skeleton ticket and PAC Infos",
+                "[*] Customizing ticket for example.test/administrator",
+                "[*] Signing/Encrypting final ticket",
+                "[*] Saving ticket in administrator.ccache",
+            ]
+        )
+        base = (
+            "impacket-ticketer -nthash "
+            + "a" * 32
+            + " -domain-sid S-1-5-21-1-2-3 -domain example.test administrator"
+        )
+        rows = [
+            event("tool_call", "success", params={"command": base}),
+            event("tool_result", "success", result=ticket_result),
+            event(
+                "tool_call",
+                "both-keys",
+                params={"command": base.replace(" -domain-sid", " -aesKey " + "b" * 64 + " -domain-sid")},
+            ),
+            event("tool_result", "both-keys", result="[-] choose only one key type"),
+            event("tool_call", "mismatch", params={"command": base}),
+            event(
+                "tool_result",
+                "mismatch",
+                result=ticket_result.replace("administrator.ccache", "other.ccache"),
+            ),
+            event("tool_call", "wrapped", params={"command": "sudo " + base}),
+            event("tool_result", "wrapped", result=ticket_result),
+        ]
+        self.write("golden-ticket.json", rows)
+        cases, _ = self.normalize()
+        positives = [
+            row
+            for row in cases
+            if "kerberos_ticket_forgery" in row["truth"]["categories"]
+        ]
+        self.assertEqual(len(positives), 1)
+        self.assertEqual(positives[0]["surface"], "action")
+        self.assertNotIn("a" * 32, json.dumps(cases, sort_keys=True))
+
     def test_compromised_fact_requires_exact_bounded_successful_authentication(self) -> None:
         secret = "generated passphrase"
         rows = [
@@ -364,9 +407,15 @@ class CochiseNormalizerTests(unittest.TestCase):
 
     def test_common_pentest_credential_forms_are_redacted_without_value_hashes(self) -> None:
         values = ("placeholder-passphrase", "a" * 32 + ":" + "b" * 32)
-        params = {"command": (f"impacket-tool domain/user:{values[0]}@host -hashes {values[1]} -H {'c' * 32}")}
+        nthash = "d" * 32
+        params = {
+            "command": (
+                f"impacket-tool domain/user:{values[0]}@host -hashes {values[1]} "
+                f"-H {'c' * 32} -nthash {nthash}"
+            )
+        }
         projected = json.dumps(adapter.projected_args(params), sort_keys=True)
-        for value in values:
+        for value in (*values, nthash):
             self.assertNotIn(value, projected)
         self.assertNotIn("c" * 32, projected)
         self.assertIn("REDACTED_SECRET_", projected)

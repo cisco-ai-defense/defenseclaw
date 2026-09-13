@@ -467,6 +467,11 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		},
 		detectionOnly: true,
 	},
+	"credential.kerberos_ticket_forgery": {
+		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
+			return exactKerberosTicketForgeryPrerequisite(facts)
+		},
+	},
 	"impact.windows_delete_all_shadow_copies": {
 		proves: func(_ actionfacts.Input, facts actionfacts.Facts) bool {
 			return actionfacts.ExactWindowsVSSDeleteAllShadows(facts)

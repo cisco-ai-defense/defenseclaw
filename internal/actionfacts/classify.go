@@ -312,6 +312,13 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 		} else {
 			out.markPartial(IssueUnknownOperandGrammar)
 		}
+	case "impacket-ticketer", "ticketer.py":
+		if _, ok := exactKerberosTicketForgeryCommand(*command); ok {
+			addOperation(command, OperationCredentialRead)
+			addOperation(command, OperationWrite)
+		} else {
+			out.markPartial(IssueUnknownOperandGrammar)
+		}
 	case "cat":
 		addOperation(command, OperationRead)
 		addPathOperands(out, command, PathAccessRead, optionValues())

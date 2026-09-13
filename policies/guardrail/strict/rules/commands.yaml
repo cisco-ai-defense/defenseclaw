@@ -286,6 +286,18 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, private-key, pkcs12, bounded-grammar]
+  - id: credential.kerberos_ticket_forgery
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-ticketer', 'ticketer.py'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)
+    pattern: 'a^'
+    title: "Forge a Kerberos ticket from static key material"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, kerberos, ticket-forgery, bounded-grammar]
   - id: credential.structured_directory_acquisition
     tool_call_only: true
     expression: "f.tool in ['secretsdump', 'hashcat_crack', 'kerberoast']"

@@ -42,7 +42,8 @@ func TestExactKerberosTicketForgerySourceObservedForms(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			facts := Analyze(Input{Tool: "execute_command", Command: test.command})
 			fact, ok := ExactKerberosTicketForgerySource(facts)
-			if !ok || fact.CommandID == 0 ||
+			if !ok || facts.Parse.Status != StatusComplete || !facts.Authoritative() ||
+				fact.CommandID == 0 ||
 				!validPrivateDigest(fact.ExpectedArtifactIdentityDigest) {
 				t.Fatalf("fact=%+v ok=%t parse=%+v commands=%+v",
 					fact, ok, facts.Parse, facts.Commands)

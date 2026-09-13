@@ -31,8 +31,23 @@ func ExactKerberosTicketForgerySource(
 	if !kerberosTicketForgeryParseEligible(facts.Parse) || len(facts.Commands) != 1 {
 		return KerberosTicketForgeryFact{}, false
 	}
-	command := facts.Commands[0]
-	if command.ID == 0 || !exactUnconditionalTopLevelCommand(command) || !command.ArgvComplete ||
+	if facts.Commands[0].ID == 0 {
+		return KerberosTicketForgeryFact{}, false
+	}
+	return exactKerberosTicketForgeryCommand(facts.Commands[0])
+}
+
+func exactKerberosTicketForgeryCommand(
+	command CommandFact,
+) (KerberosTicketForgeryFact, bool) {
+	// POSIX and argv parser internals use the zero value for process commands;
+	// the public Facts projection normalizes it after classification. Normalize
+	// the local copy here so this closed grammar can participate in that same
+	// classification pass without weakening the exported structural check.
+	if command.Kind == "" {
+		command.Kind = CommandKindProcess
+	}
+	if !exactUnconditionalTopLevelCommand(command) || !command.ArgvComplete ||
 		len(command.Argv) < 8 {
 		return KerberosTicketForgeryFact{}, false
 	}

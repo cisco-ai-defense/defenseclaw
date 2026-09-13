@@ -70,6 +70,9 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		// but authorized certificate migration remains a legitimate workflow.
 		detectionOnly: true,
 	},
+	"credential.kerberos_ticket_forgery": {
+		prerequisite: exactKerberosTicketForgeryPrerequisite,
+	},
 	"credential.windows_ntds_ifm_dump": {
 		prerequisite:     actionfacts.ExactWindowsNTDSIFMDump,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -302,6 +305,11 @@ var semanticReconImpactOwners = map[string]semanticOwner{
 		actionfacts.OperationAccountChange,
 		privilegedAccountDisposition,
 	),
+}
+
+func exactKerberosTicketForgeryPrerequisite(facts actionfacts.Facts) bool {
+	_, ok := actionfacts.ExactKerberosTicketForgerySource(facts)
+	return ok
 }
 
 func windowsSecurityControlMutationPrerequisite(
