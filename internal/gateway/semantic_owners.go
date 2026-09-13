@@ -266,6 +266,12 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		// exact-cache chain; the bounded matcher is the sole owner.
 		detectionOnly: true,
 	},
+	"exfiltration.recursive_model_artifact_external_multipart": {
+		prerequisite:     recursiveModelArtifactEgressCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// The CEL expression is only a catalog anchor. The code-owned bounded
+		// Python parser must prove recursive opened-file-to-multipart lineage.
+	},
 })
 
 func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
@@ -278,6 +284,11 @@ func adcsCertificateImpersonationCatalogPrerequisite(actionfacts.Facts) bool {
 
 func s4uTicketSecretsDumpCatalogPrerequisite(actionfacts.Facts) bool {
 	return false
+}
+
+func recursiveModelArtifactEgressCatalogPrerequisite(facts actionfacts.Facts) bool {
+	_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(facts)
+	return ok
 }
 
 func buildSemanticOwners(owners map[string]semanticOwner) map[string]semanticOwner {
