@@ -51,13 +51,14 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
         self.assertEqual(stats["baseline_runs"], 1)
         self.assertEqual(stats["side_task_runs"], 2)
         self.assertEqual(stats["side_task_success_runs"], 1)
-        self.assertEqual(stats["exclusions"], {"non_english_embedded_german": 1})
+        self.assertEqual(stats["excluded_non_english_embedded_german"], 1)
         self.assertEqual(stats["truth_benign"], 19)
         self.assertEqual(stats.get("truth_malicious", 0), 0)
         self.assertEqual(stats.get("truth_unknown", 0), 0)
         self.assertEqual(stats["applicability_in_scope"], 19)
         self.assertEqual(stats.get("applicability_out_of_scope", 0), 0)
-        self.assertEqual(stats["outcomes"], {"failed": 2, "succeeded": 12})
+        self.assertEqual(stats["outcome_failed"], 2)
+        self.assertEqual(stats["outcome_succeeded"], 12)
 
     def test_emitted_cases_have_english_strata(self) -> None:
         cases, _manifest = self.normalize()
@@ -170,7 +171,7 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
 
         cases, manifest = self.normalize(copied)
         stats = manifest["adapter_statistics"][normalizer.ADAPTER]
-        score_summary = stats["evaluation_score_summary"]
+        score_summary = manifest["trajectory_source"]["evaluation_score_summary"]
         self.assertEqual(len(cases), 19)
         self.assertEqual(score_summary["main_task_score_min"], 0.5)
         self.assertEqual(score_summary["main_task_score_max"], 0.7694)

@@ -1483,18 +1483,11 @@ def normalize(
                 f"pinned ResearchArena slice mismatch: expected {expected_slice}, observed {observed_slice}"
             )
 
-    statistics: dict[str, Any] = {key: int(value) for key, value in sorted(counts.items())}
-    statistics["outcomes"] = {key: int(value) for key, value in sorted(outcomes.items())}
-    statistics["providers"] = {key: int(value) for key, value in sorted(providers.items())}
-    statistics["exclusions"] = {key: int(value) for key, value in sorted(exclusions.items())}
-    statistics["evaluation_score_summary"] = {
-        "result_files": int(counts["evaluator_result_files_used"]),
-        "main_task_score_min": None if main_score_min == math.inf else main_score_min,
-        "main_task_score_max": None if main_score_max == -math.inf else main_score_max,
-        "side_task_score_min": None if side_score_min == math.inf else side_score_min,
-        "side_task_score_max": None if side_score_max == -math.inf else side_score_max,
-    }
-    statistics["evaluation_score_summary"] = {
+    statistics: dict[str, int] = {key: int(value) for key, value in sorted(counts.items())}
+    statistics.update({f"outcome_{key}": int(value) for key, value in sorted(outcomes.items())})
+    statistics.update({f"provider_{key}": int(value) for key, value in sorted(providers.items())})
+    statistics.update({f"excluded_{key}": int(value) for key, value in sorted(exclusions.items())})
+    evaluation_score_summary = {
         "result_files_used": counts["evaluator_result_files_used"],
         "main_task_score_min": None if math.isinf(main_score_min) else main_score_min,
         "main_task_score_max": None if math.isinf(main_score_max) else main_score_max,
@@ -1519,14 +1512,21 @@ def normalize(
             "revision": revision,
             "license": SOURCE_LICENSE,
             "redistribution": SOURCE_REDISTRIBUTION,
-            "source_file_count": len(source_files),
+            "path": "pinned-source-tree",
+            "bytes": sum(record.size for record in source_files),
+            "files": len(source_files),
+            "sha256": tree_sha256,
+        },
+        "adapter_statistics": {ADAPTER: statistics},
+        "trajectory_source": {
             "metadata_file_count": metadata_file_count,
             "solve_file_count": solve_file_count,
             "results_file_count": result_file_count,
-            "source_bytes": sum(record.size for record in source_files),
-            "source_tree_sha256": tree_sha256,
+            "outcomes": {key: int(value) for key, value in sorted(outcomes.items())},
+            "providers": {key: int(value) for key, value in sorted(providers.items())},
+            "exclusions": {key: int(value) for key, value in sorted(exclusions.items())},
+            "evaluation_score_summary": evaluation_score_summary,
         },
-        "adapter_statistics": {ADAPTER: statistics},
     }
     manifest_data = (json.dumps(manifest, indent=2, sort_keys=True, allow_nan=False) + "\n").encode("utf-8")
     manifest_path.write_bytes(manifest_data)
