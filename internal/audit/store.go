@@ -1837,6 +1837,10 @@ var migrations = []migration{
 		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
 		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
 	},
+	{
+		description: "guardrails: add result slot twenty-six for exact file-email lineage",
+		apply:       migrateToolChainTwentySixSlotFileEmailState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

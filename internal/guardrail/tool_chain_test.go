@@ -173,6 +173,7 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 		ToolChainADCSCertificateRequestThenPFXAuth:      {1 << 53, 1 << 54, 0},
 		ToolChainS4UTicketThenKerberosSecretsdump:       {1 << 55, 1 << 56, 0},
 		ToolChainSensitiveSQLiteReadThenUnboundedDelete: {1 << 57, 1 << 58, 0},
+		ToolChainFileReadThenEmailSameArtifact:          {1 << 59, 1 << 60, 0},
 	}
 	for index, definition := range ToolChainDefinitions() {
 		bits, ok := want[definition.ID]
@@ -186,17 +187,17 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 			t.Fatalf("%s result bit=%d want=%d", definition.ID, definition.ResultBit, wantResult)
 		}
 	}
-	if ToolChainCount != 25 || ToolChainLegacyCount != 13 ||
-		ToolChainKnownResultMask != uint32(0x1ffffff) ||
+	if ToolChainCount != 26 || ToolChainLegacyCount != 13 ||
+		ToolChainKnownResultMask != uint32(0x3ffffff) ||
 		ToolChainKnownResultMask&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("result slot bounds=%d/%#x want 25/0x1ffffff",
+		t.Fatalf("result slot bounds=%d/%#x want 26/0x3ffffff",
 			ToolChainCount, ToolChainKnownResultMask)
 	}
 	definition, _ := ToolChainDefinitionByID(ToolChainSQLServerXPCommandShellExecution)
-	if ToolChainKnownStepMask != uint64(0x7ffffffffffffff) ||
+	if ToolChainKnownStepMask != uint64(0x1fffffffffffffff) ||
 		ToolChainArtifactMutationBarrier != uint64(1<<19) ||
 		ToolChainKnownStepMask&ToolChainReservedSignBit != 0 {
-		t.Fatalf("step/barrier bounds=%#x/%#x want 0x7ffffffffffffff/0x80000",
+		t.Fatalf("step/barrier bounds=%#x/%#x want 0x1fffffffffffffff/0x80000",
 			ToolChainKnownStepMask, ToolChainArtifactMutationBarrier)
 	}
 	if definition.MutationBit != uint64(1<<24) {
@@ -778,7 +779,7 @@ func TestLegacyToolChainProjectionFingerprintSurvivesWidening(t *testing.T) {
 	}
 }
 
-func TestToolChainResultMaskRuntimeCapacityIncludesCatalogBitTwentyFour(t *testing.T) {
+func TestToolChainResultMaskRuntimeCapacityIncludesCatalogBitTwentyFive(t *testing.T) {
 	const twentyFifthChain = uint32(1 << 24)
 	matches := ToolChainMatches{
 		DetectedMask:        twentyFifthChain,
@@ -794,9 +795,15 @@ func TestToolChainResultMaskRuntimeCapacityIncludesCatalogBitTwentyFour(t *testi
 		ids[0] != ToolChainSensitiveSQLiteReadThenUnboundedDelete {
 		t.Fatalf("catalog result bit 24 ids=%v err=%v", ids, err)
 	}
-	const futureTwentySixthChain = uint32(1 << 25)
-	if _, err := ToolChainIDs(futureTwentySixthChain); err == nil {
-		t.Fatal("future result bit 25 was accepted before its catalog definition exists")
+	const twentySixthChain = uint32(1 << 25)
+	ids, err = ToolChainIDs(twentySixthChain)
+	if err != nil || len(ids) != 1 ||
+		ids[0] != ToolChainFileReadThenEmailSameArtifact {
+		t.Fatalf("catalog result bit 25 ids=%v err=%v", ids, err)
+	}
+	const futureTwentySeventhChain = uint32(1 << 26)
+	if _, err := ToolChainIDs(futureTwentySeventhChain); err == nil {
+		t.Fatal("future result bit 26 was accepted before its catalog definition exists")
 	}
 }
 

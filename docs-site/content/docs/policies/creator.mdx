@@ -30,14 +30,14 @@ does not execute ActionFacts parsers, CEL, regex, YARA, or bounded tool-call cha
 ## Current creator coverage
 
 The creator loads its editable rule catalog from the same generated assets as the repository
-profiles. In this snapshot, Balanced/default exposes 188 declared rules (184 enabled), Permissive
-188 (180 enabled), and Strict 187 (all enabled). Each profile carries 81 CEL declarations and 61
+profiles. In this snapshot, Balanced/default exposes 189 declared rules (185 enabled), Permissive
+189 (181 enabled), and Strict 188 (all enabled). Each profile carries 82 CEL declarations and 62
 `tool_call_only` rules. The recipe picker exposes every generated rule family, and Quick Start rule
 and correlator IDs are checked against all three profiles in the Policy Creator test suite.
 
 The **Deterministic coverage** Playground section is intentionally an inventory rather than an
-editor. It shows six ActionFacts capability groups, 18 fixed bounded chains (eight
-enforcement-capable and ten alert-only), five alert-only MCP-description YARA signatures, five
+editor. It shows six ActionFacts capability groups, 26 fixed bounded chains (four
+enforcement-capable and 22 alert-only), ten alert-only MCP-description YARA signatures, five
 selectable high-assurance packs, and the staged SSH integrity contract. Selectable packs can be
 layered directly into the custom rule pack; the generated asset is checked against the canonical
 repository YAML. For the proof model and the complete rule inventory, see
@@ -155,8 +155,8 @@ defenseclaw policy activate my-policy
 | Suppressions     | The three layers: `pre_judge_strips`, `finding_suppressions`, `tool_suppressions`.                                                     |
 | Sensitive tools  | `sensitive_tools` array — per-tool result inspection and judge-result toggles.                                                         |
 | LLM judges       | `judges.<name>` (pii / injection / tool-injection / exfil) — system prompts and category mappings.                                     |
-| Session correlator (Layer 5) | The two editable post-event correlator patterns bundled in `correlation-patterns.yaml`. These are distinct from the 18 fixed ActionFacts chains. |
-| Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 18 bounded tool-call chains, and the five MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
+| Session correlator (Layer 5) | The two editable post-event correlator patterns bundled in `correlation-patterns.yaml`. These are distinct from the 26 fixed ActionFacts chains. |
+| Deterministic coverage | Read-only inventory of code-owned ActionFacts capabilities, the 26 bounded tool-call chains, and the ten MCP-description YARA signatures; also applies selectable high-assurance rule packs to the custom pack. |
 | Firewall         | `firewall.default_action`, `blocked_destinations`, `allowed_domains`, `allowed_ports`.                                                 |
 | Webhooks         | `webhooks` array — Slack / Webex / PagerDuty / generic, signed via env-var secrets.                                                    |
 | Watch (rescan)   | `watch.rescan_enabled`, `watch.rescan_interval_min`.                                                                                    |
@@ -173,7 +173,7 @@ defenseclaw policy activate my-policy
   guardrail, firewall, audit, and skill actions. It does not run the Go ActionFacts parser, compile
   CEL, execute RE2 rules, scan MCP descriptions with YARA, or replay bounded chains. Use the exported
   policy on a DefenseClaw host and run the repository test/benchmark harness for those lanes.
-- **Fixed deterministic detectors are read-only.** The 18 bounded chains and five YARA signatures
+- **Fixed deterministic detectors are read-only.** The 26 bounded chains and ten YARA signatures
   shown by the creator are repository-owned runtime/scanner capabilities, not arbitrary policy
   programs. The creator can display their coverage and the active posture, but it does not rewrite
   their implementations. The two Layer-5 session correlator patterns remain separately editable.

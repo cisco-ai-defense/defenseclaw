@@ -86,7 +86,7 @@
           "rules": [
             {
               "id": "impact.sql_unbounded_delete",
-              "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
+              "expression": "f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "SQL DELETE without a WHERE clause",
@@ -100,7 +100,7 @@
             },
             {
               "id": "impact.sql_schema_destroy",
-              "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
+              "expression": "f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])",
               "pattern": "a^",
               "tool_call_only": true,
               "title": "SQL schema or table-wide destructive operation",
@@ -110,6 +110,22 @@
                 "destructive",
                 "database",
                 "production-safety"
+              ]
+            },
+            {
+              "id": "chain.sensitive_sql_read_then_unbounded_delete_same_table",
+              "expression": "f.tool == 'write_query'",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Sensitive SQLite read followed by unbounded same-table delete",
+              "severity": "HIGH",
+              "confidence": 0.99,
+              "tags": [
+                "destructive",
+                "database",
+                "sqlite",
+                "production-safety",
+                "bounded-lineage"
               ]
             }
           ]
@@ -213,6 +229,22 @@
           "filename": "kubernetes-production",
           "category": "kubernetes-production-protection",
           "rules": [
+            {
+              "id": "credential.protected_kubernetes_named_secret_content_read",
+              "expression": "false",
+              "pattern": "a^",
+              "tool_call_only": true,
+              "title": "Read a named Secret in a protected Kubernetes cluster",
+              "severity": "CRITICAL",
+              "confidence": 0.99,
+              "tags": [
+                "credential",
+                "kubernetes",
+                "secret",
+                "protected-cluster",
+                "exact-actionfacts"
+              ]
+            },
             {
               "id": "impact.kubernetes_namespace_delete",
               "expression": "f.commands.exists(c, c.argv_complete && c.program in ['kubectl', 'oc'] && 'delete' in c.argv && (('namespace' in c.argv) || ('namespaces' in c.argv) || ('ns' in c.argv)))",

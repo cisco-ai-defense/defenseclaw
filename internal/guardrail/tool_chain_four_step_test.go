@@ -44,7 +44,7 @@ func TestFourStepAllocationFailsClosedBeforeReservedSignBit(t *testing.T) {
 
 func TestUnallocatedFourStepBitsRemainInvalidAtRuntime(t *testing.T) {
 	projection := ToolChainProjection{
-		ParseStatus: actionfacts.StatusComplete, DetectionStepMask: uint64(1 << 59),
+		ParseStatus: actionfacts.StatusComplete, DetectionStepMask: uint64(1 << 61),
 	}
 	if err := ValidateToolChainProjection(projection); err == nil {
 		t.Fatal("unallocated future step bit was accepted before a catalog definition exists")

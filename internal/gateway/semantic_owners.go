@@ -266,6 +266,13 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		// exact-cache chain; the bounded matcher is the sole owner.
 		detectionOnly: true,
 	},
+	"chain.file_read_then_email_same_artifact": {
+		prerequisite:     fileReadEmailArtifactCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// Catalog anchor only. One action cannot complete this success-gated
+		// same-file chain; the bounded matcher is the sole owner.
+		detectionOnly: true,
+	},
 	"exfiltration.recursive_model_artifact_external_multipart": {
 		prerequisite:     recursiveModelArtifactEgressCatalogPrerequisite,
 		suppressFallback: authoritativeSemanticSafeNegative,
@@ -275,6 +282,10 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 })
 
 func compromisedCredentialAuthenticationCatalogPrerequisite(actionfacts.Facts) bool {
+	return false
+}
+
+func fileReadEmailArtifactCatalogPrerequisite(actionfacts.Facts) bool {
 	return false
 }
 

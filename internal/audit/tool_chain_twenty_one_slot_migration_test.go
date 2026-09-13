@@ -21,8 +21,8 @@ func TestToolChainTwentyOneSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 	}
 	fixture := newToolChainFixture(t, ":memory:")
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"1099", "17599"},
-		"guardrail_chain_pending_actions": {"1099", "17599"},
+		"guardrail_chain_events":          {"1143", "18303"},
+		"guardrail_chain_pending_actions": {"1143", "18303"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -70,8 +70,8 @@ func TestToolChainTwentyOneSlotMigrationRebuildsLegacyDigestCapacity(t *testing.
 		t.Fatal(err)
 	}
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"1099", "17599"},
-		"guardrail_chain_pending_actions": {"1099", "17599"},
+		"guardrail_chain_events":          {"1143", "18303"},
+		"guardrail_chain_pending_actions": {"1143", "18303"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -255,8 +255,8 @@ func TestToolChainTwentyOneSlotWorstCaseValueEncodingFitsMigratedCapacity(t *tes
 		}
 	}
 	encoded := encodeToolChainValueJoinDigests(values)
-	if len(encoded) != 17599 {
-		t.Fatalf("worst-case current-slot value width=%d want 17599", len(encoded))
+	if len(encoded) != 18303 {
+		t.Fatalf("worst-case current-slot value width=%d want 18303", len(encoded))
 	}
 	decoded, err := decodeToolChainValueJoinDigests(encoded)
 	if err != nil {
@@ -283,11 +283,11 @@ func assertStoredTwentyFirstSlot(
 	); err != nil {
 		t.Fatal(err)
 	}
-	if len(encodedResources) != 1099 {
-		t.Fatalf("encoded current-slot resource width=%d want 1099", len(encodedResources))
+	if len(encodedResources) != 1143 {
+		t.Fatalf("encoded current-slot resource width=%d want 1143", len(encodedResources))
 	}
-	if len(encodedValues) > 17599 {
-		t.Fatalf("encoded current-slot value width=%d exceeds 17599", len(encodedValues))
+	if len(encodedValues) > 18303 {
+		t.Fatalf("encoded current-slot value width=%d exceeds 18303", len(encodedValues))
 	}
 	resources, err := decodeToolChainJoinDigests(encodedResources)
 	if err != nil {

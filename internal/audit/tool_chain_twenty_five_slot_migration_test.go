@@ -17,7 +17,7 @@ func TestToolChainTwentyFiveSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 		t.Fatal("twenty-five-slot SQLite state is not append-only migration 52")
 	}
 	definitions := guardrail.ToolChainDefinitions()
-	if len(definitions) != 25 ||
+	if len(definitions) < 25 ||
 		definitions[24].ID != guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete ||
 		definitions[24].ResultBit != uint32(1<<24) ||
 		definitions[24].Step1Bit != uint64(1<<57) ||
@@ -36,7 +36,7 @@ func TestToolChainTwentyFiveSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 		).Scan(&schema); err != nil {
 			t.Fatal(err)
 		}
-		for _, bound := range []string{"1099", "17599"} {
+		for _, bound := range []string{"1143", "18303"} {
 			if !strings.Contains(schema, bound) {
 				t.Fatalf("%s schema missing bound %s: %s", table, bound, schema)
 			}

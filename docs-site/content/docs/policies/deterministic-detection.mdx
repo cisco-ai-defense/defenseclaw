@@ -21,8 +21,8 @@ explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/benchmarks).
 
 <Callout type="info" title="Repository snapshot">
-The balanced/default enabled rule catalog contains 184 local rules across seven
-families. The repository also contains 18 fixed bounded chains, five
+The balanced/default enabled rule catalog contains 185 local rules across seven
+families. The repository also contains 26 fixed bounded chains, ten
 MCP-description YARA signatures, two post-event correlator patterns, five
 selectable high-assurance packs, and one staged SSH integrity policy contract.
 The YAML and Go files linked below remain authoritative if these counts change.
@@ -63,9 +63,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 188 | 184 | 81 | 61 | 21 |
-| Permissive | 188 | 180 | 81 | 61 | 21 |
-| Strict | 187 | 187 | 81 | 61 | 6 |
+| Balanced/default | 189 | 185 | 82 | 62 | 22 |
+| Permissive | 189 | 181 | 82 | 62 | 22 |
+| Strict | 188 | 188 | 82 | 62 | 7 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -147,7 +147,7 @@ and enum reference.
 
 ## CEL selectors
 
-Each bundled profile declares 81 CEL expressions. CEL is deliberately limited
+Each bundled profile declares 82 CEL expressions. CEL is deliberately limited
 to Boolean logic, field access, fixed enum constants, membership, bounded
 `exists` comprehensions, and literal RE2 matching. It cannot perform arbitrary
 history scans, dynamic regex construction, reflection, network access, file
@@ -258,7 +258,7 @@ configuration.
 
 ## YARA MCP-description scanning
 
-The MCP scanner adds five YARA signatures from
+The MCP scanner adds ten YARA signatures from
 `policies/yara/mcp-tools/description_injection.yara`:
 
 | Signature | Requires |

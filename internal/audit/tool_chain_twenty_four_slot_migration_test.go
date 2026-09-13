@@ -21,8 +21,8 @@ func TestToolChainTwentyFourSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 	}
 	fixture := newToolChainFixture(t, ":memory:")
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"1099", "17599"},
-		"guardrail_chain_pending_actions": {"1099", "17599"},
+		"guardrail_chain_events":          {"1143", "18303"},
+		"guardrail_chain_pending_actions": {"1143", "18303"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -195,8 +195,8 @@ func TestToolChainCurrentCatalogRoundTripsAtMaximumCapacity(t *testing.T) {
 	}
 	encodedResources := encodeToolChainJoinDigests(resources)
 	encodedValues := encodeToolChainValueJoinDigests(values)
-	if len(encodedResources) != 1099 || len(encodedValues) != 17599 {
-		t.Fatalf("maximum encoded widths=%d/%d want 1099/17599",
+	if len(encodedResources) != 1143 || len(encodedValues) != 18303 {
+		t.Fatalf("maximum encoded widths=%d/%d want 1143/18303",
 			len(encodedResources), len(encodedValues))
 	}
 	decodedResources, err := decodeToolChainJoinDigests(encodedResources)

@@ -334,6 +334,18 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, kerberos, secretsdump, bounded-lineage, detection-only]
+  - id: chain.file_read_then_email_same_artifact
+    tool_call_only: true
+    expression: "f.tool in ['get_file_by_id', 'send_email']"
+    # Catalog anchor only. The code-owned bounded matcher requires two
+    # authenticated successful calls and exact opaque file-identity continuity.
+    # Recipient authorization and file sensitivity are not inferred, so this
+    # remains alert-only in every built-in posture.
+    pattern: 'a^'
+    title: "File read followed by email transfer of the same artifact"
+    severity: HIGH
+    confidence: 0.98
+    tags: [exfiltration, file, email, bounded-lineage, detection-only]
   - id: exfiltration.recursive_model_artifact_external_multipart
     tool_call_only: true
     expression: >-

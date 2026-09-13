@@ -7,7 +7,7 @@ package audit
 
 import "fmt"
 
-// migrateToolChainState adds the bounded, content-free state used by the twenty-five
+// migrateToolChainState adds the bounded, content-free state used by the twenty-six
 // fixed tool-call chain slots. Store.applyMigration owns the surrounding
 // transaction.
 func migrateToolChainState(ex dbExecer) error {
@@ -47,11 +47,11 @@ func migrateToolChainState(ex dbExecer) error {
 				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 1099),
+				CHECK (length(enforcement_join_digests) <= 1143),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 1099),
+				CHECK (length(enforcement_output_join_digests) <= 1143),
 			value_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(value_join_digests) <= 17599),
+				CHECK (length(value_join_digests) <= 18303),
 			detected_chain_mask INTEGER NOT NULL
 				CHECK (detected_chain_mask BETWEEN 0 AND 2147483647),
 			enforcement_safe_chain_mask INTEGER NOT NULL

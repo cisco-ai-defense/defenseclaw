@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 25
+	ToolChainCount       = 26
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -76,6 +76,7 @@ const (
 	ToolChainADCSCertificateRequestThenPFXAuth      = "chain.adcs_certificate_request_then_pfx_authentication"
 	ToolChainS4UTicketThenKerberosSecretsdump       = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
 	ToolChainSensitiveSQLiteReadThenUnboundedDelete = "chain.sensitive_sql_read_then_unbounded_delete_same_table"
+	ToolChainFileReadThenEmailSameArtifact          = "chain.file_read_then_email_same_artifact"
 	ToolChainMaxValueJoinDigests                    = 16
 	toolChainProjectionFingerprintDomain            = "defenseclaw.tool-chain.projection.v2"
 	toolChainWideProjectionFingerprintDomain        = "defenseclaw.tool-chain.projection.v3-wide"
@@ -405,6 +406,20 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// retains the complete proof as an alert without treating a destructive
 		// but potentially authorized database operation as universally blockable.
 		DetectionOnly: false,
+	},
+	{
+		ID: ToolChainFileReadThenEmailSameArtifact, Version: "1.0",
+		Title:       "File read followed by email transfer of the same artifact",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "authenticated-successful-structured-file-read-to-exact-email-attachment-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: true,
+		// Exact file identity, success, order, and bounds prove the transfer but
+		// do not prove that the recipient is unapproved or the file is sensitive.
+		// Keep every built-in posture alert-only until trusted deployment policy
+		// can supply those authorization facts.
+		DetectionOnly: true,
 	},
 }
 

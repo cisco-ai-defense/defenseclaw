@@ -1179,10 +1179,36 @@ func projectTrustedActionChainSteps(
 		hasAnyFinding(guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete) ||
 			hasEnforceableFinding("impact.sql_unbounded_delete"),
 	)
+	projectStructuredFileEmailChainSteps(projection, facts)
 	projectRemoteArtifactChainSteps(projection, facts)
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
 	}
+}
+
+func projectStructuredFileEmailChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainFileReadThenEmailSameArtifact
+	if !facts.Authoritative() {
+		return
+	}
+	if reads := actionfacts.ExactResourceReads(facts); len(reads) == 1 {
+		addToolChainStep(projection, chainID, 1, true, false)
+		setToolChainEnforcementJoinDigest(
+			projection, chainID, reads[0].ResourceIdentityDigest,
+		)
+		return
+	}
+	transfers := actionfacts.ExactArtifactTransfers(facts)
+	if len(transfers) != 1 || len(transfers[0].ArtifactIdentityDigests) != 1 {
+		return
+	}
+	addToolChainStep(projection, chainID, 2, true, false)
+	setToolChainEnforcementJoinDigest(
+		projection, chainID, transfers[0].ArtifactIdentityDigests[0],
+	)
 }
 
 func projectSensitiveSQLiteReadDeleteChainSteps(

@@ -116,7 +116,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.permission_denied_then_runtime_bypass',
@@ -124,7 +124,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 5,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.privilege_discovery_then_elevation',
@@ -132,7 +132,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 15,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.secret_manager_read_then_egress',
@@ -140,7 +140,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.secret_read_then_egress',
@@ -148,7 +148,7 @@ export const BOUNDED_CHAINS = [
     severity: 'CRITICAL',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.workload_identity_then_lateral_execution',
@@ -156,7 +156,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 15,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.download_decode_execute_same_artifact',
@@ -164,7 +164,7 @@ export const BOUNDED_CHAINS = [
     severity: 'CRITICAL',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.download_then_execute_same_artifact',
@@ -286,6 +286,38 @@ export const BOUNDED_CHAINS = [
     timeWindowMinutes: 30,
     mode: 'alert-only',
   },
+  {
+    id: 'chain.adcs_certificate_request_then_pfx_authentication',
+    title: 'AD CS certificate impersonation followed by PFX authentication',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.s4u_ticket_then_kerberos_secretsdump_same_cache',
+    title: 'Result-backed S4U ticket used for Kerberos-only secretsdump',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.sensitive_sql_read_then_unbounded_delete_same_table',
+    title: 'Sensitive SQLite rowset read followed by unbounded delete of the same table',
+    severity: 'CRITICAL',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.file_read_then_email_same_artifact',
+    title: 'File read followed by email transfer of the same artifact',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
 ] as const satisfies readonly BoundedChain[];
 
 export const YARA_RULES = [
@@ -360,7 +392,7 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'database-destruction-protection',
     title: 'Database destruction protection',
     status: 'selectable',
-    ruleCount: 2,
+    ruleCount: 3,
     coverage: 'Unbounded deletes plus schema, database, and table-wide destructive SQL.',
   },
   {
@@ -374,7 +406,7 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'kubernetes-production-protection',
     title: 'Kubernetes production protection',
     status: 'selectable',
-    ruleCount: 2,
+    ruleCount: 3,
     coverage: 'Namespace deletion and closed bulk workload deletion through kubectl or oc.',
   },
   {

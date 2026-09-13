@@ -68,11 +68,11 @@ func migrateToolChainPendingState(ex dbExecer) error {
 				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 1099),
+				CHECK (length(enforcement_join_digests) <= 1143),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 1099),
+				CHECK (length(enforcement_output_join_digests) <= 1143),
 			value_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(value_join_digests) <= 17599),
+				CHECK (length(value_join_digests) <= 18303),
 			prepared_time_unix_nano INTEGER NOT NULL
 				CHECK (prepared_time_unix_nano > 0),
 			expires_time_unix_nano INTEGER NOT NULL

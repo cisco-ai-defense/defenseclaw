@@ -1426,6 +1426,38 @@
       ]
     },
     {
+      "id": "RECIPE-credential.kerberos_ticket_forgery",
+      "title": "Forge a Kerberos ticket from static key material",
+      "kind": "rule:command",
+      "body": {
+        "id": "credential.kerberos_ticket_forgery",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-ticketer', 'ticketer.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_WRITE in c.operations)",
+        "pattern": "a^",
+        "title": "Forge a Kerberos ticket from static key material",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "active-directory",
+          "kerberos",
+          "ticket-forgery",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "active-directory",
+        "kerberos",
+        "ticket-forgery",
+        "bounded-grammar"
+      ]
+    },
+    {
       "id": "RECIPE-credential.structured_directory_acquisition",
       "title": "Structured directory credential acquisition",
       "kind": "rule:command",
@@ -1490,6 +1522,138 @@
       ],
       "data_axis": [
         "sensitive_access"
+      ]
+    },
+    {
+      "id": "RECIPE-chain.adcs_certificate_request_then_pfx_authentication",
+      "title": "AD CS certificate impersonation followed by PFX authentication",
+      "kind": "rule:command",
+      "body": {
+        "id": "chain.adcs_certificate_request_then_pfx_authentication",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['certipy', 'certipy-ad'])",
+        "pattern": "a^",
+        "title": "AD CS certificate impersonation followed by PFX authentication",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "active-directory",
+          "ad-cs",
+          "authentication",
+          "bounded-lineage",
+          "detection-only"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "active-directory",
+        "ad-cs",
+        "authentication",
+        "bounded-lineage",
+        "detection-only"
+      ]
+    },
+    {
+      "id": "RECIPE-chain.s4u_ticket_then_kerberos_secretsdump_same_cache",
+      "title": "Result-backed S4U ticket used for Kerberos-only secretsdump",
+      "kind": "rule:command",
+      "body": {
+        "id": "chain.s4u_ticket_then_kerberos_secretsdump_same_cache",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getst', 'getst.py', 'impacket-secretsdump', 'secretsdump.py'])",
+        "pattern": "a^",
+        "title": "Result-backed S4U ticket used for Kerberos-only secretsdump",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "active-directory",
+          "kerberos",
+          "secretsdump",
+          "bounded-lineage",
+          "detection-only"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "active-directory",
+        "kerberos",
+        "secretsdump",
+        "bounded-lineage",
+        "detection-only"
+      ]
+    },
+    {
+      "id": "RECIPE-chain.file_read_then_email_same_artifact",
+      "title": "File read followed by email transfer of the same artifact",
+      "kind": "rule:command",
+      "body": {
+        "id": "chain.file_read_then_email_same_artifact",
+        "tool_call_only": true,
+        "expression": "f.tool in ['get_file_by_id', 'send_email']",
+        "pattern": "a^",
+        "title": "File read followed by email transfer of the same artifact",
+        "severity": "HIGH",
+        "confidence": 0.98,
+        "tags": [
+          "exfiltration",
+          "file",
+          "email",
+          "bounded-lineage",
+          "detection-only"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "exfiltration",
+        "file",
+        "email",
+        "bounded-lineage",
+        "detection-only"
+      ]
+    },
+    {
+      "id": "RECIPE-exfiltration.recursive_model_artifact_external_multipart",
+      "title": "Recursive model artifacts uploaded through exact multipart lineage",
+      "kind": "rule:command",
+      "body": {
+        "id": "exfiltration.recursive_model_artifact_external_multipart",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['python', 'python3'])",
+        "pattern": "a^",
+        "title": "Recursive model artifacts uploaded through exact multipart lineage",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "exfiltration",
+          "model-artifact",
+          "checkpoint",
+          "multipart",
+          "bounded-lineage"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "exfiltration",
+        "model-artifact",
+        "checkpoint",
+        "multipart",
+        "bounded-lineage"
       ]
     },
     {
@@ -2309,13 +2473,45 @@
       ]
     },
     {
+      "id": "RECIPE-exfil.sql_credential_external_output",
+      "title": "Direct SQL credential rowset output to an external destination",
+      "kind": "rule:command",
+      "body": {
+        "id": "exfil.sql_credential_external_output",
+        "tool_call_only": true,
+        "expression": "f.tool == 'db.query'",
+        "pattern": "a^",
+        "title": "Direct SQL credential rowset output to an external destination",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "exfiltration",
+          "database",
+          "external-output",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "exfiltration",
+        "database",
+        "external-output",
+        "bounded-grammar"
+      ]
+    },
+    {
       "id": "RECIPE-impact.sql_destructive_mutation",
       "title": "Exact destructive SQL mutation",
       "kind": "rule:command",
       "body": {
         "id": "impact.sql_destructive_mutation",
         "tool_call_only": true,
-        "expression": "f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
+        "expression": "f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])",
         "pattern": "a^",
         "title": "Exact destructive SQL mutation",
         "severity": "HIGH",
@@ -2334,6 +2530,38 @@
       "tags": [
         "impact",
         "database",
+        "destructive",
+        "bounded-lineage"
+      ]
+    },
+    {
+      "id": "RECIPE-chain.sensitive_sql_read_then_unbounded_delete_same_table",
+      "title": "Sensitive SQLite read followed by unbounded same-table delete",
+      "kind": "rule:command",
+      "body": {
+        "id": "chain.sensitive_sql_read_then_unbounded_delete_same_table",
+        "tool_call_only": true,
+        "expression": "f.tool == 'write_query'",
+        "pattern": "a^",
+        "title": "Sensitive SQLite read followed by unbounded same-table delete",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "impact",
+          "database",
+          "sqlite",
+          "destructive",
+          "bounded-lineage"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "database",
+        "sqlite",
         "destructive",
         "bounded-lineage"
       ]
@@ -2530,6 +2758,40 @@
         "iam",
         "wildcard",
         "bounded-lineage"
+      ]
+    },
+    {
+      "id": "RECIPE-impact.aws_bulk_ec2_termination",
+      "title": "Terminate at least ten exact AWS EC2 instances",
+      "kind": "rule:command",
+      "body": {
+        "id": "impact.aws_bulk_ec2_termination",
+        "tool_call_only": true,
+        "expression": "f.tool == 'aws.ec2.terminate_instances'",
+        "pattern": "a^",
+        "title": "Terminate at least ten exact AWS EC2 instances",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "impact",
+          "cloud",
+          "aws",
+          "ec2",
+          "destructive",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "cloud",
+        "aws",
+        "ec2",
+        "destructive",
+        "bounded-grammar"
       ]
     },
     {
@@ -3050,6 +3312,134 @@
         "kubernetes",
         "workload-identity",
         "bounded-lineage"
+      ]
+    },
+    {
+      "id": "RECIPE-credential.kubernetes_named_secret_content_read",
+      "title": "Read the content of one named Kubernetes Secret",
+      "kind": "rule:command",
+      "body": {
+        "id": "credential.kubernetes_named_secret_content_read",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Read the content of one named Kubernetes Secret",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "kubernetes",
+          "secret",
+          "content-read",
+          "exact-actionfacts"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "kubernetes",
+        "secret",
+        "content-read",
+        "exact-actionfacts"
+      ]
+    },
+    {
+      "id": "RECIPE-credential.kubernetes_batch_secret_collection",
+      "title": "Collect decoded content from multiple named Kubernetes Secrets",
+      "kind": "rule:command",
+      "body": {
+        "id": "credential.kubernetes_batch_secret_collection",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Collect decoded content from multiple named Kubernetes Secrets",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "kubernetes",
+          "secret",
+          "batch",
+          "content-read",
+          "exact-actionfacts"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "kubernetes",
+        "secret",
+        "batch",
+        "content-read",
+        "exact-actionfacts"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.pam_permit_authentication_bypass",
+      "title": "Install pam_permit authentication bypass",
+      "kind": "rule:command",
+      "body": {
+        "id": "tamper.pam_permit_authentication_bypass",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Install pam_permit authentication bypass",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "authentication",
+          "privilege",
+          "linux",
+          "pam",
+          "tampering",
+          "exact-actionfacts"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "authentication",
+        "privilege",
+        "linux",
+        "pam",
+        "tampering",
+        "exact-actionfacts"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.docker_insecure_http_registry",
+      "title": "Configure Docker to trust an insecure HTTP registry",
+      "kind": "rule:command",
+      "body": {
+        "id": "tamper.docker_insecure_http_registry",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Configure Docker to trust an insecure HTTP registry",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "container",
+          "supply-chain",
+          "docker",
+          "tampering",
+          "exact-actionfacts"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "container",
+        "supply-chain",
+        "docker",
+        "tampering",
+        "exact-actionfacts"
       ]
     },
     {
@@ -3960,20 +4350,21 @@
     },
     {
       "id": "RECIPE-privilege.container_host_escape",
-      "title": "Privileged container with host-root bind",
+      "title": "Container with writable host-root access",
       "kind": "rule:command",
       "body": {
         "id": "privilege.container_host_escape",
         "tool_call_only": true,
-        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['docker', 'podman', 'nerdctl'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations && f.paths.exists(p, p.command_id == c.id && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] && (p.normalized == '/' || p.resolved == '/')))",
         "pattern": "(?i)\\b(?:docker|podman|nerdctl)\\b[^;\\n]*\\brun\\b[^;\\n]*--privileged\\b[^;\\n]*(?:-v|--volume)(?:=|\\s+)/:[^;\\s]+",
-        "title": "Privileged container with host-root bind",
+        "title": "Container with writable host-root access",
         "severity": "CRITICAL",
         "confidence": 0.96,
         "tags": [
           "privilege",
           "container",
-          "host-escape"
+          "host-escape",
+          "host-root"
         ]
       },
       "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
@@ -3983,7 +4374,8 @@
       "tags": [
         "privilege",
         "container",
-        "host-escape"
+        "host-escape",
+        "host-root"
       ],
       "data_axis": []
     },
@@ -4095,6 +4487,37 @@
         "denial-of-service"
       ],
       "data_axis": []
+    },
+    {
+      "id": "RECIPE-impact.unbounded_cpu_fanout",
+      "title": "Unbounded high-CPU worker fanout",
+      "kind": "rule:command",
+      "body": {
+        "id": "impact.unbounded_cpu_fanout",
+        "tool_call_only": true,
+        "pattern": "a^",
+        "title": "Unbounded high-CPU worker fanout",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "impact",
+          "denial-of-service",
+          "resource-exhaustion",
+          "cpu",
+          "exact-actionfacts"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "impact",
+        "denial-of-service",
+        "resource-exhaustion",
+        "cpu",
+        "exact-actionfacts"
+      ]
     },
     {
       "id": "RECIPE-impact.mass_process_termination",
@@ -4300,6 +4723,70 @@
         "integrity",
         "package-manager",
         "system-file",
+        "bounded-grammar"
+      ]
+    },
+    {
+      "id": "RECIPE-integrity.posix_system_shell_replacement",
+      "title": "Replace a POSIX system shell with Bash",
+      "kind": "rule:command",
+      "body": {
+        "id": "integrity.posix_system_shell_replacement",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program == 'cp' && ('/bin/dash' in c.argv || '/usr/bin/dash' in c.argv))",
+        "pattern": "(?mi)^[ \\t]*cp[ \\t]+/(?:usr/)?bin/bash[ \\t]+/(?:usr/)?bin/dash[ \\t]*$",
+        "title": "Replace a POSIX system shell with Bash",
+        "severity": "CRITICAL",
+        "confidence": 0.99,
+        "tags": [
+          "integrity",
+          "system-binary",
+          "shell",
+          "binary-hijacking",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "integrity",
+        "system-binary",
+        "shell",
+        "binary-hijacking",
+        "bounded-grammar"
+      ]
+    },
+    {
+      "id": "RECIPE-integrity.posix_system_interpreter_wrapper",
+      "title": "Replace a versioned system Python interpreter with an environment wrapper",
+      "kind": "rule:command",
+      "body": {
+        "id": "integrity.posix_system_interpreter_wrapper",
+        "tool_call_only": true,
+        "expression": "f.paths.exists(p, p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE && p.normalized.startsWith('/usr/bin/python3.'))",
+        "pattern": "(?mi)^[ \\t]*mv[ \\t]+-f[ \\t]+/usr/bin/\\.python3\\.[0-9]{1,2}\\.wrap[ \\t]+/usr/bin/python3\\.[0-9]{1,2}[ \\t]*$",
+        "title": "Replace a versioned system Python interpreter with an environment wrapper",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "integrity",
+          "system-binary",
+          "python",
+          "binary-hijacking",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "integrity",
+        "system-binary",
+        "python",
+        "binary-hijacking",
         "bounded-grammar"
       ]
     },

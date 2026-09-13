@@ -515,6 +515,8 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 		return "chain.s4u_ticket_then_kerberos_secretsdump_same_cache", true
 	case "chain.sensitive_sql_read_then_unbounded_delete_same_table":
 		return "chain.sensitive_sql_read_then_unbounded_delete_same_table", true
+	case "chain.file_read_then_email_same_artifact":
+		return "chain.file_read_then_email_same_artifact", true
 	case "exfiltration.recursive_model_artifact_external_multipart":
 		return "exfiltration.recursive_model_artifact_external_multipart", true
 	default:
