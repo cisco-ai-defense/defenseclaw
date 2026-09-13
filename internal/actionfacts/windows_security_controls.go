@@ -274,44 +274,70 @@ func exactNetExecWindowsDefenderMultiControlDisable(facts Facts) bool {
 			DialectHint: DialectPowerShell,
 		})
 		if !exactNetExecPowerShellParseStatus(inner.Parse) ||
-			len(inner.Commands) < 3 || len(inner.Commands) > windowsSecurityControlPairWindow ||
-			!exactDirectWindowsDefenderMultiControlDisable(inner) {
+			len(inner.Commands) < 3 || len(inner.Commands) > windowsSecurityControlPairWindow {
 			continue
 		}
 		allDisableCommands := true
+		settings := make(map[string]struct{}, windowsSecurityControlPairWindow)
 		for _, child := range inner.Commands {
 			if child.ParentCommandID != 0 || child.PipelineID != 0 ||
 				child.ControlFlowUncertain || len(child.Wrappers) != 0 ||
 				len(child.Redirects) != 0 || !child.ArgvComplete ||
-				child.Program != "set-mppreference" || len(child.Arguments) != 3 {
+				child.Program != "set-mppreference" {
 				allDisableCommands = false
 				break
 			}
-			_, disabled, exact := exactWindowsDefenderDisableSetting(
-				windowsWordsFromArguments(child.Arguments[1:]),
-			)
+			setting, disabled, exact := exactNetExecWindowsDefenderDisableCommand(child)
 			if !exact || !disabled {
 				allDisableCommands = false
 				break
 			}
+			settings[setting] = struct{}{}
 		}
-		if allDisableCommands {
+		if allDisableCommands && len(settings) >= 3 {
 			return true
 		}
 	}
 	return false
 }
 
+// exactNetExecWindowsDefenderDisableCommand permits only the common static
+// PowerShell error-handling suffix observed in the result-backed process
+// arguments. No other common parameters or extra operands are accepted.
+func exactNetExecWindowsDefenderDisableCommand(command CommandFact) (string, bool, bool) {
+	if len(command.Arguments) != 3 && len(command.Arguments) != 5 {
+		return "", false, false
+	}
+	if len(command.Arguments) == 5 {
+		extra := windowsWordsFromArguments(command.Arguments[3:])
+		if len(extra) != 2 || !strings.EqualFold(extra[0].value, "-ErrorAction") ||
+			!strings.EqualFold(extra[1].value, "SilentlyContinue") ||
+			extra[0].expands || extra[1].expands {
+			return "", false, false
+		}
+	}
+	return exactWindowsDefenderDisableSetting(
+		windowsWordsFromArguments(command.Arguments[1:3]),
+	)
+}
+
 func exactNetExecPowerShellParseStatus(parse ParseResult) bool {
 	if parse.Status == StatusComplete {
 		return true
 	}
-	// The PowerShell parser currently reports semicolon-separated statements as
-	// unsupported after still projecting each complete command. This wrapper
-	// grammar independently requires that every projected statement is one exact
-	// Defender disable, so that single syntax marker is safe to consume here.
-	return parse.Status == StatusPartial && len(parse.Issues) == 1 &&
-		parse.Issues[0] == IssueUnsupportedConstruct
+	// The PowerShell parser reports semicolon-separated statements as unsupported
+	// and the optional static -ErrorAction suffix as unknown operand grammar after
+	// still projecting each complete command. The wrapper grammar independently
+	// validates every projected token, so only those two issue codes are safe.
+	if parse.Status != StatusPartial || len(parse.Issues) == 0 || len(parse.Issues) > 2 {
+		return false
+	}
+	for _, issue := range parse.Issues {
+		if issue != IssueUnsupportedConstruct && issue != IssueUnknownOperandGrammar {
+			return false
+		}
+	}
+	return true
 }
 
 func exactNetExecPowerShellCommand(command CommandFact) (string, bool) {

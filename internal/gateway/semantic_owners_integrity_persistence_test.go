@@ -45,6 +45,7 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"integrity.dpkg_status_direct_mutation",
 		"integrity.git_hooks_bypass",
 		"integrity.history_tamper",
+		"integrity.posix_system_shell_replacement",
 		"persistence.git_hook_write",
 		"persistence.malicious_download_execute_payload",
 		"persistence.shell_profile_write",

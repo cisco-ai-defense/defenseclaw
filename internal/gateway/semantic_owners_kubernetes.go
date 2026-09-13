@@ -15,6 +15,8 @@ const semanticKubernetesClusterWideSecretEnumerationExpression = `f.tool == 'kub
 
 const semanticKubernetesWorkloadIdentityTokenReadExpression = `f.tool == 'kubectl'`
 
+const kubernetesBatchSecretCollectionRuleID = "credential.kubernetes_batch_secret_collection"
+
 const semanticKubernetesClusterAdminBindingExpression = `f.commands.exists(c,
 c.argv_complete && c.program == 'kubectl' &&
 defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_PERMISSION_CHANGE in c.operations &&
@@ -65,6 +67,28 @@ var semanticKubernetesOwners = map[string]semanticOwner{
 		// protected-cluster policy may enforce it with deployment context.
 		alertOnly: true,
 	},
+}
+
+func init() {
+	if _, exists := exactFallbackContracts[kubernetesBatchSecretCollectionRuleID]; exists {
+		panic("duplicate exact Kubernetes semantic owner " + kubernetesBatchSecretCollectionRuleID)
+	}
+	// This owner needs the private authenticated tool-resource identity and the
+	// original closed structured arguments, neither of which belongs in the CEL
+	// projection. The code-owned exact lane is therefore the semantic authority;
+	// the inert catalog pattern cannot create a finding by itself.
+	exactFallbackContracts[kubernetesBatchSecretCollectionRuleID] = exactFallbackContract{
+		proves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesBatchSecretCollection(input)
+			return ok
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactKubernetesBatchSecretCollection(input)
+			return ok
+		},
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	}
 }
 
 func kubernetesWorkloadIdentityTokenReadPrerequisite(facts actionfacts.Facts) bool {

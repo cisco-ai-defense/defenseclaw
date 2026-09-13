@@ -6,6 +6,10 @@ package gateway
 import "github.com/defenseclaw/defenseclaw/internal/actionfacts"
 
 var semanticCloudIAMOwners = map[string]semanticOwner{
+	"impact.aws_bulk_ec2_termination": {
+		prerequisite:     actionfacts.ExactAWSBulkEC2Termination,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"defense_evasion.cloud_security_telemetry_disable": {
 		prerequisite: cloudAuditOperationPrerequisite(actionfacts.CloudAuditTelemetryDisable),
 		alertOnly:    true,

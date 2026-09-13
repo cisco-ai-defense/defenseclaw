@@ -87,21 +87,25 @@ type Source struct {
 }
 
 type Payload struct {
-	Direction        string          `json:"direction,omitempty"`
-	Content          string          `json:"content,omitempty"`
-	ToolName         string          `json:"tool_name,omitempty"`
-	Command          string          `json:"command,omitempty"`
-	Argv             []string        `json:"argv,omitempty"`
-	Args             json.RawMessage `json:"args,omitempty"`
-	Dialect          string          `json:"dialect,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	ActiveHome       string          `json:"active_home,omitempty"`
-	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
-	Filename         string          `json:"filename,omitempty"`
-	Target           string          `json:"target,omitempty"`
-	AnnotationSpans  []ActionSpan    `json:"annotation_spans,omitempty"`
-	Events           []ActionEvent   `json:"events,omitempty"`
-	ToolResult       *ToolResultCase `json:"tool_result,omitempty"`
+	Direction string          `json:"direction,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	ToolName  string          `json:"tool_name,omitempty"`
+	Command   string          `json:"command,omitempty"`
+	Argv      []string        `json:"argv,omitempty"`
+	Args      json.RawMessage `json:"args,omitempty"`
+	// ToolResourceIdentity is benchmark-authenticated connector context for an
+	// atomic structured action. It must be derived by the normalizer from source
+	// metadata, never copied from model-controlled arguments.
+	ToolResourceIdentity string          `json:"tool_resource_identity,omitempty"`
+	Dialect              string          `json:"dialect,omitempty"`
+	CWD                  string          `json:"cwd,omitempty"`
+	ActiveHome           string          `json:"active_home,omitempty"`
+	ActiveAgentFiles     []string        `json:"active_agent_files,omitempty"`
+	Filename             string          `json:"filename,omitempty"`
+	Target               string          `json:"target,omitempty"`
+	AnnotationSpans      []ActionSpan    `json:"annotation_spans,omitempty"`
+	Events               []ActionEvent   `json:"events,omitempty"`
+	ToolResult           *ToolResultCase `json:"tool_result,omitempty"`
 }
 
 // ToolResultCase models one normalized pre-tool proposal and terminal result
@@ -506,6 +510,10 @@ func (c Case) Validate() error {
 	case "action":
 		if c.Payload.Command == "" && len(c.Payload.Argv) == 0 && len(c.Payload.Args) == 0 {
 			return errors.New("action case requires command, argv, or args")
+		}
+		if len(c.Payload.ToolResourceIdentity) > 1024 ||
+			strings.IndexByte(c.Payload.ToolResourceIdentity, 0) >= 0 {
+			return errors.New("action case has invalid tool_resource_identity")
 		}
 	case "tool_result":
 		if err := c.Payload.validateToolResult(); err != nil {

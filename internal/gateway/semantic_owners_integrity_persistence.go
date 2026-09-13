@@ -37,6 +37,10 @@ const (
 )
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
+	"integrity.posix_system_shell_replacement": {
+		prerequisite:     actionfacts.ExactPOSIXSystemShellReplacement,
+		suppressFallback: authoritativeSemanticSafeNegative,
+	},
 	"integrity.dpkg_status_direct_mutation": {
 		prerequisite:     actionfacts.ExactPOSIXDPKGStatusMutation,
 		suppressFallback: authoritativeSemanticSafeNegative,

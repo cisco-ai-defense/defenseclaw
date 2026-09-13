@@ -207,6 +207,11 @@ type Facts struct {
 	// Cloud identifiers, endpoints, profiles, credentials, and command text are
 	// discarded. Observed provider-audit facts are detection evidence only.
 	CloudResourceMutations []CloudResourceMutationFact `json:"-"`
+	// AWSBulkEC2Terminations contains only a value-free proof that one trusted
+	// structured EC2 call will terminate a bounded set of at least ten distinct
+	// canonical literal instance IDs. Account, region, and instance identities
+	// are discarded before Facts crosses the ActionFacts boundary.
+	AWSBulkEC2Terminations []AWSBulkEC2TerminationFact `json:"-"`
 	// CloudAuditSecurityOperations contains only closed, successful AWS
 	// CloudTrail operation classes derived from the aws.cloudtrail_event schema.
 	// Request bodies, principals, account IDs, resource names, and event metadata
@@ -891,7 +896,8 @@ func (f Facts) EnforcementEligible() bool {
 			len(ExactSQLMutations(f)) == len(f.SQLMutations)
 		validDirectEgress := len(f.SQLDirectExternalEgresses) == 1 &&
 			ExactSQLDirectExternalEgress(f)
-		return validSQLMutation || validDirectEgress
+		validAWSBulkTermination := len(f.AWSBulkEC2Terminations) == 1
+		return validSQLMutation || validDirectEgress || validAWSBulkTermination
 	}
 	for _, command := range f.Commands {
 		if command.Effect != EffectExecute {

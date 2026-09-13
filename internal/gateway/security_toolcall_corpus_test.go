@@ -27,25 +27,26 @@ import (
 )
 
 type toolCallCorpusCase struct {
-	ID               string              `json:"id"`
-	RuleID           string              `json:"rule_id"`
-	Tool             string              `json:"tool,omitempty"`
-	Command          string              `json:"command,omitempty"`
-	Argv             []string            `json:"argv,omitempty"`
-	Args             json.RawMessage     `json:"args,omitempty"`
-	ArgsRaw          string              `json:"args_raw,omitempty"`
-	LegacyText       string              `json:"legacy_text,omitempty"`
-	Dialect          actionfacts.Dialect `json:"dialect,omitempty"`
-	CWD              string              `json:"cwd,omitempty"`
-	ActiveHome       string              `json:"active_home,omitempty"`
-	ActiveAgentFiles []string            `json:"active_agent_files,omitempty"`
-	IsAttack         bool                `json:"is_attack"`
-	ExpectRoute      string              `json:"expect_route"` // none | semantic | fallback
-	DetectionOnly    bool                `json:"detection_only,omitempty"`
-	NoOtherFinding   bool                `json:"no_other_finding,omitempty"`
-	ProfilePosture   string              `json:"profile_posture,omitempty"`
-	ProfileRuleIDs   map[string]string   `json:"profile_rule_ids,omitempty"`
-	ProfileRoutes    map[string]string   `json:"profile_routes,omitempty"`
+	ID                   string              `json:"id"`
+	RuleID               string              `json:"rule_id"`
+	Tool                 string              `json:"tool,omitempty"`
+	Command              string              `json:"command,omitempty"`
+	Argv                 []string            `json:"argv,omitempty"`
+	Args                 json.RawMessage     `json:"args,omitempty"`
+	ArgsRaw              string              `json:"args_raw,omitempty"`
+	LegacyText           string              `json:"legacy_text,omitempty"`
+	Dialect              actionfacts.Dialect `json:"dialect,omitempty"`
+	CWD                  string              `json:"cwd,omitempty"`
+	ActiveHome           string              `json:"active_home,omitempty"`
+	ActiveAgentFiles     []string            `json:"active_agent_files,omitempty"`
+	ToolResourceIdentity string              `json:"tool_resource_identity,omitempty"`
+	IsAttack             bool                `json:"is_attack"`
+	ExpectRoute          string              `json:"expect_route"` // none | semantic | fallback
+	DetectionOnly        bool                `json:"detection_only,omitempty"`
+	NoOtherFinding       bool                `json:"no_other_finding,omitempty"`
+	ProfilePosture       string              `json:"profile_posture,omitempty"`
+	ProfileRuleIDs       map[string]string   `json:"profile_rule_ids,omitempty"`
+	ProfileRoutes        map[string]string   `json:"profile_routes,omitempty"`
 }
 
 const toolCallCorpusStrictOnlyPosture = "strict_only"
@@ -66,14 +67,15 @@ func toolCallCorpusActionFactsInput(test toolCallCorpusCase) actionfacts.Input {
 		activeHome = "/home/alice"
 	}
 	input := actionfacts.Input{
-		Tool:             tool,
-		Args:             append(json.RawMessage(nil), test.Args...),
-		Command:          test.Command,
-		Argv:             append([]string(nil), test.Argv...),
-		CWD:              cwd,
-		ActiveHome:       activeHome,
-		ActiveAgentFiles: append([]string(nil), test.ActiveAgentFiles...),
-		DialectHint:      test.Dialect,
+		Tool:                 tool,
+		Args:                 append(json.RawMessage(nil), test.Args...),
+		Command:              test.Command,
+		Argv:                 append([]string(nil), test.Argv...),
+		CWD:                  cwd,
+		ActiveHome:           activeHome,
+		ActiveAgentFiles:     append([]string(nil), test.ActiveAgentFiles...),
+		DialectHint:          test.Dialect,
+		ToolResourceIdentity: test.ToolResourceIdentity,
 	}
 	if test.ArgsRaw != "" {
 		input.Args = json.RawMessage(test.ArgsRaw)

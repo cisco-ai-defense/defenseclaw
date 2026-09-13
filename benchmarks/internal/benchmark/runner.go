@@ -472,6 +472,7 @@ func (r Runner) runAction(ctx context.Context, profile, connector string, benchm
 		Args:                     benchmarkRuntimeArgs(benchmarkCase.Payload.Args, benchmarkCase.Payload.Command != "" || len(benchmarkCase.Payload.Argv) != 0),
 		Command:                  benchmarkCase.Payload.Command,
 		Argv:                     append([]string(nil), benchmarkCase.Payload.Argv...),
+		ToolResourceIdentity:     benchmarkCase.Payload.ToolResourceIdentity,
 		CWD:                      benchmarkCWD(benchmarkCase.Payload.CWD, benchmarkCase.Payload.Args),
 		ActiveHome:               firstNonEmpty(benchmarkCase.Payload.ActiveHome, "/home/alice"),
 		ActiveAgentFiles:         append([]string(nil), benchmarkCase.Payload.ActiveAgentFiles...),

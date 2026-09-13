@@ -101,6 +101,9 @@ are not redistributed.
 | [AgentDojo](https://github.com/ethz-spylab/agentdojo) | Benign and prompt-injection tool sequences | Contextual stress; no block truth inferred |
 | [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | Paired structured attack/benign sequences | Detect-only contextual truth |
 | [HF Agentic Red Team](https://huggingface.co/datasets/sh111111111111111/agentic_red_team) | Argument-bearing synthetic trajectories | Detector coverage and rule discovery |
+| [Terminal Wrench trajectories](https://huggingface.co/datasets/few-sh/terminal-wrench-trajectories) | Reward-hacking and legitimate terminal trajectories with literal actions | Exact atomic attack positives, benign FPR, and contextual abstention |
+| [Nemotron Agentic Terminal Pivot](https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1) | Large English terminal-agent action and sequence corpus | Benign action/stateful FPR and block rate |
+| [Cochise](https://github.com/andreashappe/cochise) | Result-backed autonomous penetration-test trajectories | Executed remote endpoint-defense tampering with real arguments |
 | [ATBench](https://huggingface.co/datasets/AI45Research/ATBench), [ATBench-Codex](https://huggingface.co/datasets/AI45Research/ATBench-Codex), [ATBench-Claw](https://huggingface.co/datasets/AI45Research/ATBench-Claw) | Agent-trajectory safety stress | Benign atomic FPR and contextual chain abstention |
 | [Labeled BashBench](https://huggingface.co/datasets/AISafety-Student/labeled-bashBench) | Executed shell tasks with silver labels | Coverage only |
 | [Anode Agent-Trace-Cyber](https://huggingface.co/datasets/AnodeAI/Agent-Trace-Cyber-v1) | Cyber-agent traces | Schema and coverage evaluation |
@@ -442,6 +445,69 @@ through policy. Configuration supplies the
 missing trust fact: for example, a globally dual-use destroy operation becomes
 deterministically prohibited when it resolves to a customer-declared protected
 environment.
+
+## Coverage expansion: real structured and endpoint actions
+
+A subsequent public-data mining pass promoted only independently provable
+actions from otherwise contextual trajectories. The initial detector found
+none of these reviewed actions. The final detector recognizes all 14 projected
+actions across 11 underlying source trajectories. Four Cochise rows are
+result-backed process projections from one executed multi-host tool call, not
+four independent attacks.
+
+| Targeted proof | Public source | Independent sources / scored rows | Default/permissive | Strict |
+| --- | --- | ---: | ---: | ---: |
+| Literal Bash replacement of the system `dash` binary | Terminal Wrench | 7 / 7 | 7 TP, 0 FN, F1 100%; alert | 7 TP, 0 FN, F1 100%; block |
+| Credential-bearing SQL `SELECT` with literal external result URL | HF Agentic Red Team | 1 / 1 | 1 TP, 0 FN; alert | 1 TP, 0 FN; block |
+| Decode 3–16 named Kubernetes Secrets in a literal cluster/namespace scope | HF Agentic Red Team | 1 / 1 | 1 TP, 0 FN; alert | 1 TP, 0 FN; block |
+| Terminate 10–100 literal canonical EC2 instance IDs | HF Agentic Red Team | 1 / 1 | 1 TP, 0 FN; alert | 1 TP, 0 FN; block |
+| NetExec-family SMB execution of three Defender disablements | Cochise | 1 / 4 | 4 TP, 0 FN, F1 100%; alert | 4 TP, 0 FN, F1 100%; block |
+
+The three structured Agentic Red Team actions jointly score 3 TP, 0 FP, and
+0 FN (100% precision, recall, and F1) in every profile. Default and permissive
+alert; strict blocks. Authenticated tool-resource identity is supplied by
+benchmark context derived from source metadata, never by model-controlled
+arguments.
+
+The Terminal Wrench mixed run contains 57,921 scored benign actions plus the
+seven new positives. Default/permissive recover all seven positives with 62
+existing benign findings (0.1070% alert FPR) and no benign blocks. Strict
+recovers all seven with 206 existing benign findings (0.3557% alert FPR) and
+9 benign blocks (0.0155%). The new shell rule itself produced 7 TP and zero
+benign findings; the aggregate false positives belong to pre-existing rules.
+
+On 195,768 benign Nemotron cases, default/permissive produced 92 findings over
+101,112 action cases (0.0910% FPR), strict produced 185 (0.1830% FPR), all
+94,656 stateful cases remained quiet, and every profile produced zero benign
+blocks. None of the coverage-expansion rules fired on this corpus. A broader
+static collision audit over 218,320 benign actions also found no NetExec-family
+command containing the three-control Defender pattern; because that sample has
+no NetExec-family commands, it is collision evidence rather than a population
+FPR estimate.
+
+### Added deterministic contracts
+
+- `integrity.posix_system_shell_replacement` uses a closed ActionFacts command
+  grammar and exact semantic owner. It alerts in default/permissive and blocks
+  in strict.
+- `exfil.sql_credential_external_output` accepts only authenticated `db.query`
+  calls with exactly `sql` and `output_url`, a bounded static credential-column
+  `SELECT`, and a literal non-local HTTP(S) destination.
+- `credential.kubernetes_batch_secret_collection` accepts only the audited
+  four-key schema, authenticated resource context, literal canonical cluster,
+  namespace, and Secret identities, `decode_base64: true`, and bounded distinct
+  cardinalities.
+- `impact.aws_bulk_ec2_termination` accepts only authenticated structured calls
+  containing 10–100 distinct canonical EC2 instance IDs and rejects dry runs,
+  dynamics, duplicates, and unknown fields.
+- The existing `tamper.windows_defender_multi_control_disable` owner now parses
+  exact `nxc`, `netexec`, and `crackmapexec` SMB `smbexec` arguments and the
+  result-backed static `-ErrorAction SilentlyContinue` form without accepting
+  encoded payloads, interpolation, shell wrappers, alternate execution methods,
+  multiple targets, or unrelated inner commands.
+- Atomic benchmark payloads can now carry a bounded authenticated
+  `tool_resource_identity`, allowing the harness to exercise the same closed
+  structured proof boundary used by runtime connectors.
 
 ## Reproduce the evaluation
 

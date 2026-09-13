@@ -236,6 +236,33 @@ func TestExactNetExecWindowsDefenderMultiControlDisable(t *testing.T) {
 	}
 }
 
+func TestExactNetExecWindowsDefenderMultiControlDisableAcceptsStaticErrorAction(t *testing.T) {
+	command := `nxc smb 192.0.2.10 -u Administrator -H REDACTED_SECRET_0001 -d example.test --exec-method smbexec -x 'powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue; Set-MpPreference -DisableScriptScanning $true -ErrorAction SilentlyContinue"'`
+	facts := Analyze(Input{Tool: "shell", Command: command, DialectHint: DialectPOSIX})
+	if !ExactWindowsDefenderMultiControlDisable(facts) {
+		t.Fatalf("static result-backed NetExec arguments did not produce proof: %+v", facts)
+	}
+}
+
+func TestExactNetExecWindowsDefenderMultiControlDisableRejectsOtherCommonParameters(t *testing.T) {
+	for _, suffix := range []string{
+		"-ErrorAction Continue",
+		"-ErrorAction $preference",
+		"-WarningAction SilentlyContinue",
+		"-ErrorAction SilentlyContinue -Verbose",
+	} {
+		body := "Set-MpPreference -DisableRealtimeMonitoring $true " + suffix +
+			"; Set-MpPreference -DisableIOAVProtection $true " + suffix +
+			"; Set-MpPreference -DisableScriptScanning $true " + suffix
+		command := `nxc smb 192.0.2.10 -u Administrator -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "` + body + `"'`
+		if ExactWindowsDefenderMultiControlDisable(Analyze(Input{
+			Tool: "shell", Command: command, DialectHint: DialectPOSIX,
+		})) {
+			t.Fatalf("unsupported common-parameter suffix accepted: %s", suffix)
+		}
+	}
+}
+
 func TestExactNetExecWindowsDefenderMultiControlDisableRejectsOpenGrammar(t *testing.T) {
 	threeControls := `Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableIOAVProtection $true; Set-MpPreference -DisableScriptScanning $true`
 	for _, test := range []struct {

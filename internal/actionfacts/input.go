@@ -107,6 +107,18 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 	if exactTerminalKeystrokesTool(tool) {
 		return extractExactTerminalKeystrokesArgs(raw)
 	}
+	if tool == "aws.ec2.terminate_instances" {
+		if exactAWSBulkEC2TerminationArgs(raw) {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == kubernetesBatchSecretTool {
+		if _, ok := exactKubernetesBatchSecretCollectionArgs(raw); ok {
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if strings.EqualFold(tool, "shell") && exactEndpointProcessMetadataInput(raw) != "" {
 		// Closed Sysmon process metadata may accompany an explicit shell command.
 		// It contributes only an opaque lineage identity; it is not command text.

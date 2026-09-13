@@ -39,6 +39,10 @@ func (f Facts) EnforcementProjection() Facts {
 			[]CloudIAMPrincipalOperationFact(nil),
 			f.CloudIAMPrincipalOperations...,
 		),
+		AWSBulkEC2Terminations: append(
+			[]AWSBulkEC2TerminationFact(nil),
+			f.AWSBulkEC2Terminations...,
+		),
 		KubernetesPodRuns: append(
 			[]KubernetesPodRunFact(nil),
 			f.KubernetesPodRuns...,

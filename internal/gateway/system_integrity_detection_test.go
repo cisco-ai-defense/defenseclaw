@@ -12,9 +12,57 @@ import (
 
 const (
 	dpkgStatusMutationRuleID      = "integrity.dpkg_status_direct_mutation"
+	posixSystemShellReplacementID = "integrity.posix_system_shell_replacement"
 	kernelBindTelemetryRuleID     = "integrity.kernel_control_bind_override"
 	protectedKernelBindOverrideID = "impact.protected_kernel_control_bind_override"
 )
+
+func TestPOSIXSystemShellReplacementProfilePosture(t *testing.T) {
+	const command = "cp /bin/bash /bin/dash\n"
+	for profile, wantAction := range map[string]string{
+		"default": "alert", "permissive": "alert", "strict": "block",
+	} {
+		connector := "system-shell-replacement-" + profile
+		installToolCallCorpusProfileConnector(t, connector, profile)
+		result := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "bash_command", Command: command, CWD: "/app"},
+			command,
+			connector,
+			profile,
+		)
+		if result.Action != wantAction {
+			t.Fatalf("profile=%s result=%+v want_action=%s", profile, result, wantAction)
+		}
+		if !slices.Contains(result.RuleIDs, posixSystemShellReplacementID) {
+			t.Fatalf("profile=%s result=%+v missing %s", profile, result, posixSystemShellReplacementID)
+		}
+	}
+}
+
+func TestPOSIXSystemShellReplacementHardNegativesStayQuiet(t *testing.T) {
+	connector := "system-shell-replacement-negatives"
+	installToolCallCorpusProfileConnector(t, connector, "strict")
+	for _, command := range []string{
+		"cp /bin/dash /bin/dash.real\n",
+		"cp /bin/bash /tmp/bash\n",
+		"cp -f /bin/bash /bin/dash\n",
+		"ln -sf /bin/bash /bin/sh\n",
+		"test -f /tmp/flag && cp /bin/bash /bin/dash\n",
+		"sudo cp /bin/bash /bin/dash\n",
+	} {
+		result := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "bash_command", Command: command, CWD: "/app"},
+			command,
+			connector,
+			"strict",
+		)
+		if slices.Contains(result.RuleIDs, posixSystemShellReplacementID) {
+			t.Fatalf("command=%q result=%+v", command, result)
+		}
+	}
+}
 
 func TestDPKGStatusMutationIsStrictExactAlertOnly(t *testing.T) {
 	for _, profile := range []string{"default", "permissive"} {

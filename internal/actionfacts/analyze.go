@@ -258,6 +258,7 @@ func analyze(input Input) Facts {
 	facts.CloudIAMPrincipalOperations =
 		projectCloudIAMPrincipalOperations(input, facts)
 	facts.CloudResourceMutations = projectCloudResourceMutations(input, facts)
+	facts.AWSBulkEC2Terminations = projectAWSBulkEC2Terminations(input)
 	facts.CloudAuditSecurityOperations = projectCloudAuditSecurityOperations(input)
 	facts.EndpointSecurityControlMutations = projectEndpointSecurityControlMutations(input)
 	facts.WindowsSecurityControlMutations = projectWindowsSecurityControlMutations(facts)

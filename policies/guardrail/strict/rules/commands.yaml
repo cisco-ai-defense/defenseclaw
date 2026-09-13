@@ -752,6 +752,15 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [privilege-escalation, cloud, aws, iam, wildcard, bounded-lineage]
+  - id: impact.aws_bulk_ec2_termination
+    tool_call_only: true
+    expression: "f.tool == 'aws.ec2.terminate_instances'"
+    # HIGH is alert in default/permissive and a block in strict.
+    pattern: 'a^'
+    title: "Terminate at least ten exact AWS EC2 instances"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, cloud, aws, ec2, destructive, bounded-grammar]
   - id: impact.cloud_s3_data_delete
     tool_call_only: true
     expression: >-
@@ -914,6 +923,15 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]
+  - id: credential.kubernetes_batch_secret_collection
+    tool_call_only: true
+    # Strict blocks only the exact authenticated four-key 3-16 Secret proof;
+    # missing identity, open schemas, dynamics, and near misses abstain.
+    pattern: 'a^'
+    title: "Collect decoded content from multiple named Kubernetes Secrets"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, kubernetes, secret, batch, content-read, exact-actionfacts]
   - id: tamper.pam_permit_authentication_bypass
     tool_call_only: true
     # Strict blocks only the closed ActionFacts proof for an active pam_permit
@@ -1461,6 +1479,18 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [integrity, package-manager, system-file, bounded-grammar]
+  - id: integrity.posix_system_shell_replacement
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'cp' &&
+      ('/bin/dash' in c.argv || '/usr/bin/dash' in c.argv))
+    # Strict-only candidate. ActionFacts accepts only a direct unconditional
+    # Bash-over-dash copy. Other binaries, options, links, and dynamics abstain.
+    pattern: '(?mi)^[ \t]*cp[ \t]+/(?:usr/)?bin/bash[ \t]+/(?:usr/)?bin/dash[ \t]*$'
+    title: "Replace a POSIX system shell with Bash"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [integrity, system-binary, shell, binary-hijacking, bounded-grammar]
   - id: integrity.kernel_control_bind_override
     tool_call_only: true
     expression: >-

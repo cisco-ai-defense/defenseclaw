@@ -703,6 +703,16 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [privilege-escalation, cloud, aws, iam, wildcard, bounded-lineage]
+  - id: impact.aws_bulk_ec2_termination
+    tool_call_only: true
+    expression: "f.tool == 'aws.ec2.terminate_instances'"
+    # Exact ActionFacts owner requires a trusted tool resource identity and
+    # 10-100 distinct canonical literal instance IDs with DryRun absent/false.
+    pattern: 'a^'
+    title: "Terminate at least ten exact AWS EC2 instances"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, cloud, aws, ec2, destructive, bounded-grammar]
   - id: impact.cloud_s3_data_delete
     tool_call_only: true
     expression: >-
@@ -859,6 +869,17 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, kubernetes, secret, content-read, exact-actionfacts]
+  - id: credential.kubernetes_batch_secret_collection
+    tool_call_only: true
+    # Code-owned exact ActionFacts accepts only authenticated
+    # k8s.get_secrets_batch calls with the exact cluster, namespaces,
+    # secret_names, and decode_base64 keys; values must be bounded canonical
+    # literals, decode_base64=true, and 3-16 Secret names.
+    pattern: 'a^'
+    title: "Collect decoded content from multiple named Kubernetes Secrets"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, kubernetes, secret, batch, content-read, exact-actionfacts]
   - id: tamper.pam_permit_authentication_bypass
     tool_call_only: true
     # Code-owned closed Write/Edit grammar for one active /etc/pam.conf or
@@ -1363,3 +1384,15 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [persistence, privilege, account, system-file, structured-tool, bounded-grammar]
+  - id: integrity.posix_system_shell_replacement
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete && c.program == 'cp' &&
+      ('/bin/dash' in c.argv || '/usr/bin/dash' in c.argv))
+    # The semantic owner accepts only an unconditional literal Bash-over-dash
+    # replacement. Balanced posture surfaces the proof without blocking.
+    pattern: '(?mi)^[ \t]*cp[ \t]+/(?:usr/)?bin/bash[ \t]+/(?:usr/)?bin/dash[ \t]*$'
+    title: "Replace a POSIX system shell with Bash"
+    severity: HIGH
+    confidence: 0.99
+    tags: [integrity, system-binary, shell, binary-hijacking, bounded-grammar]
