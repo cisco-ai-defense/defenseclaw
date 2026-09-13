@@ -146,6 +146,10 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// only when a process HMAC key is present. Lifecycle tests own this inert
 	// catalog expression because a single public corpus row cannot complete it.
 	coveredExpressions[semanticCompromisedCredentialAuthenticationExpression] = struct{}{}
+	// A single Certipy invocation cannot prove the authenticated successful
+	// request-result-PFX-authentication sequence. Exact lifecycle tests own this
+	// inert catalog expression and its result-backed artifact continuity.
+	coveredExpressions[semanticADCSCertificateImpersonationExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {
