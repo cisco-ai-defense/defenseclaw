@@ -641,37 +641,16 @@ def normalize_documents(
 
     cases.sort(key=lambda case: str(case["id"]))
     counts["cases"] = len(cases)
+    statistics = {key: int(value) for key, value in sorted(counts.items())}
+    statistics.update({f"skipped_{key}": int(value) for key, value in sorted(skipped.items())})
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": revision,
-        "source_license": SOURCE_LICENSE,
-        "split": split,
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "skipped": dict(sorted(skipped.items())),
-        "excluded_fields": [
-            "task_prompt",
-            "messages",
-            "turn_log",
-            "final_message",
-            "result_full",
-            "result_preview",
-            "error",
-            "risk_details",
-            "danger_chain",
-        ],
-        "normalization": (
-            "unsafe_success trajectories become contextual stateful positives plus "
-            "out-of-scope atomic coverage cases; safe benign/hard-negative runs become "
-            "scored atomic and bounded-stateful negatives"
-        ),
-        "label_limitation": (
-            "Canary-registry unsafe_success is executed trajectory truth, not atomic-call "
-            "truth. Positive cases remain detect-only until a deterministic bounded "
-            "lineage finalizer closes source, identity, sink, and outcome joins."
-        ),
+        "datasets": [DATASET_ID],
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"mcphunt": statistics},
     }
     return cases, manifest
 
@@ -777,11 +756,17 @@ def main() -> int:
     )
     manifest = {
         **manifest,
-        "source_files": source_hashes,
-        "source_sha256": source_sha256,
-        "source_sha256_algorithm": "sha256(filename NUL raw-file-sha256-bytes) in MAIN_FILES order",
-        "source_schema_version": SOURCE_SCHEMA_VERSION,
-        "language": "en",
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": args.revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "main/{MiniMax_M2_7,deepseek_v4_flash,gemini_3_1_pro_preview,gpt_5_2,gpt_5_4}.json",
+            "bytes": sum((args.input_dir / filename).stat().st_size for filename in MAIN_FILES),
+            "files": len(source_hashes),
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
     }
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")

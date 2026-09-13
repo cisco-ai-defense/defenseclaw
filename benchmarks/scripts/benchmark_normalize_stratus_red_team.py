@@ -606,29 +606,28 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
         raise ValueError(f"expected exactly {SOURCE_EVENTS} pinned events")
     cases.sort(key=lambda case: str(case["id"]))
     counts["cases"] = len(cases)
+    statistics = {key: int(value) for key, value in sorted(counts.items())}
+    statistics.update({f"operation_{key}": int(value) for key, value in sorted(operations.items())})
+    statistics.update({f"technique_{key}": int(value) for key, value in sorted(techniques.items())})
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": revision,
-        "source_license": SOURCE_LICENSE,
-        "source_sha256": SOURCE_SHA256,
-        "source_files": len(paths),
-        "source_events": SOURCE_EVENTS,
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "operations": dict(sorted(operations.items())),
-        "techniques": dict(sorted(techniques.items())),
-        "normalization": (
-            "Exact CloudTrail operation, bounded request parameters, principal/resource/request "
-            "identities, explicit error status, timestamp, and order only. Response bodies, user "
-            "agents, source addresses, credential fields, command/policy bodies, and prose excluded."
-        ),
-        "label_limitation": (
-            "Committed detonation provenance is not atomic malicious proof. Only successful, "
-            "closed terminal operations are authoritative; failed, discovery, setup, and dual-use "
-            "events are contextual development-only cases. responseElements:null is ignored."
-        ),
+        "datasets": [DATASET_ID],
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"stratus-red-team": statistics},
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": str(SOURCE_SUBDIR / "*.json"),
+            "bytes": sum(path.stat().st_size for path in paths),
+            "files": len(paths),
+            "sha256": SOURCE_SHA256,
+            "source_url": SOURCE_URL,
+        },
     }
     return cases, manifest
 

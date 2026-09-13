@@ -33,6 +33,7 @@ DATASET_ID = "actbench"
 HUB_DATASET_ID = "ZJUICSR/ActBench"
 SOURCE_URL = f"https://huggingface.co/datasets/{HUB_DATASET_ID}"
 SOURCE_LICENSE = "MIT"
+SOURCE_REDISTRIBUTION = "download-only"
 STAGING_SPLIT = "development"
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_EVENTS = 64
@@ -465,28 +466,17 @@ def normalize(
 
     cases.sort(key=lambda case: str(case["id"]))
     counts["cases"] = len(cases)
+    statistics = {key: int(value) for key, value in sorted(counts.items())}
+    statistics.update({f"outcome_{key}": int(value) for key, value in sorted(outcomes.items())})
+    statistics.update({f"skipped_{key}": int(value) for key, value in sorted(skipped.items())})
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": revision,
-        "source_license": SOURCE_LICENSE,
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "outcomes": dict(sorted(outcomes.items())),
-        "skipped": dict(sorted(skipped.items())),
-        "normalization": (
-            "structured tool names/arguments, order, and paired success status only; "
-            "prompts, reasoning, result content, artifacts, API audits, and grader code excluded"
-        ),
-        "label_limitation": (
-            "Clean task-pass calls are atomic benign only when their paired result succeeded. "
-            "Clean stateful cases retain every call and outcome in original order. "
-            "Attack-pass labels apply only to the complete bounded trajectory and remain "
-            "contextual/proof-pending because this projection intentionally excludes the "
-            "task-relative authority boundary and trusted grader artifacts/API audit. No "
-            "attack call is emitted as atomic malicious."
-        ),
+        "datasets": [DATASET_ID],
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"actbench": statistics},
     }
     return cases, manifest
 
@@ -540,6 +530,27 @@ def main() -> int:
         args.revision,
         max_argument_bytes=args.max_argument_bytes,
     )
+    aggregate = hashlib.sha256()
+    for path in sorted(args.input, key=lambda candidate: candidate.name):
+        digest = hashlib.sha256(path.read_bytes()).digest()
+        aggregate.update(path.name.encode("utf-8"))
+        aggregate.update(b"\0")
+        aggregate.update(digest)
+    manifest = {
+        **manifest,
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": args.revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "data/trajectories/*.parquet",
+            "paths": sorted(path.name for path in args.input),
+            "bytes": sum(path.stat().st_size for path in args.input),
+            "files": len(args.input),
+            "sha256": aggregate.hexdigest(),
+            "source_url": SOURCE_URL,
+        },
+    }
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     write_outputs(cases, manifest, output=args.output, manifest_path=manifest_path)

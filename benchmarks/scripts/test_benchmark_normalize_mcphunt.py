@@ -117,9 +117,10 @@ class MCPHuntNormalizerTest(unittest.TestCase):
         self.assertEqual(2, len(atomic))
         self.assertTrue(all(case["truth"]["source_truth"] == "unknown" for case in atomic))
         self.assertTrue(all(case["truth"]["applicability"] == "out_of_scope" for case in atomic))
-        self.assertEqual(1, manifest["counts"]["trajectories_unsafe_success"])
-        self.assertEqual(2, manifest["counts"]["source_tool_calls"])
-        self.assertEqual(2, manifest["counts"]["source_calls_succeeded"])
+        stats = manifest["adapter_statistics"]["mcphunt"]
+        self.assertEqual(1, stats["trajectories_unsafe_success"])
+        self.assertEqual(2, stats["source_tool_calls"])
+        self.assertEqual(2, stats["source_calls_succeeded"])
 
     def test_real_arguments_names_success_and_servers_are_preserved(self) -> None:
         trace = source_trace(
@@ -196,7 +197,7 @@ class MCPHuntNormalizerTest(unittest.TestCase):
         self.assertTrue(all(case["truth"]["expected_disposition"] == "allow" for case in cases))
         hard_cases = [case for case in cases if case["source"]["original_id"].endswith("/hard")]
         self.assertTrue(all(case["strata"]["hard_negative"] for case in hard_cases))
-        self.assertEqual(2, manifest["counts"]["trajectories_safe_control"])
+        self.assertEqual(2, manifest["adapter_statistics"]["mcphunt"]["trajectories_safe_control"])
 
     def test_risky_safe_and_unsafe_failure_are_not_scored(self) -> None:
         traces = [
@@ -210,7 +211,7 @@ class MCPHuntNormalizerTest(unittest.TestCase):
         )
 
         self.assertEqual([], cases)
-        self.assertEqual(2, manifest["skipped"]["excluded_unscored_outcome"])
+        self.assertEqual(2, manifest["adapter_statistics"]["mcphunt"]["skipped_excluded_unscored_outcome"])
 
     def test_long_positive_uses_bounded_evidence_window_without_losing_atomic_calls(self) -> None:
         events = [source_event(index) for index in range(70)]
@@ -302,7 +303,7 @@ class MCPHuntNormalizerTest(unittest.TestCase):
         )
 
         self.assertEqual([], cases)
-        self.assertEqual(1, manifest["skipped"]["invalid_event_arguments"])
+        self.assertEqual(1, manifest["adapter_statistics"]["mcphunt"]["skipped_invalid_event_arguments"])
 
 
 if __name__ == "__main__":

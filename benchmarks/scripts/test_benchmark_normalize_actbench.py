@@ -109,8 +109,10 @@ class NormalizeActBenchTest(unittest.TestCase):
             ["succeeded", "failed", "succeeded"],
             [event["outcome"] for event in sequences[0]["payload"]["events"]],
         )
-        self.assertEqual(2, manifest["counts"]["clean_action_cases"])
-        self.assertEqual({"failed": 1, "succeeded": 2}, manifest["outcomes"])
+        stats = manifest["adapter_statistics"]["actbench"]
+        self.assertEqual(2, stats["clean_action_cases"])
+        self.assertEqual(1, stats["outcome_failed"])
+        self.assertEqual(2, stats["outcome_succeeded"])
 
     def test_attack_pass_is_contextual_only_at_stateful_boundary(self) -> None:
         cases, manifest = MODULE.normalize([source_row("attack")], REVISION)
@@ -123,8 +125,9 @@ class NormalizeActBenchTest(unittest.TestCase):
         self.assertEqual("out_of_scope", case["truth"]["applicability"])
         self.assertEqual("detect_only", case["truth"]["expected_disposition"])
         self.assertIn("contextual_trajectory_source_positive", case["truth"]["categories"])
-        self.assertEqual(1, manifest["counts"]["attack_stateful_cases"])
-        self.assertEqual(1, manifest["counts"]["attack_contextual_cases"])
+        stats = manifest["adapter_statistics"]["actbench"]
+        self.assertEqual(1, stats["attack_stateful_cases"])
+        self.assertEqual(1, stats["attack_contextual_cases"])
         self.assertFalse(any(row["surface"] == "action" for row in cases))
 
     def test_failed_source_tasks_do_not_become_benign_or_malicious_labels(self) -> None:
@@ -137,8 +140,9 @@ class NormalizeActBenchTest(unittest.TestCase):
         )
 
         self.assertEqual([], cases)
-        self.assertEqual(1, manifest["skipped"]["clean_task_not_passed"])
-        self.assertEqual(1, manifest["skipped"]["attack_not_passed"])
+        stats = manifest["adapter_statistics"]["actbench"]
+        self.assertEqual(1, stats["skipped_clean_task_not_passed"])
+        self.assertEqual(1, stats["skipped_attack_not_passed"])
 
     def test_call_result_pairing_uses_ids_and_preserves_call_order(self) -> None:
         calls = [
@@ -218,7 +222,7 @@ class NormalizeActBenchTest(unittest.TestCase):
             ["succeeded", "unknown"],
             [event["outcome"] for event in sequences[0]["payload"]["events"]],
         )
-        self.assertEqual(1, manifest["outcomes"]["unknown"])
+        self.assertEqual(1, manifest["adapter_statistics"]["actbench"]["outcome_unknown"])
 
     def test_downloaded_grader_and_result_content_are_never_evaluated_or_projected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -264,8 +268,9 @@ class NormalizeActBenchTest(unittest.TestCase):
         cases, manifest = MODULE.normalize([duplicate, oversized], REVISION, max_argument_bytes=64)
 
         self.assertEqual([], cases)
-        self.assertEqual(1, manifest["skipped"]["duplicate_tool_call"])
-        self.assertEqual(1, manifest["skipped"]["oversized_tool_arguments"])
+        stats = manifest["adapter_statistics"]["actbench"]
+        self.assertEqual(1, stats["skipped_duplicate_tool_call"])
+        self.assertEqual(1, stats["skipped_oversized_tool_arguments"])
 
     def test_task_pair_grouping_schema_validation_and_order_stability(self) -> None:
         rows = [

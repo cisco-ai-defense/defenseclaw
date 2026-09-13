@@ -153,12 +153,13 @@ def test_real_pinned_corpus_normalizes_and_validates() -> None:
         pytest.skip("pinned Stratus fixture is not present")
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert manifest["source_events"] == 310
-    assert manifest["source_files"] == 35
-    assert manifest["counts"]["action_cases"] == 310
-    assert manifest["counts"]["failed_events"] == 52
-    assert manifest["counts"]["successful_events"] == 258
-    assert manifest["counts"]["exact_closure_events"] > 0
+    stats = manifest["adapter_statistics"]["stratus-red-team"]
+    assert stats["source_events"] == 310
+    assert manifest["source"]["files"] == 35
+    assert stats["action_cases"] == 310
+    assert stats["failed_events"] == 52
+    assert stats["successful_events"] == 258
+    assert stats["exact_closure_events"] > 0
     assert all(case["split"] == "development" for case in cases)
     assert all(
         len(case["payload"].get("events", [])) <= MODULE.MAX_EVENTS for case in cases if case["surface"] == "stateful"
