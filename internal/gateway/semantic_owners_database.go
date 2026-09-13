@@ -15,7 +15,7 @@ const semanticSQLCommandUDFCreateExpression = `f.tool in ['sql_query', 'execute_
 
 const semanticSQLServerXPCommandShellExpression = `f.tool == 'sql_query'`
 
-const semanticSQLDestructiveMutationExpression = `f.tool == 'sql_query' || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])`
+const semanticSQLDestructiveMutationExpression = `f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete && c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])`
 
 const semanticHTTPSQLInjectionExpression = `f.tool == 'http_request'`
 

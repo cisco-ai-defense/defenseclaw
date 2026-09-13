@@ -1217,6 +1217,9 @@ func containerHostEscapeDisposition(
 	facts actionfacts.Facts,
 	command actionfacts.CommandFact,
 ) (bool, bool) {
+	if actionfacts.ExactWritableHostRootContainerAccess(facts) {
+		return true, true
+	}
 	shape, determinate := exactContainerRunShape(command)
 	if !determinate || !shape.privileged {
 		return false, determinate
@@ -1499,7 +1502,7 @@ func containerRunValueOption(key string) bool {
 func containerRunFlagOption(argument string) bool {
 	switch argument {
 	case "-d", "--detach", "--init", "-i", "--interactive",
-		"--oom-kill-disable", "--privileged", "--read-only", "--rm",
+		"-it", "-ti", "--oom-kill-disable", "--privileged", "--read-only", "--rm",
 		"--tty", "-t":
 		return true
 	default:

@@ -1084,6 +1084,44 @@
         "Only reviewed deterministic events are applicable; contextual session rows remain mining-only."
       ]
     },
+    "elastic/integrations-aws-cloudtrail-fixtures": {
+      "intended_use": [
+        "action",
+        "cloud-share-same-operation-control",
+        "successful-permission-removal",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "License review is still required and no compatible aggregate result is currently available."
+      ]
+    },
+    "achinta3/cybersec-jsonschemabench-cloudtrail-v6": {
+      "intended_use": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "missing",
+      "limitations": [
+        "License review is still required and no compatible aggregate result is currently available."
+      ]
+    },
+    "adanalvarez/TrailDiscover": {
+      "intended_use": [
+        "action",
+        "cloud-share-same-operation-control",
+        "failed-operation-control",
+        "parser-boundary"
+      ],
+      "status": "missing",
+      "limitations": [
+        "Indexed for provider-audit parser controls; no compatible aggregate result is currently available."
+      ]
+    },
     "agent-trace": {
       "intended_use": [
         "action",

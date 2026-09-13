@@ -56,10 +56,11 @@ class AgenticRedTeamManifestTests(unittest.TestCase):
                 "trajectory_source",
             },
         )
-        stats = manifest["adapter_statistics"]["agentic-redteam-v2"]
+        stats = manifest["adapter_statistics"]["agentic-redteam-v3"]
         self.assertEqual(stats["benign_cases"], 1)
         self.assertEqual(stats["malicious_cases"], 1)
         self.assertEqual(stats["events_with_arguments"], 5)
+        self.assertEqual(stats["database_events_with_benchmark_resource_identity"], 0)
         self.assertIn("label_limitation", manifest["trajectory_source"])
         malicious = next(row for row in rows if row["truth"]["source_truth"] == "malicious")
         self.assertEqual(malicious["payload"]["events"][-1]["tool_name"], "http.post")
@@ -82,6 +83,18 @@ class AgenticRedTeamManifestTests(unittest.TestCase):
             current["next"] = child
             current = child
         self.assertIsNone(adapter.bounded_arguments(nested))
+
+    def test_database_identity_comes_from_source_metadata_not_arguments(self) -> None:
+        trajectory = [
+            {"action": {"type": "tool_call", "name": "db.query", "args": {"db": "one", "sql": "SELECT 1"}}},
+            {"action": {"type": "tool_call", "name": "db.execute", "args": {"db": "two", "sql": "TRUNCATE TABLE logs"}}},
+        ]
+        first = adapter.tool_events(trajectory, 1, "source-one")
+        second = adapter.tool_events(trajectory, 1, "source-two")
+        self.assertEqual(first[0]["tool_resource_identity"], first[1]["tool_resource_identity"])
+        self.assertNotEqual(first[0]["tool_resource_identity"], second[0]["tool_resource_identity"])
+        self.assertNotIn("one", first[0]["tool_resource_identity"])
+        self.assertNotIn("two", first[0]["tool_resource_identity"])
 
 
 if __name__ == "__main__":

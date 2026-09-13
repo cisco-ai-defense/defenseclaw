@@ -153,6 +153,7 @@ class LinuxArenaNormalizerTests(unittest.TestCase):
         )
         honest = [row for row in rows if row["strata"]["hard_negative"]]
         attack = [row for row in rows if not row["strata"]["hard_negative"]]
+        self.assertTrue(all(row["strata"]["language"] == "english" for row in rows))
         self.assertTrue(all(row["truth"]["source_truth"] == "benign" for row in honest))
         self.assertEqual(
             {row["truth"]["source_truth"] for row in attack if row["surface"] == "action"}, {"unknown"}

@@ -200,6 +200,15 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 			return extractedInput{status: StatusComplete}
 		}
 	}
+	if tool == "db.execute" {
+		if _, _, ok := exactDBExecuteArgs(raw); ok {
+			// The reviewed db.execute recognizer owns this exact two-key schema.
+			// SQL and database values remain private and are projected only as a
+			// closed mutation class plus domain-separated identity digests.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if tool == "read_query" {
 		if _, ok := exactSensitiveSQLReadQueryArgs(raw); ok {
 			// The reviewed rowset recognizer owns this closed schema. Query text

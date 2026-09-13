@@ -9094,7 +9094,7 @@ var (
 		"-v", "--volume", "-w", "--workdir",
 	)
 	containerRunFlagOptions = optionValues(
-		"-d", "--detach", "--init", "-i", "--interactive",
+		"-d", "--detach", "--init", "-i", "-it", "-ti", "--interactive",
 		"--oom-kill-disable", "--privileged", "--read-only", "--rm",
 		"--tty", "-t",
 	)

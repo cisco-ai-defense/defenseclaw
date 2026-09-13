@@ -95,6 +95,30 @@ func TestSQLDestructiveMutationHardNegativesSuppressFallback(t *testing.T) {
 	}
 }
 
+func TestStructuredDBExecutePolicyBoundaries(t *testing.T) {
+	input := func(query string) actionfacts.Input {
+		return actionfacts.Input{
+			Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":` +
+				string(mustJSON(t, query)) + `}`),
+			ToolResourceIdentity: "mcp://database/synthetic-production",
+		}
+	}
+
+	truncate := actionfacts.Analyze(input("TRUNCATE TABLE audit_log"))
+	deleteAll := actionfacts.Analyze(input("DELETE FROM sessions"))
+	dropTable := actionfacts.Analyze(input("DROP TABLE obsolete_records"))
+	bounded := actionfacts.Analyze(input("DELETE FROM sessions WHERE id = 7"))
+	if !sqlSchemaDestroyPrerequisite(truncate) || !sqlUnboundedDeletePrerequisite(deleteAll) {
+		t.Fatalf("protected database operations were not recognized: truncate=%+v delete=%+v", truncate, deleteAll)
+	}
+	if sqlSchemaDestroyPrerequisite(dropTable) || sqlUnboundedDeletePrerequisite(dropTable) {
+		t.Fatalf("standalone DROP TABLE must remain alert-only: %+v", dropTable)
+	}
+	if sqlDestructiveMutationPrerequisite(bounded) {
+		t.Fatalf("bounded DELETE produced destructive mutation: %+v", bounded)
+	}
+}
+
 func structuredSQLMutationInput(t *testing.T, query string) actionfacts.Input {
 	t.Helper()
 	raw, err := json.Marshal(map[string]string{

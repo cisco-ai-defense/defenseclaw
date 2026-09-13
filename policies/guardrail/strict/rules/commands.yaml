@@ -666,11 +666,12 @@ rules:
   - id: impact.sql_destructive_mutation
     tool_call_only: true
     expression: >-
-      f.tool == 'sql_query' ||
+      f.tool in ['sql_query', 'db.execute'] ||
       f.commands.exists(c, c.argv_complete &&
       c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd'])
-    # Strict also stays alert-only: posture alone does not prove that an exact
-    # database mutation is unauthorized or targets a protected resource.
+    # Strict also stays alert-only, including for authenticated structured
+    # connectors: posture alone does not prove that an exact database mutation
+    # is unauthorized or targets a protected resource.
     pattern: 'a^'
     title: "Exact destructive SQL mutation"
     severity: HIGH
@@ -1339,16 +1340,15 @@ rules:
       f.commands.exists(c, c.argv_complete &&
       c.program in ['docker', 'podman', 'nerdctl'] &&
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CONTAINER_RUN in c.operations &&
-      c.argv.exists(a, a == '--privileged' || a.startsWith('--privileged=')) &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE] &&
       (p.normalized == '/' || p.resolved == '/')))
     pattern: '(?i)\b(?:docker|podman|nerdctl)\b[^;\n]*\brun\b[^;\n]*--privileged\b[^;\n]*(?:-v|--volume)(?:=|\s+)/:[^;\s]+'
-    title: "Privileged container with host-root bind"
+    title: "Container with writable host-root access"
     severity: CRITICAL
     confidence: 0.96
-    tags: [privilege, container, host-escape]
+    tags: [privilege, container, host-escape, host-root]
   - id: privilege.host_namespace_entry
     tool_call_only: true
     pattern: '(?i)\b(?:nsenter\b[^;\n]*(?:(?:-t|--target)(?:=|\s+)1\b|/proc/1/ns/(?:mnt|uts|ipc|net|pid|user|cgroup|time)\b)|chroot\b[^;\n]*/proc/1/root\b)'

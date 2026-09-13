@@ -49,6 +49,10 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 	}
 	switch fact.Engine {
 	case "postgresql", "mysql", "sqlserver":
+	case "generic":
+		if fact.QuerySource != SQLMutationQueryStructured {
+			return false
+		}
 	case "sqlite":
 		return fact.QuerySource == SQLMutationQueryStructured &&
 			fact.Operation == SQLMutationDeleteUnbounded &&
@@ -62,7 +66,7 @@ func validSQLMutationFact(fact SQLMutationFact) bool {
 		return false
 	}
 	switch fact.Operation {
-	case SQLMutationDeleteUnbounded, SQLMutationTruncate:
+	case SQLMutationDeleteUnbounded, SQLMutationTruncate, SQLMutationDropTable:
 		return fact.Scope == SQLMutationScopeTable
 	case SQLMutationDropSchema:
 		return fact.Scope == SQLMutationScopeSchema
@@ -101,7 +105,13 @@ func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
 		)
 		databaseIdentity := candidate.databaseIdentity
 		if operation == SQLMutationDropDatabase {
-			databaseIdentity = object
+			if candidate.engine == "generic" {
+				// A db.execute argument cannot authenticate the dropped database
+				// by itself. Keep the connector identity in the digest boundary.
+				databaseIdentity = candidate.connectionIdentity + "\x00" + object
+			} else {
+				databaseIdentity = object
+			}
 		}
 		if databaseIdentity == "" {
 			databaseIdentity = "implicit"
@@ -143,6 +153,15 @@ func projectSQLMutations(input Input, facts Facts) []SQLMutationFact {
 }
 
 func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
+	if database, query, ok := exactDBExecuteInput(input); ok {
+		return []exactSQLMutationInput{{
+			engine:             "generic",
+			query:              query,
+			source:             SQLMutationQueryStructured,
+			connectionIdentity: input.ToolResourceIdentity,
+			databaseIdentity:   input.ToolResourceIdentity + "\x00" + strings.ToLower(database),
+		}}
+	}
 	if query, ok := exactSQLiteWriteQueryInput(input); ok {
 		return []exactSQLMutationInput{{
 			engine:             "sqlite",
@@ -173,6 +192,40 @@ func exactSQLMutationInputs(input Input, facts Facts) []exactSQLMutationInput {
 		return nil
 	}
 	return []exactSQLMutationInput{candidate}
+}
+
+// exactDBExecuteInput recognizes the closed two-key schema observed in public
+// argument-bearing agent traces. The connector-provided resource identity is
+// mandatory: an argument-supplied database name alone is not an authenticated
+// authorization boundary and must never make a mutation enforcement eligible.
+func exactDBExecuteInput(input Input) (database, query string, ok bool) {
+	if input.Tool != "db.execute" || input.Command != "" || len(input.Argv) != 0 ||
+		!validTrustedToolResourceIdentity(input.ToolResourceIdentity) {
+		return "", "", false
+	}
+	return exactDBExecuteArgs(input.Args)
+}
+
+func exactDBExecuteArgs(raw json.RawMessage) (database, query string, ok bool) {
+	object, problem := exactJSONObject(raw)
+	if problem.status != "" || len(object) != 2 {
+		return "", "", false
+	}
+	query, queryOK := object["sql"].(string)
+	database, databaseOK := object["database"].(string)
+	if !databaseOK {
+		database, databaseOK = object["db"].(string)
+	}
+	if !queryOK || !databaseOK || !exactSQLScalar(query, maxCommandBytes) ||
+		!exactSQLIdentity(database) || unresolvedSQLMutationValue(database) {
+		return "", "", false
+	}
+	for key := range object {
+		if key != "sql" && key != "database" && key != "db" {
+			return "", "", false
+		}
+	}
+	return database, query, true
 }
 
 func exactSQLiteWriteQueryInput(input Input) (string, bool) {
@@ -464,6 +517,9 @@ func exactSQLMutationTokens(engine string, tokens []string) (SQLMutationOperatio
 		operation, scope, object = SQLMutationTruncate, SQLMutationScopeTable, tokens[1]
 	case len(tokens) == 3 && tokens[0] == "TRUNCATE" && tokens[1] == "TABLE":
 		operation, scope, object = SQLMutationTruncate, SQLMutationScopeTable, tokens[2]
+	case len(tokens) >= 3 && tokens[0] == "DROP" && tokens[1] == "TABLE":
+		operation, scope = SQLMutationDropTable, SQLMutationScopeTable
+		object = exactSQLDropObject(tokens[2:])
 	case len(tokens) >= 3 && tokens[0] == "DROP" && tokens[1] == "SCHEMA":
 		operation, scope = SQLMutationDropSchema, SQLMutationScopeSchema
 		object = exactSQLDropObject(tokens[2:])

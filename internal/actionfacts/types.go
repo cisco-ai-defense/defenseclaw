@@ -775,6 +775,7 @@ type SQLMutationOperation string
 const (
 	SQLMutationDeleteUnbounded SQLMutationOperation = "delete_unbounded"
 	SQLMutationTruncate        SQLMutationOperation = "truncate"
+	SQLMutationDropTable       SQLMutationOperation = "drop_table"
 	SQLMutationDropSchema      SQLMutationOperation = "drop_schema"
 	SQLMutationDropDatabase    SQLMutationOperation = "drop_database"
 )

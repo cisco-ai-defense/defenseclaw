@@ -92,8 +92,15 @@ def bounded_arguments(value: Any) -> dict[str, Any] | None:
     return copied
 
 
-def tool_events(trajectory: list[dict[str, Any]], through_index: int) -> list[dict[str, Any]]:
+def tool_events(
+    trajectory: list[dict[str, Any]], through_index: int, source_id: str
+) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
+    resource_identity = (
+        "benchmark://agentic-redteam/"
+        + hashlib.sha256(source_id.encode()).hexdigest()[:24]
+        + "/database"
+    )
     for step in trajectory[: through_index + 1]:
         action = step.get("action")
         if not isinstance(action, dict) or action.get("type") != "tool_call":
@@ -104,7 +111,13 @@ def tool_events(trajectory: list[dict[str, Any]], through_index: int) -> list[di
         arguments = bounded_arguments(action.get("args", {}))
         if arguments is None:
             return []
-        events.append({"tool_name": name, "args": arguments, "dialect": "none"})
+        event = {"tool_name": name, "args": arguments, "dialect": "none"}
+        if name.startswith("db."):
+            # The source trajectory ID, not model-controlled arguments, supplies
+            # a stable opaque connector identity for deterministic replay. The
+            # runtime still requires its adapter to authenticate this context.
+            event["tool_resource_identity"] = resource_identity
+        events.append(event)
     return [
         {**event, "offset_seconds": index}
         for index, event in enumerate(events[-64:])
@@ -179,8 +192,9 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         if not isinstance(drift_action, dict) or drift_action.get("type") != "tool_call":
             skipped["non_tool_drift"] += 1
             continue
-        pre = tool_events(trajectory, drift - 1)
-        at_drift = tool_events(trajectory, drift)
+        source_id = str(source["id"])
+        pre = tool_events(trajectory, drift - 1, source_id)
+        at_drift = tool_events(trajectory, drift, source_id)
         if len(pre) < 2 or len(at_drift) < 2:
             skipped["insufficient_tool_history"] += 1
             continue
@@ -194,6 +208,11 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         for row in rows
         for event in row["payload"]["events"]
     )
+    authenticated_database_events = sum(
+        "tool_resource_identity" in event
+        for row in rows
+        for event in row["payload"]["events"]
+    )
     manifest = {
         "schema_version": "1",
         "datasets": ["agentic-redteam-benchmark"],
@@ -202,11 +221,12 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         "exact_payload_duplicates_removed": 0,
         "label_conflicts_excluded": 0,
         "adapter_statistics": {
-            "agentic-redteam-v2": {
+            "agentic-redteam-v3": {
                 "selected_source_trajectories": selected_sources,
                 "benign_cases": truth_counts["benign"],
                 "malicious_cases": truth_counts["malicious"],
                 "events_with_arguments": argument_events,
+                "database_events_with_benchmark_resource_identity": authenticated_database_events,
                 "source_file_count": len(source_files),
                 **dict(sorted(skipped.items())),
             }
@@ -225,7 +245,8 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
             "normalization": (
                 "original-tier tool names and bounded JSON arguments through the labeled drift step plus "
                 "paired pre-drift prefixes; goals, plans, thoughts, observations, raw calls, and post-drift "
-                "steps excluded"
+                "steps excluded; database connector replay identities are opaque hashes of source trajectory "
+                "metadata and never copied from model-controlled arguments"
             ),
             "label_limitation": (
                 "The upstream README calls the 513-example tier gold, but this pinned revision has empty "

@@ -39,6 +39,7 @@ def stateful_row() -> dict[str, object]:
                 {
                     "tool_name": "sql_query",
                     "args": {"connection": "fixture", "query": "SELECT 1"},
+                    "tool_resource_identity": "benchmark://database/opaque-fixture",
                     "dialect": "none",
                     "outcome": "succeeded",
                     "offset_seconds": 1,
@@ -72,6 +73,10 @@ class StatefulActionProjectionTests(unittest.TestCase):
         self.assertEqual(rows[0]["payload"]["args"], {"command": "echo ok"})
         self.assertNotIn("outcome", rows[0]["payload"])
         self.assertEqual(rows[1]["strata"]["sequence_index"], 1)
+        self.assertEqual(
+            rows[1]["payload"]["tool_resource_identity"],
+            "benchmark://database/opaque-fixture",
+        )
         self.assertEqual(rows[0]["split"], "validation")
         self.assertIn("projected_atomic_event", rows[0]["truth"]["categories"])
 
@@ -108,7 +113,8 @@ class StatefulActionProjectionTests(unittest.TestCase):
         )
         self.assertEqual(
             manifest["projection"],
-            "stateful parent plus one action case per event; action outcomes and offsets excluded",
+            "stateful parent plus one action case per event; authenticated resource identity retained; "
+            "action outcomes and offsets excluded",
         )
 
     def test_rows_validate_against_case_schema(self) -> None:

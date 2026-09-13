@@ -83,6 +83,33 @@ func TestSQLMutationFactsExactInputs(t *testing.T) {
 			engine: "sqlite", operation: SQLMutationDeleteUnbounded,
 			scope: SQLMutationScopeTable, source: SQLMutationQueryStructured,
 		},
+		{
+			name: "authenticated db execute truncate database key",
+			input: Input{
+				Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"TRUNCATE TABLE audit_log;"}`),
+				ToolResourceIdentity: "mcp://database/synthetic-production",
+			},
+			engine: "generic", operation: SQLMutationTruncate,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryStructured,
+		},
+		{
+			name: "authenticated db execute unbounded delete db key",
+			input: Input{
+				Tool: "db.execute", Args: json.RawMessage(`{"db":"app","sql":"DELETE FROM sessions"}`),
+				ToolResourceIdentity: "mcp://database/synthetic-app",
+			},
+			engine: "generic", operation: SQLMutationDeleteUnbounded,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryStructured,
+		},
+		{
+			name: "authenticated db execute drop table",
+			input: Input{
+				Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"DROP TABLE IF EXISTS customers CASCADE"}`),
+				ToolResourceIdentity: "mcp://database/synthetic-production",
+			},
+			engine: "generic", operation: SQLMutationDropTable,
+			scope: SQLMutationScopeTable, source: SQLMutationQueryStructured,
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -176,6 +203,13 @@ func TestSQLMutationFactsHardNegatives(t *testing.T) {
 		{name: "sqlite trailing statement", input: sqliteWriteQueryInput(`DELETE FROM credentials; SELECT 1;`)},
 		{name: "sqlite preceding statement", input: sqliteWriteQueryInput(`PRAGMA foreign_keys=OFF; DELETE FROM credentials;`)},
 		{name: "sqlite dynamic table", input: sqliteWriteQueryInput(`DELETE FROM ${TABLE}`)},
+		{name: "db execute missing resource identity", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"TRUNCATE TABLE audit_log"}`)}},
+		{name: "db execute bounded delete", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"DELETE FROM customers WHERE id = 7"}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
+		{name: "db execute unknown field", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"DROP TABLE customers","confirm":true}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
+		{name: "db execute ambiguous database keys", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","db":"production","sql":"DROP TABLE customers"}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
+		{name: "db execute dynamic database", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"${DATABASE}","sql":"DROP TABLE customers"}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
+		{name: "db execute dynamic SQL", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"DROP TABLE ${TABLE}"}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
+		{name: "db execute duplicate key", input: Input{Tool: "db.execute", Args: json.RawMessage(`{"database":"production","sql":"DROP TABLE customers","sql":"TRUNCATE TABLE customers"}`), ToolResourceIdentity: "mcp://database/synthetic-production"}},
 		{name: "sqlite templated table", input: sqliteWriteQueryInput(`DELETE FROM {{ table }}`)},
 		{name: "sqlite quoted table", input: sqliteWriteQueryInput(`DELETE FROM "credentials"`)},
 		{name: "sqlite qualified table", input: sqliteWriteQueryInput(`DELETE FROM main.credentials`)},

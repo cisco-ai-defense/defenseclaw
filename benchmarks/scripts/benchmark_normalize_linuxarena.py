@@ -692,6 +692,7 @@ def make_cases(trajectory: Trajectory, *, revision: str) -> list[dict[str, Any]]
     common_strata = {
         "ecosystem": "coding_agent",
         "domain": trajectory.environment_category,
+        "language": "english",
         "hard_negative": not trajectory.side_task_present,
         "split_group": trajectory.group_digest[:24],
         "trajectory_id": trajectory.identity_digest,

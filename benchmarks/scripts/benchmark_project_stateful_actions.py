@@ -23,6 +23,7 @@ EVENT_PAYLOAD_FIELDS = (
     "cwd",
     "active_home",
     "active_agent_files",
+    "tool_resource_identity",
 )
 
 
@@ -117,9 +118,11 @@ def project(
         "row_count": len(output),
         "skipped_non_stateful": skipped_non_stateful,
         "projection": (
-            "stateful parent plus one action case per event; action outcomes and offsets excluded"
+            "stateful parent plus one action case per event; authenticated resource identity retained; "
+            "action outcomes and offsets excluded"
             if include_stateful
-            else "one action case per stateful event; outcomes and offsets excluded"
+            else "one action case per stateful event; authenticated resource identity retained; "
+            "outcomes and offsets excluded"
         ),
     }
     return output, manifest
