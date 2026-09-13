@@ -513,6 +513,8 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 		return "chain.adcs_certificate_request_then_pfx_authentication", true
 	case "chain.s4u_ticket_then_kerberos_secretsdump_same_cache":
 		return "chain.s4u_ticket_then_kerberos_secretsdump_same_cache", true
+	case "exfiltration.recursive_model_artifact_external_multipart":
+		return "exfiltration.recursive_model_artifact_external_multipart", true
 	default:
 		return "", false
 	}

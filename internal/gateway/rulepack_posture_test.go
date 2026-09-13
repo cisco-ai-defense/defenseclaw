@@ -90,6 +90,29 @@ func TestS4UTicketSecretsDumpChainCatalogAnchor(t *testing.T) {
 	}
 }
 
+func TestRecursiveModelArtifactEgressCatalogAnchor(t *testing.T) {
+	const wantExpression = "f.commands.exists(c, c.argv_complete && c.program in ['python', 'python3'])"
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		pack := mustLoadRulePack(t, filepath.Join(guardrailPoliciesRoot(t), profile))
+		var matches []guardrail.RuleDefYAML
+		for _, file := range pack.RuleFiles {
+			for _, rule := range file.Rules {
+				if rule.ID == modelArtifactEgressRuleID {
+					matches = append(matches, rule)
+				}
+			}
+		}
+		if len(matches) != 1 {
+			t.Fatalf("%s contains %d copies, want one", profile, len(matches))
+		}
+		rule := matches[0]
+		if !rule.ToolCallOnly || rule.Pattern != "a^" || rule.Severity != "HIGH" ||
+			strings.Join(strings.Fields(rule.Expression), " ") != wantExpression {
+			t.Fatalf("%s model-egress anchor=%+v", profile, rule)
+		}
+	}
+}
+
 // TestProfilePosture_InjectionJudge pins the injection-judge labeling
 // contract: every profile assigns HIGH on a single category and
 // CRITICAL on two+ categories. Action mapping (block/alert/allow) is

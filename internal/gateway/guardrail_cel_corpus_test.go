@@ -153,6 +153,10 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// Lifecycle-owned anchor: only authenticated S4U result promotion plus the
 	// bounded cache-identity matcher may emit this rule.
 	coveredExpressions[semanticS4UTicketSecretsDumpExpression] = struct{}{}
+	// The exact recursive traversal, same-path binary open, multipart-handle
+	// join, and destination proof live in a bounded Python parser. The CEL
+	// expression is only its inert catalog selector.
+	coveredExpressions[semanticRecursiveModelArtifactEgressExpression] = struct{}{}
 	for _, corpusCase := range celTargeted {
 		facts := actionfacts.Analyze(toolCallCorpusActionFactsInput(corpusCase))
 		if !facts.Authoritative() {

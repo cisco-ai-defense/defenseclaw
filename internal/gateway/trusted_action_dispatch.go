@@ -740,6 +740,22 @@ var exactFallbackContracts = map[string]exactFallbackContract{
 		// execution remains detection-only at the pre-execution hook.
 		detectionOnly: true,
 	},
+	"exfiltration.recursive_model_artifact_external_multipart": {
+		proves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(input, facts)
+			return ok
+		},
+		boundedSubgraphProves: func(input actionfacts.Input, facts actionfacts.Facts) bool {
+			_, ok := actionfacts.ExactRecursiveModelArtifactMultipartEgress(input, facts)
+			return ok
+		},
+		// The Python source grammar, recursive traversal, exact opened-path to
+		// multipart-handle join, and static destination are all code-owned. The
+		// catalog regex is inert; HIGH severity makes this alert in balanced and
+		// permissive while strict may block the complete proof.
+		requiresExactDetectionProof: true,
+		codeOwnedDetection:          true,
+	},
 	"CMD-REMOTE-PAYLOAD-EXEC-CLEANUP": {
 		proves: func(input actionfacts.Input, _ actionfacts.Facts) bool {
 			return trustedRemotePayloadExecuteCleanupPattern.MatchString(
