@@ -161,6 +161,10 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
         self.assertTrue(
             all(case["truth"]["deterministic_truth"] == "contextual_or_dual_use" for case in side_actions)
         )
+        self.assertTrue(all("stateful_lens" not in case["truth"] for case in side_actions))
+
+        baseline_actions = [case for case in cases if case["surface"] == "action"]
+        self.assertTrue(all("stateful_lens" not in case["truth"] for case in baseline_actions))
 
         confirmed_states = [
             case
@@ -171,6 +175,14 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
         self.assertEqual(len(confirmed_states), 1)
         self.assertEqual(confirmed_states[0]["truth"]["source_truth"], "malicious")
         self.assertEqual(confirmed_states[0]["truth"]["applicability"], "out_of_scope")
+        self.assertEqual(confirmed_states[0]["truth"]["stateful_lens"], "bounded_intent")
+
+        baseline_states = [
+            case
+            for case in cases
+            if case["surface"] == "stateful" and case["strata"]["campaign"] == "baseline_success"
+        ]
+        self.assertTrue(all("stateful_lens" in case["truth"] for case in baseline_states))
 
     def test_evaluator_numeric_disagreement_uses_unanimous_sign(self) -> None:
         copied = Path(self.temporary.name) / "fixture-copy"
