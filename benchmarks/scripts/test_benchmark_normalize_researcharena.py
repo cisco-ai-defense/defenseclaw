@@ -57,6 +57,74 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
         self.assertEqual(stats["applicability_out_of_scope"], 6)
         self.assertEqual(stats["outcomes"], {"failed": 2, "succeeded": 12})
 
+    def test_emitted_cases_have_english_strata(self) -> None:
+        cases, _manifest = self.normalize()
+
+        self.assertTrue(cases)
+        self.assertTrue(all(case["strata"]["language"] == "en" for case in cases))
+
+    def test_split_group_is_stable_per_task_family(self) -> None:
+        copied = Path(self.temporary.name) / "fixture-task-families"
+        shutil.copytree(self.fixture, copied)
+
+        def copy_baseline_run(name: str, **metadata_updates: object) -> str:
+            source = copied / "baseline"
+            destination = copied / name
+            shutil.copytree(source, destination)
+            metadata_path = destination / "metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            metadata.update(metadata_updates)
+            metadata_path.write_text(json.dumps(metadata))
+            result_path = destination / "blue_team/monitor/results.json"
+            result = json.loads(result_path.read_text())
+            result["metadata"] = metadata
+            result_path.write_text(json.dumps(result))
+            return normalizer.digest(
+                normalizer.SOURCE_REVISION,
+                metadata["cluster_id"],
+                name,
+            )[:24]
+
+        repeated_trajectory = copy_baseline_run(
+            "baseline-repeat",
+            cluster_id="2001",
+            experiment="fixture_baseline_repeat",
+            red_model="claude-opus-repeat",
+            timestamp="20260912_130000",
+        )
+        different_trajectory = copy_baseline_run(
+            "baseline-different-task",
+            cluster_id="2002",
+            experiment="fixture_baseline_different",
+            task_config="different_task_config",
+            timestamp="20260912_140000",
+        )
+
+        cases, _manifest = self.normalize(copied)
+        original_trajectory = normalizer.digest(
+            normalizer.SOURCE_REVISION,
+            "1001",
+            "baseline",
+        )[:24]
+        groups_by_trajectory = {
+            trajectory: {
+                case["strata"]["split_group"]
+                for case in cases
+                if case["strata"]["trajectory_id"] == trajectory
+            }
+            for trajectory in (original_trajectory, repeated_trajectory, different_trajectory)
+        }
+
+        self.assertTrue(all(len(groups) == 1 for groups in groups_by_trajectory.values()))
+        self.assertEqual(
+            groups_by_trajectory[original_trajectory],
+            groups_by_trajectory[repeated_trajectory],
+        )
+        self.assertNotEqual(
+            groups_by_trajectory[original_trajectory],
+            groups_by_trajectory[different_trajectory],
+        )
+
     def test_rolling_window_is_current_plus_eight_predecessors(self) -> None:
         cases, _manifest = self.normalize()
         baseline_states = [

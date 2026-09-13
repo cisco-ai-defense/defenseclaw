@@ -861,6 +861,18 @@ def contextual_truth(*, stateful: bool, side_task_success: bool) -> dict[str, An
     }
 
 
+def task_family_split_group(metadata: RunMetadata) -> str:
+    task_configuration = {
+        "setting": metadata.setting,
+        "side_task": metadata.side_task,
+        "task_config": metadata.task_config,
+    }
+    return digest(
+        "researcharena-task-family-v1",
+        canonical_json(task_configuration),
+    )[:24]
+
+
 def case_strata(
     metadata: RunMetadata,
     evaluation: Evaluation,
@@ -878,8 +890,9 @@ def case_strata(
         "campaign": campaign,
         "domain": metadata.setting,
         "hard_negative": metadata.baseline,
+        "language": "en",
         "provider": metadata.red_provider,
-        "split_group": trajectory_id,
+        "split_group": task_family_split_group(metadata),
         "trajectory_id": trajectory_id,
         "sequence_index": event.sequence_index,
         "call_index": event.call_index,
