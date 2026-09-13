@@ -83,6 +83,12 @@ var semanticOwners = buildSemanticOwners(map[string]semanticOwner{
 		prerequisite:      pathOwnerPrerequisite(matchesActiveAWSCredentials),
 		suppressFallback:  pathOwnerSafeNegative(matchesAWSCredentials, matchesActiveAWSCredentials),
 	},
+	"PATH-PASSWORD-CRACKER-POTFILE": {
+		prerequisite: passwordCrackerPotfileReadPrerequisite,
+		// Reading a recovered-password store is high-confidence credential
+		// access, but is legitimate during an authorized assessment.
+		detectionOnly: true,
+	},
 	"PATH-KUBE": {
 		equivalentAliases: []string{"PATH-WIN-KUBE-CONFIG"},
 		prerequisite:      pathOwnerPrerequisite(matchesActiveKubeConfig),
@@ -1493,6 +1499,56 @@ func matchesActiveAWSCredentials(
 ) bool {
 	relative, ok := activeHomeRelative(facts, candidate)
 	return ok && relative == ".aws/credentials"
+}
+
+func passwordCrackerPotfileReadPrerequisite(facts actionfacts.Facts) bool {
+	for _, command := range facts.Commands {
+		if !hasOperation(command, actionfacts.OperationCredentialRead) {
+			continue
+		}
+		for _, candidate := range facts.Paths {
+			if candidate.CommandID == command.ID &&
+				candidate.Access == actionfacts.PathAccessRead &&
+				matchesPasswordCrackerPotfile(facts, candidate) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchesPasswordCrackerPotfile(
+	facts actionfacts.Facts,
+	candidate actionfacts.PathFact,
+) bool {
+	if candidate.Flavor != actionfacts.PathFlavorPOSIX ||
+		integrityPathHasFixtureSegment(candidate.Value) {
+		return false
+	}
+	for _, segment := range strings.Split(candidate.Value, "/") {
+		if segment == ".." {
+			return false
+		}
+	}
+	resolved := strings.TrimSpace(candidate.Resolved)
+	if resolved == "" {
+		resolved = strings.TrimSpace(candidate.Normalized)
+	}
+	for _, relative := range []string{
+		".john/john.pot",
+		".local/share/hashcat/hashcat.potfile",
+		".hashcat/hashcat.potfile",
+	} {
+		if resolved == "/root/"+relative {
+			return true
+		}
+		home := strings.TrimRight(strings.TrimSpace(facts.ActiveHome), "/")
+		if home != "" && strings.HasPrefix(home, "/") &&
+			resolved == home+"/"+relative {
+			return true
+		}
+	}
+	return false
 }
 
 func matchesKubeConfig(value string) bool {

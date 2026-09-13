@@ -224,6 +224,7 @@ func analyze(input Input) Facts {
 	facts.ActiveAgentFilesCaseInsensitiveUncertain =
 		input.ActiveAgentFilesCaseInsensitiveUncertain
 	facts.ActiveAgentFilesUncertain = input.ActiveAgentFilesUncertain
+	classifyCanonicalPasswordCrackerPotfileRead(&facts)
 	facts.SensitiveEgressArtifactWrites =
 		projectSensitiveEgressArtifactWrites(input)
 	facts.StructuredTextReplacements =

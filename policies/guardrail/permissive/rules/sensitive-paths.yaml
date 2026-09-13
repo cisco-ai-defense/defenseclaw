@@ -46,6 +46,17 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [credential, file-sensitive]
+  - id: PATH-PASSWORD-CRACKER-POTFILE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+)/(?:\.john/john\.pot|\.local/share/hashcat/hashcat\.potfile|\.hashcat/hashcat\.potfile)(?:$|["''\s|;&])'
+    title: "Password-cracker recovered credential store read"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, password-cracking, file-sensitive, detection-only]
   - id: PATH-KUBE
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&

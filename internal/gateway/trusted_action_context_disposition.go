@@ -224,6 +224,10 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 		matcher: trustedActionPathValueMatcher(matchesAWSCredentials),
 	},
 	{
+		ruleIDs: []string{"PATH-PASSWORD-CRACKER-POTFILE"},
+		matcher: matchesPasswordCrackerPotfile,
+	},
+	{
 		ruleIDs: []string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"},
 		matcher: trustedActionPathValueMatcher(matchesKubeConfig),
 	},
