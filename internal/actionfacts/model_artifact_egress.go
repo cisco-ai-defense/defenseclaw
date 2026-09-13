@@ -86,6 +86,14 @@ func ExactRecursiveModelArtifactMultipartEgress(
 	if !ok {
 		return ModelArtifactEgressFact{}, false
 	}
+	// These literal tokens are mandatory in the closed grammar. Rejecting the
+	// common non-candidate path before tokenization keeps large benign Python
+	// corpora cheap without broadening or narrowing the accepted proof.
+	for _, marker := range []string{"os.walk", "requests.post", "files", "open"} {
+		if !strings.Contains(source, marker) {
+			return ModelArtifactEgressFact{}, false
+		}
+	}
 	proof, ok := parseModelArtifactPython(source)
 	if !ok {
 		return ModelArtifactEgressFact{}, false
