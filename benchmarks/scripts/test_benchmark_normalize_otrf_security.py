@@ -132,7 +132,14 @@ def test_auoms_parent_child_chain_is_bounded_and_redacted() -> None:
         },
     ]
     data = b"".join((json.dumps(row) + "\n").encode() for row in rows)
-    spec = next(item for item in MODULE.ARCHIVES if item.key == "linux-log4shell-chain")
+    spec = MODULE.ArchiveSpec(
+        "linux-log4shell-chain",
+        "datasets/compound/Log4Shell/syslog_auoms_auditd_log4shell_cve2021_44228_jndi_reference.zip",
+        "syslog_auoms_auditd_log4shell_cve2021_44228_jndi_reference_2022-05-11181020.json",
+        "20ca2d3371daca5bff0e6e1ede0c74c6f4df5c8696f959e5bbafb6f058a1b724",
+        "auoms_json",
+        "linux",
+    )
     cases = MODULE.normalize_auoms(spec, data, Counter())
     assert len(cases) == 1
     assert cases[0]["surface"] == "stateful"
@@ -167,7 +174,14 @@ def test_real_selective_projection_validates() -> None:
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases)
     assert manifest["cases"] == len(cases)
+    assert manifest["cases"] == 5
+    assert manifest["counts"] == {MODULE.DATASET: 5}
     assert manifest["datasets"] == [MODULE.DATASET]
+    stats = manifest["adapter_statistics"][MODULE.ADAPTER]
+    assert stats["selected_archives"] == 5
+    assert stats["applicable_positives"] == 2
+    assert stats["contextual_cases"] == 3
+    assert stats["source_records"] == 21231
     assert set(manifest) == {
         "schema_version",
         "datasets",
@@ -178,5 +192,5 @@ def test_real_selective_projection_validates() -> None:
         "adapter_statistics",
         "output_sha256",
     }
-    assert any(case["surface"] == "stateful" for case in cases)
+    assert all(case["surface"] == "action" for case in cases)
     assert all(len(case["payload"].get("events", [])) <= MODULE.MAX_EVENTS for case in cases)

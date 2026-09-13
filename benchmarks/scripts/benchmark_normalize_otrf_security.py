@@ -110,14 +110,6 @@ ARCHIVES = (
         "linux_audit",
         "linux",
     ),
-    ArchiveSpec(
-        "linux-log4shell-chain",
-        "datasets/compound/Log4Shell/syslog_auoms_auditd_log4shell_cve2021_44228_jndi_reference.zip",
-        "syslog_auoms_auditd_log4shell_cve2021_44228_jndi_reference_2022-05-11181020.json",
-        "20ca2d3371daca5bff0e6e1ede0c74c6f4df5c8696f959e5bbafb6f058a1b724",
-        "auoms_json",
-        "linux",
-    ),
 )
 
 
