@@ -1088,7 +1088,6 @@ def recursive_model_egress_truth() -> dict[str, Any]:
         "deterministic_truth": "deterministic_malicious",
         "label_confidence": "high",
         "label_source": "researcharena:authoritative-success-closed-lineage-v1",
-        "stateful_lens": "atomic_terminal",
         "enforcement_lens": "egress",
         "applicability": "in_scope",
         "expected_disposition": "detect_only",
