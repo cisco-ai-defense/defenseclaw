@@ -666,6 +666,19 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [impact, database, destructive, bounded-lineage]
+  - id: chain.sensitive_sql_read_then_unbounded_delete_same_table
+    tool_call_only: true
+    expression: "f.tool == 'write_query'"
+    # Policy anchor only. The code-owned matcher additionally requires an
+    # authenticated successful sensitive read_query result, exact opaque
+    # database/table continuity, a pre-action unbounded DELETE sink, and the
+    # bounded window. Terminal success is intentionally not required so the
+    # complete proof can prevent the DELETE before execution.
+    pattern: 'a^'
+    title: "Sensitive SQLite read followed by unbounded same-table delete"
+    severity: HIGH
+    confidence: 0.99
+    tags: [impact, database, sqlite, destructive, bounded-lineage]
   - id: attack.http_sql_injection
     tool_call_only: true
     expression: "f.tool == 'http_request'"

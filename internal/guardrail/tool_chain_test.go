@@ -20,7 +20,8 @@ func TestMatchToolChainsFixedCatalog(t *testing.T) {
 			if definition.ID == ToolChainSecretReadThenEgress ||
 				definition.ID == ToolChainDownloadDecodeExecuteSameArtifact ||
 				definition.ID == ToolChainStagedReverseShellPersistence ||
-				definition.ID == ToolChainSensitiveReadValueExternalTransmit {
+				definition.ID == ToolChainSensitiveReadValueExternalTransmit ||
+				definition.ID == ToolChainSensitiveSQLiteReadThenUnboundedDelete {
 				wantSeverity = "CRITICAL"
 			}
 			if definition.Step3Bit != 0 {
@@ -147,30 +148,31 @@ func TestProximityOnlyChainsRemainVisibleButCannotEnforce(t *testing.T) {
 
 func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 	want := map[string][3]uint64{
-		ToolChainGuardrailsOffThenEgress:               {1 << 0, 1 << 1, 0},
-		ToolChainPermissionDeniedThenBypass:            {1 << 2, 1 << 3, 0},
-		ToolChainPrivilegeDiscoveryThenElevation:       {1 << 4, 1 << 5, 0},
-		ToolChainSecretManagerReadThenEgress:           {1 << 6, 1 << 7, 0},
-		ToolChainSecretReadThenEgress:                  {1 << 8, 1 << 9, 0},
-		ToolChainWorkloadIdentityThenLateralExec:       {1 << 10, 1 << 11, 0},
-		ToolChainDownloadDecodeExecuteSameArtifact:     {1 << 12, 1 << 13, 1 << 14},
-		ToolChainDownloadThenExecuteSameArtifact:       {1 << 15, 1 << 16, 0},
-		ToolChainSensitiveEgressArtifactThenExec:       {1 << 17, 1 << 18, 0},
-		ToolChainFirewallExpansionThenDestination:      {1 << 20, 1 << 21, 0},
-		ToolChainSQLServerXPCommandShellExecution:      {1 << 22, 1 << 23, 0},
-		ToolChainPrivilegedKubernetesHostRootExec:      {1 << 25, 1 << 26, 1 << 27},
-		ToolChainWirelessCaptureThenDeauthSameBSSID:    {1 << 29, 1 << 30, 0},
-		ToolChainSecretsdumpThenPsExecSameIdentity:     {1 << 31, 1 << 32, 0},
-		ToolChainCloudIAMPrincipalAdmin:                {1 << 33, 1 << 34, 0},
-		ToolChainKubernetesPrivilegedCronJob:           {1 << 35, 1 << 36, 0},
-		ToolChainSQLCommandUDF:                         {1 << 38, 1 << 39, 0},
-		ToolChainStagedReverseShellPersistence:         {1 << 41, 1 << 42, 0},
-		ToolChainEndpointSecurityControlMutation:       {1 << 44, 1 << 45, 0},
-		ToolChainSensitiveReadValueExternalTransmit:    {1 << 46, 1 << 47, 0},
-		ToolChainSensitiveSQLValueCrossResourcePersist: {1 << 48, 1 << 49, 0},
-		ToolChainCompromisedCredentialThenAuthenticate: {1 << 50, 1 << 51, 0},
-		ToolChainADCSCertificateRequestThenPFXAuth:     {1 << 53, 1 << 54, 0},
-		ToolChainS4UTicketThenKerberosSecretsdump:      {1 << 55, 1 << 56, 0},
+		ToolChainGuardrailsOffThenEgress:                {1 << 0, 1 << 1, 0},
+		ToolChainPermissionDeniedThenBypass:             {1 << 2, 1 << 3, 0},
+		ToolChainPrivilegeDiscoveryThenElevation:        {1 << 4, 1 << 5, 0},
+		ToolChainSecretManagerReadThenEgress:            {1 << 6, 1 << 7, 0},
+		ToolChainSecretReadThenEgress:                   {1 << 8, 1 << 9, 0},
+		ToolChainWorkloadIdentityThenLateralExec:        {1 << 10, 1 << 11, 0},
+		ToolChainDownloadDecodeExecuteSameArtifact:      {1 << 12, 1 << 13, 1 << 14},
+		ToolChainDownloadThenExecuteSameArtifact:        {1 << 15, 1 << 16, 0},
+		ToolChainSensitiveEgressArtifactThenExec:        {1 << 17, 1 << 18, 0},
+		ToolChainFirewallExpansionThenDestination:       {1 << 20, 1 << 21, 0},
+		ToolChainSQLServerXPCommandShellExecution:       {1 << 22, 1 << 23, 0},
+		ToolChainPrivilegedKubernetesHostRootExec:       {1 << 25, 1 << 26, 1 << 27},
+		ToolChainWirelessCaptureThenDeauthSameBSSID:     {1 << 29, 1 << 30, 0},
+		ToolChainSecretsdumpThenPsExecSameIdentity:      {1 << 31, 1 << 32, 0},
+		ToolChainCloudIAMPrincipalAdmin:                 {1 << 33, 1 << 34, 0},
+		ToolChainKubernetesPrivilegedCronJob:            {1 << 35, 1 << 36, 0},
+		ToolChainSQLCommandUDF:                          {1 << 38, 1 << 39, 0},
+		ToolChainStagedReverseShellPersistence:          {1 << 41, 1 << 42, 0},
+		ToolChainEndpointSecurityControlMutation:        {1 << 44, 1 << 45, 0},
+		ToolChainSensitiveReadValueExternalTransmit:     {1 << 46, 1 << 47, 0},
+		ToolChainSensitiveSQLValueCrossResourcePersist:  {1 << 48, 1 << 49, 0},
+		ToolChainCompromisedCredentialThenAuthenticate:  {1 << 50, 1 << 51, 0},
+		ToolChainADCSCertificateRequestThenPFXAuth:      {1 << 53, 1 << 54, 0},
+		ToolChainS4UTicketThenKerberosSecretsdump:       {1 << 55, 1 << 56, 0},
+		ToolChainSensitiveSQLiteReadThenUnboundedDelete: {1 << 57, 1 << 58, 0},
 	}
 	for index, definition := range ToolChainDefinitions() {
 		bits, ok := want[definition.ID]
@@ -184,17 +186,17 @@ func TestToolChainExistingBitAssignmentsRemainStable(t *testing.T) {
 			t.Fatalf("%s result bit=%d want=%d", definition.ID, definition.ResultBit, wantResult)
 		}
 	}
-	if ToolChainCount != 24 || ToolChainLegacyCount != 13 ||
-		ToolChainKnownResultMask != uint32(0xffffff) ||
+	if ToolChainCount != 25 || ToolChainLegacyCount != 13 ||
+		ToolChainKnownResultMask != uint32(0x1ffffff) ||
 		ToolChainKnownResultMask&ToolChainReservedResultSignBit != 0 {
-		t.Fatalf("result slot bounds=%d/%#x want 24/0xffffff",
+		t.Fatalf("result slot bounds=%d/%#x want 25/0x1ffffff",
 			ToolChainCount, ToolChainKnownResultMask)
 	}
 	definition, _ := ToolChainDefinitionByID(ToolChainSQLServerXPCommandShellExecution)
-	if ToolChainKnownStepMask != uint64(0x1ffffffffffffff) ||
+	if ToolChainKnownStepMask != uint64(0x7ffffffffffffff) ||
 		ToolChainArtifactMutationBarrier != uint64(1<<19) ||
 		ToolChainKnownStepMask&ToolChainReservedSignBit != 0 {
-		t.Fatalf("step/barrier bounds=%#x/%#x want 0x1ffffffffffffff/0x80000",
+		t.Fatalf("step/barrier bounds=%#x/%#x want 0x7ffffffffffffff/0x80000",
 			ToolChainKnownStepMask, ToolChainArtifactMutationBarrier)
 	}
 	if definition.MutationBit != uint64(1<<24) {
@@ -776,19 +778,50 @@ func TestLegacyToolChainProjectionFingerprintSurvivesWidening(t *testing.T) {
 	}
 }
 
-func TestToolChainResultMaskRuntimeCapacityIncludesFutureBitTwentyFour(t *testing.T) {
-	const futureTwentyFifthChain = uint32(1 << 24)
+func TestToolChainResultMaskRuntimeCapacityIncludesCatalogBitTwentyFour(t *testing.T) {
+	const twentyFifthChain = uint32(1 << 24)
 	matches := ToolChainMatches{
-		DetectedMask:        futureTwentyFifthChain,
-		EnforcementSafeMask: futureTwentyFifthChain,
+		DetectedMask:        twentyFifthChain,
+		EnforcementSafeMask: twentyFifthChain,
 	}
-	if matches.DetectedMask != futureTwentyFifthChain ||
-		matches.EnforcementSafeMask != futureTwentyFifthChain ||
-		futureTwentyFifthChain&ToolChainReservedResultSignBit != 0 {
+	if matches.DetectedMask != twentyFifthChain ||
+		matches.EnforcementSafeMask != twentyFifthChain ||
+		twentyFifthChain&ToolChainReservedResultSignBit != 0 {
 		t.Fatalf("uint32 result-mask capacity lost bit 24: %+v", matches)
 	}
-	if _, err := ToolChainIDs(futureTwentyFifthChain); err == nil {
-		t.Fatal("future result bit was accepted before its catalog definition exists")
+	ids, err := ToolChainIDs(twentyFifthChain)
+	if err != nil || len(ids) != 1 ||
+		ids[0] != ToolChainSensitiveSQLiteReadThenUnboundedDelete {
+		t.Fatalf("catalog result bit 24 ids=%v err=%v", ids, err)
+	}
+	const futureTwentySixthChain = uint32(1 << 25)
+	if _, err := ToolChainIDs(futureTwentySixthChain); err == nil {
+		t.Fatal("future result bit 25 was accepted before its catalog definition exists")
+	}
+}
+
+func TestToolChainDatabaseTableJoinDigestIsStableSeparatedAndFailClosed(t *testing.T) {
+	const (
+		database = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+		table    = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+		other    = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+	)
+	joined := ToolChainDatabaseTableJoinDigest(database, table)
+	if joined == "" || joined != ToolChainDatabaseTableJoinDigest(database, table) ||
+		joined == ToolChainDatabaseTableJoinDigest(other, table) ||
+		joined == ToolChainDatabaseTableJoinDigest(database, other) ||
+		joined == ToolChainDatabaseTableJoinDigest(table, database) {
+		t.Fatalf("database/table join is not stable and domain-separated: %q", joined)
+	}
+	for _, malformed := range [][2]string{
+		{"", table},
+		{"short", table},
+		{strings.ToUpper(database), table},
+		{database, "not-a-digest"},
+	} {
+		if got := ToolChainDatabaseTableJoinDigest(malformed[0], malformed[1]); got != "" {
+			t.Fatalf("malformed identity joined as %q", got)
+		}
 	}
 }
 

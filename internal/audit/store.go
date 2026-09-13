@@ -1833,6 +1833,10 @@ var migrations = []migration{
 		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
 		apply:       migrateToolChainTwentyFourSlotS4UState,
 	},
+	{
+		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
+		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

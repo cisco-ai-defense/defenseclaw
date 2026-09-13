@@ -21,8 +21,8 @@ func TestToolChainTwentyFourSlotMigrationIsAppendOnlyAndSized(t *testing.T) {
 	}
 	fixture := newToolChainFixture(t, ":memory:")
 	for table, bounds := range map[string][]string{
-		"guardrail_chain_events":          {"1055", "16895"},
-		"guardrail_chain_pending_actions": {"1055", "16895"},
+		"guardrail_chain_events":          {"1099", "17599"},
+		"guardrail_chain_pending_actions": {"1099", "17599"},
 	} {
 		var schema string
 		if err := fixture.store.db.QueryRow(
@@ -183,7 +183,7 @@ func TestToolChainTwentyFourSlotMigrationPreservesDurableStateOnReplay(t *testin
 	}
 }
 
-func TestToolChainTwentyFourthSlotRoundTripsAtMaximumCapacity(t *testing.T) {
+func TestToolChainCurrentCatalogRoundTripsAtMaximumCapacity(t *testing.T) {
 	const digest = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
 	var resources [guardrail.ToolChainCount]string
 	var values [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
@@ -195,8 +195,8 @@ func TestToolChainTwentyFourthSlotRoundTripsAtMaximumCapacity(t *testing.T) {
 	}
 	encodedResources := encodeToolChainJoinDigests(resources)
 	encodedValues := encodeToolChainValueJoinDigests(values)
-	if len(encodedResources) != 1055 || len(encodedValues) != 16895 {
-		t.Fatalf("maximum encoded widths=%d/%d want 1055/16895",
+	if len(encodedResources) != 1099 || len(encodedValues) != 17599 {
+		t.Fatalf("maximum encoded widths=%d/%d want 1099/17599",
 			len(encodedResources), len(encodedValues))
 	}
 	decodedResources, err := decodeToolChainJoinDigests(encodedResources)
@@ -208,6 +208,6 @@ func TestToolChainTwentyFourthSlotRoundTripsAtMaximumCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	if decodedResources != resources || decodedValues != values {
-		t.Fatal("twenty-four-slot maximum-capacity encoding did not round trip")
+		t.Fatal("current-catalog maximum-capacity encoding did not round trip")
 	}
 }

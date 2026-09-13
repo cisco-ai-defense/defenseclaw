@@ -37,7 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v11-s4u-ticket-lineage"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v12-sqlite-database-table-lineage"
 
 type toolValueLineageProcessKey struct {
 	material  [32]byte
@@ -1173,10 +1173,67 @@ func projectTrustedActionChainSteps(
 	projectSQLCommandUDFChainSteps(projection, facts)
 	projectStagedReverseShellPersistenceChainSteps(projection, facts)
 	projectEndpointSecurityControlChainSteps(projection, facts)
+	projectSensitiveSQLiteReadDeleteChainSteps(
+		projection,
+		facts,
+		hasAnyFinding(guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete) ||
+			hasEnforceableFinding("impact.sql_unbounded_delete"),
+	)
 	projectRemoteArtifactChainSteps(projection, facts)
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
 	}
+}
+
+func projectSensitiveSQLiteReadDeleteChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+	protectedDatabasePolicy bool,
+) {
+	const chainID = guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete
+	if facts.Tool == "read_query" {
+		reads := actionfacts.ExactSensitiveSQLRowsetReads(facts)
+		if len(reads) != 1 || !reads[0].Exact || !facts.Authoritative() {
+			return
+		}
+		digest := guardrail.ToolChainDatabaseTableJoinDigest(
+			reads[0].DatabaseIdentityDigest,
+			reads[0].TableIdentityDigest,
+		)
+		if digest == "" {
+			return
+		}
+		// A structured read has no executable command and therefore is not
+		// independently enforcement-eligible. It is only a pending proposal:
+		// ResolvePending promotes the exact authenticated invocation after its
+		// result reports success; failed and unknown outcomes discard it.
+		addToolChainStep(projection, chainID, 1, true, false)
+		setToolChainEnforcementJoinDigest(projection, chainID, digest)
+		return
+	}
+	if facts.Tool != "write_query" {
+		return
+	}
+	mutations := actionfacts.ExactSQLMutations(facts)
+	if len(mutations) != 1 || !mutations[0].Exact ||
+		mutations[0].Engine != "sqlite" ||
+		mutations[0].QuerySource != actionfacts.SQLMutationQueryStructured ||
+		mutations[0].Operation != actionfacts.SQLMutationDeleteUnbounded ||
+		mutations[0].Scope != actionfacts.SQLMutationScopeTable ||
+		!facts.Authoritative() || !facts.EnforcementEligible() {
+		return
+	}
+	digest := guardrail.ToolChainDatabaseTableJoinDigest(
+		mutations[0].DatabaseIdentityDigest,
+		mutations[0].ObjectIdentityDigest,
+	)
+	if digest == "" {
+		return
+	}
+	// Detection is profile-independent. Enforcement is admitted only by a
+	// shipped posture that explicitly treats this database scope as protected.
+	addToolChainStep(projection, chainID, 2, true, protectedDatabasePolicy)
+	setToolChainEnforcementJoinDigest(projection, chainID, digest)
 }
 
 func projectKerberosS4UTicketSecretsDumpChainSteps(

@@ -25,6 +25,8 @@ const semanticMySQLClientShellEscapeExpression = `f.commands.exists(c, c.argv_co
 
 const semanticSensitiveSQLValueCrossResourcePersistenceExpression = `f.tool in ['write_file', 'create_entities']`
 
+const semanticSensitiveSQLiteReadDeleteExpression = `f.tool == 'write_query'`
+
 var semanticDatabaseOwners = map[string]semanticOwner{
 	"attack.http_command_injection": {
 		prerequisite:     httpCommandInjectionPrerequisite,
@@ -112,10 +114,31 @@ var semanticDatabaseOwners = map[string]semanticOwner{
 		// never prove this chain; the bounded state matcher is the sole code owner.
 		detectionOnly: true,
 	},
+	"chain.sensitive_sql_read_then_unbounded_delete_same_table": {
+		prerequisite:     sensitiveSQLiteReadDeleteCatalogPrerequisite,
+		suppressFallback: authoritativeSemanticSafeNegative,
+		// This policy-only sink anchor cannot emit the chain by itself. Its
+		// presence in strict or the database-destruction pack authorizes the
+		// exact successful-result matcher to project enforcement evidence.
+		detectionOnly: true,
+	},
 }
 
 func sensitiveSQLValueCrossResourcePersistenceCatalogPrerequisite(actionfacts.Facts) bool {
 	return false
+}
+
+func sensitiveSQLiteReadDeleteCatalogPrerequisite(facts actionfacts.Facts) bool {
+	if facts.Tool != "write_query" || !facts.Authoritative() ||
+		!facts.EnforcementEligible() {
+		return false
+	}
+	mutations := actionfacts.ExactSQLMutations(facts)
+	return len(mutations) == 1 && mutations[0].Exact &&
+		mutations[0].Engine == "sqlite" &&
+		mutations[0].QuerySource == actionfacts.SQLMutationQueryStructured &&
+		mutations[0].Operation == actionfacts.SQLMutationDeleteUnbounded &&
+		mutations[0].Scope == actionfacts.SQLMutationScopeTable
 }
 
 func sqlClientShellEscapePrerequisite(

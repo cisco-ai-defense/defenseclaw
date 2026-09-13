@@ -59,7 +59,8 @@ func migrateToolChainPendingState(ex dbExecer) error {
 			-- authentication, and same-account replacement barrier. Bits 53 and 54
 			-- are the AD CS certificate request and same-PFX authentication roles.
 			-- Bits 55 and 56 are the S4U ticket issuance and exact-cache Kerberos
-			-- secretsdump roles.
+			-- secretsdump roles. Bits 57 and 58 are the authenticated SQLite
+			-- sensitive-read result and exact same-table unbounded-delete roles.
 			-- Bit 63 is permanently reserved because SQLite INTEGER is signed.
 			detection_step_mask INTEGER NOT NULL
 				CHECK (detection_step_mask BETWEEN 0 AND 9223372036854775807),
@@ -67,11 +68,11 @@ func migrateToolChainPendingState(ex dbExecer) error {
 				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 1055),
+				CHECK (length(enforcement_join_digests) <= 1099),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 1055),
+				CHECK (length(enforcement_output_join_digests) <= 1099),
 			value_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(value_join_digests) <= 16895),
+				CHECK (length(value_join_digests) <= 17599),
 			prepared_time_unix_nano INTEGER NOT NULL
 				CHECK (prepared_time_unix_nano > 0),
 			expires_time_unix_nano INTEGER NOT NULL

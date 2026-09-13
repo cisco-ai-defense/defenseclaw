@@ -26,7 +26,8 @@ func ExactSensitiveSQLRowsetReads(facts Facts) []SensitiveSQLRowsetReadFact {
 }
 
 func validSensitiveSQLRowsetReadFact(fact SensitiveSQLRowsetReadFact) bool {
-	if !fact.Exact || !validPrivateDigest(fact.DatabaseIdentityDigest) {
+	if !fact.Exact || !validPrivateDigest(fact.DatabaseIdentityDigest) ||
+		!validSQLMutationDigest(fact.TableIdentityDigest) {
 		return false
 	}
 	switch fact.TableClass {
@@ -57,12 +58,30 @@ func projectSensitiveSQLRowsetReads(input Input) []SensitiveSQLRowsetReadFact {
 			sensitiveSQLRowsetIdentityDomain,
 			input.ToolResourceIdentity,
 		),
-		Exact: true,
+		TableIdentityDigest: SensitiveSQLTableIdentityDigest(tableClass),
+		Exact:               true,
 	}
 	if !validSensitiveSQLRowsetReadFact(fact) {
 		return nil
 	}
 	return []SensitiveSQLRowsetReadFact{fact}
+}
+
+// SensitiveSQLTableIdentityDigest returns the same opaque table identity used
+// by exact SQLite mutation facts. Only the closed sensitive-table vocabulary
+// is accepted; arbitrary table names cannot enter this helper.
+func SensitiveSQLTableIdentityDigest(table SensitiveSQLTableClass) string {
+	switch table {
+	case SensitiveSQLTableCredentials, SensitiveSQLTableOAuthTokens,
+		SensitiveSQLTableEmployees:
+		return sqlMutationDigest(
+			sqlMutationObjectDigestDomain,
+			"sqlite",
+			string(table),
+		)
+	default:
+		return ""
+	}
 }
 
 func exactSensitiveSQLInputQuery(input Input) (string, bool) {

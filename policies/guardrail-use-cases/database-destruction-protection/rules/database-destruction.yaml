@@ -22,3 +22,12 @@ rules:
     severity: CRITICAL
     confidence: 0.99
     tags: [destructive, database, production-safety]
+
+  - id: chain.sensitive_sql_read_then_unbounded_delete_same_table
+    expression: "f.tool == 'write_query'"
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Sensitive SQLite read followed by unbounded same-table delete"
+    severity: HIGH
+    confidence: 0.99
+    tags: [destructive, database, sqlite, production-safety, bounded-lineage]

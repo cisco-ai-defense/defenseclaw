@@ -439,6 +439,33 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		EnforcementOutputJoinDigests: pending.enforcementOutputJoinDigests,
 		ValueJoinDigests:             pending.valueJoinDigests,
 	}
+	readDeleteDefinition, readDeleteDefinitionOK := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete,
+	)
+	readDeleteIndex, readDeleteIndexOK := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveSQLiteReadThenUnboundedDelete,
+	)
+	if readDeleteDefinitionOK && readDeleteIndexOK &&
+		projection.DetectionStepMask&readDeleteDefinition.Step1Bit != 0 {
+		source := pendingSQLValueSource(pending)
+		tableDigest := actionfacts.SensitiveSQLTableIdentityDigest(source.TableClass)
+		joinDigest := guardrail.ToolChainDatabaseTableJoinDigest(
+			source.DatabaseIdentityDigest,
+			tableDigest,
+		)
+		if source == (ToolChainPendingSQLValueSource{}) || joinDigest == "" ||
+			projection.EnforcementStepMask&readDeleteDefinition.Step1Bit != 0 ||
+			projection.EnforcementJoinDigests[readDeleteIndex] != joinDigest ||
+			projection.EnforcementOutputJoinDigests[readDeleteIndex] != "" ||
+			projection.ValueJoinDigests[readDeleteIndex] !=
+				(guardrail.ToolChainValueJoinDigests{}) {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
+		// Only the exact invocation's authenticated successful result promotes
+		// the read proposal into durable predecessor evidence. No result bytes or
+		// row values are retained.
+		projection.EnforcementStepMask |= readDeleteDefinition.Step1Bit
+	}
 	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
 		index, ok := guardrail.ToolChainIndexByID(
 			guardrail.ToolChainSensitiveReadValueExternalTransmit,

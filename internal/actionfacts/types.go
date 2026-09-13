@@ -467,12 +467,14 @@ const (
 	SensitiveSQLTableEmployees   SensitiveSQLTableClass = "employees"
 )
 
-// SensitiveSQLRowsetReadFact contains no SQL, database name, connection
-// material, or row value. DatabaseIdentityDigest is a lowercase SHA-256 digest
-// over a domain-separated, length-framed trusted tool resource identity.
+// SensitiveSQLRowsetReadFact contains no SQL, database name, table name,
+// connection material, or row value. Identity fields are lowercase,
+// domain-separated SHA-256 digests. TableClass is a closed parser vocabulary
+// retained for result classification; joins use only the opaque digests.
 type SensitiveSQLRowsetReadFact struct {
 	TableClass             SensitiveSQLTableClass
 	DatabaseIdentityDigest string
+	TableIdentityDigest    string
 	Exact                  bool
 }
 

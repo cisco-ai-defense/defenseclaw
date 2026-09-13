@@ -22,7 +22,7 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount       = 24
+	ToolChainCount       = 25
 	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
@@ -51,42 +51,44 @@ const (
 	ToolChainReceiptTTL    = 7 * 24 * time.Hour
 	ToolChainMaxHorizon    = 30 * time.Minute
 
-	ToolChainGuardrailsOffThenEgress               = "chain.guardrails_off_then_egress"
-	ToolChainPermissionDeniedThenBypass            = "chain.permission_denied_then_runtime_bypass"
-	ToolChainPrivilegeDiscoveryThenElevation       = "chain.privilege_discovery_then_elevation"
-	ToolChainSecretManagerReadThenEgress           = "chain.secret_manager_read_then_egress"
-	ToolChainSecretReadThenEgress                  = "chain.secret_read_then_egress"
-	ToolChainWorkloadIdentityThenLateralExec       = "chain.workload_identity_then_lateral_execution"
-	ToolChainDownloadDecodeExecuteSameArtifact     = "chain.download_decode_execute_same_artifact"
-	ToolChainDownloadThenExecuteSameArtifact       = "chain.download_then_execute_same_artifact"
-	ToolChainSensitiveEgressArtifactThenExec       = "chain.sensitive_egress_artifact_then_execute"
-	ToolChainFirewallExpansionThenDestination      = "chain.firewall_trust_expansion_then_destination_use"
-	ToolChainSQLServerXPCommandShellExecution      = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
-	ToolChainPrivilegedKubernetesHostRootExec      = "chain.kubernetes_privileged_host_root_write_apply_exec"
-	ToolChainWirelessCaptureThenDeauthSameBSSID    = "chain.wireless_capture_then_deauth_same_bssid"
-	ToolChainSecretsdumpThenPsExecSameIdentity     = "chain.secretsdump_then_psexec_same_target_principal"
-	ToolChainCloudIAMPrincipalAdmin                = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
-	ToolChainKubernetesPrivilegedCronJob           = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
-	ToolChainSQLCommandUDF                         = "chain.sql_command_udf_create_then_invoke_same_function"
-	ToolChainStagedReverseShellPersistence         = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
-	ToolChainEndpointSecurityControlMutation       = "chain.endpoint_security_control_request_then_completed_same_process"
-	ToolChainSensitiveReadValueExternalTransmit    = "chain.sensitive_read_value_then_external_literal_transmit"
-	ToolChainSensitiveSQLValueCrossResourcePersist = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
-	ToolChainCompromisedCredentialThenAuthenticate = "chain.compromised_credential_then_successful_authentication"
-	ToolChainADCSCertificateRequestThenPFXAuth     = "chain.adcs_certificate_request_then_pfx_authentication"
-	ToolChainS4UTicketThenKerberosSecretsdump      = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
-	ToolChainMaxValueJoinDigests                   = 16
-	toolChainProjectionFingerprintDomain           = "defenseclaw.tool-chain.projection.v2"
-	toolChainWideProjectionFingerprintDomain       = "defenseclaw.tool-chain.projection.v3-wide"
-	toolChainRulesetFingerprintDomain              = "defenseclaw.tool-chain.ruleset.v1"
-	toolChainDefinitionFingerprintDomain           = "defenseclaw.tool-chain.definition.v1"
-	toolChainCatalogFingerprintDomain              = "defenseclaw.tool-chain.catalog.v1"
-	toolChainRelevantSemanticProjection            = "actionfacts-v14-adcs-pfx-lineage"
-	toolChainRelevantEnforcementProjection         = "enforcement-proof-v1"
-	toolChainRelevantFallbackProjection            = "owner-local-fallback-v1"
-	toolChainRelevantExternalEgressProjection      = "external-egress-v1"
-	toolChainRelevantN13Projection                 = "n13-lateral-exec-proof-v1"
-	toolChainRelevantH18Projection                 = "h18-system-root-proof-v1"
+	ToolChainGuardrailsOffThenEgress                = "chain.guardrails_off_then_egress"
+	ToolChainPermissionDeniedThenBypass             = "chain.permission_denied_then_runtime_bypass"
+	ToolChainPrivilegeDiscoveryThenElevation        = "chain.privilege_discovery_then_elevation"
+	ToolChainSecretManagerReadThenEgress            = "chain.secret_manager_read_then_egress"
+	ToolChainSecretReadThenEgress                   = "chain.secret_read_then_egress"
+	ToolChainWorkloadIdentityThenLateralExec        = "chain.workload_identity_then_lateral_execution"
+	ToolChainDownloadDecodeExecuteSameArtifact      = "chain.download_decode_execute_same_artifact"
+	ToolChainDownloadThenExecuteSameArtifact        = "chain.download_then_execute_same_artifact"
+	ToolChainSensitiveEgressArtifactThenExec        = "chain.sensitive_egress_artifact_then_execute"
+	ToolChainFirewallExpansionThenDestination       = "chain.firewall_trust_expansion_then_destination_use"
+	ToolChainSQLServerXPCommandShellExecution       = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
+	ToolChainPrivilegedKubernetesHostRootExec       = "chain.kubernetes_privileged_host_root_write_apply_exec"
+	ToolChainWirelessCaptureThenDeauthSameBSSID     = "chain.wireless_capture_then_deauth_same_bssid"
+	ToolChainSecretsdumpThenPsExecSameIdentity      = "chain.secretsdump_then_psexec_same_target_principal"
+	ToolChainCloudIAMPrincipalAdmin                 = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
+	ToolChainKubernetesPrivilegedCronJob            = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
+	ToolChainSQLCommandUDF                          = "chain.sql_command_udf_create_then_invoke_same_function"
+	ToolChainStagedReverseShellPersistence          = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
+	ToolChainEndpointSecurityControlMutation        = "chain.endpoint_security_control_request_then_completed_same_process"
+	ToolChainSensitiveReadValueExternalTransmit     = "chain.sensitive_read_value_then_external_literal_transmit"
+	ToolChainSensitiveSQLValueCrossResourcePersist  = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
+	ToolChainCompromisedCredentialThenAuthenticate  = "chain.compromised_credential_then_successful_authentication"
+	ToolChainADCSCertificateRequestThenPFXAuth      = "chain.adcs_certificate_request_then_pfx_authentication"
+	ToolChainS4UTicketThenKerberosSecretsdump       = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
+	ToolChainSensitiveSQLiteReadThenUnboundedDelete = "chain.sensitive_sql_read_then_unbounded_delete_same_table"
+	ToolChainMaxValueJoinDigests                    = 16
+	toolChainProjectionFingerprintDomain            = "defenseclaw.tool-chain.projection.v2"
+	toolChainWideProjectionFingerprintDomain        = "defenseclaw.tool-chain.projection.v3-wide"
+	toolChainRulesetFingerprintDomain               = "defenseclaw.tool-chain.ruleset.v1"
+	toolChainDefinitionFingerprintDomain            = "defenseclaw.tool-chain.definition.v1"
+	toolChainCatalogFingerprintDomain               = "defenseclaw.tool-chain.catalog.v1"
+	toolChainDatabaseTableJoinDomain                = "defenseclaw.tool-chain.database-table-join.v1"
+	toolChainRelevantSemanticProjection             = "actionfacts-v15-sqlite-database-table-lineage"
+	toolChainRelevantEnforcementProjection          = "enforcement-proof-v1"
+	toolChainRelevantFallbackProjection             = "owner-local-fallback-v1"
+	toolChainRelevantExternalEgressProjection       = "external-egress-v1"
+	toolChainRelevantN13Projection                  = "n13-lateral-exec-proof-v1"
+	toolChainRelevantH18Projection                  = "h18-system-root-proof-v1"
 )
 
 // ToolChainDefinition is the immutable private catalog entry for one bounded
@@ -390,6 +392,20 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		RequiresTerminalSuccess: false,
 		DetectionOnly:           false,
 	},
+	{
+		ID: ToolChainSensitiveSQLiteReadThenUnboundedDelete, Version: "1.0",
+		Title:       "Sensitive SQLite rowset read followed by unbounded delete of the same table",
+		Severity:    "CRITICAL",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "authenticated-successful-mcp-sqlite-sensitive-read-to-exact-same-database-table-unbounded-delete-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		// Enforcement bits are projected only when strict or the explicit
+		// database-destruction policy admits this exact sink. Balanced/default
+		// retains the complete proof as an alert without treating a destructive
+		// but potentially authorized database operation as universally blockable.
+		DetectionOnly: false,
+	},
 }
 
 var (
@@ -567,6 +583,37 @@ func ToolChainResultMask(id string) (uint32, bool) {
 		return 0, false
 	}
 	return definition.ResultBit, true
+}
+
+// ToolChainDatabaseTableJoinDigest binds two already-opaque ActionFacts
+// identities into one fixed chain join. Inputs must be canonical SHA-256
+// digests; malformed or missing identities fail closed. The function never
+// receives SQL, database names, table names, or result values.
+func ToolChainDatabaseTableJoinDigest(databaseDigest, tableDigest string) string {
+	if !validToolChainIdentityDigest(databaseDigest) ||
+		!validToolChainIdentityDigest(tableDigest) {
+		return ""
+	}
+	hash := sha256.New()
+	for _, value := range []string{
+		toolChainDatabaseTableJoinDomain,
+		databaseDigest,
+		tableDigest,
+	} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func validToolChainIdentityDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // ToolChainIDs expands a validated result mask in catalog order.

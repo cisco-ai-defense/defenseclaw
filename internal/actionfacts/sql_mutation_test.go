@@ -235,6 +235,9 @@ func TestSQLiteWriteQueryMutationIdentityIsStableJoinedAndPrivate(t *testing.T) 
 	if first[0].DatabaseIdentityDigest != read[0].DatabaseIdentityDigest {
 		t.Fatal("read_query and write_query did not retain the same authenticated database identity")
 	}
+	if first[0].ObjectIdentityDigest != read[0].TableIdentityDigest {
+		t.Fatal("read_query and write_query did not retain the same normalized table identity")
+	}
 	if first[0].DatabaseIdentityDigest != same[0].DatabaseIdentityDigest ||
 		first[0].ObjectIdentityDigest != same[0].ObjectIdentityDigest {
 		t.Fatal("equivalent database/table identities produced different digests")

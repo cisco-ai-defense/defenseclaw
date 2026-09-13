@@ -142,6 +142,10 @@ func TestGuardrailProfilesCELActionFactsCorpusMatrix(t *testing.T) {
 	// complete that proof; exact positive and negative lifecycle coverage lives
 	// in tool_value_lineage_sql_chain_test.go.
 	coveredExpressions[semanticSensitiveSQLValueCrossResourcePersistenceExpression] = struct{}{}
+	// This policy-only selector admits the exact SQLite delete sink. The
+	// successful read result and bounded database/table join are exercised by
+	// the dedicated chain conformance tests rather than one atomic corpus row.
+	coveredExpressions[semanticSensitiveSQLiteReadDeleteExpression] = struct{}{}
 	// The exact account and credential roles are private ActionFacts projected
 	// only when a process HMAC key is present. Lifecycle tests own this inert
 	// catalog expression because a single public corpus row cannot complete it.

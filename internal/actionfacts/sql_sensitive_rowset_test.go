@@ -62,7 +62,8 @@ func TestSensitiveSQLRowsetReadMCPHuntShapes(t *testing.T) {
 				t.Fatalf("reads = %#v, parse = %#v", reads, facts.Parse)
 			}
 			if reads[0].TableClass != test.class || !reads[0].Exact ||
-				!validPrivateDigest(reads[0].DatabaseIdentityDigest) {
+				!validPrivateDigest(reads[0].DatabaseIdentityDigest) ||
+				!validSQLMutationDigest(reads[0].TableIdentityDigest) {
 				t.Fatalf("read = %#v", reads[0])
 			}
 		})
@@ -180,6 +181,9 @@ func TestSensitiveSQLRowsetIdentityDigestIsStableSeparatedAndPrivate(t *testing.
 	if first[0].DatabaseIdentityDigest != second[0].DatabaseIdentityDigest {
 		t.Fatal("same trusted identity produced different digests")
 	}
+	if first[0].TableIdentityDigest != second[0].TableIdentityDigest {
+		t.Fatal("same normalized table produced different digests")
+	}
 	if first[0].DatabaseIdentityDigest == third[0].DatabaseIdentityDigest {
 		t.Fatal("different trusted identities produced the same digest")
 	}
@@ -206,6 +210,7 @@ func TestSensitiveSQLRowsetIdentityDigestIsStableSeparatedAndPrivate(t *testing.
 		"SELECT password FROM credentials",
 		input.ToolResourceIdentity,
 		first[0].DatabaseIdentityDigest,
+		first[0].TableIdentityDigest,
 		"SensitiveSQLRowsetReads",
 	} {
 		if strings.Contains(string(encodedFacts), forbidden) {

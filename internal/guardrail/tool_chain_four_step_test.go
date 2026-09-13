@@ -18,43 +18,33 @@ const (
 	fourStepMutationBit = uint64(1 << 61)
 )
 
-func TestFourStepAllocationAppendsWithoutRenumberingDeployedBits(t *testing.T) {
+func TestFourStepAllocationFailsClosedBeforeReservedSignBit(t *testing.T) {
 	definitions := ToolChainDefinitions()
 	deployed := append([]ToolChainDefinition(nil), definitions...)
 	definitions = append(definitions, ToolChainDefinition{
 		ID: "test.four-step-capability", FourStep: true,
 	})
-	offset := allocateToolChainBits(definitions, 0)
-	for index := range deployed {
-		got, want := definitions[index], deployed[index]
-		if got.Step1Bit != want.Step1Bit || got.Step2Bit != want.Step2Bit ||
-			got.Step3Bit != want.Step3Bit || got.Step4Bit != 0 ||
-			got.MutationBit != want.MutationBit || got.ResultBit != want.ResultBit {
-			t.Fatalf("deployed slot %d was renumbered: got=%+v want=%+v", index, got, want)
+	defer func() {
+		if recovered := recover(); recovered == nil {
+			t.Error("four-step allocation crossed the reserved step sign bit")
+			return
 		}
-	}
-	appended := definitions[len(definitions)-1]
-	steps, results := toolChainCatalogMasks(definitions)
-	if got := [5]uint64{
-		appended.Step1Bit, appended.Step2Bit, appended.Step3Bit,
-		appended.Step4Bit, appended.MutationBit,
-	}; got != [5]uint64{
-		fourStepFirstBit, fourStepSecondBit, fourStepThirdBit,
-		fourStepTerminalBit, fourStepMutationBit,
-	} {
-		t.Fatalf("four-step allocation=%#v", got)
-	}
-	if appended.ResultBit != uint32(1<<ToolChainCount) || offset != 62 ||
-		appended.ResultBit&ToolChainReservedResultSignBit != 0 ||
-		appended.MutationBit&ToolChainReservedSignBit != 0 ||
-		steps&fourStepTerminalBit == 0 || results&appended.ResultBit == 0 {
-		t.Fatalf("unsafe appended allocation: definition=%+v offset=%d", appended, offset)
-	}
+		for index := range deployed {
+			got, want := definitions[index], deployed[index]
+			if got.Step1Bit != want.Step1Bit || got.Step2Bit != want.Step2Bit ||
+				got.Step3Bit != want.Step3Bit || got.Step4Bit != want.Step4Bit ||
+				got.MutationBit != want.MutationBit || got.ResultBit != want.ResultBit {
+				t.Fatalf("deployed slot %d was renumbered before rejection: got=%+v want=%+v",
+					index, got, want)
+			}
+		}
+	}()
+	allocateToolChainBits(definitions, 0)
 }
 
 func TestUnallocatedFourStepBitsRemainInvalidAtRuntime(t *testing.T) {
 	projection := ToolChainProjection{
-		ParseStatus: actionfacts.StatusComplete, DetectionStepMask: fourStepFirstBit,
+		ParseStatus: actionfacts.StatusComplete, DetectionStepMask: uint64(1 << 59),
 	}
 	if err := ValidateToolChainProjection(projection); err == nil {
 		t.Fatal("unallocated future step bit was accepted before a catalog definition exists")
