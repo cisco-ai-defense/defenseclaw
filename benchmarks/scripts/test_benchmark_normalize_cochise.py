@@ -321,6 +321,28 @@ class CochiseNormalizerTests(unittest.TestCase):
         self.assertIn("REDACTED_SECRET_", projected)
         self.assertNotRegex(projected, r"REDACTED_SECRET_[0-9a-f]{64}")
 
+    def test_mkdir_parents_option_and_python_slices_are_not_redacted(self) -> None:
+        commands = (
+            "mkdir -p /tmp/cochise-results",
+            "i:i+25",
+            "for chunk in rows[i:i+25]: pass",
+        )
+        for command in commands:
+            with self.subTest(command=command):
+                self.assertEqual(adapter.projected_args({"command": command})["command"], command)
+
+    def test_real_short_password_flags_and_account_secrets_remain_redacted(self) -> None:
+        secrets = ("nxc-password", "sshpass-password", "actual+25")
+        command = (
+            f"nxc smb host -u user -p '{secrets[0]}' && "
+            f"sshpass -p {secrets[1]} ssh host && "
+            f"impacket-tool domain/user:{secrets[2]}@host"
+        )
+        projected = adapter.projected_args({"command": command})["command"]
+        for secret in secrets:
+            self.assertNotIn(secret, projected)
+        self.assertEqual(projected.count("REDACTED_SECRET_"), len(secrets))
+
     def test_malformed_input_is_counted_and_does_not_shift_deterministic_ids(self) -> None:
         good = [
             event("tool_call", "one", params={"command": "whoami"}),

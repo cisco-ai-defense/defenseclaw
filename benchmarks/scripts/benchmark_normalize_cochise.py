@@ -103,10 +103,16 @@ NETEXEC_FLAG_OPTIONS = frozenset(
     {"--shares", "--groups", "--users", "--trusted-for-delegation", "--dc-list", "--local-auth"}
 )
 COMMAND_SECRET_RE = re.compile(
-    r"(?i)(?:^|\s)(?:-p|--password|-H|-hashes|--hashes|-aesKey|--aesKey)\s+"
+    r"(?i)(?:^|\s)(?:--password|-H|-hashes|--hashes|-aesKey|--aesKey)\s+"
     r"(?:['\"]([^'\"]{4,})['\"]|([^\s]{4,}))"
 )
-ACCOUNT_SECRET_RE = re.compile(r"(?i)(?:[A-Za-z0-9_.-]+[/\\])?[A-Za-z0-9_.-]+:([^\s@'\"]{4,})(?=@|\s|$)")
+SHORT_PASSWORD_RE = re.compile(r"(?i)(?:^|\s)-p\s+(?:['\"]([^'\"]{4,})['\"]|([^\s]{4,}))")
+SHORT_PASSWORD_PROGRAMS = NETEXEC_PROGRAMS | frozenset({"sshpass"})
+ACCOUNT_SECRET_RE = re.compile(
+    r"(?i)(?:[A-Za-z0-9_.-]+[/\\])?(?P<account>[A-Za-z0-9_.-]+):"
+    r"(?P<secret>[^\s@'\"]{4,})(?=@|\s|$)"
+)
+PYTHON_SLICE_TAIL_RE = re.compile(r"^(?P<index>[A-Za-z_]\w*)[+-]\d+\]*:*$")
 
 
 class ProjectionError(ValueError):
@@ -314,6 +320,21 @@ def join_calls(records: Iterable[Record], stats: Counter[str]) -> list[JoinedCal
     return joined
 
 
+def command_uses_short_password_option(command: str) -> bool:
+    """Return whether ``-p`` belongs to a closed password-taking program."""
+    try:
+        argv = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    return any(Path(token).name.lower() in SHORT_PASSWORD_PROGRAMS for token in argv)
+
+
+def python_slice_false_positive(match: re.Match[str]) -> bool:
+    """Reject index slices such as ``i:i+25`` from account-secret projection."""
+    tail = PYTHON_SLICE_TAIL_RE.fullmatch(match.group("secret"))
+    return tail is not None and tail.group("index") == match.group("account")
+
+
 def sensitive_values(value: object, key: str = "") -> set[str]:
     found: set[str] = set()
     lowered = key.lower()
@@ -324,7 +345,12 @@ def sensitive_values(value: object, key: str = "") -> set[str]:
         if lowered in {"command", "cmd"}:
             for match in COMMAND_SECRET_RE.finditer(value):
                 found.add(match.group(1) or match.group(2))
-            found.update(match.group(1) for match in ACCOUNT_SECRET_RE.finditer(value))
+            if command_uses_short_password_option(value):
+                for match in SHORT_PASSWORD_RE.finditer(value):
+                    found.add(match.group(1) or match.group(2))
+            for match in ACCOUNT_SECRET_RE.finditer(value):
+                if not python_slice_false_positive(match):
+                    found.add(match.group("secret"))
     elif isinstance(value, Mapping):
         for child_key, child in value.items():
             if isinstance(child_key, str):
