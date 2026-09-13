@@ -1073,6 +1073,27 @@
       "enabled": true
     },
     {
+      "id": "SecureAI-SE/fuzz-agent-trajectories",
+      "purpose": [
+        "action",
+        "web-api-security",
+        "deterministic-command-injection",
+        "benign-hard-negative",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "source_url": "https://huggingface.co/datasets/SecureAI-SE/fuzz-agent-trajectories",
+      "revision": "a5db1bb894eb1eee839a84330d49075132f050ee",
+      "fetch": "manual",
+      "include_paths": [
+        "data/train-00000-of-00001.parquet"
+      ],
+      "license": "CC-BY-4.0",
+      "license_status": "approved",
+      "redistribution": "download-only",
+      "enabled": true
+    },
+    {
       "id": "secebl-public-examples",
       "purpose": [
         "action",

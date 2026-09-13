@@ -519,6 +519,20 @@
         "No compatible aggregate result is currently available; this entry remains in the public source inventory."
       ]
     },
+    "SecureAI-SE/fuzz-agent-trajectories": {
+      "intended_use": [
+        "action",
+        "web-api-security",
+        "deterministic-command-injection",
+        "benign-hard-negative",
+        "real-tool-arguments",
+        "real-tool-results"
+      ],
+      "status": "normalized-mining-only",
+      "limitations": [
+        "The small development corpus supports exact structured-request rule mining; it is not an independent held-out population estimate."
+      ]
+    },
     "CyCraftAI/TraceSafe": {
       "intended_use": [
         "action",
