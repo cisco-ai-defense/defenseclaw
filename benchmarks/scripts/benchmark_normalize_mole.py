@@ -126,6 +126,28 @@ def optional_text(value: object, code: str, maximum: int = 4096) -> str | None:
     return required_text(value, code, maximum)
 
 
+def optional_identity_evidence(
+    value: object,
+    *,
+    field: str,
+    code: str,
+    maximum: int,
+) -> tuple[str | None, dict[str, object]]:
+    if value is None or value == "":
+        return None, {}
+    if not isinstance(value, str) or not value.strip():
+        raise ProjectionError(code)
+    result = value.strip()
+    encoded = result.encode()
+    if len(encoded) <= maximum:
+        return result, {}
+    return None, {
+        f"{field}_omitted_oversized": True,
+        f"{field}_bytes": len(encoded),
+        f"{field}_sha256": hashlib.sha256(encoded).hexdigest(),
+    }
+
+
 def bounded(value: object, depth: int = 0) -> object:
     if depth > MAX_DEPTH:
         raise ProjectionError("value_too_deep")
@@ -253,7 +275,12 @@ def event_projection(row: Mapping[str, Any], ordinal: int) -> tuple[dict[str, An
     destination = optional_text(row.get("dest_domain"), "invalid_destination", 253)
     if type(row.get("is_external")) is not bool:
         raise ProjectionError("invalid_destination_trust")
-    resource_id = optional_text(row.get("resource_id"), "invalid_resource_id", 4096)
+    resource_id, resource_id_evidence = optional_identity_evidence(
+        row.get("resource_id"),
+        field="resource_id",
+        code="invalid_resource_id",
+        maximum=4096,
+    )
     resource_hash = optional_text(row.get("resource_hash"), "invalid_resource_hash", 128)
     parent = optional_text(row.get("parent_event_id"), "invalid_parent_event_id", 240)
     arguments, args_evidence = parse_source_args(row.get("args"), row.get("args_hash"))
@@ -267,6 +294,7 @@ def event_projection(row: Mapping[str, Any], ordinal: int) -> tuple[dict[str, An
         "exit_code": exit_code,
         "bytes": byte_count,
         "is_external": row["is_external"],
+        **resource_id_evidence,
         **args_evidence,
     }
     for key, value in (

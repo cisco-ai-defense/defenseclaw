@@ -145,6 +145,18 @@ class MoleNormalizerTest(unittest.TestCase):
         self.assertTrue(value["_mole_value_omitted_oversized"])
         self.assertRegex(value["sha256"], r"^[0-9a-f]{64}$")
 
+    def test_oversized_resource_identity_is_hashed_not_copied(self) -> None:
+        row = event(0)
+        oversized = "resource-" + "x" * 4096
+        row["resource_id"] = oversized
+        cases, _ = normalize([row], [])
+        evidence = cases[0]["payload"]["args"]["_mole_evidence"]
+        self.assertNotIn("resource_id", evidence)
+        self.assertTrue(evidence["resource_id_omitted_oversized"])
+        self.assertEqual(len(oversized.encode()), evidence["resource_id_bytes"])
+        self.assertRegex(evidence["resource_id_sha256"], r"^[0-9a-f]{64}$")
+        self.assertNotIn(oversized, json.dumps(cases))
+
     def test_schema_validation_and_supervision_fields_are_excluded(self) -> None:
         cases, _ = normalize([event(0), event(1)], [label()])
         MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
