@@ -93,6 +93,10 @@ type ToolChainResolvePendingInput struct {
 	SuccessfulSQLValueSource            ToolChainPendingSQLValueSource      `json:"-"`
 	SuccessfulSQLResourceIdentityDigest string                              `json:"-"`
 	SuccessfulSQLValueDigests           guardrail.ToolChainValueJoinDigests `json:"-"`
+	// SuccessfulADCSCertificatePFXDigest is accepted only when the pending
+	// invocation is the exact AD CS impersonation-request predecessor. It
+	// carries a one-way artifact identity, never the certificate path or bytes.
+	SuccessfulADCSCertificatePFXDigest string `json:"-"`
 }
 
 type ToolChainResolvePendingResult struct {
@@ -465,6 +469,25 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		projection.EnforcementJoinDigests[index] =
 			input.SuccessfulSQLResourceIdentityDigest
 		projection.ValueJoinDigests[index] = input.SuccessfulSQLValueDigests
+	}
+	if input.SuccessfulADCSCertificatePFXDigest != "" {
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		)
+		definition, definitionOK := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		)
+		if !ok || !definitionOK ||
+			projection.DetectionStepMask&definition.Step1Bit == 0 ||
+			projection.EnforcementStepMask&definition.Step1Bit != 0 ||
+			projection.EnforcementJoinDigests[index] != "" ||
+			projection.EnforcementOutputJoinDigests[index] != "" ||
+			projection.ValueJoinDigests[index] != (guardrail.ToolChainValueJoinDigests{}) {
+			return ToolChainResolvePendingResult{}, ErrToolChainIntegrity
+		}
+		projection.EnforcementStepMask |= definition.Step1Bit
+		projection.EnforcementJoinDigests[index] =
+			input.SuccessfulADCSCertificatePFXDigest
 	}
 	if projection.DetectionStepMask == 0 {
 		// A successfully resolved but semantically unrelated tool call still
@@ -939,7 +962,8 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 			input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) ||
 			input.SuccessfulSQLValueSource != (ToolChainPendingSQLValueSource{}) ||
 			input.SuccessfulSQLResourceIdentityDigest != "" ||
-			input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+			input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) ||
+			input.SuccessfulADCSCertificatePFXDigest != "" {
 			return errors.New("audit: unsuccessful pending result contains value lineage")
 		}
 		return nil
@@ -947,9 +971,49 @@ func validateToolChainResolvePendingInput(input ToolChainResolvePendingInput) er
 	if err := validateSHA256("tool-chain ruleset fingerprint", input.RulesetFingerprint, true); err != nil {
 		return err
 	}
-	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) &&
-		input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+	lineageKinds := 0
+	if input.SuccessfulReadValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+		lineageKinds++
+	}
+	if input.SuccessfulSQLValueDigests != (guardrail.ToolChainValueJoinDigests{}) {
+		lineageKinds++
+	}
+	if input.SuccessfulADCSCertificatePFXDigest != "" {
+		lineageKinds++
+	}
+	if lineageKinds > 1 {
 		return errors.New("audit: successful pending result contains ambiguous value lineage")
+	}
+	if input.SuccessfulADCSCertificatePFXDigest != "" {
+		if err := validateSHA256(
+			"successful AD CS certificate PFX digest",
+			input.SuccessfulADCSCertificatePFXDigest,
+			true,
+		); err != nil {
+			return err
+		}
+		index, ok := guardrail.ToolChainIndexByID(
+			guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		definition, ok := guardrail.ToolChainDefinitionByID(
+			guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+		)
+		if !ok {
+			return ErrToolChainIntegrity
+		}
+		projection := guardrail.ToolChainProjection{
+			ParseStatus:         actionfacts.StatusComplete,
+			DetectionStepMask:   definition.Step1Bit,
+			EnforcementStepMask: definition.Step1Bit,
+		}
+		projection.EnforcementJoinDigests[index] =
+			input.SuccessfulADCSCertificatePFXDigest
+		if err := guardrail.ValidateToolChainProjection(projection); err != nil {
+			return err
+		}
 	}
 	if input.SuccessfulReadValueDigests == (guardrail.ToolChainValueJoinDigests{}) {
 		if input.SuccessfulReadPathDigest != "" {

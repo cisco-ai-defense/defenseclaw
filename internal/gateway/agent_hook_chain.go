@@ -37,7 +37,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
-const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v9-policy-posture"
+const toolChainGatewayProjectionRevision = "authenticated-hook-projection-v10-adcs-pfx-lineage"
 
 type toolValueLineageProcessKey struct {
 	material  [32]byte
@@ -332,6 +332,7 @@ func (a *APIServer) applyAgentHookToolChains(
 			sqlProjection              toolValueLineageSQLSuccessfulProjection
 			sqlProjected               bool
 			returnedCredentialMaterial actionfacts.ReturnedCredentialMaterial
+			adcsCertificatePFXDigest   string
 		)
 		if outcome == connector.ToolLifecycleOutcomeSuccess {
 			sqlSource, sqlProjection, sqlProjected =
@@ -339,6 +340,8 @@ func (a *APIServer) applyAgentHookToolChains(
 			if resultBytes, exact := exactReturnedCredentialResultBytes(req, outcome); exact {
 				returnedCredentialMaterial =
 					actionfacts.ClassifyReturnedCredentialMaterial(resultBytes)
+				adcsCertificatePFXDigest =
+					actionfacts.ExactADCSCertificatePFXResult(resultBytes)
 			}
 		}
 		resolved, resolveErr := repository.ResolvePending(
@@ -357,6 +360,7 @@ func (a *APIServer) applyAgentHookToolChains(
 				SuccessfulSQLValueDigests: toolValueLineageGuardrailDigests(
 					sqlProjection.valueDigests,
 				),
+				SuccessfulADCSCertificatePFXDigest: adcsCertificatePFXDigest,
 			},
 		)
 		if resolveErr != nil {
@@ -968,6 +972,8 @@ func projectTrustedActionChainSteps(
 	facts actionfacts.Facts,
 	findings []RuleFinding,
 ) {
+	projectADCSCertificateImpersonationChainSteps(projection, facts)
+
 	found := make(map[string]RuleFinding, len(findings))
 	for _, finding := range findings {
 		found[finding.RuleID] = finding
@@ -1164,6 +1170,26 @@ func projectTrustedActionChainSteps(
 	projectRemoteArtifactChainSteps(projection, facts)
 	if factsMayMutateArtifact(facts) {
 		projection.DetectionStepMask |= guardrail.ToolChainArtifactMutationBarrier
+	}
+}
+
+func projectADCSCertificateImpersonationChainSteps(
+	projection *guardrail.ToolChainProjection,
+	facts actionfacts.Facts,
+) {
+	const chainID = guardrail.ToolChainADCSCertificateRequestThenPFXAuth
+	if _, ok := actionfacts.ExactADCSCertificateImpersonationRequest(facts); ok {
+		// The request is detection evidence immediately, but becomes enforcement
+		// evidence only after its authenticated result proves the exact PFX that
+		// was written. ResolvePending performs that promotion.
+		addToolChainStep(projection, chainID, 1, true, false)
+		return
+	}
+	if auth, ok := actionfacts.ExactADCSCertificateImpersonationAuth(facts); ok {
+		addToolChainStep(projection, chainID, 2, true, true)
+		setToolChainEnforcementJoinDigest(
+			projection, chainID, auth.PFXArtifactIdentityDigest,
+		)
 	}
 }
 

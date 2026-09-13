@@ -80,7 +80,7 @@ const (
 	toolChainRulesetFingerprintDomain              = "defenseclaw.tool-chain.ruleset.v1"
 	toolChainDefinitionFingerprintDomain           = "defenseclaw.tool-chain.definition.v1"
 	toolChainCatalogFingerprintDomain              = "defenseclaw.tool-chain.catalog.v1"
-	toolChainRelevantSemanticProjection            = "actionfacts-v13-compromised-credential-auth-lineage"
+	toolChainRelevantSemanticProjection            = "actionfacts-v14-adcs-pfx-lineage"
 	toolChainRelevantEnforcementProjection         = "enforcement-proof-v1"
 	toolChainRelevantFallbackProjection            = "owner-local-fallback-v1"
 	toolChainRelevantExternalEgressProjection      = "external-egress-v1"
