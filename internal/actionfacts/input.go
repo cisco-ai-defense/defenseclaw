@@ -104,6 +104,14 @@ func extractArgs(raw json.RawMessage) extractedInput {
 }
 
 func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
+	switch {
+	case strings.EqualFold(tool, "search_files"):
+		return extractExactSearchFilesArgs(raw)
+	case strings.EqualFold(tool, "get_file_info"):
+		return extractExactGetFileInfoArgs(raw)
+	case strings.EqualFold(tool, "fs.read_batch"):
+		return extractExactFSReadBatchArgs(raw)
+	}
 	if exactTerminalKeystrokesTool(tool) {
 		return extractExactTerminalKeystrokesArgs(raw)
 	}

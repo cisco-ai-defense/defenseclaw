@@ -1382,7 +1382,7 @@ func TestAnalyzeClosedKnownToolArgumentSemantics(t *testing.T) {
 			operation: OperationDelete, access: PathAccessDelete,
 		},
 		{
-			tool: "search_files", args: json.RawMessage(`{"path":"/repo"}`),
+			tool: "search_files", args: json.RawMessage(`{"path":"/repo","pattern":"fixture"}`),
 			operation: OperationSearch, access: PathAccessRead,
 		},
 		{

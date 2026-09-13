@@ -1348,6 +1348,7 @@ type toolPathShape uint8
 const (
 	toolPathNone toolPathShape = iota
 	toolPathInput
+	toolPathBatchInput
 	toolPathOutput
 	toolPathTarget
 	toolPathCopy
@@ -1418,6 +1419,8 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 	case "listfiles", "list_files", "list-files",
 		"listdirectory", "list_directory", "list-directory":
 		return pathToolSemantics(PathAccessList, OperationList), true
+	case "get_file_info":
+		return pathToolSemantics(PathAccessMetadata, OperationList), true
 	case "search",
 		"searchfiles", "search_files", "search-files",
 		"filesearch", "file_search", "file-search",
@@ -1480,6 +1483,14 @@ func lookupToolArgumentSemantics(tool string) (toolArgumentSemantics, bool) {
 			requiresPaths:    true,
 			requiresURLs:     true,
 			flow:             toolFlowDownload,
+		}, true
+	case "fs.read_batch":
+		return toolArgumentSemantics{
+			acceptsPaths:  true,
+			pathAccess:    PathAccessRead,
+			pathOperation: OperationRead,
+			pathShape:     toolPathBatchInput,
+			requiresPaths: true,
 		}, true
 	default:
 		return toolArgumentSemantics{}, false
@@ -1587,6 +1598,21 @@ func projectToolPaths(
 			return nil, false
 		}
 		return []projectedToolPath{{access: semantics.pathAccess, value: path.value}}, true
+	case toolPathBatchInput:
+		if len(extracted.paths) == 0 {
+			return nil, false
+		}
+		paths := make([]projectedToolPath, 0, len(extracted.paths))
+		for _, path := range extracted.paths {
+			if path.key != "path" || path.value == "" {
+				return nil, false
+			}
+			paths = append(paths, projectedToolPath{
+				access: semantics.pathAccess,
+				value:  path.value,
+			})
+		}
+		return paths, true
 	case toolPathOutput:
 		path, ok := extracted.singlePathArgument("path", "filepath", "target", "destination")
 		if !ok {
