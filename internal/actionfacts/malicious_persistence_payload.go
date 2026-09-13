@@ -47,11 +47,77 @@ func projectMaliciousPersistencePayloads(input Input) []MaliciousPersistencePayl
 		return nil
 	}
 	if exactPersistencePOSIXDownloadExecute(method, payload) ||
+		exactPersistenceBashTCPReverseShell(method, payload) ||
 		exactPAMPersistenceReverseShell(method, payload) ||
 		exactPersistencePowerShellDownloadExecute(method, payload) {
 		return []MaliciousPersistencePayloadFact{{Class: maliciousPersistenceDownloadExecuteClass}}
 	}
 	return nil
+}
+
+// exactPersistenceBashTCPReverseShell proves that a closed persist invocation
+// installs one literal interactive Bash /dev/tcp reverse shell. Cron and
+// systemd payload extraction remain owned by their existing closed grammars;
+// the executable command is then checked by the same parser-backed proof used
+// for staged payloads and Kubernetes CronJobs.
+func exactPersistenceBashTCPReverseShell(method, payload string) bool {
+	if payload == "" || len(payload) > stagedPayloadMaxScriptBytes ||
+		strings.TrimSpace(payload) != payload {
+		return false
+	}
+
+	var command string
+	var ok bool
+	switch method {
+	case "cron":
+		command, ok = exactPersistenceCronCommand(payload)
+	case "systemd":
+		command, ok = exactPersistenceSystemdCommand(payload)
+	default:
+		return false
+	}
+	if !ok || command == "" || strings.TrimSpace(command) != command {
+		return false
+	}
+	if exactPersistenceLiteralBashTCPReverseShell(command) {
+		return true
+	}
+
+	// Accept one exact literal shell boundary needed by common cron/systemd
+	// forms. The existing matcher rejects nested quotes, escapes, newlines,
+	// mismatched delimiters, environment wrappers, and additional commands.
+	wrapped := persistenceLiteralShellCommand.FindStringSubmatch(command)
+	return len(wrapped) == 4 && wrapped[1] == wrapped[3] &&
+		exactPersistenceLiteralBashTCPReverseShell(wrapped[2])
+}
+
+func exactPersistenceLiteralBashTCPReverseShell(command string) bool {
+	if !exactAuthoritativePOSIXReverseShellCommand(command) {
+		return false
+	}
+	const suffix = " 0>&1"
+	var endpoint string
+	for _, prefix := range []string{
+		"bash -i >& /dev/tcp/",
+		"/bin/bash -i >& /dev/tcp/",
+	} {
+		if strings.HasPrefix(command, prefix) && strings.HasSuffix(command, suffix) {
+			endpoint = strings.TrimSuffix(strings.TrimPrefix(command, prefix), suffix)
+			break
+		}
+	}
+	host, port, ok := strings.Cut(endpoint, "/")
+	if !ok || host == "" || port == "" || strings.Contains(port, "/") {
+		return false
+	}
+	normalized, scope, kind, _ := deriveNetworkTarget(host)
+	if normalized == "" || kind != NetworkTargetSingleHost ||
+		scope == NetworkScopeLoopback || scope == NetworkScopeLinkLocal {
+		return false
+	}
+	lowerHost := strings.ToLower(strings.TrimSuffix(normalized, "."))
+	return lowerHost != "localhost" && !strings.HasSuffix(lowerHost, ".localhost") &&
+		!strings.HasSuffix(lowerHost, ".local")
 }
 
 func exactPAMPersistenceReverseShell(method, payload string) bool {
