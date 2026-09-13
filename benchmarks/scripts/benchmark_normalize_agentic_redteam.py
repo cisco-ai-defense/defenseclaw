@@ -132,28 +132,43 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         rows.append(case_row(source, revision, split, pre, "benign"))
         rows.append(case_row(source, revision, split, at_drift, "malicious"))
     rows.sort(key=lambda row: str(row["id"]))
+    truth_counts = Counter(row["truth"]["source_truth"] for row in rows)
     manifest = {
         "schema_version": "1",
-        "source_id": "agentic-redteam-benchmark",
-        "source_revision": revision,
-        "source_license": "CC-BY-4.0",
-        "split": split,
-        "selected_source_trajectories": selected_sources,
-        "row_count": len(rows),
-        "truth_counts": dict(sorted(Counter(row["truth"]["source_truth"] for row in rows).items())),
-        "skipped": dict(sorted(skipped.items())),
-        "source_file_count": len(source_files),
-        "source_files_sha256": hashlib.sha256(
-            json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
-        ).hexdigest(),
-        "normalization": (
-            "original-tier tool names through the labeled drift step plus paired pre-drift prefixes; "
-            "goals, plans, thoughts, observations, raw calls, arguments, and post-drift steps excluded"
-        ),
-        "label_limitation": (
-            "The upstream README calls the 513-example tier gold, but this pinned revision has empty "
-            "metadata.reviewed_by arrays; report it as upstream-original, not independently human-reviewed."
-        ),
+        "datasets": ["agentic-redteam-benchmark"],
+        "cases": len(rows),
+        "counts": {"agentic-redteam-benchmark": len(rows)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {
+            "agentic-redteam-v1": {
+                "selected_source_trajectories": selected_sources,
+                "benign_cases": truth_counts["benign"],
+                "malicious_cases": truth_counts["malicious"],
+                "source_file_count": len(source_files),
+                **dict(sorted(skipped.items())),
+            }
+        },
+        # Keep descriptive provenance under the schema's extensible, value-free
+        # trajectory metadata field so the Go harness can decode this manifest
+        # strictly without dropping important label limitations.
+        "trajectory_source": {
+            "source_id": "agentic-redteam-benchmark",
+            "source_revision": revision,
+            "source_license": "CC-BY-4.0",
+            "split": split,
+            "source_files_sha256": hashlib.sha256(
+                json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
+            ).hexdigest(),
+            "normalization": (
+                "original-tier tool names through the labeled drift step plus paired pre-drift prefixes; "
+                "goals, plans, thoughts, observations, raw calls, arguments, and post-drift steps excluded"
+            ),
+            "label_limitation": (
+                "The upstream README calls the 513-example tier gold, but this pinned revision has empty "
+                "metadata.reviewed_by arrays; report it as upstream-original, not independently human-reviewed."
+            ),
+        },
     }
     return rows, manifest
 
