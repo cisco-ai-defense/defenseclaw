@@ -30,6 +30,13 @@ type Input struct {
 	Command string
 	Argv    []string
 	CWD     string
+	// ToolResourceIdentity is private, connector-authenticated context naming
+	// the exact tool-side resource used by this invocation (for example, one
+	// configured MCP database or storage server). It must never be populated
+	// from tool arguments, command text, model output, or other user-controlled
+	// material. ActionFacts retains only domain-separated digests derived from
+	// it.
+	ToolResourceIdentity string `json:"-"`
 	// ActiveHome is trusted caller context for the identity executing the
 	// action. It must be an absolute POSIX or Windows filesystem path.
 	// ActionFacts never discovers it from process state.
@@ -108,6 +115,16 @@ type Facts struct {
 	// file read. SQL text, paths, connection strings, usernames, and passwords
 	// are discarded before Facts crosses the ActionFacts boundary.
 	SQLSensitiveServerFileReads []SQLSensitiveServerFileReadFact `json:"-"`
+	// SensitiveSQLRowsetReads contains only a closed sensitive-table class and
+	// a domain-separated digest of trusted connector resource identity. Query
+	// text, selected values, connection strings, and raw resource identity are
+	// discarded before Facts crosses the ActionFacts boundary.
+	SensitiveSQLRowsetReads []SensitiveSQLRowsetReadFact `json:"-"`
+	// StructuredLiteralPersistences contains only a closed sink class and a
+	// domain-separated digest binding trusted connector resource identity to an
+	// exact literal sink target. Content, observations, target names, paths, and
+	// raw connector identity are not retained in this private projection.
+	StructuredLiteralPersistences []StructuredLiteralPersistenceFact `json:"-"`
 	// SQLCommandUDFOperations contains only a closed create/invoke operation,
 	// a database-engine class, and domain-separated SHA-256 identity digests.
 	// SQL, function bodies, command arguments, connection strings, usernames,
@@ -423,6 +440,43 @@ type PostgreSQLCopyProgramFact struct {
 type SQLSensitiveServerFileReadFact struct {
 	DatabaseEngine string
 	PathClass      string
+}
+
+// SensitiveSQLTableClass is the closed set of rowsets whose reviewed fields
+// may participate in a future exact value-lineage proof.
+type SensitiveSQLTableClass string
+
+const (
+	SensitiveSQLTableCredentials SensitiveSQLTableClass = "credentials"
+	SensitiveSQLTableOAuthTokens SensitiveSQLTableClass = "oauth_tokens"
+	SensitiveSQLTableEmployees   SensitiveSQLTableClass = "employees"
+)
+
+// SensitiveSQLRowsetReadFact contains no SQL, database name, connection
+// material, or row value. DatabaseIdentityDigest is a lowercase SHA-256 digest
+// over a domain-separated, length-framed trusted tool resource identity.
+type SensitiveSQLRowsetReadFact struct {
+	TableClass             SensitiveSQLTableClass
+	DatabaseIdentityDigest string
+	Exact                  bool
+}
+
+// StructuredLiteralPersistenceSink is the closed set of literal persistence
+// schemas that a future value-lineage proof may resolve after success.
+type StructuredLiteralPersistenceSink string
+
+const (
+	StructuredLiteralPersistenceFile   StructuredLiteralPersistenceSink = "file"
+	StructuredLiteralPersistenceEntity StructuredLiteralPersistenceSink = "knowledge_graph_entity"
+)
+
+// StructuredLiteralPersistenceFact contains no path, entity name, type,
+// observation, content, or connector identity. TargetIdentityDigest binds the
+// exact target to trusted connector context without retaining either value.
+type StructuredLiteralPersistenceFact struct {
+	SinkClass            StructuredLiteralPersistenceSink
+	TargetIdentityDigest string
+	Exact                bool
 }
 
 // SQLCommandUDFOperation is the closed vocabulary for a command-executing

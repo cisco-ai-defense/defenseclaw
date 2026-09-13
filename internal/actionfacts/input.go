@@ -186,6 +186,22 @@ func extractArgsForTool(raw json.RawMessage, tool string) extractedInput {
 			return extractedInput{status: StatusComplete}
 		}
 	}
+	if tool == "read_query" {
+		if _, ok := exactSensitiveSQLReadQueryArgs(raw); ok {
+			// The reviewed rowset recognizer owns this closed schema. Query text
+			// remains private and is never projected into generic command facts.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
+	if tool == "create_entities" {
+		if _, ok := exactStructuredEntityPersistenceArgs(raw); ok {
+			// The reviewed persistence recognizer owns this closed schema.
+			// Entity names, types, and observations remain private.
+			return extractedInput{status: StatusComplete}
+		}
+		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
+	}
 	if tool == "http_request" && selectsHTTPPathRequestSchema(raw) {
 		if _, ok := exactHTTPRequestInput(raw); ok {
 			// The reviewed HTTP recognizers own both accepted request schemas.

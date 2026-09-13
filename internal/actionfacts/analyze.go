@@ -61,6 +61,7 @@ func analyze(input Input) Facts {
 	for _, issue := range []IssueCode{
 		validateToolName(input.Tool),
 		validateScalar(input.CWD, maxScalarBytes),
+		validateTrustedToolResourceIdentity(input.ToolResourceIdentity),
 		validateActiveHome(input.ActiveHome),
 		activeAgentFilesIssue,
 		activeAgentFilesCaseInsensitiveIssue,
@@ -232,6 +233,9 @@ func analyze(input Input) Facts {
 	facts.PostgreSQLCopyPrograms = projectPostgreSQLCopyPrograms(input)
 	facts.SQLSensitiveServerFileReads =
 		projectSQLSensitiveServerFileReads(input)
+	facts.SensitiveSQLRowsetReads = projectSensitiveSQLRowsetReads(input)
+	facts.StructuredLiteralPersistences =
+		projectStructuredLiteralPersistences(input)
 	facts.SQLCommandUDFOperations = projectSQLCommandUDFOperations(input, facts)
 	facts.SQLMutations = projectSQLMutations(input, facts)
 	facts.HTTPSQLInjections = projectHTTPSQLInjections(input)
