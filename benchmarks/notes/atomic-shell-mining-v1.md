@@ -138,3 +138,27 @@ have no outcomes; Shell curated responses/system changes are source evidence
 but do not establish DefenseClaw success semantics; and the locked Shell paths
 omit ATT&CK/TTP annotations. No production detection code was changed and no
 source was uploaded.
+
+## Targeted ActionFacts authority rerun
+
+The 18,849-case development corpus was evaluated before and after adding a
+closed parser projection for standalone absolute `cd` fallback lists. The
+change deliberately excludes trailing commands, relative or dynamic paths,
+redirects, wrappers, grouping, background execution, and mixed `&&`/`||`
+control flow. Every projected branch remains control-flow uncertain and is
+ineligible for enforcement.
+
+| metric | before (`4bc060364`) | after (`cc506b796`) | delta |
+| --- | ---: | ---: | ---: |
+| authoritative ActionFacts | 1,053 | 1,055 | +2 |
+| non-authoritative ActionFacts | 17,796 | 17,794 | -2 |
+| semantic-route findings | 65 | 65 | 0 |
+| fallback-route findings | 86 | 86 | 0 |
+| alerts | 65 | 65 | 0 |
+| blocks | 26 | 26 | 0 |
+
+The two newly authoritative rows remain `allow`; no decision or finding
+changed. Because every row in this corpus is contextual/detect-only source
+evidence, it has no benign denominator and cannot provide an FPR. Its purpose
+is parser coverage and candidate mining. FPR is measured later against the
+separate large benign corpora after a batch of detection changes.
