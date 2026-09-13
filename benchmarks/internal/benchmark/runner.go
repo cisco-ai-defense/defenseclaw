@@ -252,6 +252,11 @@ func (r Runner) runStateful(ctx context.Context, profile, connector string, benc
 			CredentialLineageHMACKey: benchmarkCredentialLineageHMACKey,
 		}
 		result := gateway.EvaluateDeterministicAction(ctx, input, firstNonEmpty(event.Command, string(event.Args)), connector, profile)
+		if event.Outcome == "succeeded" && event.ResultProof != "" {
+			result = gateway.ApplyDeterministicSuccessfulActionResult(
+				result, []byte(event.ResultProof),
+			)
+		}
 		prediction.IssueCodes = append(prediction.IssueCodes, result.IssueCodes...)
 		prediction.EvaluationStatus = mergeEvaluationStatus(prediction.EvaluationStatus, result.CELEvaluationStatus)
 		allAuthoritative = allAuthoritative && result.Authoritative

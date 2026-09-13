@@ -270,6 +270,50 @@ func EvaluateDeterministicAction(
 	return result
 }
 
+// ApplyDeterministicSuccessfulActionResult promotes only result-backed chain
+// state that the production lifecycle would attach after an authenticated
+// successful terminal event. It is used by the offline stateful benchmark to
+// replay a value-safe result proof; raw result content and derived identities
+// are never copied into a prediction.
+func ApplyDeterministicSuccessfulActionResult(
+	evaluation DeterministicActionEvaluation,
+	resultProof []byte,
+) DeterministicActionEvaluation {
+	digest := actionfacts.ExactADCSCertificatePFXResult(resultProof)
+	if digest == "" {
+		return evaluation
+	}
+	definition, ok := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+	)
+	index, indexOK := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+	)
+	if !ok || !indexOK ||
+		evaluation.DetectionStepMask&definition.Step1Bit == 0 ||
+		evaluation.EnforcementStepMask&definition.Step1Bit != 0 ||
+		evaluation.EnforcementJoinDigests[index] != "" ||
+		evaluation.EnforcementOutputJoinDigests[index] != "" ||
+		evaluation.ValueJoinDigests[index] != (guardrail.ToolChainValueJoinDigests{}) {
+		return evaluation
+	}
+	projection := guardrail.ToolChainProjection{
+		ParseStatus:                  actionfacts.ParseStatus(evaluation.ParseStatus),
+		DetectionStepMask:            evaluation.DetectionStepMask,
+		EnforcementStepMask:          evaluation.EnforcementStepMask | definition.Step1Bit,
+		EnforcementJoinDigests:       evaluation.EnforcementJoinDigests,
+		EnforcementOutputJoinDigests: evaluation.EnforcementOutputJoinDigests,
+		ValueJoinDigests:             evaluation.ValueJoinDigests,
+	}
+	projection.EnforcementJoinDigests[index] = digest
+	if guardrail.ValidateToolChainProjection(projection) != nil {
+		return evaluation
+	}
+	evaluation.EnforcementStepMask = projection.EnforcementStepMask
+	evaluation.EnforcementJoinDigests = projection.EnforcementJoinDigests
+	return evaluation
+}
+
 // EvaluateDeterministicToolResult is the classifier-only benchmark lens for a
 // normalized invocation/result pair. It runs the production source grammar,
 // connector-specific result parser, and value-free classifier, but does not

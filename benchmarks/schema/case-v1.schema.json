@@ -59,8 +59,18 @@
               "active_home": {"type": "string", "maxLength": 4096},
               "active_agent_files": {"type": "array", "maxItems": 256, "items": {"type": "string", "maxLength": 4096}},
               "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled", "unknown"]},
-              "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800}
-            }
+              "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800},
+              "result_proof": {"type": "string", "maxLength": 262144}
+            },
+            "allOf": [
+              {
+                "if": {"required": ["result_proof"]},
+                "then": {
+                  "required": ["outcome"],
+                  "properties": {"outcome": {"const": "succeeded"}}
+                }
+              }
+            ]
           }
         },
         "tool_result": {"$ref": "#/$defs/tool_result"}

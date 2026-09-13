@@ -1320,10 +1320,23 @@ def build_corpus(
             )
             base["truth"] = adcs_certificate_impersonation_truth()
             base["surface"] = "stateful"
+            request_event = payload_for_call(
+                request_call.call, outcome="succeeded", secret_refs=secret_refs
+            )
+            # This is a minimal synthetic proof, not copied source output. The
+            # reordered exact markers exercise the production result parser
+            # while retaining only the already-normalized artifact identity.
+            request_event["result_proof"] = "\n".join(
+                [
+                    f"[*] Wrote certificate and private key to '{artifact}'",
+                    ADCS_REQUESTED_LINE,
+                    f"[*] Saving certificate and private key to '{artifact}'",
+                ]
+            )
             base["payload"] = {
                 "direction": "tool_call",
                 "events": [
-                    payload_for_call(request_call.call, outcome="succeeded", secret_refs=secret_refs),
+                    request_event,
                     payload_for_call(authentication_call.call, outcome="succeeded", secret_refs=secret_refs),
                 ],
             }

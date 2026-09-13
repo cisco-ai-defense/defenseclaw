@@ -154,6 +154,10 @@ type ActionEvent struct {
 	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
 	Outcome          string          `json:"outcome,omitempty"`
 	OffsetSeconds    int             `json:"offset_seconds,omitempty"`
+	// ResultProof is a bounded, value-safe synthetic proof used only to replay
+	// production result-backed state transitions. Normalizers must never copy a
+	// raw tool result into this field.
+	ResultProof string `json:"result_proof,omitempty"`
 }
 
 type Truth struct {
@@ -535,6 +539,14 @@ func (c Case) Validate() error {
 				}
 				if c.Truth.StatefulLens == StatefulBoundedComplete && event.Outcome == "unknown" {
 					return fmt.Errorf("stateful event %d has unknown outcome under bounded_completed", index)
+				}
+				if event.ResultProof != "" {
+					if event.Outcome != "succeeded" {
+						return fmt.Errorf("stateful event %d result proof requires succeeded outcome", index)
+					}
+					if len(event.ResultProof) > 256*1024 || strings.IndexByte(event.ResultProof, 0) >= 0 {
+						return fmt.Errorf("stateful event %d has invalid result proof", index)
+					}
 				}
 				priorOffset = event.OffsetSeconds
 			}

@@ -1320,6 +1320,28 @@ func TestStatefulTruthLensValidationRejectsOptimisticTruth(t *testing.T) {
 	}
 }
 
+func TestStatefulResultProofRequiresSuccessfulEvent(t *testing.T) {
+	benchmarkCase := minimalCase("stateful-result-proof", TruthMalicious, DispositionBlock)
+	benchmarkCase.Surface = "stateful"
+	benchmarkCase.Truth.DeterministicTruth = DeterministicMalicious
+	benchmarkCase.Truth.LabelConfidence = "high"
+	benchmarkCase.Truth.LabelSource = "fixture.result-proof"
+	benchmarkCase.Truth.StatefulLens = StatefulBoundedComplete
+	benchmarkCase.Truth.RuleIDs = []string{"chain.expected"}
+	benchmarkCase.Payload = Payload{Events: []ActionEvent{
+		{ToolName: "shell", Command: "printf request", Outcome: "failed", ResultProof: "synthetic proof"},
+		{ToolName: "shell", Command: "printf auth", Outcome: "succeeded", OffsetSeconds: 1},
+	}}
+	if err := benchmarkCase.Validate(); err == nil ||
+		!strings.Contains(err.Error(), "result proof requires succeeded outcome") {
+		t.Fatalf("validation error=%v", err)
+	}
+	benchmarkCase.Payload.Events[0].Outcome = "succeeded"
+	if err := benchmarkCase.Validate(); err != nil {
+		t.Fatalf("successful result proof rejected: %v", err)
+	}
+}
+
 func TestStatefulTruthLensesExcludeAtomicLabelsAndRequireExpectedChainRule(t *testing.T) {
 	stateful := func(id, lens, disposition string, rules ...string) Case {
 		benchmarkCase := minimalCase(id, TruthMalicious, disposition)

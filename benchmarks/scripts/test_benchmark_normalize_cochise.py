@@ -260,6 +260,8 @@ class CochiseNormalizerTests(unittest.TestCase):
         )
         self.assertEqual([item["outcome"] for item in chain["payload"]["events"]], ["succeeded", "succeeded"])
         self.assertTrue(all("result" not in item for item in chain["payload"]["events"]))
+        self.assertIn("result_proof", chain["payload"]["events"][0])
+        self.assertNotIn("result_proof", chain["payload"]["events"][1])
         encoded = json.dumps(chain, sort_keys=True)
         self.assertNotIn(password, encoded)
         self.assertNotIn(nt_hash, encoded)
