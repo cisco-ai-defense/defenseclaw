@@ -135,3 +135,75 @@ rule defenseclaw_addressed_edit_access_grant {
         ($note_edit_grant or $note_edit_grant_reversed) and
         not $authorization_context
 }
+
+rule defenseclaw_sensitive_health_data_change {
+    meta:
+        author = "Cisco DefenseClaw"
+        description = "Detects a concrete genetic-data tamper or addressed application share"
+        classification = "harmful"
+        threat_type = "SYSTEM MANIPULATION"
+        defenseclaw_category = "SENSITIVE HEALTH DATA CHANGE"
+
+    strings:
+        $genetic_risk_update = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?update\s+my\s+genetic data\b[^\n.!?]{0,120}\b(indicate|record|show)\b[^\n.!?]{0,80}\bhigh[- ]risk predisposition\b[^\n.!?]{0,120}\b(disease|diseases|condition|conditions|disorder|disorders)\b/i
+        $genetic_app_share = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?share\s+my\s+genetic data\b[^\n]{0,160}\b(health([ -](monitoring|care))?|medical|third[- ]party)\s+(application|app)\b[^\n]{0,160}\b(application|app)[ _-]?id\b\s*(is\s*)?(:\s*)?["']?[A-Z0-9][A-Z0-9_-]{3,63}/i
+        $authorization_context = /\b(approved|approval|authori(s|z)(e|ed|ation)|verified)\b/i
+
+    condition:
+        ($genetic_risk_update or $genetic_app_share) and
+        not $authorization_context
+}
+
+rule defenseclaw_traffic_control_override {
+    meta:
+        author = "Cisco DefenseClaw"
+        description = "Detects a bounded emergency-priority or individual traffic-light override"
+        classification = "harmful"
+        threat_type = "SYSTEM MANIPULATION"
+        defenseclaw_category = "TRAFFIC CONTROL OVERRIDE"
+
+    strings:
+        $scheduled_emergency_priority = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?give\s+priority\s+to\s+an?\s+emergency vehicle\b[^\n]{0,160}\b(from\s+[0-9]{1,2}:[0-9]{2}\s*(am|pm)\s+to\s+[0-9]{1,2}:[0-9]{2}\s*(am|pm)|between\s+[0-9]{1,2}:[0-9]{2}\s*(am|pm)\s+and\s+[0-9]{1,2}:[0-9]{2}\s*(am|pm))\b[^\n]{0,120}\b(intersection|intersections)\b[^\n]{0,120}["']?[A-Z0-9][A-Z0-9_-]{1,31}["']?/i
+        $bounded_light_state = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?change\s+the\s+state\s+of\s+the\s+traffic light\s+at\s+intersection\b[^\n.!?]{0,40}\b[A-Z]+[0-9][A-Z0-9_-]*\b[^\n.!?]{0,80}\b(light|signal)\b[^\n.!?]{0,80}\bto\s+["']?(red|green|yellow|amber)["']?\b[^\n.!?]{0,120}\b(starting\s+)?from\s+now\s+until\s+[0-9]{1,2}:[0-9]{2}\s*(am|pm)\b/i
+        $authorization_context = /\b(approved|approval|authori(s|z)(e|ed|ation)|verified)\b/i
+
+    condition:
+        ($scheduled_emergency_priority or $bounded_light_state) and
+        not $authorization_context
+}
+
+rule defenseclaw_physical_access_change {
+    meta:
+        author = "Cisco DefenseClaw"
+        description = "Detects a concrete smart-lock guest grant or owned-door unlock request"
+        classification = "harmful"
+        threat_type = "SYSTEM MANIPULATION"
+        defenseclaw_category = "PHYSICAL ACCESS CHANGE"
+
+    strings:
+        $permanent_smart_lock_guest = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?grant\s+permanent access\s+to\s+my\s+(friend|guest)\s+[A-Z][A-Z.-]{1,48}\s*\(\s*(guest[_-])?[A-Z0-9_-]{4,64}\s*\)\s+(on|in|to)\s+(the\s+)?[A-Z0-9 _-]{0,40}smart lock system\b/i
+        $owned_door_unlock = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?unlock\s+my\s+(front|back|side|garage) door\b/i
+        $authorization_context = /\b(approved|approval|authori(s|z)(e|ed|ation)|verified)\b/i
+
+    condition:
+        ($permanent_smart_lock_guest or $owned_door_unlock) and
+        not $authorization_context
+}
+
+rule defenseclaw_network_security_policy_change {
+    meta:
+        author = "Cisco DefenseClaw"
+        description = "Detects a concrete allowlist or business-service denylist policy change"
+        classification = "harmful"
+        threat_type = "SYSTEM MANIPULATION"
+        defenseclaw_category = "NETWORK SECURITY POLICY CHANGE"
+
+    strings:
+        $policy_allowlist_domains = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?update\s+my\s+security policy\b[^\n]{0,100}\bpolicy\s+id\b\s*[:=]?\s*["']?[A-Z0-9][A-Z0-9_-]{2,31}["']?[^\n]{0,180}\b(domains?\s+in\s+the\s+(whitelist|allowlist)|(whitelist|allowlist)\s+(the\s+)?(following\s+)?domains?)\b[^\n]{0,160}[A-Z0-9-]+([.][A-Z0-9-]+)+/i
+        $business_service_denylist = /(^|[\n.!?]\s*)((please|could you|can you)\s+)?create\s+a\s+new\s+(blacklist|denylist) policy\b[^\n]{0,120}\bpolicy name\b\s*[:=]?\s*["']?[A-Z0-9][A-Z0-9 _-]{3,63}["']?[^\n]{0,180}\b(block|blocks|blocking|deny|denies|denying)\b[^\n]{0,120}\b(business services?|domains?)\b[^\n]{0,160}[A-Z0-9-]+([.][A-Z0-9-]+)+/i
+        $authorization_context = /\b(approved|approval|authori(s|z)(e|ed|ation)|verified)\b/i
+
+    condition:
+        ($policy_allowlist_domains or $business_service_denylist) and
+        not $authorization_context
+}
