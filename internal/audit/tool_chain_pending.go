@@ -51,13 +51,14 @@ type ToolChainSessionResetStatus string
 // denial outcome. The exact session digest is derived from the correlation
 // ledger rather than accepted from the caller.
 type ToolChainPreparePendingInput struct {
-	ConnectorInstanceID  ConnectorInstanceID
-	ToolInvocationDigest string
-	PreSemanticEventID   SemanticEventID
-	PreInputFingerprint  string
-	RulesetFingerprint   string
-	Projection           guardrail.ToolChainProjection
-	SQLValueSource       ToolChainPendingSQLValueSource `json:"-"`
+	ConnectorInstanceID      ConnectorInstanceID
+	ToolInvocationDigest     string
+	PreSemanticEventID       SemanticEventID
+	PreInputFingerprint      string
+	RulesetFingerprint       string
+	Projection               guardrail.ToolChainProjection
+	SQLValueSource           ToolChainPendingSQLValueSource       `json:"-"`
+	ReturnedCredentialSource actionfacts.ReturnedCredentialSource `json:"-"`
 }
 
 // ToolChainPendingSQLValueSource is a value-free descriptor of one exact
@@ -101,6 +102,10 @@ type ToolChainResolvePendingResult struct {
 	// ruleset-consistent authoritative success. JSON exclusion prevents this
 	// internal handoff from becoming an accidental serialization boundary.
 	SQLValueSource ToolChainPendingSQLValueSource `json:"-"`
+	// ReturnedCredentialSource is released only after exact-session,
+	// exact-invocation, ruleset-consistent authoritative success. It is a
+	// closed value-free enum and is excluded from serialization.
+	ReturnedCredentialSource actionfacts.ReturnedCredentialSource `json:"-"`
 }
 
 // ToolChainDiscardPendingForEventSessionInput identifies an authoritative
@@ -146,6 +151,7 @@ type persistedToolChainPending struct {
 	valueJoinDigests                                                 [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	prepared, expires                                                int64
 	sqlValueSourceTableClass, sqlValueSourceResourceDigest           string
+	returnedCredentialSource                                         int64
 }
 
 type persistedToolChainPendingBoundary struct {
@@ -298,8 +304,9 @@ func (repo *ToolChainRepository) preparePendingTx(
 			enforcement_step_mask, enforcement_join_digests,
 			enforcement_output_join_digests, value_join_digests,
 			prepared_time_unix_nano, expires_time_unix_nano
-			, sql_value_source_table_class, sql_value_source_resource_digest
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			, sql_value_source_table_class, sql_value_source_resource_digest,
+			returned_credential_source
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		string(input.ConnectorInstanceID), input.ToolInvocationDigest, session,
 		string(input.PreSemanticEventID), input.PreInputFingerprint, projectionFP,
 		input.RulesetFingerprint, string(input.Projection.ParseStatus),
@@ -308,7 +315,8 @@ func (repo *ToolChainRepository) preparePendingTx(
 		encodeToolChainJoinDigests(input.Projection.EnforcementOutputJoinDigests),
 		encodeToolChainValueJoinDigests(input.Projection.ValueJoinDigests),
 		unixNano(now), unixNano(expires), string(input.SQLValueSource.TableClass),
-		input.SQLValueSource.DatabaseIdentityDigest)
+		input.SQLValueSource.DatabaseIdentityDigest,
+		int64(input.ReturnedCredentialSource))
 	if err != nil {
 		return ToolChainPreparePendingResult{}, err
 	}
@@ -485,7 +493,8 @@ func (repo *ToolChainRepository) resolvePendingTx(
 		}
 		return ToolChainResolvePendingResult{
 			Status: ToolChainPendingResolved, Observation: observation,
-			SQLValueSource: pendingSQLValueSource(pending),
+			SQLValueSource:           pendingSQLValueSource(pending),
+			ReturnedCredentialSource: pendingReturnedCredentialSource(pending),
 		}, nil
 	}
 	observation, err := repo.observeTx(ctx, tx, ToolChainObserveInput{
@@ -510,7 +519,8 @@ func (repo *ToolChainRepository) resolvePendingTx(
 	}
 	return ToolChainResolvePendingResult{
 		Status: ToolChainPendingResolved, Observation: observation,
-		SQLValueSource: pendingSQLValueSource(pending),
+		SQLValueSource:           pendingSQLValueSource(pending),
+		ReturnedCredentialSource: pendingReturnedCredentialSource(pending),
 	}, nil
 }
 
@@ -894,6 +904,9 @@ func validateToolChainPreparePendingInput(input ToolChainPreparePendingInput) er
 	if err := validatePendingSQLValueSource(input.SQLValueSource); err != nil {
 		return err
 	}
+	if err := validateReturnedCredentialSource(input.ReturnedCredentialSource); err != nil {
+		return err
+	}
 	return validatePendingToolChainProjection(input.Projection)
 }
 
@@ -1102,7 +1115,8 @@ func loadToolChainPending(
 		enforcement_join_digests, enforcement_output_join_digests,
 		value_join_digests,
 		prepared_time_unix_nano, expires_time_unix_nano,
-		sql_value_source_table_class, sql_value_source_resource_digest
+		sql_value_source_table_class, sql_value_source_resource_digest,
+		returned_credential_source
 		FROM guardrail_chain_pending_actions
 		WHERE connector_instance_id=? AND session_value_digest=?
 		AND tool_invocation_digest=?`,
@@ -1115,6 +1129,7 @@ func loadToolChainPending(
 		&valueJoinDigests,
 		&pending.prepared, &pending.expires,
 		&pending.sqlValueSourceTableClass, &pending.sqlValueSourceResourceDigest,
+		&pending.returnedCredentialSource,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
 		return persistedToolChainPending{}, false, nil
@@ -1353,6 +1368,9 @@ func validatePersistedToolChainPending(pending persistedToolChainPending) error 
 	if err := validatePendingSQLValueSource(pendingSQLValueSource(pending)); err != nil {
 		return ErrToolChainIntegrity
 	}
+	if err := validateReturnedCredentialSource(pendingReturnedCredentialSource(pending)); err != nil {
+		return ErrToolChainIntegrity
+	}
 	projectionFP, err := guardrail.ToolChainProjectionFingerprint(projection)
 	if err != nil || projectionFP != pending.projectionFP {
 		return ErrToolChainIntegrity
@@ -1397,7 +1415,8 @@ func sameToolChainPending(
 		pending.enforcementJoinDigests == input.Projection.EnforcementJoinDigests &&
 		pending.enforcementOutputJoinDigests == input.Projection.EnforcementOutputJoinDigests &&
 		pending.valueJoinDigests == input.Projection.ValueJoinDigests &&
-		pendingSQLValueSource(pending) == input.SQLValueSource
+		pendingSQLValueSource(pending) == input.SQLValueSource &&
+		pendingReturnedCredentialSource(pending) == input.ReturnedCredentialSource
 }
 
 func pendingSQLValueSource(pending persistedToolChainPending) ToolChainPendingSQLValueSource {
@@ -1423,6 +1442,25 @@ func validatePendingSQLValueSource(source ToolChainPendingSQLValueSource) error 
 		source.DatabaseIdentityDigest,
 		true,
 	)
+}
+
+func pendingReturnedCredentialSource(
+	pending persistedToolChainPending,
+) actionfacts.ReturnedCredentialSource {
+	return actionfacts.ReturnedCredentialSource(pending.returnedCredentialSource)
+}
+
+func validateReturnedCredentialSource(source actionfacts.ReturnedCredentialSource) error {
+	switch source {
+	case actionfacts.ReturnedCredentialSourceNone,
+		actionfacts.ReturnedCredentialSourceSecretsDump,
+		actionfacts.ReturnedCredentialSourceKerberoast,
+		actionfacts.ReturnedCredentialSourceASREPRoast,
+		actionfacts.ReturnedCredentialSourceFileRead:
+		return nil
+	default:
+		return errors.New("audit: invalid returned credential source")
+	}
 }
 
 func deleteToolChainPending(

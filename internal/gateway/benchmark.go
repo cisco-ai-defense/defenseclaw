@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -30,6 +31,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 	"github.com/defenseclaw/defenseclaw/internal/guardrail/semantic"
 )
@@ -71,6 +73,21 @@ type DeterministicActionEvaluation struct {
 	// stateful benchmark runner. It is never copied into a Prediction.
 	ValueJoinDigests    [guardrail.ToolChainCount]guardrail.ToolChainValueJoinDigests
 	CELEvaluationStatus string
+}
+
+// DeterministicToolResultInput models one already-validated, exact
+// invocation/result pair for offline benchmarking. Raw result content remains
+// request-scoped and is never copied into DeterministicActionEvaluation.
+type DeterministicToolResultInput struct {
+	Connector     string
+	PreEvent      string
+	ResultEvent   string
+	SessionID     string
+	InvocationID  string
+	Outcome       string
+	ToolName      string
+	ToolArgs      json.RawMessage
+	ResultContent string
 }
 
 // DeterministicHTTPMessageEvaluation is the value-safe projection returned by
@@ -251,6 +268,170 @@ func EvaluateDeterministicAction(
 	}
 	result.Action = strings.ToLower(strings.TrimSpace(result.Action))
 	return result
+}
+
+// EvaluateDeterministicToolResult is the classifier-only benchmark lens for a
+// normalized invocation/result pair. It runs the production source grammar,
+// connector-specific result parser, and value-free classifier, but does not
+// replace lifecycle integration tests: the normalized Outcome is used to
+// construct a connector envelope and durable pending-state/replay behavior is
+// tested separately. This adapter never serializes input values.
+func EvaluateDeterministicToolResult(
+	ctx context.Context,
+	input DeterministicToolResultInput,
+	profile string,
+) (DeterministicActionEvaluation, error) {
+	if err := ctx.Err(); err != nil {
+		return DeterministicActionEvaluation{}, err
+	}
+	req, outcome, err := deterministicToolResultRequest(input)
+	if err != nil {
+		return DeterministicActionEvaluation{}, err
+	}
+	actionTool := input.ToolName
+	if _, projected, ok := exactMCPToolResource(input.ToolName, ""); ok {
+		actionTool = projected
+	}
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool:        actionTool,
+		Args:        append(json.RawMessage(nil), input.ToolArgs...),
+		ActiveHome:  "/home/alice",
+		DialectHint: actionfacts.DialectPOSIX,
+	})
+	result := DeterministicActionEvaluation{
+		Action:              guardrailActionAllow,
+		Route:               "none",
+		ParseStatus:         string(facts.Parse.Status),
+		Dialect:             string(facts.Parse.Dialect),
+		Authoritative:       facts.Authoritative(),
+		EnforcementEligible: facts.EnforcementEligible(),
+		CELEvaluationStatus: deterministicCELEvaluationStatus(input.Connector, facts),
+	}
+	for _, issue := range facts.Parse.Issues {
+		result.IssueCodes = append(result.IssueCodes, string(issue))
+	}
+	resultBytes, exact := exactReturnedCredentialResultBytes(req, outcome)
+	if !exact {
+		sort.Strings(result.IssueCodes)
+		return result, nil
+	}
+	findings := returnedCredentialMaterialFindings(
+		actionfacts.ExactReturnedCredentialSource(facts),
+		actionfacts.ClassifyReturnedCredentialMaterial(resultBytes),
+	)
+	if len(findings) == 0 {
+		sort.Strings(result.IssueCodes)
+		return result, nil
+	}
+	result.Severity = HighestSeverity(findings)
+	result.Route = "semantic"
+	for _, finding := range findings {
+		result.RuleIDs = append(result.RuleIDs, finding.RuleID)
+		result.Findings = append(result.Findings, DeterministicActionFinding{
+			RuleID:                   finding.RuleID,
+			Severity:                 finding.Severity,
+			Confidence:               finding.Confidence,
+			Route:                    "semantic",
+			ContributesToEnforcement: finding.contributesToEnforcement(),
+			Disposition:              "detect_only",
+		})
+	}
+	sort.Strings(result.RuleIDs)
+	sort.Strings(result.IssueCodes)
+	_ = profile // Result hooks are post-action and remain advisory in every posture.
+	return result, nil
+}
+
+func deterministicToolResultRequest(
+	input DeterministicToolResultInput,
+) (agentHookRequest, connector.ToolLifecycleOutcome, error) {
+	connectorName := canonicalConnectorRulePackKey(input.Connector)
+	if connectorName == "" || strings.TrimSpace(input.SessionID) == "" ||
+		strings.TrimSpace(input.InvocationID) == "" || strings.TrimSpace(input.ToolName) == "" ||
+		len(input.ToolArgs) == 0 || !json.Valid(input.ToolArgs) {
+		return agentHookRequest{}, connector.ToolLifecycleOutcomeUnknown,
+			errors.New("invalid deterministic tool-result input")
+	}
+	var outcome connector.ToolLifecycleOutcome
+	switch input.Outcome {
+	case "succeeded":
+		outcome = connector.ToolLifecycleOutcomeSuccess
+	case "failed":
+		outcome = connector.ToolLifecycleOutcomeFailure
+	case "denied":
+		outcome = connector.ToolLifecycleOutcomeDenied
+	case "cancelled":
+		outcome = connector.ToolLifecycleOutcomeCancelled
+	default:
+		return agentHookRequest{}, connector.ToolLifecycleOutcomeUnknown,
+			fmt.Errorf("unsupported deterministic tool-result outcome %q", input.Outcome)
+	}
+	validLifecycle := false
+	switch connectorName {
+	case "claudecode", "codex":
+		validLifecycle = input.PreEvent == "PreToolUse" &&
+			((outcome == connector.ToolLifecycleOutcomeSuccess && input.ResultEvent == "PostToolUse") ||
+				(outcome != connector.ToolLifecycleOutcomeSuccess && input.ResultEvent == "PostToolUseFailure"))
+	case "opencode":
+		validLifecycle = input.PreEvent == "tool.execute.before" &&
+			input.ResultEvent == "tool.execute.after"
+	case "amp":
+		validLifecycle = input.PreEvent == "tool.call" && input.ResultEvent == "tool.result"
+	}
+	if !validLifecycle {
+		return agentHookRequest{}, connector.ToolLifecycleOutcomeUnknown,
+			fmt.Errorf("unsupported deterministic tool-result lifecycle for %q", connectorName)
+	}
+	var args map[string]interface{}
+	decoder := json.NewDecoder(bytes.NewReader(input.ToolArgs))
+	decoder.UseNumber()
+	if err := decoder.Decode(&args); err != nil || args == nil {
+		return agentHookRequest{}, connector.ToolLifecycleOutcomeUnknown,
+			errors.New("deterministic tool-result args must be an object")
+	}
+	payload := map[string]interface{}{
+		"hook_event_name": input.ResultEvent,
+		"session_id":      input.SessionID,
+		"tool_call_id":    input.InvocationID,
+		"tool_use_id":     input.InvocationID,
+		"tool_name":       input.ToolName,
+		"tool_input":      args,
+	}
+	switch connectorName {
+	case "claudecode":
+		payload["tool_response"] = input.ResultContent
+	case "opencode":
+		payload["tool_response"] = map[string]interface{}{
+			"output": input.ResultContent,
+			"metadata": map[string]interface{}{
+				"exit": map[bool]int{true: 0, false: 1}[outcome == connector.ToolLifecycleOutcomeSuccess],
+			},
+		}
+	case "amp":
+		payload["tool_response"] = input.ResultContent
+		if outcome == connector.ToolLifecycleOutcomeSuccess {
+			payload["status"] = "done"
+		} else {
+			payload["status"] = "error"
+			payload["error"] = "tool result did not succeed"
+		}
+	case "codex":
+		payload["tool_response"] = map[string]interface{}{
+			"content": []interface{}{map[string]interface{}{
+				"type": "text", "text": input.ResultContent,
+			}},
+			"isError": outcome != connector.ToolLifecycleOutcomeSuccess,
+		}
+	}
+	return agentHookRequest{
+		ConnectorName:    connectorName,
+		HookEventName:    input.ResultEvent,
+		SessionID:        input.SessionID,
+		ToolInvocationID: input.InvocationID,
+		ToolName:         input.ToolName,
+		ToolArgs:         append(json.RawMessage(nil), input.ToolArgs...),
+		Payload:          payload,
+	}, outcome, nil
 }
 
 func deterministicCELEvaluationStatus(connector string, facts actionfacts.Facts) string {

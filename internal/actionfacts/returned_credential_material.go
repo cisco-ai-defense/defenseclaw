@@ -43,6 +43,7 @@ const (
 	ReturnedCredentialSourceSecretsDump
 	ReturnedCredentialSourceKerberoast
 	ReturnedCredentialSourceASREPRoast
+	ReturnedCredentialSourceFileRead
 )
 
 var (
@@ -57,6 +58,9 @@ var (
 	)
 	returnedLabeledNTLMLine = regexp.MustCompile(
 		`(?i)^(?:[^:\r\n]{1,128}\s+)?(?:ntlm|nt[ _-]?hash)\s*[:=]\s*[0-9a-f]{32}$`,
+	)
+	returnedCredentialTelemetryMarker = regexp.MustCompile(
+		`(?i)(?:ntlm|nt[ _-]?hash)\s*[:=]|:[0-9]{1,10}:(?:[0-9a-f]{32}|\*):(?:[0-9a-f]{32}|\*):::`,
 	)
 )
 
@@ -92,6 +96,34 @@ func ClassifyReturnedCredentialMaterial(result []byte) ReturnedCredentialMateria
 	return material & returnedCredentialMaterialKnown
 }
 
+// ReturnedCredentialTelemetrySensitive is a deliberately broader privacy
+// boundary than ClassifyReturnedCredentialMaterial. Detection abstains when
+// input limits or exact record grammar are not satisfied; telemetry must not
+// expose a likely credential merely because that stricter classifier abstains.
+// The loose marker scan remains linear and examines the complete value so a
+// credential beyond the strict classifier's size boundary is still redacted.
+func ReturnedCredentialTelemetrySensitive(result []byte) bool {
+	if len(result) == 0 {
+		return false
+	}
+	return ClassifyReturnedCredentialMaterial(result).Valid() ||
+		containsASCIIFold(result, []byte("$krb5tgs$")) ||
+		containsASCIIFold(result, []byte("$krb5asrep$")) ||
+		returnedCredentialTelemetryMarker.Match(result)
+}
+
+func containsASCIIFold(value, marker []byte) bool {
+	if len(marker) == 0 || len(value) < len(marker) {
+		return false
+	}
+	for offset := 0; offset <= len(value)-len(marker); offset++ {
+		if bytes.EqualFold(value[offset:offset+len(marker)], marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // Valid reports whether the classification contains at least one known,
 // value-free credential material class.
 func (material ReturnedCredentialMaterial) Valid() bool {
@@ -104,8 +136,16 @@ func (material ReturnedCredentialMaterial) Valid() bool {
 // wrappers, redirects, compound actions, dynamic argv and structured actions
 // with any competing command facts abstain.
 func ExactReturnedCredentialSource(facts Facts) ReturnedCredentialSource {
-	if facts.Parse.Status != StatusComplete || !facts.Authoritative() ||
-		len(facts.DirectoryCredentialAcquisitions) != 1 {
+	if facts.Parse.Status != StatusComplete || !facts.Authoritative() {
+		return ReturnedCredentialSourceNone
+	}
+	if len(facts.DirectoryCredentialAcquisitions) == 0 {
+		if exactReturnedCredentialFileRead(facts) {
+			return ReturnedCredentialSourceFileRead
+		}
+		return ReturnedCredentialSourceNone
+	}
+	if len(facts.DirectoryCredentialAcquisitions) != 1 {
 		return ReturnedCredentialSourceNone
 	}
 	acquisition := facts.DirectoryCredentialAcquisitions[0]
@@ -139,6 +179,34 @@ func ExactReturnedCredentialSource(facts Facts) ReturnedCredentialSource {
 	}
 }
 
+func exactReturnedCredentialFileRead(facts Facts) bool {
+	if len(facts.Commands) != 1 {
+		return false
+	}
+	command := facts.Commands[0]
+	if command.ID == 0 || command.ParentCommandID != 0 || command.PipelineID != 0 ||
+		command.ControlFlowUncertain || command.Effect != EffectExecute ||
+		!command.ArgvComplete || len(command.Argv) != 2 ||
+		len(command.Redirects) != 0 || len(command.Wrappers) != 0 ||
+		!hasFactOperation(command, OperationRead) {
+		return false
+	}
+	switch command.Program {
+	case "cat", "type", "get-content", "gc":
+	default:
+		return false
+	}
+	reads := 0
+	for _, path := range facts.Paths {
+		if path.CommandID != command.ID || path.Access != PathAccessRead ||
+			path.Value == "" {
+			return false
+		}
+		reads++
+	}
+	return reads == 1
+}
+
 // MatchesReturnedCredentialMaterial proves the only accepted source/result
 // correspondences. Extra material classes are allowed because a successful
 // credential-dump result may contain more than one recognized record type.
@@ -156,6 +224,8 @@ func MatchesReturnedCredentialMaterial(
 		return material&ReturnedCredentialKerberosTGS != 0
 	case ReturnedCredentialSourceASREPRoast:
 		return material&ReturnedCredentialKerberosASREP != 0
+	case ReturnedCredentialSourceFileRead:
+		return material.Valid()
 	default:
 		return false
 	}

@@ -21,7 +21,7 @@
       }
     },
     "split": {"enum": ["smoke", "development", "validation", "test"]},
-    "surface": {"enum": ["text", "action", "stateful", "code", "skill", "plugin", "mcp", "e2e"]},
+    "surface": {"enum": ["text", "action", "tool_result", "stateful", "code", "skill", "plugin", "mcp", "e2e"]},
     "payload": {
       "type": "object",
       "additionalProperties": false,
@@ -62,7 +62,8 @@
               "offset_seconds": {"type": "integer", "minimum": 0, "maximum": 1800}
             }
           }
-        }
+        },
+        "tool_result": {"$ref": "#/$defs/tool_result"}
       }
     },
     "truth": {
@@ -156,9 +157,103 @@
           }
         }
       }
+    },
+    {
+      "if": {
+        "properties": {"surface": {"const": "tool_result"}},
+        "required": ["surface"]
+      },
+      "then": {
+        "properties": {
+          "payload": {
+            "required": ["tool_result"],
+            "minProperties": 1,
+            "maxProperties": 1
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"payload": {"required": ["tool_result"]}},
+        "required": ["payload"]
+      },
+      "then": {"properties": {"surface": {"const": "tool_result"}}}
     }
   ],
   "$defs": {
+    "tool_result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["invocation", "result"],
+      "properties": {
+        "invocation": {"$ref": "#/$defs/tool_result_invocation"},
+        "result": {"$ref": "#/$defs/tool_result_terminal"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "amp"}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "tool.call"}}},
+            "result": {"properties": {"connector": {"const": "amp"}, "event": {"const": "tool.result"}}}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "opencode"}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "tool.execute.before"}}},
+            "result": {"properties": {"connector": {"const": "opencode"}, "event": {"const": "tool.execute.after"}}}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"enum": ["claudecode", "codex"]}}}}},
+          "then": {"properties": {
+            "invocation": {"properties": {"event": {"const": "PreToolUse"}}},
+            "result": {"properties": {"connector": {"enum": ["claudecode", "codex"]}}, "allOf": [
+              {
+                "if": {"properties": {"outcome": {"const": "succeeded"}}},
+                "then": {"properties": {"event": {"const": "PostToolUse"}}},
+                "else": {"properties": {"event": {"const": "PostToolUseFailure"}}}
+              }
+            ]}
+          }}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "claudecode"}}}}},
+          "then": {"properties": {"result": {"properties": {"connector": {"const": "claudecode"}}}}}
+        },
+        {
+          "if": {"properties": {"invocation": {"properties": {"connector": {"const": "codex"}}}}},
+          "then": {"properties": {"result": {"properties": {"connector": {"const": "codex"}}}}}
+        }
+      ]
+    },
+    "tool_result_invocation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector", "event", "session_id", "invocation_id", "tool_name", "args"],
+      "properties": {
+        "connector": {"enum": ["amp", "claudecode", "codex", "opencode"]},
+        "event": {"enum": ["tool.call", "PreToolUse", "tool.execute.before"]},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "invocation_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "tool_name": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "args": {"type": "object", "maxProperties": 4096}
+      }
+    },
+    "tool_result_terminal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["connector", "event", "session_id", "invocation_id", "outcome", "content"],
+      "properties": {
+        "connector": {"enum": ["amp", "claudecode", "codex", "opencode"]},
+        "event": {"enum": ["tool.result", "PostToolUse", "PostToolUseFailure", "tool.execute.after"]},
+        "session_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "invocation_id": {"type": "string", "minLength": 1, "maxLength": 240, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+        "outcome": {"enum": ["succeeded", "failed", "denied", "cancelled"]},
+        "content": {"type": "string", "maxLength": 262144}
+      }
+    },
     "span": {
       "type": "object",
       "additionalProperties": false,

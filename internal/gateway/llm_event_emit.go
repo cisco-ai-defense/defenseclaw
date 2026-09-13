@@ -669,7 +669,9 @@ func (a *APIServer) emitCodexHookLLMEvent(ctx context.Context, req codexHookRequ
 		meta.ToolID = req.ToolUseID
 		meta.DestinationApp = hookToolDestinationApp(payloadString(req.Payload, "mcp_server_name"), codexToolName(req))
 		arguments := stringFromJSONRaw(codexToolArgs(req))
-		response := codexToolResponseString(req.ToolResponse)
+		response := redactReturnedCredentialTelemetry(
+			codexToolResponseString(req.ToolResponse),
+		)
 		a.rememberHookSpawnIntent(meta, codexToolName(req), hookSpawnIntentCompleted, arguments, response)
 		completionContext := a.emitHookToolSpan(ctx, meta, codexToolName(req), arguments, response, nil)
 		a.emitToolInvocationEventV8(completionContext, meta, "result", codexToolName(req), "", response, nil)
@@ -791,9 +793,10 @@ func (a *APIServer) emitAgentHookLLMEvent(ctx context.Context, req agentHookRequ
 			meta.LifecycleOutcome == "cancelled" || meta.LifecycleOutcome == "rejected" {
 			spawnPhase = hookSpawnIntentFailed
 		}
-		a.rememberHookSpawnIntent(meta, req.ToolName, spawnPhase, stringFromJSONRaw(req.ToolArgs), req.Content)
-		completionContext := a.emitHookToolSpan(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), req.Content, nil)
-		a.emitToolInvocationEventV8(completionContext, meta, "result", req.ToolName, "", req.Content, nil)
+		output := redactReturnedCredentialTelemetry(req.Content)
+		a.rememberHookSpawnIntent(meta, req.ToolName, spawnPhase, stringFromJSONRaw(req.ToolArgs), output)
+		completionContext := a.emitHookToolSpan(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), output, nil)
+		a.emitToolInvocationEventV8(completionContext, meta, "result", req.ToolName, "", output, nil)
 		a.emitInferredDelegatedAgentTransitions(ctx, meta, req.ToolName, stringFromJSONRaw(req.ToolArgs), false)
 	}
 }
@@ -878,7 +881,7 @@ func (a *APIServer) emitClaudeCodeHookLLMEvent(ctx context.Context, req claudeCo
 		meta.ToolID = req.ToolUseID
 		meta.DestinationApp = hookToolDestinationApp(req.MCPServerName, claudeCodeToolName(req))
 		arguments := stringFromJSONRaw(claudeCodeToolArgs(req))
-		output := claudeCodeToolOutput(req)
+		output := redactReturnedCredentialTelemetry(claudeCodeToolOutput(req))
 		spawnPhase := hookSpawnIntentCompleted
 		if req.HookEventName == "PostToolUseFailure" {
 			spawnPhase = hookSpawnIntentFailed

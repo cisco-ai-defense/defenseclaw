@@ -1821,6 +1821,10 @@ var migrations = []migration{
 		description: "guardrails: add result slot twenty-two for compromised credential authentication",
 		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
 	},
+	{
+		description: "guardrails: bind pending credential sources to authoritative results",
+		apply:       migrateToolChainReturnedCredentialSourceState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

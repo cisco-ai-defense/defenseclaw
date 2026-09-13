@@ -50,11 +50,35 @@ func TestClassifyReturnedCredentialMaterialRejectsHardNegatives(t *testing.T) {
 		"NT hash: REDACTED_SECRET",
 		"prefix " + strings.Repeat("c", maxReturnedCredentialLineBytes),
 		"NT hash: " + hash + "\x00suffix",
-		strings.Repeat("x", MaxReturnedCredentialResultBytes+1),
+		strings.Repeat("x", MaxReturnedCredentialResultBytes+1) + "$krb5asrep$23$truncated",
 	}
 	for _, input := range tests {
 		if got := ClassifyReturnedCredentialMaterial([]byte(input)); got != ReturnedCredentialMaterialNone || got.Valid() {
 			t.Fatalf("hard negative classified as %d: %.80q", got, input)
+		}
+	}
+}
+
+func TestReturnedCredentialTelemetrySensitiveFailsClosed(t *testing.T) {
+	hash := strings.Repeat("a", 32)
+	for _, input := range []string{
+		"prefix\x00\nNT hash: " + hash,
+		strings.Repeat("padding", 3000) + "$krb5tgs$23$truncated",
+		strings.Repeat("x", MaxReturnedCredentialResultBytes+1) + "$krb5asrep$23$truncated",
+		"example:500:" + hash + ":" + strings.Repeat("b", 32) + ":::",
+	} {
+		if !ReturnedCredentialTelemetrySensitive([]byte(input)) {
+			t.Fatalf("sensitive telemetry was not redacted: %.80q", input)
+		}
+	}
+	for _, input := range []string{
+		"",
+		"build completed",
+		"document says NT hash without a value",
+		strings.Repeat("x", MaxReturnedCredentialResultBytes+1),
+	} {
+		if ReturnedCredentialTelemetrySensitive([]byte(input)) {
+			t.Fatalf("ordinary telemetry was redacted: %q", input)
 		}
 	}
 }
@@ -68,11 +92,16 @@ func TestExactReturnedCredentialSource(t *testing.T) {
 		{"kerberoast", Input{Tool: "execute_command", Command: "impacket-GetUserSPNs -dc-ip 192.0.2.12 -request EXAMPLE.TEST/user:secret", DialectHint: DialectPOSIX}, ReturnedCredentialSourceKerberoast},
 		{"asrep", Input{Tool: "execute_command", Command: "impacket-GetNPUsers EXAMPLE.TEST/user -dc-ip 192.0.2.12 -no-pass -request -format hashcat", DialectHint: DialectPOSIX}, ReturnedCredentialSourceASREPRoast},
 		{"structured-secretsdump", Input{Tool: "secretsdump", Args: []byte(`{"method":"dcsync","target":"dc.example.test","username":"svc"}`)}, ReturnedCredentialSourceSecretsDump},
+		{"literal-file-read", Input{Tool: "execute_command", Command: "cat /tmp/kerberoast.txt", DialectHint: DialectPOSIX}, ReturnedCredentialSourceFileRead},
 		{"offline-crack-abstains", Input{Tool: "execute_command", Command: "hashcat -m 18200 asrep.txt words.txt", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
 		{"shell-wrapper-abstains", Input{Tool: "execute_command", Command: `bash -lc 'impacket-GetNPUsers EXAMPLE.TEST/user -no-pass -request'`, DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
 		{"pipeline-abstains", Input{Tool: "execute_command", Command: "impacket-GetNPUsers EXAMPLE.TEST/user -no-pass -request | tee /tmp/out", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
 		{"redirect-abstains", Input{Tool: "execute_command", Command: "impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret > /tmp/out", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
 		{"compound-abstains", Input{Tool: "execute_command", Command: "impacket-GetUserSPNs -request EXAMPLE.TEST/user:secret; cat /tmp/out", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
+		{"multi-file-read-abstains", Input{Tool: "execute_command", Command: "cat /tmp/one /tmp/two", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
+		{"redirected-file-read-abstains", Input{Tool: "execute_command", Command: "cat /tmp/out 2>/dev/null", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
+		{"pipelined-file-read-abstains", Input{Tool: "execute_command", Command: "cat /tmp/out | head -1", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
+		{"file-read-preview-abstains", Input{Tool: "execute_command", Command: "echo cat /tmp/out", DialectHint: DialectPOSIX}, ReturnedCredentialSourceNone},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -113,7 +142,8 @@ func TestBashLoginCommandCredentialAcquisitionHardNegatives(t *testing.T) {
 func TestMatchesReturnedCredentialMaterial(t *testing.T) {
 	if !MatchesReturnedCredentialMaterial(ReturnedCredentialSourceKerberoast, ReturnedCredentialKerberosTGS) ||
 		!MatchesReturnedCredentialMaterial(ReturnedCredentialSourceASREPRoast, ReturnedCredentialKerberosASREP) ||
-		!MatchesReturnedCredentialMaterial(ReturnedCredentialSourceSecretsDump, ReturnedCredentialNTDSRecord|ReturnedCredentialKerberosASREP) {
+		!MatchesReturnedCredentialMaterial(ReturnedCredentialSourceSecretsDump, ReturnedCredentialNTDSRecord|ReturnedCredentialKerberosASREP) ||
+		!MatchesReturnedCredentialMaterial(ReturnedCredentialSourceFileRead, ReturnedCredentialKerberosTGS|ReturnedCredentialLabeledNTLM) {
 		t.Fatal("expected source/result correspondence did not match")
 	}
 	for _, mismatch := range []struct {

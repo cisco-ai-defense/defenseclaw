@@ -23,6 +23,11 @@ const SchemaVersion = "1"
 const maxPredictionFindingCount = 1_000_000
 
 const (
+	maxToolResultArgsBytes    = 1 << 20
+	maxToolResultContentBytes = 256 << 10
+)
+
+const (
 	TruthBenign    = "benign"
 	TruthMalicious = "malicious"
 	TruthSensitive = "sensitive"
@@ -96,6 +101,35 @@ type Payload struct {
 	Target           string          `json:"target,omitempty"`
 	AnnotationSpans  []ActionSpan    `json:"annotation_spans,omitempty"`
 	Events           []ActionEvent   `json:"events,omitempty"`
+	ToolResult       *ToolResultCase `json:"tool_result,omitempty"`
+}
+
+// ToolResultCase models one normalized pre-tool proposal and terminal result
+// for the classifier-only benchmark lens. Identity is repeated intentionally
+// so malformed cross-call joins can be represented and rejected during loading.
+// Production lifecycle authority, pending-state, and replay behavior remain
+// integration-test concerns. ResultContent must never be copied to Prediction.
+type ToolResultCase struct {
+	Invocation ToolResultInvocation `json:"invocation"`
+	Result     ToolResultTerminal   `json:"result"`
+}
+
+type ToolResultInvocation struct {
+	Connector    string          `json:"connector"`
+	Event        string          `json:"event"`
+	SessionID    string          `json:"session_id"`
+	InvocationID string          `json:"invocation_id"`
+	ToolName     string          `json:"tool_name"`
+	Args         json.RawMessage `json:"args"`
+}
+
+type ToolResultTerminal struct {
+	Connector    string `json:"connector"`
+	Event        string `json:"event"`
+	SessionID    string `json:"session_id"`
+	InvocationID string `json:"invocation_id"`
+	Outcome      string `json:"outcome"`
+	Content      string `json:"content"`
 }
 
 // ActionSpan records source annotation offsets over an atomic command or one
@@ -464,6 +498,10 @@ func (c Case) Validate() error {
 		if c.Payload.Command == "" && len(c.Payload.Argv) == 0 && len(c.Payload.Args) == 0 {
 			return errors.New("action case requires command, argv, or args")
 		}
+	case "tool_result":
+		if err := c.Payload.validateToolResult(); err != nil {
+			return err
+		}
 	case "code":
 		if c.Payload.Content == "" && c.Payload.Target == "" {
 			return errors.New("code case requires content or target")
@@ -505,6 +543,94 @@ func (c Case) Validate() error {
 		}
 	default:
 		return fmt.Errorf("unsupported surface %q", c.Surface)
+	}
+	if c.Surface != "tool_result" && c.Payload.ToolResult != nil {
+		return errors.New("payload.tool_result is reserved for tool_result cases")
+	}
+	return nil
+}
+
+func (p Payload) validateToolResult() error {
+	if p.ToolResult == nil {
+		return errors.New("tool_result case requires payload.tool_result")
+	}
+	if p.Direction != "" || p.Content != "" || p.ToolName != "" || p.Command != "" ||
+		len(p.Argv) != 0 || len(p.Args) != 0 || p.Dialect != "" || p.CWD != "" ||
+		p.ActiveHome != "" || len(p.ActiveAgentFiles) != 0 || p.Filename != "" ||
+		p.Target != "" || len(p.AnnotationSpans) != 0 || len(p.Events) != 0 {
+		return errors.New("tool_result payload cannot mix legacy payload fields")
+	}
+
+	invocation := p.ToolResult.Invocation
+	result := p.ToolResult.Result
+	if invocation.Connector == "" || invocation.Event == "" || invocation.SessionID == "" ||
+		invocation.InvocationID == "" || invocation.ToolName == "" || len(invocation.Args) == 0 ||
+		result.Connector == "" || result.Event == "" || result.SessionID == "" ||
+		result.InvocationID == "" || result.Outcome == "" {
+		return errors.New("tool_result requires complete invocation and terminal result fields")
+	}
+	for name, value := range map[string]string{
+		"connector": invocation.Connector, "pre event": invocation.Event,
+		"session ID": invocation.SessionID, "invocation ID": invocation.InvocationID,
+		"tool name": invocation.ToolName, "result event": result.Event,
+	} {
+		if len(value) > 240 || !boundedIdentifier.MatchString(value) {
+			return fmt.Errorf("tool_result has invalid %s", name)
+		}
+	}
+	if invocation.Connector != strings.ToLower(invocation.Connector) ||
+		invocation.Connector != result.Connector {
+		return errors.New("tool_result connector identity must match exactly and be lowercase")
+	}
+	if invocation.SessionID != result.SessionID || invocation.InvocationID != result.InvocationID {
+		return errors.New("tool_result session and invocation identity must match exactly")
+	}
+	if len(invocation.Args) > maxToolResultArgsBytes || !json.Valid(invocation.Args) {
+		return errors.New("tool_result args must be bounded valid JSON")
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(invocation.Args, &args); err != nil || args == nil {
+		return errors.New("tool_result args must be a JSON object")
+	}
+	if len(result.Content) > maxToolResultContentBytes {
+		return errors.New("tool_result content exceeds the classifier input bound")
+	}
+	if err := validateToolResultLifecycle(invocation.Connector, invocation.Event, result.Event, result.Outcome); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateToolResultLifecycle(connector, preEvent, resultEvent, outcome string) error {
+	type lifecycle struct {
+		pre     string
+		success string
+		failure string
+	}
+	known := map[string]lifecycle{
+		"amp":        {pre: "tool.call", success: "tool.result", failure: "tool.result"},
+		"claudecode": {pre: "PreToolUse", success: "PostToolUse", failure: "PostToolUseFailure"},
+		"codex":      {pre: "PreToolUse", success: "PostToolUse", failure: "PostToolUseFailure"},
+		"opencode":   {pre: "tool.execute.before", success: "tool.execute.after", failure: "tool.execute.after"},
+	}
+	contract, ok := known[connector]
+	if !ok {
+		return fmt.Errorf("tool_result has unsupported connector %q", connector)
+	}
+	if preEvent != contract.pre {
+		return fmt.Errorf("tool_result has invalid pre event for connector %q", connector)
+	}
+	switch outcome {
+	case "succeeded":
+		if resultEvent != contract.success {
+			return fmt.Errorf("tool_result has invalid success event for connector %q", connector)
+		}
+	case "failed", "denied", "cancelled":
+		if resultEvent != contract.failure {
+			return fmt.Errorf("tool_result has invalid failure event for connector %q", connector)
+		}
+	default:
+		return fmt.Errorf("tool_result requires an authoritative terminal outcome, got %q", outcome)
 	}
 	return nil
 }

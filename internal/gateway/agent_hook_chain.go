@@ -328,13 +328,18 @@ func (a *APIServer) applyAgentHookToolChains(
 		readPathDigest, readValueDigests :=
 			toolValueLineageSuccessfulReadResult(req, outcome)
 		var (
-			sqlSource     audit.ToolChainPendingSQLValueSource
-			sqlProjection toolValueLineageSQLSuccessfulProjection
-			sqlProjected  bool
+			sqlSource                  audit.ToolChainPendingSQLValueSource
+			sqlProjection              toolValueLineageSQLSuccessfulProjection
+			sqlProjected               bool
+			returnedCredentialMaterial actionfacts.ReturnedCredentialMaterial
 		)
 		if outcome == connector.ToolLifecycleOutcomeSuccess {
 			sqlSource, sqlProjection, sqlProjected =
 				projectSuccessfulSQLResultCandidate(ctx, req)
+			if resultBytes, exact := exactReturnedCredentialResultBytes(req, outcome); exact {
+				returnedCredentialMaterial =
+					actionfacts.ClassifyReturnedCredentialMaterial(resultBytes)
+			}
 		}
 		resolved, resolveErr := repository.ResolvePending(
 			ctx,
@@ -363,6 +368,35 @@ func (a *APIServer) applyAgentHookToolChains(
 		if resolvedSuccess {
 			if sqlProjected && resolved.SQLValueSource == sqlSource {
 				req.toolChain.successfulSQLResult = &sqlProjection
+			}
+			if credentialFindings := returnedCredentialMaterialFindings(
+				resolved.ReturnedCredentialSource,
+				returnedCredentialMaterial,
+			); len(credentialFindings) != 0 {
+				// The proof is high confidence but intentionally advisory: post-tool
+				// result hooks cannot prevent an operation that already completed.
+				resp = mergeAgentHookFindings(
+					profile, req, resp, credentialFindings, guardrailActionAllow,
+				)
+				eval := a.emitHookRuleFindings(
+					ctx,
+					req.ConnectorName,
+					req.HookEventName,
+					&ToolInspectVerdict{
+						Action:           resp.Action,
+						Severity:         HighestSeverity(credentialFindings),
+						Findings:         FindingStrings(credentialFindings),
+						DetailedFindings: credentialFindings,
+					},
+					"tool_result",
+					latency,
+				)
+				if resp.EvaluationID == "" {
+					resp.EvaluationID = eval.EvaluationID
+				}
+				resp.RuleIDs = mergeBoundedRuleIDs(
+					8, eval.RuleIDs, resp.RuleIDs,
+				)
 			}
 			// Terminal-success-only chains are deliberately absent from the
 			// synchronous pre-tool observation. Their exact pending projection is
@@ -529,6 +563,9 @@ func (a *APIServer) applyAgentHookToolChains(
 				RulesetFingerprint:   rulesetFingerprint,
 				Projection:           predecessorProjection,
 				SQLValueSource:       pendingSQLValueSource(req.toolChain),
+				ReturnedCredentialSource: actionfacts.ExactReturnedCredentialSource(
+					req.toolChain.facts,
+				),
 			},
 		); prepareErr != nil {
 			// Pending state is an additive experimental lane. A persistence

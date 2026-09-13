@@ -128,7 +128,7 @@ func (r Runner) Run(ctx context.Context, cases []Case) ([]Prediction, map[string
 			// Code and external artifact scanners own separate policies. Until a
 			// profile-specific scanner policy is selected by an adapter, run their
 			// public detector result exactly once instead of tripling the sample.
-			if (!lane.standard || lane.label != "default") && benchmarkCase.Surface != "text" && benchmarkCase.Surface != "action" && benchmarkCase.Surface != "stateful" && benchmarkCase.Surface != "e2e" {
+			if (!lane.standard || lane.label != "default") && benchmarkCase.Surface != "text" && benchmarkCase.Surface != "action" && benchmarkCase.Surface != "tool_result" && benchmarkCase.Surface != "stateful" && benchmarkCase.Surface != "e2e" {
 				continue
 			}
 			prediction := r.runCase(ctx, lane.label, lane.posture, lane.packDir, connector, textInspector, allowedRuleIDs, benchmarkCase)
@@ -169,6 +169,8 @@ func (r Runner) runCase(
 		prediction = r.runText(caseCtx, textInspector, allowedRuleIDs, benchmarkCase, prediction)
 	case "action":
 		prediction = r.runAction(caseCtx, posture, connector, benchmarkCase, prediction)
+	case "tool_result":
+		prediction = r.runToolResult(caseCtx, posture, benchmarkCase, prediction)
 	case "code":
 		prediction = r.runCode(caseCtx, benchmarkCase, prediction)
 	case "skill", "plugin", "mcp":
@@ -192,6 +194,42 @@ func (r Runner) runCase(
 	prediction.IssueCodes = compactStrings(prediction.IssueCodes)
 	prediction = applyConservativeAlertProjection(prediction)
 	return prediction
+}
+
+func (r Runner) runToolResult(
+	ctx context.Context,
+	profile string,
+	benchmarkCase Case,
+	prediction Prediction,
+) Prediction {
+	prediction.Engine = "gateway-tool-result"
+	toolResult := benchmarkCase.Payload.ToolResult
+	if toolResult == nil {
+		prediction.Action = "error"
+		prediction.ErrorCode = "invalid_tool_result_case"
+		return prediction
+	}
+	result, err := gateway.EvaluateDeterministicToolResult(
+		ctx,
+		gateway.DeterministicToolResultInput{
+			Connector:     toolResult.Invocation.Connector,
+			PreEvent:      toolResult.Invocation.Event,
+			ResultEvent:   toolResult.Result.Event,
+			SessionID:     toolResult.Invocation.SessionID,
+			InvocationID:  toolResult.Invocation.InvocationID,
+			Outcome:       toolResult.Result.Outcome,
+			ToolName:      toolResult.Invocation.ToolName,
+			ToolArgs:      append(json.RawMessage(nil), toolResult.Invocation.Args...),
+			ResultContent: toolResult.Result.Content,
+		},
+		profile,
+	)
+	if err != nil {
+		prediction.Action = "error"
+		prediction.ErrorCode = "tool_result_evaluation_failure"
+		return prediction
+	}
+	return applyDeterministicActionEvaluation(prediction, result)
 }
 
 func (r Runner) runStateful(ctx context.Context, profile, connector string, benchmarkCase Case, prediction Prediction) Prediction {
@@ -438,6 +476,13 @@ func (r Runner) runAction(ctx context.Context, profile, connector string, benchm
 		connector,
 		profile,
 	)
+	return applyDeterministicActionEvaluation(prediction, result)
+}
+
+func applyDeterministicActionEvaluation(
+	prediction Prediction,
+	result gateway.DeterministicActionEvaluation,
+) Prediction {
 	prediction.Detected = len(result.Findings) > 0
 	prediction.Action = normalizeAction(result.Action)
 	prediction.Severity = normalizeSeverity(result.Severity)
@@ -861,6 +906,8 @@ func engineForSurface(surface string) string {
 		return "gateway-local-text"
 	case "action":
 		return "gateway-trusted-action"
+	case "tool_result":
+		return "gateway-tool-result"
 	case "code":
 		return "code-scan-local"
 	case "skill":
