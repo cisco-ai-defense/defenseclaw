@@ -758,6 +758,9 @@ func TestGlobalLDPreloadProfileInstallOwnerBoundaries(t *testing.T) {
 		},
 		{"dynamic library", "echo 'export LD_PRELOAD=$LIBRARY' > /etc/profile.d/guard.sh", false},
 		{"unrelated profile write", "echo 'export PATH=/opt/bin:$PATH' > /etc/profile.d/tool.sh", false},
+		{"Nemotron profile read", "cat /etc/profile.d/compliance.sh", false},
+		{"Nemotron profile removal", "rm /etc/profile.d/compliance.sh", false},
+		{"profile directory list", "ls -la /etc/profile.d/", false},
 		{"nested profile path", "echo 'export LD_PRELOAD=/tmp/lib.so' > /etc/profile.d/test/guard.sh", false},
 		{"profile fixture", "echo 'export LD_PRELOAD=/tmp/lib.so' > /repo/fixtures/etc/profile.d/guard.sh", false},
 	} {
