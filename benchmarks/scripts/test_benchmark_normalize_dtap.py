@@ -254,6 +254,91 @@ class DTapNormalizerTest(unittest.TestCase):
         )
         self.assertNotIn("/tmp/private-report", json.dumps(first, sort_keys=True))
 
+    def test_legacy_migration_changes_only_truth_authority(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benign = root / "research" / "benign"
+            malicious = root / "research" / "malicious" / "direct" / "case"
+            benign.mkdir(parents=True)
+            malicious.mkdir(parents=True)
+            for target, name in ((benign, "one.json"), (malicious, "two.json")):
+                (target / name).write_text(
+                    json.dumps(
+                        trace(
+                            agent_call("read", {"path": "/tmp/private-report"}),
+                            tool_result("read", {"success": True}),
+                        )
+                    ),
+                    encoding="utf-8",
+                )
+            (benign / "judge_result.json").write_text(
+                json.dumps({"task_success": True}), encoding="utf-8"
+            )
+            (malicious / "judge_result.json").write_text(
+                json.dumps({"attack_success": True}), encoding="utf-8"
+            )
+            rows, counts = normalizer.normalize(root, normalizer.PINNED_REVISION)
+            before_non_truth = []
+            for row in rows:
+                source_truth = row["truth"]["source_truth"]
+                domain = row["strata"]["domain"]
+                row["truth"] = {
+                    "applicability": "in_scope",
+                    "categories": [
+                        "execution_grounded",
+                        "judge_confirmed",
+                        domain,
+                        source_truth,
+                    ],
+                    "deterministic_truth": source_truth,
+                    "expected_disposition": (
+                        "allow" if source_truth == "benign" else "block"
+                    ),
+                    "label_confidence": "high",
+                    "label_source": "source:deterministic_environment_judge",
+                    "source_truth": source_truth,
+                }
+                before_non_truth.append({key: value for key, value in row.items() if key != "truth"})
+            body = normalizer.encode_rows(rows)
+            corpus = root.parent / "legacy-cases.jsonl"
+            corpus.write_bytes(body)
+            legacy = {
+                "counts": dict(counts),
+                "dataset": normalizer.DATASET_ID,
+                "label_limitation": "legacy",
+                "license": normalizer.LICENSE,
+                "output_sha256": hashlib.sha256(body).hexdigest(),
+                "revision": normalizer.PINNED_REVISION,
+                "row_count": len(rows),
+                "schema_version": normalizer.SCHEMA_VERSION,
+                "source_url": normalizer.SOURCE_URL,
+            }
+            legacy_path = root.parent / "legacy-manifest.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            first_body, first_manifest = normalizer.migrate_existing_corpus(
+                corpus, legacy_path
+            )
+            second_body, second_manifest = normalizer.migrate_existing_corpus(
+                corpus, legacy_path
+            )
+        migrated = [json.loads(line) for line in first_body.splitlines()]
+        after_non_truth = [
+            {key: value for key, value in row.items() if key != "truth"}
+            for row in migrated
+        ]
+        self.assertEqual(first_body, second_body)
+        self.assertEqual(first_manifest, second_manifest)
+        self.assertEqual(before_non_truth, after_non_truth)
+        malicious_truth = next(
+            row["truth"] for row in migrated if row["truth"]["source_truth"] == "malicious"
+        )
+        self.assertEqual("contextual_or_dual_use", malicious_truth["deterministic_truth"])
+        self.assertEqual("out_of_scope", malicious_truth["applicability"])
+        self.assertEqual("detect_only", malicious_truth["expected_disposition"])
+        self.assertEqual(
+            hashlib.sha256(body).hexdigest(), first_manifest["inputs"][0]["sha256"]
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

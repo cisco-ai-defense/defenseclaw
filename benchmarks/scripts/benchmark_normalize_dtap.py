@@ -53,6 +53,7 @@ def parse_args() -> argparse.Namespace:
     source = parser.add_mutually_exclusive_group(required=True)
     source.add_argument("--root", type=Path)
     source.add_argument("--existing-corpus", type=Path)
+    source.add_argument("--migrate-existing-corpus", type=Path)
     parser.add_argument("--legacy-manifest", type=Path)
     parser.add_argument("--revision", default=PINNED_REVISION)
     parser.add_argument("--output", type=Path)
@@ -212,6 +213,66 @@ def repair_existing_manifest(corpus: Path, legacy_path: Path) -> dict[str, Any]:
             "source_url": SOURCE_URL,
         },
     }
+
+
+def migrate_existing_corpus(
+    corpus: Path, legacy_path: Path
+) -> tuple[bytes, dict[str, Any]]:
+    """Migrate only legacy truth metadata while preserving detector inputs."""
+
+    manifest = repair_existing_manifest(corpus, legacy_path)
+    rows: list[dict[str, Any]] = []
+    malicious_migrated = 0
+    duplicate_categories_removed = 0
+    with corpus.open("rb") as handle:
+        for line_number, raw_line in enumerate(handle, start=1):
+            row = json.loads(raw_line)
+            truth = row.get("truth")
+            strata = row.get("strata")
+            if not isinstance(truth, dict) or not isinstance(strata, dict):
+                raise ValueError(f"DTap row {line_number} is missing truth metadata")
+            source_truth = truth.get("source_truth")
+            domain = strata.get("domain")
+            if source_truth not in {"benign", "malicious"} or not isinstance(domain, str):
+                raise ValueError(f"DTap row {line_number} has unsupported legacy truth")
+            expected_truth = {
+                "applicability": "in_scope",
+                "categories": ["execution_grounded", "judge_confirmed", domain, source_truth],
+                "deterministic_truth": source_truth,
+                "expected_disposition": "allow" if source_truth == "benign" else "block",
+                "label_confidence": "high",
+                "label_source": "source:deterministic_environment_judge",
+                "source_truth": source_truth,
+            }
+            if truth != expected_truth:
+                raise ValueError(f"DTap row {line_number} legacy truth contract differs")
+            if source_truth == "malicious":
+                row["truth"] = truth_contract(source_truth, domain)
+                malicious_migrated += 1
+            else:
+                categories = truth["categories"]
+                unique_categories = list(dict.fromkeys(categories))
+                if unique_categories != categories:
+                    row["truth"] = {**truth, "categories": unique_categories}
+                    duplicate_categories_removed += 1
+            rows.append(row)
+
+    body = encode_rows(rows)
+    statistics = manifest["adapter_statistics"][ADAPTER]
+    statistics.update(
+        {
+            "duplicate_truth_categories_removed": duplicate_categories_removed,
+            "legacy_malicious_cases_contextualized": malicious_migrated,
+            "migration_cases": len(rows),
+            "non_truth_rows_changed": 0,
+        }
+    )
+    manifest["adapter_statistics"][ADAPTER] = dict(sorted(statistics.items()))
+    manifest["inputs"] = [
+        {"bytes": corpus.stat().st_size, "sha256": manifest["output_sha256"]}
+    ]
+    manifest["output_sha256"] = hashlib.sha256(body).hexdigest()
+    return body, manifest
 
 
 def load_object(path: Path) -> dict[str, Any]:
@@ -561,6 +622,22 @@ def normalize(root: Path, revision: str) -> tuple[list[dict[str, Any]], Counter[
 
 def main() -> int:
     args = parse_args()
+    if args.migrate_existing_corpus is not None:
+        if args.legacy_manifest is None or args.manifest is None or args.output is None:
+            raise ValueError(
+                "corpus migration requires --legacy-manifest, --output, and --manifest"
+            )
+        body, manifest = migrate_existing_corpus(
+            args.migrate_existing_corpus, args.legacy_manifest
+        )
+        args.output.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.output.write_bytes(body)
+        args.manifest.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(json.dumps({"manifest": str(args.manifest), **manifest}, sort_keys=True))
+        return 0
     if args.existing_corpus is not None:
         if args.legacy_manifest is None or args.manifest is None or args.output is not None:
             raise ValueError(
