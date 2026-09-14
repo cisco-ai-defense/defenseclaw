@@ -1087,6 +1087,7 @@ $teardownFailurePreserved = & $module {
         [void](Invoke-DefenseClawManagedHooksTeardownCommand `
             -Layout $failureLayout `
             -GatewayServiceName 'DefenseClawGateway' `
+            -GuardianServiceName 'DefenseClawHookGuardian' `
             -Action prepare)
     }
     catch {

@@ -304,7 +304,14 @@ func TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope(t *testing.T) 
 	}
 }
 
-func TestCleanupCaptureRejectsLegacyUnboundEntry(t *testing.T) {
+// TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded — the earlier
+// fail-closed behavior made uninstall unable to clean up any lock entry
+// written by a pre-binding build (empty ManagedGatewayServiceName), stranding
+// upgrades. Cleanup capture now treats a legacy unbound entry as
+// automatically superseded so the apply path retires it without touching
+// bytes owned by a different scope; a NON-EMPTY but invalid identity value
+// remains fail-closed (that would be tampered state, not a legacy artifact).
+func TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded(t *testing.T) {
 	if err := requireWindowsCodexMachineAdministrator(); err != nil {
 		t.Skipf("managed purge requires an elevated Administrator or LocalSystem token: %v", err)
 	}
@@ -326,13 +333,17 @@ func TestCleanupCaptureRejectsLegacyUnboundEntry(t *testing.T) {
 	}, true); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := CaptureManagedHookContractCleanupClaimForOwner(
+	claim, err := CaptureManagedHookContractCleanupClaimForOwner(
 		dataDir,
 		"codex",
 		ownerSID,
 		"DefenseClawGateway-ScopeA",
-	); err == nil || !strings.Contains(err.Error(), "no valid gateway service binding") {
-		t.Fatalf("legacy cleanup capture error = %v", err)
+	)
+	if err != nil {
+		t.Fatalf("legacy cleanup capture returned error = %v, want superseded claim", err)
+	}
+	if !claim.Superseded || claim.EntryPresent || claim.ApplicationStarted {
+		t.Fatalf("legacy claim = %+v, want Superseded=true EntryPresent=false ApplicationStarted=false", claim)
 	}
 }
 
