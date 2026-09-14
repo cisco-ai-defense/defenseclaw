@@ -181,14 +181,9 @@ func buildCorpusManifest(
 	if len(normalizationData) == 0 {
 		return manifest, nil
 	}
-	var normalized NormalizationManifest
-	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(normalizationData), 4<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&normalized); err != nil {
-		return CorpusManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return CorpusManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	normalized, err := decodeNormalizationManifest(normalizationData)
+	if err != nil {
+		return CorpusManifest{}, err
 	}
 	if normalized.SchemaVersion != SchemaVersion || normalized.OutputSHA256 != corpusSHA256 || normalized.Cases != len(sourceCases) {
 		return CorpusManifest{}, fmt.Errorf("normalization manifest identity differs from corpus")
@@ -204,21 +199,8 @@ func buildCorpusManifest(
 	if !equalCounts(manifest.DatasetCounts, normalized.Counts) {
 		return CorpusManifest{}, fmt.Errorf("normalization manifest counts differ from corpus")
 	}
-	if normalized.Source != nil {
-		source := normalized.Source
-		if source.Dataset == "" || normalized.Counts[source.Dataset] == 0 ||
-			source.Revision == "" || source.License == "" || source.Redistribution == "" ||
-			(source.Path == "" && len(source.Paths) == 0) || source.Bytes < 0 ||
-			source.Rows < 0 || len(source.Language) > 32 ||
-			len(source.TrajectoryVerification) > 160 ||
-			!validSHA256(source.SHA256) {
-			return CorpusManifest{}, fmt.Errorf("normalization source metadata is invalid")
-		}
-	}
-	for _, input := range normalized.Inputs {
-		if input.Bytes < 0 || !validSHA256(input.SHA256) {
-			return CorpusManifest{}, fmt.Errorf("normalization input metadata is invalid")
-		}
+	if err := validateNormalizationManifestMetadata(normalized); err != nil {
+		return CorpusManifest{}, err
 	}
 	if normalized.Partition != nil {
 		partition := normalized.Partition
@@ -249,6 +231,39 @@ func buildCorpusManifest(
 	}
 	manifest.Normalization = &normalized
 	return manifest, nil
+}
+
+func decodeNormalizationManifest(data []byte) (NormalizationManifest, error) {
+	var normalized NormalizationManifest
+	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(data), 4<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&normalized); err != nil {
+		return NormalizationManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return NormalizationManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	}
+	return normalized, nil
+}
+
+func validateNormalizationManifestMetadata(normalized NormalizationManifest) error {
+	if normalized.Source != nil {
+		source := normalized.Source
+		if source.Dataset == "" || normalized.Counts[source.Dataset] == 0 ||
+			source.Revision == "" || source.License == "" || source.Redistribution == "" ||
+			(source.Path == "" && len(source.Paths) == 0) || source.Bytes < 0 ||
+			source.Rows < 0 || len(source.Language) > 32 ||
+			len(source.TrajectoryVerification) > 160 ||
+			!validSHA256(source.SHA256) {
+			return fmt.Errorf("normalization source metadata is invalid")
+		}
+	}
+	for _, input := range normalized.Inputs {
+		if input.Bytes < 0 || !validSHA256(input.SHA256) {
+			return fmt.Errorf("normalization input metadata is invalid")
+		}
+	}
+	return nil
 }
 
 func validSHA256(value string) bool {

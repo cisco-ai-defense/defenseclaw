@@ -6,7 +6,9 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -71,7 +73,7 @@ def normalize(events: list[dict[str, object]], labels: list[dict[str, object]]):
         labels,
         revision=MODULE.SOURCE_REVISION,
         source_split="gpt53_single_day",
-        split="development",
+        split="validation",
     )
 
 
@@ -176,9 +178,78 @@ class MoleNormalizerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "do not join"):
             normalize([event(0)], [label(account="other")])
 
-    def test_revision_is_immutable(self) -> None:
+    def test_revision_and_source_partition_are_immutable(self) -> None:
         with self.assertRaisesRegex(ValueError, MODULE.SOURCE_REVISION):
-            MODULE.normalize([event(0)], [], revision="main", source_split="gpt53_single_day", split="development")
+            MODULE.normalize(
+                [event(0)],
+                [],
+                revision="main",
+                source_split="gpt53_single_day",
+                split="validation",
+            )
+        with self.assertRaisesRegex(ValueError, "immutable benchmark partition"):
+            MODULE.normalize(
+                [event(0)],
+                [],
+                revision=MODULE.SOURCE_REVISION,
+                source_split="gpt53_single_day",
+                split="development",
+            )
+
+    def test_strict_manifest_repair_is_value_free_and_deterministic(self) -> None:
+        source_split = "gpt53_single_day"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source_files: dict[str, str] = {}
+            for config, body in (("audit", b"audit-bytes"), ("labels", b"label-bytes")):
+                relative = f"data/{config}/{source_split}/0000.parquet"
+                path = root / relative
+                path.parent.mkdir(parents=True)
+                path.write_bytes(body)
+                source_files[relative] = hashlib.sha256(body).hexdigest()
+            counts = {
+                "account_day_labels": 1,
+                "benign_tasks": 1,
+                "cases": 3,
+                "cases_action": 2,
+                "cases_benign": 3,
+                "cases_stateful": 1,
+                "source_events": 2,
+                "tasks": 1,
+            }
+            legacy = MODULE.manifest_record(
+                revision=MODULE.SOURCE_REVISION,
+                source_split=source_split,
+                split="validation",
+                counts=counts,
+            )
+            legacy.update(source_files=source_files, output_sha256="a" * 64)
+            first = MODULE.strict_manifest_from_legacy(
+                legacy,
+                input_dir=root,
+                source_split=source_split,
+                split="validation",
+            )
+            second = MODULE.strict_manifest_from_legacy(
+                legacy,
+                input_dir=root,
+                source_split=source_split,
+                split="validation",
+            )
+            self.assertEqual(
+                json.dumps(first, indent=2, sort_keys=True) + "\n",
+                json.dumps(second, indent=2, sort_keys=True) + "\n",
+            )
+            self.assertEqual([MODULE.DATASET_ID], first["datasets"])
+            self.assertEqual({MODULE.DATASET_ID: 3}, first["counts"])
+            self.assertEqual(counts, first["adapter_statistics"][MODULE.DATASET_ID])
+            self.assertEqual("download-only", first["source"]["redistribution"])
+            self.assertEqual(MODULE.SOURCE_REVISION, first["source"]["revision"])
+            self.assertEqual(2, first["source"]["files"])
+            self.assertEqual(3, first["source"]["rows"])
+            self.assertEqual("validation", first["trajectory_source"]["benchmark_split"])
+            self.assertNotIn("source_files", json.dumps(first))
+            self.assertNotIn("audit-bytes", json.dumps(first))
 
 
 if __name__ == "__main__":

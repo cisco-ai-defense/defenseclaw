@@ -31,6 +31,7 @@ SOURCE_URL = "https://huggingface.co/datasets/forgelab/mole"
 SOURCE_REVISION = "7eb86b0d2918c32760fe8a91b78bb50ccc054ce5"
 SOURCE_LICENSE = "Apache-2.0"
 SOURCE_REDISTRIBUTION = "download-only"
+ADAPTER = "benchmark_normalize_mole.py"
 SOURCE_CONFIGS = ("audit", "labels")
 SOURCE_SPLITS = (
     "deepseek_v4_flash_multiday",
@@ -41,6 +42,19 @@ SOURCE_SPLITS = (
     "kimi_k26_single_day",
     "qwen36_27b_multiday",
     "qwen36_27b_single_day",
+)
+SOURCE_PARTITIONS = {
+    "deepseek_v4_flash_multiday": "development",
+    "deepseek_v4_flash_single_day": "development",
+    "gpt53_multiday": "validation",
+    "gpt53_single_day": "validation",
+    "kimi_k26_multiday": "development",
+    "kimi_k26_single_day": "development",
+    "qwen36_27b_multiday": "test",
+    "qwen36_27b_single_day": "test",
+}
+SPLIT_GROUP_STRATEGY = (
+    "sha256(dataset\\0revision\\0source_split\\0account\\0utc_date\\0task_id)[:24]"
 )
 AUDIT_COLUMNS = (
     "event_id",
@@ -89,8 +103,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source-split", choices=SOURCE_SPLITS, required=True)
     parser.add_argument("--revision", default=SOURCE_REVISION)
     parser.add_argument("--split", choices=("development", "validation", "test"), required=True)
-    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--manifest", type=Path)
+    parser.add_argument(
+        "--repair-legacy-manifest",
+        type=Path,
+        help="regenerate only a strict value-free sidecar from a legacy Mole manifest",
+    )
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
     return parser.parse_args()
 
@@ -109,6 +128,114 @@ def file_sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             value.update(chunk)
     return value.hexdigest()
+
+
+def source_inventory(
+    input_dir: Path,
+    source_split: str,
+    expected_hashes: Mapping[str, str] | None = None,
+) -> list[dict[str, object]]:
+    expected_paths = [
+        f"data/{config}/{source_split}/0000.parquet" for config in SOURCE_CONFIGS
+    ]
+    if expected_hashes is not None and sorted(expected_hashes) != sorted(expected_paths):
+        raise ValueError("legacy Mole source inventory differs from the pinned two-file layout")
+    inventory: list[dict[str, object]] = []
+    for relative in expected_paths:
+        path = input_dir / relative
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"missing pinned Mole source file: {relative}")
+        sha256 = file_sha256(path)
+        if expected_hashes is not None and expected_hashes[relative] != sha256:
+            raise ValueError(f"pinned Mole source identity mismatch: {relative}")
+        inventory.append({"path": relative, "bytes": path.stat().st_size, "sha256": sha256})
+    return inventory
+
+
+def source_inventory_sha256(inventory: Sequence[Mapping[str, object]]) -> str:
+    value = hashlib.sha256(b"forgelab-mole-source-inventory-v1\0")
+    for item in sorted(inventory, key=lambda entry: str(entry["path"])):
+        value.update(
+            f"{item['path']}\0{item['bytes']}\0{item['sha256']}\n".encode("utf-8")
+        )
+    return value.hexdigest()
+
+
+def strict_manifest_from_legacy(
+    legacy: Mapping[str, Any], *, input_dir: Path, source_split: str, split: str
+) -> dict[str, Any]:
+    if source_split not in SOURCE_PARTITIONS or SOURCE_PARTITIONS[source_split] != split:
+        raise ValueError("Mole source split differs from its immutable benchmark partition")
+    required_identity = {
+        "schema_version": SCHEMA_VERSION,
+        "source_id": DATASET_ID,
+        "source_url": SOURCE_URL,
+        "source_revision": SOURCE_REVISION,
+        "source_license": SOURCE_LICENSE,
+        "source_split": source_split,
+        "split": split,
+    }
+    for key, expected in required_identity.items():
+        if legacy.get(key) != expected:
+            raise ValueError(f"legacy Mole manifest has invalid {key}")
+    cases = legacy.get("row_count")
+    counts = legacy.get("counts")
+    output_sha256 = legacy.get("output_sha256")
+    source_files = legacy.get("source_files")
+    if type(cases) is not int or cases <= 0:
+        raise ValueError("legacy Mole manifest has invalid row_count")
+    if (
+        not isinstance(counts, dict)
+        or counts.get("cases") != cases
+        or any(not isinstance(key, str) or type(value) is not int or value < 0 for key, value in counts.items())
+    ):
+        raise ValueError("legacy Mole manifest has invalid counts")
+    if not isinstance(output_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", output_sha256):
+        raise ValueError("legacy Mole manifest has invalid output_sha256")
+    if (
+        not isinstance(source_files, dict)
+        or any(
+            not isinstance(path, str)
+            or not isinstance(sha256, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+            for path, sha256 in source_files.items()
+        )
+    ):
+        raise ValueError("legacy Mole manifest has invalid source_files")
+    inventory = source_inventory(input_dir, source_split, source_files)
+    source_rows = int(counts.get("source_events", 0)) + int(counts.get("account_day_labels", 0))
+    return {
+        "schema_version": SCHEMA_VERSION,
+        "datasets": [DATASET_ID],
+        "cases": cases,
+        "counts": {DATASET_ID: cases},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {
+            DATASET_ID: {key: int(value) for key, value in sorted(counts.items())}
+        },
+        "output_sha256": output_sha256,
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": SOURCE_REVISION,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "pinned-source-tree",
+            "paths": [str(item["path"]) for item in inventory],
+            "bytes": sum(int(item["bytes"]) for item in inventory),
+            "files": len(inventory),
+            "rows": source_rows,
+            "sha256": source_inventory_sha256(inventory),
+            "language": "en",
+            "source_url": SOURCE_URL,
+        },
+        "trajectory_source": {
+            "benchmark_split": split,
+            "partition_authority": "immutable-source-configuration-v1",
+            "source_split": source_split,
+            "split_group_strategy": SPLIT_GROUP_STRATEGY,
+        },
+    }
 
 
 def required_text(value: object, code: str, maximum: int = 240) -> str:
@@ -552,6 +679,8 @@ def normalize_into(
 ) -> dict[str, Any]:
     if revision != SOURCE_REVISION:
         raise ValueError(f"Mole revision must be pinned to {SOURCE_REVISION}")
+    if source_split not in SOURCE_PARTITIONS or SOURCE_PARTITIONS[source_split] != split:
+        raise ValueError("Mole source split differs from its immutable benchmark partition")
     if source_split not in SOURCE_SPLITS:
         raise ValueError("unsupported Mole source split")
     labels = label_index(label_rows)
@@ -685,6 +814,23 @@ def main() -> int:
     args = parse_args()
     if args.revision != SOURCE_REVISION:
         raise ValueError(f"Mole revision must be pinned to {SOURCE_REVISION}")
+    if SOURCE_PARTITIONS[args.source_split] != args.split:
+        raise ValueError("Mole source split differs from its immutable benchmark partition")
+    if args.repair_legacy_manifest is not None:
+        if args.output is not None or args.manifest is None:
+            raise ValueError("manifest repair requires --manifest and forbids --output")
+        legacy = json.loads(args.repair_legacy_manifest.read_text(encoding="utf-8"))
+        manifest = strict_manifest_from_legacy(
+            legacy,
+            input_dir=args.input_dir,
+            source_split=args.source_split,
+            split=args.split,
+        )
+        atomic_write(args.manifest, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
+        print(json.dumps({"manifest": str(args.manifest), **manifest}, sort_keys=True))
+        return 0
+    if args.output is None:
+        raise ValueError("normalization requires --output")
     audit_paths = source_paths(args.input_dir, "audit", args.source_split)
     label_paths = source_paths(args.input_dir, "labels", args.source_split)
     try:
@@ -727,6 +873,12 @@ def main() -> int:
     manifest.update(
         source_files=dict(sorted(source_files.items())),
         output_sha256=output_hash.hexdigest(),
+    )
+    manifest = strict_manifest_from_legacy(
+        manifest,
+        input_dir=args.input_dir,
+        source_split=args.source_split,
+        split=args.split,
     )
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     atomic_write(manifest_path, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())
