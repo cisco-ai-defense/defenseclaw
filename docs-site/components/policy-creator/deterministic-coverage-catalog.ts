@@ -27,8 +27,8 @@ export interface BoundedChain {
   readonly id: string;
   readonly title: string;
   readonly severity: 'HIGH' | 'CRITICAL';
-  readonly eventWindow: 8 | 9;
-  readonly timeWindowMinutes: 5 | 15 | 30;
+  readonly eventWindow: 5 | 8 | 9;
+  readonly timeWindowMinutes: 5 | 10 | 15 | 30;
   readonly mode: 'enforcement-capable' | 'alert-only';
 }
 
