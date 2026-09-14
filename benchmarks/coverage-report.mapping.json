@@ -458,9 +458,11 @@
       "intended_use": [
         "action",
         "stateful",
-        "judge-confirmed-attack",
+        "bounded-chain-candidate",
         "benign",
-        "real-tool-arguments"
+        "hard-negative",
+        "real-tool-arguments",
+        "trajectory-label-candidate"
       ],
       "status": "missing",
       "limitations": [

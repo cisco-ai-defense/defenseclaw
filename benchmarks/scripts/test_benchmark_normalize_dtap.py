@@ -30,6 +30,29 @@ def trace(*trajectory, instruction="List the records"):
 
 
 class DTapNormalizerTest(unittest.TestCase):
+    def test_dataset_lock_has_one_canonical_dtap_source(self):
+        benchmarks_root = Path(__file__).resolve().parent.parent
+        lock = json.loads((benchmarks_root / "datasets.lock.json").read_text(encoding="utf-8"))
+        matching = [
+            entry
+            for entry in lock["datasets"]
+            if entry.get("source_url") == normalizer.SOURCE_URL
+            and entry.get("revision") == normalizer.PINNED_REVISION
+        ]
+        self.assertEqual([entry["id"] for entry in matching], [normalizer.DATASET_ID])
+        self.assertEqual(
+            set(matching[0]["purpose"]),
+            {
+                "action",
+                "stateful",
+                "bounded-chain-candidate",
+                "benign",
+                "hard-negative",
+                "real-tool-arguments",
+                "trajectory-label-candidate",
+            },
+        )
+
     def test_parallel_calls_require_matching_non_error_results_and_keep_identity(self):
         source = trace(
             agent_call("search", {"query": "records"}),
