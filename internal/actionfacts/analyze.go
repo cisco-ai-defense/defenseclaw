@@ -351,6 +351,11 @@ func analyzeStructuredArgv(
 		out.markAmbiguous(IssueConflictingSources)
 		return out
 	}
+	if dialect == DialectPython {
+		out := newParseOutput(DialectPython, startID)
+		out.markUnsupported(IssueUnsupportedConstruct)
+		return out
+	}
 	if dialect == "" || dialect == DialectNone {
 		dialect = DialectArgv
 	}
@@ -1167,6 +1172,10 @@ func parseCommandAs(source string, dialect Dialect, startID int64, wrapperDepth 
 		return parseCMD(source, startID, wrapperDepth)
 	case DialectPOSIX, DialectNone:
 		return parsePOSIX(source, startID, wrapperDepth)
+	case DialectPython:
+		out := newParseOutput(DialectPython, startID)
+		out.markUnsupported(IssueUnsupportedConstruct)
+		return out
 	default:
 		out := newParseOutput(dialect, startID)
 		out.markUnsupported(IssueUnsupportedConstruct)
@@ -2071,7 +2080,8 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 
 func validDialect(dialect Dialect) bool {
 	switch dialect {
-	case "", DialectNone, DialectArgv, DialectPOSIX, DialectPowerShell, DialectCMD:
+	case "", DialectNone, DialectArgv, DialectPOSIX, DialectPowerShell,
+		DialectCMD, DialectPython:
 		return true
 	default:
 		return false

@@ -954,6 +954,7 @@ const (
 	DialectPOSIX      Dialect = "posix"
 	DialectPowerShell Dialect = "powershell"
 	DialectCMD        Dialect = "cmd"
+	DialectPython     Dialect = "python"
 	DialectMixed      Dialect = "mixed"
 )
 

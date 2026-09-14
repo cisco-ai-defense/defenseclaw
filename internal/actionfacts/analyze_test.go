@@ -3123,6 +3123,55 @@ func TestEnforceAnalyzeAuthorityRejectsInconsistentProgram(t *testing.T) {
 	assertFactsInvariants(t, facts)
 }
 
+func TestAnalyzeExplicitPythonDialectFailsClosed(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "notebook analysis",
+			command: "import pandas as pd\ndata = pd.read_csv('input.csv')\nprint(data.describe())\n",
+		},
+		{
+			name:    "Python process execution",
+			command: "import subprocess\nsubprocess.run(['sh', '-c', 'id'])\n",
+		},
+		{
+			name:    "shell-shaped text",
+			command: "rm -rf /tmp/data",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool:        "edit_cell",
+				Command:     test.command,
+				DialectHint: DialectPython,
+			})
+			if facts.Parse.Status != StatusUnsupported ||
+				facts.Parse.Dialect != DialectPython || facts.Authoritative() ||
+				!containsIssue(facts.Parse.Issues, IssueUnsupportedConstruct) {
+				t.Fatalf("Python projection did not fail closed: %#v", facts)
+			}
+			if len(facts.Commands) != 0 || len(facts.Paths) != 0 ||
+				len(facts.Network) != 0 || len(facts.DataFlows) != 0 {
+				t.Fatalf("unsupported Python emitted semantic facts: %#v", facts)
+			}
+		})
+	}
+
+	structured := Analyze(Input{
+		Tool:        "edit_cell",
+		Argv:        []string{"python", "-c", "print('ok')"},
+		DialectHint: DialectPython,
+	})
+	if structured.Parse.Status != StatusUnsupported ||
+		structured.Parse.Dialect != DialectPython || structured.Authoritative() ||
+		!containsIssue(structured.Parse.Issues, IssueUnsupportedConstruct) ||
+		len(structured.Commands) != 0 {
+		t.Fatalf("structured Python projection did not fail closed: %#v", structured)
+	}
+}
+
 func TestAnalyzeInvalidDialectHintNeverPropagates(t *testing.T) {
 	invalid := Dialect("attacker-controlled")
 	tests := []struct {

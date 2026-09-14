@@ -905,6 +905,8 @@ func benchmarkDialect(value string) actionfacts.Dialect {
 		return actionfacts.DialectPowerShell
 	case "cmd":
 		return actionfacts.DialectCMD
+	case "python":
+		return actionfacts.DialectPython
 	case "mixed":
 		return actionfacts.DialectMixed
 	case "none":

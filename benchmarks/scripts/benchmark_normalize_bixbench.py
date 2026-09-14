@@ -549,7 +549,7 @@ def safe_code(code: str) -> tuple[bool, str]:
     stripped = code.lstrip()
     if stripped.startswith("%%bash"):
         return safe_shell(code), "posix"
-    return safe_python(code), "none"
+    return safe_python(code), "python"
 
 
 def notebook_safety(cells: Mapping[int, Mapping[str, Any]]) -> dict[int, bool]:
@@ -806,7 +806,7 @@ def normalize_run(
             raw_code = arguments["contents"]
             command = redact_code(raw_code)
             proven_safe = cell_safety.get(cell_index, False)
-            dialect = "posix" if raw_code.lstrip().startswith("%%bash") else "none"
+            dialect = "posix" if raw_code.lstrip().startswith("%%bash") else "python"
             final = cells.get(cell_index)
             is_final = last_edit.get(cell_index) == sequence_index
             executed = final is not None and final_cell_success(final, raw_code)

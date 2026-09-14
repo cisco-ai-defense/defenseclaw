@@ -108,6 +108,8 @@ class BixBenchNormalizerTest(unittest.TestCase):
         self.assertEqual([case["truth"]["source_truth"] for case in actions], ["benign", "benign"])
         self.assertEqual(stats["benign_action_events"], 2)
         self.assertEqual(stats["benign_stateful_windows"], 1)
+        edit = next(case for case in actions if case["payload"].get("tool_name") == "edit_cell")
+        self.assertEqual(edit["payload"]["dialect"], "python")
         self.assertTrue(
             all(len(case["payload"].get("events", [])) <= 9 for case in (value.case for value in candidates))
         )
