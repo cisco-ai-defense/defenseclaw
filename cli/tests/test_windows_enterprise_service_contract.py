@@ -5623,7 +5623,7 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert 'TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope' in (
         connector_cleanup_test
     )
-    assert 'TestCleanupCaptureRejectsLegacyUnboundEntry' in connector_cleanup_test
+    assert 'TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded' in connector_cleanup_test
     assert 'TestCleanupClaimMissingStateRequiresPersistedMutationBarrier' in (
         connector_cleanup_test
     )
