@@ -59,7 +59,11 @@ class ShellAttackEvolutionNormalizerTest(unittest.TestCase):
         self.assertEqual(case["truth"]["source_truth"], "malicious")
         self.assertEqual(case["truth"]["deterministic_truth"], "contextual_or_dual_use")
         self.assertEqual(case["truth"]["expected_disposition"], "detect_only")
-        self.assertEqual(case["truth"]["label_confidence"], "medium")
+        self.assertEqual(case["truth"]["label_confidence"], "high")
+        self.assertEqual(
+            case["truth"]["label_source"],
+            "source:curated_honeypot_attack_and_vi",
+        )
         self.assertIn("harm-vi-4", case["truth"]["categories"])
 
     def test_zero_harm_reconnaissance_is_not_relabeled_benign(self) -> None:
@@ -74,6 +78,7 @@ class ShellAttackEvolutionNormalizerTest(unittest.TestCase):
                         "turn_index": 0,
                         "command": "cat /proc/cpuinfo | grep name | wc -l",
                         "severity_vi": 0,
+                        "response_source": "curated_ubuntu",
                     }
                 ],
             )
@@ -111,7 +116,7 @@ class ShellAttackEvolutionNormalizerTest(unittest.TestCase):
         self.assertNotIn("argv", cases[0]["payload"])
         self.assertEqual(
             cases[0]["truth"]["label_source"],
-            "shell-attack-evolution:honeypot-capture",
+            "source:honeypot_command_catalog",
         )
         self.assertEqual(
             normalizer.ADAPTER_STATISTICS["shell-attack-evolution"]["command_source_rows"],
