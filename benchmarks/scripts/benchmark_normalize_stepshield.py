@@ -572,6 +572,24 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def canonical_identity_statistics(summary: Mapping[str, Any]) -> dict[str, int]:
+    """Flatten value-free identity evidence into runner-compatible counters."""
+    statistics = {
+        f"canonical_identity_{key}": int(summary[key])
+        for key in (
+            "distinct_monitor_visible_trajectories",
+            "exact_duplicate_redundancy_after_mapping_collapse",
+            "heldout_overlap_classes",
+            "mapped_train_blind_copies",
+            "paper_records",
+            "records_after_collapsing_mapped_train_blind_copies",
+        )
+    }
+    for relation, count in summary["classes_by_relation"].items():
+        statistics[f"canonical_identity_relation_{relation}"] = int(count)
+    return statistics
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", required=True, type=Path)
@@ -589,11 +607,12 @@ def main() -> int:
     trajectories, source_counts, canonical_summary = load_trajectories(args.input_dir)
     cases, counts = normalize(trajectories)
     counts.update(source_counts)
+    counts.update(canonical_identity_statistics(canonical_summary))
     validate_cases(cases, args.schema)
     body = "".join(canonical_json(case) + "\n" for case in cases).encode()
     manifest = {
         "adapter_statistics": {ADAPTER: dict(sorted(counts.items()))}, "cases": len(cases),
-        "canonical_identity": canonical_summary, "counts": {DATASET_ID: len(cases)}, "datasets": [DATASET_ID],
+        "counts": {DATASET_ID: len(cases)}, "datasets": [DATASET_ID],
         "exact_payload_duplicates_removed": 0, "label_conflicts_excluded": 0,
         "output_sha256": hashlib.sha256(body).hexdigest(), "schema_version": SCHEMA_VERSION,
         "source": {

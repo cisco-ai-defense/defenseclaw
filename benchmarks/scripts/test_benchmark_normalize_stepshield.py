@@ -105,6 +105,29 @@ class StepShieldNormalizerTest(unittest.TestCase):
         )
         MODULE.validate_cases(contextual + clean, MODULE.DEFAULT_SCHEMA)
 
+    def test_canonical_identity_evidence_is_flattened_to_integer_statistics(self) -> None:
+        summary = {
+            "classes_by_relation": {
+                "documented_train_to_blind_deployment_copy": 3,
+                "independent_monitor_visible_trajectory": 5,
+            },
+            "distinct_monitor_visible_trajectories": 5,
+            "exact_duplicate_redundancy_after_mapping_collapse": 1,
+            "heldout_overlap_classes": 0,
+            "mapped_train_blind_copies": 3,
+            "paper_records": 9,
+            "records_after_collapsing_mapped_train_blind_copies": 8,
+        }
+        statistics = MODULE.canonical_identity_statistics(summary)
+        self.assertEqual(0, statistics["canonical_identity_heldout_overlap_classes"])
+        self.assertEqual(
+            3,
+            statistics[
+                "canonical_identity_relation_documented_train_to_blind_deployment_copy"
+            ],
+        )
+        self.assertTrue(all(type(value) is int for value in statistics.values()))
+
 
 if __name__ == "__main__":
     unittest.main()
