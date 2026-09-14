@@ -1081,11 +1081,12 @@ $teardownFailurePreserved = & $module {
     $failureLayout = @{
         ManifestPath = 'C:\missing\targets.yaml'
         ManagedHooksTeardownJournalPath = 'C:\missing\managed-hooks-teardown.json'
-        # The teardown wrapper validates this receipt path before it reaches
-        # the native helper's ProgramData-trust probe. Supply a placeholder
-        # so the wrapper progresses to the mocked "restricted fixture" error
-        # this test is trying to observe.
+        # The teardown wrapper validates the receipt path AND the purge scope
+        # before it invokes the mocked gateway command. Placeholders here let
+        # the wrapper reach the mock so the test can observe the "restricted
+        # fixture" error the mock returns.
         ManagedHookContractCleanupReceiptPath = 'C:\missing\managed-hook-contract-cleanup-receipt.json'
+        PurgeScopeSHA256 = ('0' * 64)
     }
     $caught = $null
     try {

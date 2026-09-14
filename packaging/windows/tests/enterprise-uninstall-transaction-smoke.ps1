@@ -6454,6 +6454,14 @@ targets:
         $failClosedLayout = New-HarnessCommittedPurgeCase `
             -Name 'install-retained-state-requires-native-cleanup'
         Publish-HarnessPurgeReceipt -Layout $failClosedLayout
+        # Retire the state-purge intent so the Install path does NOT take the
+        # Complete-DefenseClawStatePurge branch (which handles a null native
+        # cleanup source gracefully once the purge intent has reached
+        # 'contract_locks_finalized'). We want the flow to reach the retained-
+        # state Install gate that fails closed when native_cleanup is missing.
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $failClosedLayout.PurgeIntentPath `
+            -Force
         $failClosedThrew = $false
         $failClosedMessage = ''
         try {
@@ -6490,6 +6498,20 @@ targets:
         $purgeFailClosedLayout = New-HarnessCommittedPurgeCase `
             -Name 'purge-requires-native-cleanup-source'
         Publish-HarnessPurgeReceipt -Layout $purgeFailClosedLayout
+        # The `exact-scope purge requires the authenticated native cleanup
+        # executable` gate at Invoke-DefenseClawExactScopeRecoveryPurge only
+        # fires when neither a state-purge intent nor a StateRoot survives.
+        # Retire both to steer Invoke-DefenseClawPreLayoutRecovery past
+        # Complete-DefenseClawStatePurge (which handles a null native cleanup
+        # gracefully once the intent has already reached
+        # 'contract_locks_finalized') and into the exact-scope recovery path.
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $purgeFailClosedLayout.PurgeIntentPath `
+            -Force
+        Microsoft.PowerShell.Management\Remove-Item `
+            -LiteralPath $purgeFailClosedLayout.StateRoot `
+            -Recurse `
+            -Force
         $purgeFailClosedThrew = $false
         $purgeFailClosedMessage = ''
         try {
