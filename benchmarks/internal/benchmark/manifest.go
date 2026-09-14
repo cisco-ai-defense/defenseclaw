@@ -28,7 +28,15 @@ type NormalizationManifest struct {
 	OutputSHA256           string                    `json:"output_sha256"`
 	Partition              *PartitionMetadata        `json:"partition,omitempty"`
 	Source                 *NormalizationSource      `json:"source,omitempty"`
+	Inputs                 []NormalizationInput      `json:"inputs,omitempty"`
 	TrajectorySource       json.RawMessage           `json:"trajectory_source,omitempty"`
+}
+
+// NormalizationInput binds a merged corpus to the normalized corpora used to
+// construct it without exposing local paths or source payload values.
+type NormalizationInput struct {
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
 }
 
 // NormalizationSource binds a single-source adapter output to the exact local
@@ -205,6 +213,11 @@ func buildCorpusManifest(
 			len(source.TrajectoryVerification) > 160 ||
 			!validSHA256(source.SHA256) {
 			return CorpusManifest{}, fmt.Errorf("normalization source metadata is invalid")
+		}
+	}
+	for _, input := range normalized.Inputs {
+		if input.Bytes < 0 || !validSHA256(input.SHA256) {
+			return CorpusManifest{}, fmt.Errorf("normalization input metadata is invalid")
 		}
 	}
 	if normalized.Partition != nil {

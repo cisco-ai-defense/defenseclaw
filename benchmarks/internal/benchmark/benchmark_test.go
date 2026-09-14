@@ -998,6 +998,46 @@ func TestNormalizationSourceMetadataIsStrictAndPreserved(t *testing.T) {
 	}
 }
 
+func TestNormalizationInputMetadataIsStrictAndPreserved(t *testing.T) {
+	cases := []Case{minimalCase("merged", TruthBenign, DispositionAllow)}
+	corpusDigest := strings.Repeat("c", 64)
+	normalization := NormalizationManifest{
+		SchemaVersion:     SchemaVersion,
+		Datasets:          []string{"test"},
+		Cases:             1,
+		Counts:            map[string]int{"test": 1},
+		AdapterStatistics: map[string]map[string]int{},
+		OutputSHA256:      corpusDigest,
+		Inputs: []NormalizationInput{
+			{Bytes: 42, SHA256: strings.Repeat("a", 64)},
+			{Bytes: 84, SHA256: strings.Repeat("b", 64)},
+		},
+	}
+	data, err := json.Marshal(normalization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := BuildCorpusManifest(cases, corpusDigest, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Normalization == nil || len(manifest.Normalization.Inputs) != 2 ||
+		manifest.Normalization.Inputs[1].Bytes != 84 ||
+		manifest.Normalization.Inputs[1].SHA256 != strings.Repeat("b", 64) {
+		t.Fatalf("input metadata was not preserved: %+v", manifest.Normalization)
+	}
+
+	normalization.Inputs[0].SHA256 = "invalid"
+	data, err = json.Marshal(normalization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := BuildCorpusManifest(cases, corpusDigest, data); err == nil ||
+		!strings.Contains(err.Error(), "input metadata") {
+		t.Fatalf("invalid input digest error=%v", err)
+	}
+}
+
 func TestTruthOverlayChangesOnlyTruthAndBindsItsDigest(t *testing.T) {
 	source := []Case{
 		minimalCase("benign", TruthBenign, DispositionAllow),

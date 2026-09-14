@@ -9,6 +9,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from benchmarks.scripts.benchmark_merge_corpora import normalization_inputs
 from benchmarks.scripts.benchmark_normalize import write_outputs
 
 
@@ -57,6 +58,26 @@ class MergeCorporaTest(unittest.TestCase):
             {row["payload"]["tool_name"] for row in merged},
         )
         self.assertEqual(1, metadata["exact_payload_duplicates_removed"])
+
+    def test_input_metadata_is_path_independent_and_content_deduplicated(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            first = root / "z-last.jsonl"
+            duplicate = root / "a-first-copy.jsonl"
+            second = root / "middle.jsonl"
+            first.write_bytes(b'{"id":"same"}\n')
+            duplicate.write_bytes(first.read_bytes())
+            second.write_bytes(b'{"id":"other"}\n')
+
+            left = normalization_inputs([first, second, duplicate])
+            right = normalization_inputs([second, duplicate, first])
+
+        self.assertEqual(left, right)
+        self.assertEqual(2, len(left))
+        self.assertEqual(
+            sorted(left, key=lambda item: (item["sha256"], item["bytes"])),
+            left,
+        )
 
 
 if __name__ == "__main__":

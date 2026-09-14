@@ -36,6 +36,14 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def normalization_inputs(paths: list[Path]) -> list[dict[str, object]]:
+    identities = {
+        (sha256_file(path), path.stat().st_size)
+        for path in paths
+    }
+    return [{"sha256": digest, "bytes": size} for digest, size in sorted(identities)]
+
+
 def rows(paths: list[Path]) -> Iterator[dict[str, object]]:
     for path in paths:
         with path.open("r", encoding="utf-8") as handle:
@@ -61,10 +69,7 @@ def main() -> int:
     counts: dict[str, int] = {}
     write_outputs(output, manifest_path, sorted(selected), rows(inputs), counts)
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["inputs"] = [
-        {"sha256": sha256_file(path), "bytes": path.stat().st_size}
-        for path in inputs
-    ]
+    manifest["inputs"] = normalization_inputs(inputs)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(
         json.dumps(
