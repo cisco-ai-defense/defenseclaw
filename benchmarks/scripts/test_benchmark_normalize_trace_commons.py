@@ -41,11 +41,12 @@ class TraceCommonsAdapterTests(unittest.TestCase):
                 ],
             }
         ]
-        cases, manifest = adapter.normalize(rows, "a" * 40)
+        cases, manifest = adapter.normalize(rows, adapter.SOURCE_REVISION)
         self.assertEqual(len(cases), 1)
         self.assertEqual(cases[0]["payload"]["args"]["command"], "printf ok")
         self.assertEqual(cases[0]["payload"]["command"], "printf ok")
         self.assertEqual(cases[0]["payload"]["dialect"], "posix")
+        self.assertEqual(cases[0]["split"], "smoke")
         self.assertEqual(cases[0]["truth"]["deterministic_truth"], "benign")
         statistics = manifest["adapter_statistics"][adapter.ADAPTER]
         self.assertEqual(statistics["source_tool_calls"], 2)
@@ -80,7 +81,7 @@ class TraceCommonsAdapterTests(unittest.TestCase):
                 ],
             }
         )
-        cases, _ = adapter.normalize([{"session_id": "one", "messages": [message]}], "a" * 40)
+        cases, _ = adapter.normalize([{"session_id": "one", "messages": [message]}], adapter.SOURCE_REVISION)
 
         self.assertEqual(cases[0]["payload"]["dialect"], "powershell")
         self.assertEqual(cases[0]["payload"]["command"], "Remove-Item -Recurse -Force build")
@@ -94,7 +95,7 @@ class TraceCommonsAdapterTests(unittest.TestCase):
         )
         cases, _ = adapter.normalize(
             [{"session_id": "one", "messages": [message]}, {"session_id": "two", "messages": [message]}],
-            "b" * 40,
+            adapter.SOURCE_REVISION,
         )
         self.assertEqual(len(cases), 2)
         self.assertEqual(len({case["strata"]["split_group"] for case in cases}), 2)
@@ -121,9 +122,130 @@ class TraceCommonsAdapterTests(unittest.TestCase):
                     ],
                 }
             ],
-            "c" * 40,
+            adapter.SOURCE_REVISION,
         )
         adapter.validate_cases(cases, Path("benchmarks/schema/case-v1.schema.json"))
+
+    def test_redacts_secret_fields_and_identity_fragments_but_preserves_safe_literals(self) -> None:
+        message = json.dumps(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "Bash",
+                            "arguments": {
+                                "command": "tool --token provided-by-store /home/contributor/repo",
+                                "description": "inspect src safely",
+                                "password": "provided-by-store",
+                            },
+                        }
+                    }
+                ],
+            }
+        )
+        cases, manifest = adapter.normalize(
+            [{"session_id": "one", "messages": [message]}], adapter.SOURCE_REVISION
+        )
+        arguments = cases[0]["payload"]["args"]
+        self.assertEqual(arguments["description"], "inspect src safely")
+        self.assertEqual(arguments["password"], "<redacted:secret>")
+        self.assertEqual(
+            arguments["command"], "tool --token <redacted:secret> /home/<redacted-user>/repo"
+        )
+        statistics = manifest["adapter_statistics"][adapter.ADAPTER]
+        self.assertEqual(statistics["privacy_redacted_sensitive_values"], 1)
+        self.assertEqual(statistics["privacy_redacted_string_values"], 1)
+
+    def test_quoted_and_bearer_command_secrets_are_redacted(self) -> None:
+        statistics = adapter.Counter()
+        projected = adapter.redact_string(
+            "tool --token='provided-by-store' -H 'Authorization: Bearer provided-by-store' "
+            "-H 'Cookie: session=provided-by-store; preference=safe'",
+            sensitive_key=False,
+            statistics=statistics,
+        )
+        self.assertNotIn("provided-by-store", projected)
+        self.assertNotIn("preference=safe", projected)
+        self.assertGreaterEqual(projected.count("<redacted:secret>"), 3)
+
+    def test_common_structured_secret_keys_are_fully_redacted(self) -> None:
+        projected = adapter.secret_safe(
+            {
+                "api_key": "provided-by-store",
+                "accessKey": "provided-by-store",
+                "client-secret": "provided-by-store",
+                "nested": [{"session_key": "provided-by-store"}],
+            },
+            adapter.Counter(),
+        )
+        self.assertNotIn("provided-by-store", json.dumps(projected))
+
+    def test_rejects_unpinned_revision(self) -> None:
+        with self.assertRaisesRegex(ValueError, "revision differs"):
+            adapter.normalize([], "0" * 40)
+
+    def test_nested_headers_and_url_userinfo_are_redacted(self) -> None:
+        arguments = {
+            "headers": [{"Authorization": "Bearer provided-by-store"}],
+            "url": "https://contributor:provided-by-store@example.invalid/api",
+            "options": {"dry_run": True, "retries": 2},
+        }
+        projected = adapter.secret_safe(arguments, adapter.Counter())
+        self.assertEqual(projected["headers"][0]["Authorization"], "<redacted:secret>")
+        self.assertEqual(
+            projected["url"],
+            "https://<redacted-user>:<redacted:secret>@example.invalid/api",
+        )
+        self.assertEqual(projected["options"], {"dry_run": True, "retries": 2})
+
+    def test_nonfinite_and_oversized_arguments_are_quarantined(self) -> None:
+        messages = [
+            json.dumps(
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {"function": {"name": "Bash", "arguments": '{"command": NaN}'}},
+                        {
+                            "function": {
+                                "name": "Bash",
+                                "arguments": {"command": "x" * (adapter.MAX_ARGUMENT_BYTES + 1)},
+                            }
+                        },
+                    ],
+                }
+            )
+        ]
+        cases, manifest = adapter.normalize(
+            [{"session_id": "one", "messages": messages}], adapter.SOURCE_REVISION
+        )
+        self.assertEqual(cases, [])
+        statistics = manifest["adapter_statistics"][adapter.ADAPTER]
+        self.assertEqual(statistics["skipped_invalid_arguments"], 1)
+        self.assertEqual(statistics["skipped_oversized_arguments"], 1)
+
+    def test_duplicate_argument_keys_are_quarantined(self) -> None:
+        message = json.dumps(
+            {
+                "role": "assistant",
+                "tool_calls": [
+                    {
+                        "function": {
+                            "name": "Bash",
+                            "arguments": '{"command":"first","command":"second"}',
+                        }
+                    }
+                ],
+            }
+        )
+        cases, manifest = adapter.normalize(
+            [{"session_id": "one", "messages": [message]}], adapter.SOURCE_REVISION
+        )
+        self.assertEqual(cases, [])
+        self.assertEqual(
+            manifest["adapter_statistics"][adapter.ADAPTER]["skipped_invalid_arguments"],
+            1,
+        )
 
 
 if __name__ == "__main__":
