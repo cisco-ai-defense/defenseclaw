@@ -86,6 +86,14 @@ try {
                 -Name Invoke-DefenseClawManagedHookContractCleanup `
                 -CommandType Function
         ).ScriptBlock
+        # Captured before the lifecycle harnesses install their event-only
+        # Get-DefenseClawLifecycleStatus mocks. Later source-contract
+        # assertions must read the module's real body, not a mock's.
+        $script:HarnessRealLifecycleStatusSource = (
+            Microsoft.PowerShell.Core\Get-Command `
+                -Name Get-DefenseClawLifecycleStatus `
+                -CommandType Function
+        ).ScriptBlock.ToString()
         $readinessSource = (
             Microsoft.PowerShell.Core\Get-Command `
                 -Name Wait-DefenseClawEnterpriseReadiness `
@@ -8632,11 +8640,7 @@ targets:
         finally {
             $script:HarnessState = $savedHarnessState
         }
-        $statusSource = [string](
-            Microsoft.PowerShell.Core\Get-Command `
-                -Name Get-DefenseClawLifecycleStatus `
-                -CommandType Function
-        ).ScriptBlock
+        $statusSource = [string]$script:HarnessRealLifecycleStatusSource
         Assert-Harness `
             -Condition (
                 $statusSource -cmatch '-not\s+\$deferredConfigPending\s+-and'
