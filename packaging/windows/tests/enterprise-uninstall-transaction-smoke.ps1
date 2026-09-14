@@ -3319,6 +3319,13 @@ targets:
                 crash_at = $CrashAt
                 operation = 'uninstall'
                 events = $events
+                # The Set-DefenseClawPathAcl mock only delegates to the real
+                # ACL writer when it can resolve the case layout. Without this
+                # key every protected exchange file this harness publishes
+                # (notably the scope-bound contract cleanup receipt) kept its
+                # creator-owned inherited DACL, while the unmocked production
+                # reader still demanded the exact AdminFile contract.
+                layout = $layout
                 active_references = $InitialReferences
                 binary_present = -not $AlreadyUninstalled
                 installed = -not $AlreadyUninstalled
