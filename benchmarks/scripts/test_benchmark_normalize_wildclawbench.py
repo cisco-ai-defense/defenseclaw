@@ -178,6 +178,47 @@ class WildClawBenchNormalizerTest(unittest.TestCase):
         self.assertEqual([], cases)
         self.assertEqual(1, manifest["skipped"]["invalid_trajectory_json"])
 
+    def test_strict_manifest_is_value_free_and_regeneration_is_byte_identical(self) -> None:
+        cases, metadata = MODULE.normalize(
+            [source_row()], revision=REVISION, split="development"
+        )
+        first_body = "".join(MODULE.canonical_json(case) + "\n" for case in cases).encode(
+            "utf-8"
+        )
+        regenerated, regenerated_metadata = MODULE.normalize(
+            [source_row()], revision=REVISION, split="development"
+        )
+        second_body = "".join(
+            MODULE.canonical_json(case) + "\n" for case in regenerated
+        ).encode("utf-8")
+        first = MODULE.strict_manifest(cases, metadata, first_body)
+        second = MODULE.strict_manifest(regenerated, regenerated_metadata, second_body)
+        self.assertEqual(first_body, second_body)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            set(first),
+            {
+                "adapter_statistics",
+                "cases",
+                "counts",
+                "datasets",
+                "exact_payload_duplicates_removed",
+                "label_conflicts_excluded",
+                "output_sha256",
+                "schema_version",
+                "source",
+            },
+        )
+        self.assertEqual({MODULE.DATASET_ID: len(cases)}, first["counts"])
+        self.assertTrue(
+            all(
+                type(value) is int
+                for value in first["adapter_statistics"][MODULE.ADAPTER].values()
+            )
+        )
+        self.assertEqual("download-only", first["source"]["redistribution"])
+        self.assertNotIn("printf safe", json.dumps(first, sort_keys=True))
+
 
 if __name__ == "__main__":
     unittest.main()

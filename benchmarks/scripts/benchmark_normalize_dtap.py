@@ -32,8 +32,10 @@ from typing import Any
 
 SCHEMA_VERSION = "1"
 DATASET_ID = "AI-Secure/DTap-Bench-Agent-Trajectories"
+ADAPTER = "dtap-agent-trajectories-v3"
 SOURCE_URL = f"https://huggingface.co/datasets/{DATASET_ID}"
 LICENSE = "Apache-2.0"
+SOURCE_REDISTRIBUTION = "download-only"
 PINNED_REVISION = "836caf2fdd78b888ddd14fb62dc038e932e17898"
 NON_ENGLISH_SCRIPT = re.compile(
     "[\u0370-\u052f\u0590-\u08ff\u0900-\u109f\u1780-\u18af\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]"
@@ -48,9 +50,12 @@ MALICIOUS_EXCLUSION_REASON = (
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", required=True, type=Path)
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument("--root", type=Path)
+    source.add_argument("--existing-corpus", type=Path)
+    parser.add_argument("--legacy-manifest", type=Path)
     parser.add_argument("--revision", default=PINNED_REVISION)
-    parser.add_argument("--output", required=True, type=Path)
+    parser.add_argument("--output", type=Path)
     parser.add_argument("--manifest", type=Path)
     return parser.parse_args()
 
@@ -61,6 +66,152 @@ def sha256_file(path: Path) -> str:
         for chunk in iter(lambda: handle.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def source_inventory(root: Path) -> tuple[int, int, str]:
+    """Bind exactly the JSON files consumed by this adapter, without values."""
+
+    aggregate = hashlib.sha256(b"dtap-json-source-tree-v1\0")
+    byte_count = 0
+    file_count = 0
+    for path in sorted(root.rglob("*.json")):
+        relative = path.relative_to(root).as_posix()
+        size = path.stat().st_size
+        digest = sha256_file(path)
+        aggregate.update(f"{relative}\0{size}\0{digest}\n".encode("utf-8"))
+        byte_count += size
+        file_count += 1
+    if file_count == 0:
+        raise ValueError("DTap source tree contains no JSON files")
+    return byte_count, file_count, aggregate.hexdigest()
+
+
+def encode_rows(rows: list[dict[str, Any]]) -> bytes:
+    return "".join(
+        json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n" for row in rows
+    ).encode("utf-8")
+
+
+def strict_manifest(
+    rows: list[dict[str, Any]], counts: Counter[str], root: Path, revision: str
+) -> dict[str, Any]:
+    body = encode_rows(rows)
+    source_bytes, source_files, source_sha256 = source_inventory(root)
+    return {
+        "adapter_statistics": {
+            ADAPTER: {key: int(value) for key, value in sorted(counts.items())}
+        },
+        "cases": len(rows),
+        "counts": {DATASET_ID: len(rows)},
+        "datasets": [DATASET_ID],
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "output_sha256": hashlib.sha256(body).hexdigest(),
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "bytes": source_bytes,
+            "dataset": DATASET_ID,
+            "files": source_files,
+            "license": LICENSE,
+            "path": "**/*.json",
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "revision": revision,
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
+    }
+
+
+def repair_existing_manifest(corpus: Path, legacy_path: Path) -> dict[str, Any]:
+    """Upgrade a canonical legacy sidecar using provenance fields only.
+
+    Payloads are deliberately never selected or interpreted here. The corpus
+    is streamed solely to verify its digest, source contract, and split-group
+    assignments before retaining the legacy adapter counters.
+    """
+
+    legacy = load_object(legacy_path)
+    expected_legacy_keys = {
+        "counts",
+        "dataset",
+        "label_limitation",
+        "license",
+        "output_sha256",
+        "revision",
+        "row_count",
+        "schema_version",
+        "source_url",
+    }
+    if set(legacy) != expected_legacy_keys:
+        raise ValueError("unexpected DTap legacy manifest fields")
+    if (
+        legacy["dataset"] != DATASET_ID
+        or legacy["revision"] != PINNED_REVISION
+        or legacy["license"] != LICENSE
+        or legacy["source_url"] != SOURCE_URL
+        or legacy["schema_version"] != SCHEMA_VERSION
+    ):
+        raise ValueError("DTap legacy manifest provenance differs from the pin")
+    statistics = legacy["counts"]
+    if not isinstance(statistics, dict) or any(
+        not isinstance(key, str) or type(value) is not int or value < 0
+        for key, value in statistics.items()
+    ):
+        raise ValueError("DTap legacy counts are not integer statistics")
+
+    corpus_hash = hashlib.sha256()
+    cases = 0
+    group_splits: dict[str, str] = {}
+    with corpus.open("rb") as handle:
+        for raw_line in handle:
+            corpus_hash.update(raw_line)
+            row = json.loads(raw_line)
+            source = row.get("source")
+            strata = row.get("strata")
+            split = row.get("split")
+            if not isinstance(source, dict) or not isinstance(strata, dict):
+                raise ValueError("DTap corpus is missing provenance metadata")
+            if (
+                source.get("dataset") != DATASET_ID
+                or source.get("revision") != PINNED_REVISION
+                or source.get("license") != LICENSE
+                or source.get("redistribution") != SOURCE_REDISTRIBUTION
+            ):
+                raise ValueError("DTap corpus provenance differs from the pin")
+            group = strata.get("split_group")
+            if (
+                split not in {"development", "validation", "test"}
+                or not isinstance(group, str)
+                or re.fullmatch(r"[0-9a-f]{24}", group) is None
+            ):
+                raise ValueError("DTap corpus has invalid split-group metadata")
+            if group in group_splits and group_splits[group] != split:
+                raise ValueError("DTap split group crosses partitions")
+            group_splits[group] = split
+            cases += 1
+
+    digest = corpus_hash.hexdigest()
+    if digest != legacy["output_sha256"] or cases != legacy["row_count"]:
+        raise ValueError("DTap corpus identity differs from the legacy manifest")
+    return {
+        "adapter_statistics": {
+            ADAPTER: {key: int(value) for key, value in sorted(statistics.items())}
+        },
+        "cases": cases,
+        "counts": {DATASET_ID: cases},
+        "datasets": [DATASET_ID],
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "output_sha256": digest,
+        "schema_version": SCHEMA_VERSION,
+        "trajectory_source": {
+            "dataset": DATASET_ID,
+            "license": LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "revision": PINNED_REVISION,
+            "source_url": SOURCE_URL,
+        },
+    }
 
 
 def load_object(path: Path) -> dict[str, Any]:
@@ -410,31 +561,28 @@ def normalize(root: Path, revision: str) -> tuple[list[dict[str, Any]], Counter[
 
 def main() -> int:
     args = parse_args()
+    if args.existing_corpus is not None:
+        if args.legacy_manifest is None or args.manifest is None or args.output is not None:
+            raise ValueError(
+                "manifest repair requires --legacy-manifest and --manifest, without --output"
+            )
+        manifest = repair_existing_manifest(args.existing_corpus, args.legacy_manifest)
+        args.manifest.parent.mkdir(parents=True, exist_ok=True)
+        args.manifest.write_text(
+            json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        print(json.dumps({"manifest": str(args.manifest), **manifest}, sort_keys=True))
+        return 0
+    if args.output is None or args.legacy_manifest is not None:
+        raise ValueError("source normalization requires --output and forbids --legacy-manifest")
+    assert args.root is not None
     rows, counts = normalize(args.root, args.revision)
+    output_data = encode_rows(rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    with args.output.open("w", encoding="utf-8", newline="\n") as handle:
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+    args.output.write_bytes(output_data)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest = {
-        "dataset": DATASET_ID,
-        "license": LICENSE,
-        "output_sha256": sha256_file(args.output),
-        "revision": args.revision,
-        "row_count": len(rows),
-        "schema_version": SCHEMA_VERSION,
-        "source_url": SOURCE_URL,
-        "counts": dict(sorted(counts.items())),
-        "label_limitation": (
-            "Successful benign trajectories are in-scope benign FPR truth. Source attack_success labels prove only "
-            "the complete malicious trajectory, not each emitted chunk; malicious chunks remain out-of-scope, "
-            "detect-only, contextual trajectory-success candidates with proof pending because this adapter has no "
-            "independent exact proof verifier. Only English trajectories with real tool arguments and matching "
-            "non-error result evidence are projected; prompts, prose, evaluator/judge text, and result content are "
-            "not authoritative action evidence."
-        ),
-    }
+    manifest = strict_manifest(rows, counts, args.root, args.revision)
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     print(json.dumps({"rows": len(rows), "counts": dict(sorted(counts.items()))}, sort_keys=True))
     return 0

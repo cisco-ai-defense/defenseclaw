@@ -31,9 +31,11 @@ from typing import Any
 
 SCHEMA_VERSION = "1"
 DATASET_ID = "internlm/WildClawBench-Trajectories"
+ADAPTER = "wildclawbench-result-authority-v2"
 SOURCE_URL = "https://huggingface.co/datasets/internlm/WildClawBench-Trajectories"
 SOURCE_LICENSE = "MIT"
 SOURCE_REDISTRIBUTION = "download-only"
+SOURCE_REVISION = "d2816016a7a7b41fa6b7ba368b28ddafcb54fd93"
 SOURCE_PATH = "train.parquet"
 SOURCE_BYTES = 25_358_054
 SOURCE_SHA256 = "9be080beb826b4c620d0a5d2987d1a0d3be758248076dfff48807fb11fcb4c17"
@@ -524,8 +526,43 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def strict_manifest(
+    cases: list[dict[str, Any]], metadata: dict[str, Any], output_data: bytes
+) -> dict[str, Any]:
+    statistics = dict(metadata["counts"])
+    statistics.update(
+        {f"skipped_{key}": value for key, value in metadata["skipped"].items()}
+    )
+    return {
+        "adapter_statistics": {
+            ADAPTER: {key: int(value) for key, value in sorted(statistics.items())}
+        },
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "datasets": [DATASET_ID],
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "output_sha256": hashlib.sha256(output_data).hexdigest(),
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": SOURCE_REVISION,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": SOURCE_PATH,
+            "bytes": SOURCE_BYTES,
+            "sha256": SOURCE_SHA256,
+            "source_url": SOURCE_URL,
+        },
+    }
+
+
 def main() -> int:
     args = parse_args()
+    if args.revision != SOURCE_REVISION:
+        raise ValueError(
+            f"unexpected source revision: {args.revision}; expected {SOURCE_REVISION}"
+        )
     if args.input.stat().st_size != SOURCE_BYTES:
         raise ValueError(
             f"unexpected source size: {args.input.stat().st_size}; expected {SOURCE_BYTES}"
@@ -538,19 +575,7 @@ def main() -> int:
     )
     validate_cases(cases, args.schema)
     output_data = "".join(canonical_json(case) + "\n" for case in cases).encode("utf-8")
-    manifest = {
-        **manifest,
-        "source": {
-            "dataset": DATASET_ID,
-            "revision": args.revision,
-            "license": SOURCE_LICENSE,
-            "redistribution": SOURCE_REDISTRIBUTION,
-            "path": SOURCE_PATH,
-            "bytes": SOURCE_BYTES,
-            "sha256": SOURCE_SHA256,
-        },
-        "output_sha256": hashlib.sha256(output_data).hexdigest(),
-    }
+    manifest = strict_manifest(cases, manifest, output_data)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     atomic_write(args.output, output_data)
     atomic_write(

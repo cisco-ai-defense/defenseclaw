@@ -358,6 +358,81 @@ func TestRunBenchmarkEvaluatesRowsPromotedByTruthOverlay(t *testing.T) {
 	}
 }
 
+func TestRunBenchmarkStrictTrajectoryAdapterManifests(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubRunBinaryProvenance(t, repoRoot)
+	for _, test := range []struct {
+		dataset          string
+		adapter          string
+		revision         string
+		license          string
+		trajectorySource bool
+	}{
+		{dataset: "AI-Secure/DTap-Bench-Agent-Trajectories", adapter: "dtap-agent-trajectories-v3", revision: "836caf2fdd78b888ddd14fb62dc038e932e17898", license: "Apache-2.0", trajectorySource: true},
+		{dataset: "internlm/WildClawBench-Trajectories", adapter: "wildclawbench-result-authority-v2", revision: "d2816016a7a7b41fa6b7ba368b28ddafcb54fd93", license: "MIT"},
+	} {
+		t.Run(test.adapter, func(t *testing.T) {
+			dir := t.TempDir()
+			benchmarkCase := benchmark.Case{
+				SchemaVersion: benchmark.SchemaVersion,
+				ID:            test.adapter + "/case",
+				Source: benchmark.Source{
+					Dataset: test.dataset, Revision: test.revision, OriginalID: "case",
+					License: test.license, Redistribution: "download-only",
+				},
+				Split:   "development",
+				Surface: "action",
+				Payload: benchmark.Payload{ToolName: "shell", Command: "echo safe", Dialect: "posix"},
+				Truth: benchmark.Truth{
+					SourceTruth: benchmark.TruthBenign, DeterministicTruth: benchmark.DeterministicBenign,
+					LabelConfidence: "high", LabelSource: "source", Applicability: benchmark.InScope,
+					ExpectedDisposition: benchmark.DispositionAllow,
+				},
+			}
+			corpusPath := writeJSONLForTest(t, dir, "cases.jsonl", benchmarkCase)
+			corpusData, err := os.ReadFile(corpusPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			manifest := benchmark.NormalizationManifest{
+				SchemaVersion: benchmark.SchemaVersion, Datasets: []string{test.dataset}, Cases: 1,
+				Counts: map[string]int{test.dataset: 1}, AdapterStatistics: map[string]map[string]int{test.adapter: {"cases": 1}},
+				OutputSHA256: fmt.Sprintf("%x", sha256.Sum256(corpusData)),
+				Source: &benchmark.NormalizationSource{
+					Dataset: test.dataset, Revision: test.revision, License: test.license,
+					Redistribution: "download-only", Path: "source", Bytes: 1, SHA256: strings.Repeat("a", 64),
+				},
+			}
+			if test.trajectorySource {
+				manifest.TrajectorySource = json.RawMessage(fmt.Sprintf(
+					`{"dataset":%q,"license":%q,"redistribution":"download-only","revision":%q}`,
+					test.dataset, test.license, test.revision,
+				))
+			}
+			manifestData, err := json.Marshal(manifest)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "cases.manifest.json"), manifestData, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := runBenchmark([]string{
+				"--corpus", corpusPath,
+				"--dataset-lock", filepath.Join(repoRoot, "benchmarks", "datasets.lock.json"),
+				"--repo-root", repoRoot,
+				"--profiles", "default",
+				"--run-id", test.adapter,
+				"--output", filepath.Join(dir, "output"),
+			}, &bytes.Buffer{}); err != nil {
+				t.Fatalf("runner rejected strict manifest: %v", err)
+			}
+		})
+	}
+}
+
 func TestRunBenchmarkLoadsAndLabelsOptInPolicyPack(t *testing.T) {
 	dir := t.TempDir()
 	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))

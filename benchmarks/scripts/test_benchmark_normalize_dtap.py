@@ -2,6 +2,7 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -145,6 +146,113 @@ class DTapNormalizerTest(unittest.TestCase):
         self.assertNotIn("_ordinal", sparse_projected[0][1]["events"][0])
         with self.assertRaises(ValueError):
             normalizer.normalize(Path("/does/not/exist"), "not-the-pinned-revision")
+
+    def test_strict_manifest_is_value_free_and_regeneration_is_byte_identical(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benign = root / "research" / "benign"
+            benign.mkdir(parents=True)
+            (benign / "one.json").write_text(
+                json.dumps(
+                    trace(
+                        agent_call("read", {"path": "/tmp/report"}),
+                        tool_result("read", {"success": True}),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            (benign / "judge_result.json").write_text(
+                json.dumps({"task_success": True}), encoding="utf-8"
+            )
+            first_rows, first_counts = normalizer.normalize(
+                root, normalizer.PINNED_REVISION
+            )
+            second_rows, second_counts = normalizer.normalize(
+                root, normalizer.PINNED_REVISION
+            )
+            first_body = normalizer.encode_rows(first_rows)
+            second_body = normalizer.encode_rows(second_rows)
+            first = normalizer.strict_manifest(
+                first_rows, first_counts, root, normalizer.PINNED_REVISION
+            )
+            second = normalizer.strict_manifest(
+                second_rows, second_counts, root, normalizer.PINNED_REVISION
+            )
+        self.assertEqual(first_body, second_body)
+        self.assertEqual(first, second)
+        self.assertEqual(
+            set(first),
+            {
+                "adapter_statistics",
+                "cases",
+                "counts",
+                "datasets",
+                "exact_payload_duplicates_removed",
+                "label_conflicts_excluded",
+                "output_sha256",
+                "schema_version",
+                "source",
+            },
+        )
+        self.assertEqual({normalizer.DATASET_ID: 1}, first["counts"])
+        self.assertTrue(
+            all(
+                type(value) is int
+                for value in first["adapter_statistics"][normalizer.ADAPTER].values()
+            )
+        )
+        self.assertEqual("download-only", first["source"]["redistribution"])
+        self.assertNotIn("/tmp/report", json.dumps(first, sort_keys=True))
+
+    def test_existing_canonical_sidecar_repair_preserves_statistics_and_provenance(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            benign = root / "research" / "benign"
+            benign.mkdir(parents=True)
+            (benign / "one.json").write_text(
+                json.dumps(
+                    trace(
+                        agent_call("read", {"path": "/tmp/private-report"}),
+                        tool_result("read", {"success": True}),
+                    )
+                ),
+                encoding="utf-8",
+            )
+            (benign / "judge_result.json").write_text(
+                json.dumps({"task_success": True}), encoding="utf-8"
+            )
+            rows, counts = normalizer.normalize(root, normalizer.PINNED_REVISION)
+            body = normalizer.encode_rows(rows)
+            corpus = root.parent / "cases.jsonl"
+            corpus.write_bytes(body)
+            legacy = {
+                "counts": dict(counts),
+                "dataset": normalizer.DATASET_ID,
+                "label_limitation": "value-free label contract",
+                "license": normalizer.LICENSE,
+                "output_sha256": hashlib.sha256(body).hexdigest(),
+                "revision": normalizer.PINNED_REVISION,
+                "row_count": len(rows),
+                "schema_version": normalizer.SCHEMA_VERSION,
+                "source_url": normalizer.SOURCE_URL,
+            }
+            legacy_path = root.parent / "legacy.json"
+            legacy_path.write_text(json.dumps(legacy), encoding="utf-8")
+            first = normalizer.repair_existing_manifest(corpus, legacy_path)
+            second = normalizer.repair_existing_manifest(corpus, legacy_path)
+        self.assertEqual(first, second)
+        self.assertEqual({normalizer.DATASET_ID: len(rows)}, first["counts"])
+        self.assertEqual(
+            dict(sorted(counts.items())),
+            first["adapter_statistics"][normalizer.ADAPTER],
+        )
+        self.assertEqual(
+            "download-only", first["trajectory_source"]["redistribution"]
+        )
+        self.assertEqual(
+            normalizer.PINNED_REVISION, first["trajectory_source"]["revision"]
+        )
+        self.assertNotIn("/tmp/private-report", json.dumps(first, sort_keys=True))
 
 
 if __name__ == "__main__":
