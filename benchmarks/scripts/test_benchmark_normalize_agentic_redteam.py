@@ -37,7 +37,9 @@ class AgenticRedTeamManifestTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "case.json").write_text(json.dumps(source_row()), encoding="utf-8")
-            rows, manifest = adapter.normalize(root, "fixture-revision", "validation")
+            rows, manifest = adapter.normalize(
+                root, adapter.SOURCE_REVISION, adapter.PRE_PARTITION_SPLIT, verify_source=False
+            )
 
         self.assertEqual(len(rows), 2)
         self.assertEqual(manifest["datasets"], ["agentic-redteam-benchmark"])
@@ -84,10 +86,31 @@ class AgenticRedTeamManifestTests(unittest.TestCase):
             current = child
         self.assertIsNone(adapter.bounded_arguments(nested))
 
+    def test_rejects_unpinned_revision_partition_and_source_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "case.json").write_text(json.dumps(source_row()), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "datasets.lock.json"):
+                adapter.normalize(
+                    root, "moving-revision", adapter.PRE_PARTITION_SPLIT, verify_source=False
+                )
+            with self.assertRaisesRegex(ValueError, "pre-partitioned"):
+                adapter.normalize(
+                    root, adapter.SOURCE_REVISION, "development", verify_source=False
+                )
+            with self.assertRaisesRegex(ValueError, "pinned inventory"):
+                adapter.normalize(root, adapter.SOURCE_REVISION, adapter.PRE_PARTITION_SPLIT)
+
     def test_database_identity_comes_from_source_metadata_not_arguments(self) -> None:
         trajectory = [
             {"action": {"type": "tool_call", "name": "db.query", "args": {"db": "one", "sql": "SELECT 1"}}},
-            {"action": {"type": "tool_call", "name": "db.execute", "args": {"db": "two", "sql": "TRUNCATE TABLE logs"}}},
+            {
+                "action": {
+                    "type": "tool_call",
+                    "name": "db.execute",
+                    "args": {"db": "two", "sql": "TRUNCATE TABLE logs"},
+                }
+            },
         ]
         first = adapter.tool_events(trajectory, 1, "source-one")
         second = adapter.tool_events(trajectory, 1, "source-two")

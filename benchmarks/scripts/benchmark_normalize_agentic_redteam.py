@@ -24,6 +24,9 @@ from typing import Any
 
 SAFE_TOOL = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,159}$")
 DETECT_DECISIONS = {"KILL_SESSION", "WARN"}
+SOURCE_REVISION = "12ddc82333e5df3581341493df4513a24cfc61bb"
+PRE_PARTITION_SPLIT = "smoke"
+SOURCE_FILES_SHA256 = "b963a4e12404316acd025c1288f0720a524308a4752e2340f1abba17c62fabd1"
 MAX_ARGUMENT_BYTES = 64 * 1024
 MAX_ARGUMENT_DEPTH = 8
 MAX_ARGUMENT_NODES = 1024
@@ -35,7 +38,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--split", choices=("development", "validation", "test"), default="validation")
+    parser.add_argument("--split", choices=(PRE_PARTITION_SPLIT,), default=PRE_PARTITION_SPLIT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     return parser.parse_args()
@@ -163,7 +166,13 @@ def case_row(
     }
 
 
-def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def normalize(
+    root: Path, revision: str, split: str, *, verify_source: bool = True
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if revision != SOURCE_REVISION:
+        raise ValueError("Agentic RedTeam revision differs from datasets.lock.json")
+    if split != PRE_PARTITION_SPLIT:
+        raise ValueError("Agentic RedTeam rows must remain pre-partitioned")
     rows: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
     source_files: list[dict[str, Any]] = []
@@ -202,6 +211,11 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         rows.append(case_row(source, revision, split, pre, "benign"))
         rows.append(case_row(source, revision, split, at_drift, "malicious"))
     rows.sort(key=lambda row: str(row["id"]))
+    source_files_sha256 = hashlib.sha256(
+        json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    if verify_source and source_files_sha256 != SOURCE_FILES_SHA256:
+        raise ValueError("Agentic RedTeam source bytes differ from pinned inventory")
     truth_counts = Counter(row["truth"]["source_truth"] for row in rows)
     argument_events = sum(
         bool(event["args"])
@@ -239,9 +253,7 @@ def normalize(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any
             "source_revision": revision,
             "source_license": "CC-BY-4.0",
             "split": split,
-            "source_files_sha256": hashlib.sha256(
-                json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
-            ).hexdigest(),
+            "source_files_sha256": source_files_sha256,
             "normalization": (
                 "original-tier tool names and bounded JSON arguments through the labeled drift step plus "
                 "paired pre-drift prefixes; goals, plans, thoughts, observations, raw calls, and post-drift "
