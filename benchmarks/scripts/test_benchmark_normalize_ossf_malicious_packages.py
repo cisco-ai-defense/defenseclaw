@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -140,3 +141,30 @@ def test_revision_and_real_source_fingerprints_are_enforced() -> None:
     resolved, entries = MODULE.verify_source(source, MODULE.SOURCE_REVISION)
     assert resolved == source.resolve()
     assert len(entries) > 200_000
+
+
+def test_tracked_dirty_input_is_rejected_but_untracked_is_irrelevant(tmp_path: Path) -> None:
+    repository = tmp_path / "source"
+    repository.mkdir()
+    subprocess.run(["git", "init", "-q", str(repository)], check=True)
+    subprocess.run(["git", "-C", str(repository), "config", "user.name", "Test User"], check=True)
+    subprocess.run(
+        ["git", "-C", str(repository), "config", "user.email", "test.user@example.invalid"],
+        check=True,
+    )
+    (repository / "osv").mkdir()
+    tracked = repository / "osv" / "report.json"
+    tracked.write_text("{}\n", encoding="utf-8")
+    (repository / "LICENSE").write_text("test license\n", encoding="utf-8")
+    (repository / "README.md").write_text("test readme\n", encoding="utf-8")
+    subprocess.run(["git", "-C", str(repository), "add", *MODULE.INCLUDE_PATHS], check=True)
+    subprocess.run(["git", "-C", str(repository), "commit", "-qm", "fixture"], check=True)
+
+    MODULE.require_clean_tracked(repository)
+    tracked.write_text("modified\n", encoding="utf-8")
+    with pytest.raises(ValueError, match="tracked include paths must be clean"):
+        MODULE.require_clean_tracked(repository)
+
+    tracked.write_text("{}\n", encoding="utf-8")
+    (repository / "osv" / "untracked.json").write_text("untracked\n", encoding="utf-8")
+    MODULE.require_clean_tracked(repository)

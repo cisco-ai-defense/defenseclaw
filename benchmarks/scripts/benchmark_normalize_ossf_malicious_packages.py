@@ -110,6 +110,35 @@ def _git(root: Path, *arguments: str) -> bytes:
     return completed.stdout
 
 
+def require_clean_tracked(root: Path) -> None:
+    """Reject modifications to tracked inputs without scanning untracked files."""
+
+    try:
+        completed = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "diff-index",
+                "--quiet",
+                "--ignore-submodules=all",
+                "HEAD",
+                "--",
+                *INCLUDE_PATHS,
+            ],
+            check=False,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            timeout=120,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ValueError("unable to verify tracked source content with git") from exc
+    if completed.returncode == 1:
+        raise ValueError("pinned source tracked include paths must be clean")
+    if completed.returncode != 0:
+        raise ValueError("unable to verify tracked source content with git")
+
+
 def verify_source(root: Path, revision: str) -> tuple[Path, list[str]]:
     if revision != SOURCE_REVISION:
         raise ValueError(f"revision must equal pinned revision {SOURCE_REVISION}")
@@ -122,16 +151,10 @@ def verify_source(root: Path, revision: str) -> tuple[Path, list[str]]:
     osv_tree = _git(resolved, "rev-parse", "HEAD:osv").decode("ascii").strip()
     if osv_tree != SOURCE_OSV_TREE:
         raise ValueError("source OSV tree does not match pinned revision")
-    dirty = _git(
-        resolved,
-        "status",
-        "--porcelain=v1",
-        "--untracked-files=all",
-        "--",
-        *INCLUDE_PATHS,
-    )
-    if dirty:
-        raise ValueError("pinned source include paths must be clean")
+    # Untracked files are irrelevant: normalization is driven exclusively by
+    # the exact pinned ls-tree entry list below.  A tracked-only diff avoids an
+    # unbounded untracked-directory walk across this ~237k-file checkout.
+    require_clean_tracked(resolved)
 
     index = _git(
         resolved,
