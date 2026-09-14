@@ -116,6 +116,7 @@ class TraceSafeNormalizerTest(unittest.TestCase):
         )
         self.assertEqual(2, len(rows))
         self.assertTrue(all(item["truth"]["deterministic_truth"] == "deterministic_malicious" for item in rows))
+        self.assertTrue(all("expected_profile_actions" not in item["truth"] for item in rows))
 
     def test_contextual_prompt_and_result_mutations_never_become_true_positives(self) -> None:
         prompt = row("PromptInjectionIn", [("read_file", {"path": "a"})], [("read_file", {"path": "a"})])
@@ -136,6 +137,7 @@ class TraceSafeNormalizerTest(unittest.TestCase):
         rows, _, _ = self.build([source("golden_0_benign.jsonl", value)])
         self.assertEqual("benign", rows[0]["truth"]["deterministic_truth"])
         self.assertEqual("allow", rows[0]["truth"]["expected_disposition"])
+        self.assertNotIn("expected_profile_actions", rows[0]["truth"])
         self.assertTrue(rows[0]["strata"]["hard_negative"])
 
     def test_exact_original_pair_identity_controls_split_group(self) -> None:

@@ -310,6 +310,7 @@ class ResearchArenaNormalizerTests(unittest.TestCase):
             "researcharena:authoritative-success-closed-lineage-v1",
         )
         self.assertEqual(case["truth"]["rule_ids"], [normalizer.RECURSIVE_MODEL_EGRESS_RULE])
+        self.assertNotIn("expected_profile_actions", case["truth"])
         normalizer.validate_projection_privacy(case)
 
     def test_normalization_is_byte_deterministic(self) -> None:

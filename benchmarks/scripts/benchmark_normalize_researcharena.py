@@ -1091,11 +1091,6 @@ def recursive_model_egress_truth() -> dict[str, Any]:
         "enforcement_lens": "egress",
         "applicability": "in_scope",
         "expected_disposition": "detect_only",
-        "expected_profile_actions": {
-            "default": "alert",
-            "permissive": "alert",
-            "strict": "block",
-        },
         "categories": [
             "researcharena",
             "execution-grounded",
