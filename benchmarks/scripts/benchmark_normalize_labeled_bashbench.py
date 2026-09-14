@@ -545,6 +545,67 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
     return cases, manifest
 
 
+def runner_manifest(
+    legacy: dict[str, Any],
+    *,
+    input_path: Path,
+    revision: str,
+    output_sha256: str,
+) -> dict[str, Any]:
+    """Convert adapter diagnostics to the strict benchmark-runner contract."""
+    statistics: dict[str, int] = {}
+    nested = {
+        "category_counts": "category",
+        "action_type_counts": "action_type",
+        "danger_level_counts": "danger_level",
+        "skipped_row_counts": "skipped",
+    }
+    excluded = {
+        "schema_version",
+        "source_id",
+        "source_url",
+        "source_revision",
+        "source_license",
+        "source_redistribution",
+        "split",
+        "metric_boundary",
+        *nested,
+    }
+    for key, value in legacy.items():
+        if key in excluded:
+            continue
+        if isinstance(value, bool):
+            statistics[key] = int(value)
+        elif isinstance(value, int):
+            statistics[key] = value
+    for key, prefix in nested.items():
+        for label, value in sorted(legacy[key].items()):
+            statistics[f"{prefix}_{label}"] = int(value)
+    cases = int(legacy["total_case_count"])
+    source_sha256 = file_sha256(input_path)
+    return {
+        "schema_version": "1",
+        "datasets": [SOURCE_ID],
+        "cases": cases,
+        "counts": {SOURCE_ID: cases},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": int(legacy["divergent_coordinate_count"]),
+        "adapter_statistics": {"labeled-bashbench-v2": dict(sorted(statistics.items()))},
+        "output_sha256": output_sha256,
+        "source": {
+            "dataset": SOURCE_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": input_path.name,
+            "bytes": input_path.stat().st_size,
+            "rows": int(legacy["source_row_count"]),
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
+    }
+
+
 def validate_cases(rows: Sequence[dict[str, Any]], schema_path: Path) -> None:
     try:
         import jsonschema
@@ -561,19 +622,17 @@ def validate_cases(rows: Sequence[dict[str, Any]], schema_path: Path) -> None:
 
 def main() -> int:
     args = parse_args()
-    cases, manifest = normalize_rows(source_rows(args.input), revision=args.source_revision)
+    cases, legacy_manifest = normalize_rows(source_rows(args.input), revision=args.source_revision)
     validate_cases(cases, args.schema)
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
         for row in cases:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-    manifest.update(
-        {
-            "source_artifact_bytes": args.input.stat().st_size,
-            "source_artifact_sha256": file_sha256(args.input),
-            "output_sha256": file_sha256(args.output),
-            "case_schema_sha256": file_sha256(args.schema),
-        }
+    manifest = runner_manifest(
+        legacy_manifest,
+        input_path=args.input,
+        revision=args.source_revision,
+        output_sha256=file_sha256(args.output),
     )
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     manifest_path.parent.mkdir(parents=True, exist_ok=True)
@@ -584,8 +643,8 @@ def main() -> int:
                 "output": str(args.output),
                 "manifest": str(manifest_path),
                 "row_count": len(cases),
-                "atomic_count": manifest["unique_action_count"],
-                "stateful_count": manifest["stateful_sequence_count"],
+                "atomic_count": legacy_manifest["unique_action_count"],
+                "stateful_count": legacy_manifest["stateful_sequence_count"],
                 "output_sha256": manifest["output_sha256"],
                 "execution_performed": False,
                 "truth_tier": "silver_contextual_development_only",

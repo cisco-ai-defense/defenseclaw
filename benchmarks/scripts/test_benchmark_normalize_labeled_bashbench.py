@@ -175,6 +175,43 @@ class NormalizeLabeledBashBenchTest(unittest.TestCase):
         self.assertEqual(cases, [])
         self.assertEqual(manifest["skipped_row_counts"]["not_annotated_tool_input"], 1)
 
+    def test_runner_manifest_uses_strict_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "data.jsonl"
+            source.write_text(json.dumps(source_row()) + "\n", encoding="utf-8")
+            cases, legacy = normalizer.normalize_rows([source_row()], revision="abc")
+            output_digest = "a" * 64
+            manifest = normalizer.runner_manifest(
+                legacy,
+                input_path=source,
+                revision="abc",
+                output_sha256=output_digest,
+            )
+        self.assertEqual(manifest["schema_version"], "1")
+        self.assertEqual(manifest["datasets"], [normalizer.SOURCE_ID])
+        self.assertEqual(manifest["cases"], len(cases))
+        self.assertEqual(manifest["counts"], {normalizer.SOURCE_ID: len(cases)})
+        self.assertEqual(manifest["output_sha256"], output_digest)
+        self.assertEqual(manifest["source"]["revision"], "abc")
+        self.assertEqual(manifest["source"]["rows"], 1)
+        self.assertEqual(
+            set(manifest),
+            {
+                "adapter_statistics",
+                "cases",
+                "counts",
+                "datasets",
+                "exact_payload_duplicates_removed",
+                "label_conflicts_excluded",
+                "output_sha256",
+                "schema_version",
+                "source",
+            },
+        )
+        self.assertIsInstance(
+            manifest["adapter_statistics"]["labeled-bashbench-v2"]["execution_performed"], int
+        )
+
 
 if __name__ == "__main__":
     unittest.main()
