@@ -191,13 +191,14 @@ jobs:
           $connectorList = Invoke-WindowsNativeProcess $go @(
             'test', '-vet=off', '-list', '^(Test|Fuzz|Example)', './internal/gateway/connector'
           ) -TimeoutSeconds 600 -LogPath (Join-Path $env:DC_STATE_ROOT 'go-connector-list.log')
-          # These lifecycle regressions intentionally spawn another copy of the
-          # connector test binary and replace process-global native-install
-          # discovery state. Run each in a fresh process so Windows image/file
-          # handles and global overrides cannot leak into the next shard test.
+          # These regressions spawn another executable and/or replace
+          # process-global native-install discovery state. Run each in a fresh
+          # process so Windows image/file handles, hook binary overrides, and
+          # parallel shard scheduling cannot affect their environment.
           $connectorIsolatedTests = @(
             'TestCodexLifecycle_CrossProcessSetupTeardownTransaction',
-            'TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout'
+            'TestMaintenanceCodexTeardownPreservesDriftWithoutInstalledLayout',
+            'TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio'
           )
           $connectorTests = @(
             [regex]::Split([string]$connectorList.StdOut, '\r?\n') |

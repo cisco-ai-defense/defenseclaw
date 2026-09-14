@@ -115,7 +115,9 @@ def test_ci_shards_slow_gateway_package_and_combines_go_coverage() -> None:
 
     assert "name: Go Gateway Test (shard ${{ matrix.shard }})" in workflow
     assert "python3 scripts/go_test_shards.py" in workflow
-    assert "name: Go Test (remaining packages)" in workflow
+    assert "name: Go Test (remaining packages / shard ${{ matrix.shard }})" in workflow
+    assert "GO_PACKAGE_SHARD: ${{ matrix.shard }}" in workflow
+    assert "GO_PACKAGE_SHARDS: 4" in workflow
     assert "needs: [go-test-gateway, go-test-other]" in workflow
     assert "python3 scripts/merge_go_coverage.py" in workflow
     assert "go tool cover -func=coverage.out" in workflow
