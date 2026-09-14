@@ -1385,6 +1385,23 @@ rules:
     severity: HIGH
     confidence: 0.95
     tags: [persistence, privilege, account]
+  - id: persistence.posix_literal_password_change_trailing_shell
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['passwd', 'chpasswd'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations) &&
+      f.commands.exists(c, c.argv_complete && c.program == 'bash') &&
+      f.data_flows.exists(d,
+      d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT &&
+      d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)
+    # The semantic owner additionally requires the exact value-free three-stage
+    # echo -> passwd|chpasswd -> bare bash grammar. The regex lane stays closed.
+    pattern: 'a^'
+    title: "Literal password change piped into a trailing shell"
+    severity: HIGH
+    confidence: 0.99
+    tags: [persistence, account, shell, bounded-grammar, detection-only]
   - id: privilege.posix_non_root_uid_zero_account_write
     tool_call_only: true
     # The regex lane is intentionally disabled. ActionFacts accepts only a

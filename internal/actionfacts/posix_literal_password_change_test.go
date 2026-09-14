@@ -56,6 +56,11 @@ func TestExactPOSIXLiteralPasswordChangeCorpusForms(t *testing.T) {
 			if fact.CommandID == 0 || !passwordChangeTestSinkHasOperation(facts, fact.CommandID, test.sink) {
 				t.Fatalf("sink fact=%+v commands=%+v", fact, facts.Commands)
 			}
+			wantTrailingShell := test.form == POSIXLiteralPasswordChangeThreeStageTrailingShell
+			if got := ExactPOSIXLiteralPasswordChangeTrailingShell(facts); got != wantTrailingShell {
+				t.Fatalf("trailing-shell predicate=%t, want %t; facts=%+v",
+					got, wantTrailingShell, facts)
+			}
 		})
 	}
 }
@@ -94,6 +99,9 @@ func TestPOSIXLiteralPasswordChangeHardNegatives(t *testing.T) {
 				POSIXLiteralPasswordChangeOutcomeSucceeded,
 			); ok {
 				t.Fatalf("unexpected proof: %+v facts=%+v", fact, facts)
+			}
+			if ExactPOSIXLiteralPasswordChangeTrailingShell(facts) {
+				t.Fatalf("unexpected trailing-shell proof: facts=%+v", facts)
 			}
 			for _, command := range facts.Commands {
 				if command.Program == "passwd" || command.Program == "chpasswd" {
