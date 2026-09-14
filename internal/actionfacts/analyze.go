@@ -2021,6 +2021,9 @@ func enforceAnalyzeAuthority(out *parseOutput) {
 		case "source", ".":
 			out.markPartial(IssueOpaqueArtifact)
 		case "bash", "sh", "zsh", "dash", "ksh", "mksh":
+			if exactPOSIXLiteralPasswordChangeTrailingShell(out, command) {
+				continue
+			}
 			if exactPOSIXPipelineStdinInterpreter(out, command) ||
 				exactPOSIXShellPreviewInvocation(command) {
 				continue

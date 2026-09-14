@@ -63,6 +63,7 @@ func classifyOutput(out *parseOutput) {
 		invocation   posixShellInvocation
 	}
 	deferred := make([]deferredPOSIXNoExec, 0, len(out.commands))
+	preclassifyPOSIXLiteralPasswordChange(out)
 	for i := range out.commands {
 		if invocation, ok := validPOSIXNoExecCandidate(&out.commands[i]); ok {
 			deferred = append(deferred, deferredPOSIXNoExec{
@@ -684,6 +685,8 @@ func classifyCommand(out *parseOutput, command *CommandFact) {
 	case "useradd", "usermod", "adduser", "net", "net1", "new-localuser", "gpasswd",
 		"groupmems", "dseditgroup", "dscl":
 		classifyAccount(out, command, program)
+	case "passwd", "chpasswd":
+		classifyPOSIXLiteralPasswordChange(out, command)
 	case "add-localgroupmember":
 		classifyStructuredPowerShellAddLocalGroupMember(out, command)
 	case "add-adgroupmember":
@@ -3530,6 +3533,9 @@ func classifyStructuredGetACL(out *parseOutput, command *CommandFact) {
 }
 
 func classifyShellInvocation(out *parseOutput, command *CommandFact) {
+	if exactPOSIXLiteralPasswordChangeTrailingShell(out, command) {
+		return
+	}
 	if exactPOSIXPipelineStdinInterpreter(out, command) {
 		return
 	}
