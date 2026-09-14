@@ -74,6 +74,10 @@ def test_authoritative_truth_requires_exact_bounded_successful_lineage() -> None
     assert case["truth"]["deterministic_truth"] == "deterministic_malicious"
     assert case["truth"]["expected_disposition"] == "block"
     assert len(case["payload"]["events"]) == 2
+    assert case["strata"]["split_group"] == MODULE.digest(
+        "zenodo-21860163-trajectory-group-v1",
+        MODULE.digest("zenodo-21860163-trajectory-v1", "p15b-run-data/01-injection-map/cell.json", "0")[:24],
+    )[:24]
     rendered = MODULE.canonical_json(case)
     assert MARKER not in rendered
     assert "<lineage:" in rendered
@@ -144,6 +148,9 @@ def test_human_benign_requires_exact_body_and_successful_real_write() -> None:
     assert len(cases) == 1
     assert counts["benign_audit_samples_joined"] == 1
     assert cases[0]["truth"]["source_truth"] == "benign"
+    assert cases[0]["strata"]["split_group"] == MODULE.digest(
+        "zenodo-21860163-audit-group-v1", sample_id
+    )[:24]
     rendered = MODULE.canonical_json(cases)
     assert body not in rendered
     assert "<value:" in rendered

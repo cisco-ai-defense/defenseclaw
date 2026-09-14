@@ -465,6 +465,7 @@ def stateful_case(
             "trajectory_id": trajectory,
             "sequence_index": 0,
             "call_index": 0,
+            "split_group": digest("zenodo-21860163-trajectory-group-v1", trajectory)[:24],
         },
     }
 
@@ -595,7 +596,12 @@ def benign_audit_cases(
                         "expected_disposition": "allow",
                         "categories": ["human_verified_benign_code_edit"],
                     },
-                    "strata": {"language": "english", "domain": "coding_agent", "hard_negative": True},
+                    "strata": {
+                        "language": "english",
+                        "domain": "coding_agent",
+                        "hard_negative": True,
+                        "split_group": digest("zenodo-21860163-audit-group-v1", sample_id)[:24],
+                    },
                 }
             )
         counts["benign_audit_samples_joined"] += 1
