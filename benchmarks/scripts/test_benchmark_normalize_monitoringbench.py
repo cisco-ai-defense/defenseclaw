@@ -77,6 +77,25 @@ class MonitoringBenchNormalizerTest(unittest.TestCase):
         self.assertEqual(event["outcome"], "failed")
         self.assertNotIn("result", event)
 
+    def test_source_inputs_are_value_free_validated_and_sorted(self):
+        inputs = normalizer.normalization_inputs({
+            "archive": {"bytes": 7, "sha256": "b" * 64},
+            "master": {"bytes": 3, "sha256": "a" * 64},
+        })
+        self.assertEqual([
+            {"bytes": 3, "sha256": "a" * 64},
+            {"bytes": 7, "sha256": "b" * 64},
+        ], inputs)
+        self.assertTrue(all(set(item) == {"bytes", "sha256"} for item in inputs))
+        with self.assertRaisesRegex(ValueError, "source file identity"):
+            normalizer.normalization_inputs({
+                "archive": {"bytes": -1, "sha256": "a" * 64},
+            })
+        with self.assertRaisesRegex(ValueError, "source file identity"):
+            normalizer.normalization_inputs({
+                "archive": {"bytes": 1, "sha256": "not-a-digest"},
+            })
+
 
 if __name__ == "__main__":
     unittest.main()
