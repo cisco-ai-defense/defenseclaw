@@ -18,6 +18,7 @@ import (
 // separated so the test remains explicit and shell-portable.
 func TestStrictNormalizationManifestFiles(t *testing.T) {
 	paths := strings.Fields(os.Getenv("DEFENSECLAW_STRICT_NORMALIZATION_MANIFESTS"))
+	requirePartition := os.Getenv("DEFENSECLAW_REQUIRE_PARTITION_MANIFESTS") == "1"
 	if len(paths) == 0 {
 		t.Skip("DEFENSECLAW_STRICT_NORMALIZATION_MANIFESTS is not set")
 	}
@@ -37,6 +38,16 @@ func TestStrictNormalizationManifestFiles(t *testing.T) {
 			}
 			if normalized.SchemaVersion != SchemaVersion || len(normalized.Datasets) == 0 || normalized.Cases <= 0 {
 				t.Fatal("normalization manifest identity is incomplete")
+			}
+			if requirePartition {
+				partition := normalized.Partition
+				if partition == nil || partition.Strategy != "adapter-group-balanced-v1" ||
+					partition.Split == "" || partition.SplitGroupCount <= 0 ||
+					!validSHA256(partition.SourceCorpusSHA256) ||
+					!validSHA256(partition.SourceNormalizationSHA256) ||
+					!validSHA256(partition.AssignmentSHA256) {
+					t.Fatal("strict partition manifest identity is incomplete")
+				}
 			}
 		})
 	}

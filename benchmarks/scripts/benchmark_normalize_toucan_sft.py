@@ -27,6 +27,8 @@ SOURCE_REVISION = "0df3cf37f2abefb380370cfb02eabea2a35ae782"
 SOURCE_LICENSE = "Apache-2.0"
 SOURCE_REDISTRIBUTION = "download-only"
 ADAPTER = "toucan-sft-unlabeled-trajectories-v1"
+PARTITION_STRATEGY = "adapter-group-balanced-v1"
+PARTITION_RATIOS = {"development": 70, "validation": 15, "test": 15}
 SOURCE_FILES = (
     "SFT/train-00000-of-00003.parquet",
     "SFT/train-00001-of-00003.parquet",
@@ -559,6 +561,34 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def manifest_bytes(manifest: Mapping[str, Any]) -> bytes:
+    return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
+def partition_assignment_sha256(cases: Sequence[dict[str, Any]]) -> str:
+    assignments: list[tuple[str, str, str]] = []
+    group_splits: dict[str, str] = {}
+    for case in cases:
+        case_id = case.get("id")
+        split = case.get("split")
+        strata = case.get("strata")
+        group = strata.get("split_group") if isinstance(strata, Mapping) else None
+        if not isinstance(case_id, str) or not isinstance(group, str) or split not in PARTITION_RATIOS:
+            raise ValueError("Toucan partition assignment metadata is incomplete")
+        if split != split_for(group):
+            raise ValueError(f"{case_id}: split differs from the adapter-owned assignment")
+        if prior := group_splits.get(group):
+            if prior != split:
+                raise ValueError(f"split group {group} crosses benchmark splits")
+        else:
+            group_splits[group] = split
+        assignments.append((case_id, group, split))
+    digest = hashlib.sha256()
+    for case_id, group, split in sorted(assignments):
+        digest.update(f"{case_id}\0{group}\0{split}\n".encode())
+    return digest.hexdigest()
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-root", required=True, type=Path)
@@ -577,13 +607,28 @@ def select_split(
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if split is None:
         return list(cases), manifest
+    source_corpus_sha256 = manifest.get("output_sha256")
+    if not isinstance(source_corpus_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", source_corpus_sha256) is None:
+        raise ValueError("full normalization manifest has an invalid corpus digest")
+    source_normalization_sha256 = hashlib.sha256(manifest_bytes(manifest)).hexdigest()
+    assignment_sha256 = partition_assignment_sha256(cases)
     selected = [case for case in cases if case["split"] == split]
+    groups = {str(case["strata"]["split_group"]) for case in selected}
     body = "".join(canonical_json(case) + "\n" for case in selected).encode("utf-8")
     selected_manifest = dict(manifest)
     selected_manifest["cases"] = len(selected)
     selected_manifest["counts"] = {DATASET_ID: len(selected)}
     selected_manifest["output_sha256"] = hashlib.sha256(body).hexdigest()
-    selected_manifest["split"] = split
+    selected_manifest["partition"] = {
+        "assignment_sha256": assignment_sha256,
+        "ratios": dict(PARTITION_RATIOS),
+        "seed": 0,
+        "source_corpus_sha256": source_corpus_sha256,
+        "source_normalization_sha256": source_normalization_sha256,
+        "split": split,
+        "split_group_count": len(groups),
+        "strategy": PARTITION_STRATEGY,
+    }
     return selected, selected_manifest
 
 
@@ -597,7 +642,7 @@ def main() -> int:
         raise ValueError("normalization manifest does not bind output bytes")
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     atomic_write(args.output, body)
-    atomic_write(manifest_path, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"))
+    atomic_write(manifest_path, manifest_bytes(manifest))
     print(json.dumps({"manifest": str(manifest_path), "output": str(args.output), **manifest}, sort_keys=True))
     return 0
 

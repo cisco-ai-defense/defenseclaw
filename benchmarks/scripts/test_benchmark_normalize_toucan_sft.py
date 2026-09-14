@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import sys
@@ -211,27 +212,67 @@ class ToucanSFTNormalizerTest(unittest.TestCase):
         self.assertEqual(1, statistics["exact_payload_duplicates_removed"])
         self.assertEqual("7900c4d1-9c88-5e4b-b91a-d113dcd4d031", cases[0]["source"]["original_id"])
 
-    def test_select_split_rebinds_counts_and_output_digest(self) -> None:
-        cases, _ = MODULE.normalize_rows(
-            [
-                row(),
-                row(identity="7900c4d1-9c88-5e4b-b91a-d113dcd4d041"),
-                row(identity="7900c4d1-9c88-5e4b-b91a-d113dcd4d042"),
-            ]
+    def test_select_split_emits_strict_authoritative_partition_sidecars(self) -> None:
+        cases, _ = MODULE.normalize_rows([row()])
+        template = cases[0]
+        groups = {
+            "development": "000000000000000000000000",
+            "test": "000000000000000000000001",
+            "validation": "000000000000000000000002",
+        }
+        cases = []
+        for split, group in groups.items():
+            case = copy.deepcopy(template)
+            case["id"] = f"toucan-sft/test-{split}"
+            case["split"] = split
+            case["strata"]["split_group"] = group
+            cases.append(case)
+        full_body = "".join(MODULE.canonical_json(case) + "\n" for case in cases).encode()
+        full_manifest = {
+            "adapter_statistics": {MODULE.ADAPTER: {"cases": 3}},
+            "cases": 3,
+            "counts": {MODULE.DATASET_ID: 3},
+            "datasets": [MODULE.DATASET_ID],
+            "exact_payload_duplicates_removed": 0,
+            "label_conflicts_excluded": 0,
+            "output_sha256": MODULE.hashlib.sha256(full_body).hexdigest(),
+            "schema_version": MODULE.SCHEMA_VERSION,
+        }
+        manifests = {}
+        selected_groups = {}
+        for split in MODULE.PARTITION_RATIOS:
+            selected, manifest = MODULE.select_split(cases, full_manifest, split)
+            repeated = MODULE.select_split(cases, full_manifest, split)
+            self.assertEqual(MODULE.manifest_bytes(manifest), MODULE.manifest_bytes(repeated[1]))
+            self.assertNotIn("split", manifest)
+            self.assertEqual(1, manifest["cases"])
+            self.assertEqual({MODULE.DATASET_ID: 1}, manifest["counts"])
+            self.assertEqual(split, manifest["partition"]["split"])
+            self.assertEqual(1, manifest["partition"]["split_group_count"])
+            manifests[split] = manifest
+            selected_groups[split] = {case["strata"]["split_group"] for case in selected}
+        self.assertEqual(set(), selected_groups["development"] & selected_groups["validation"])
+        self.assertEqual(set(), selected_groups["development"] & selected_groups["test"])
+        self.assertEqual(set(), selected_groups["validation"] & selected_groups["test"])
+        assignment_digests = {manifest["partition"]["assignment_sha256"] for manifest in manifests.values()}
+        source_digests = {manifest["partition"]["source_corpus_sha256"] for manifest in manifests.values()}
+        authority_digests = {
+            manifest["partition"]["source_normalization_sha256"] for manifest in manifests.values()
+        }
+        self.assertEqual({MODULE.partition_assignment_sha256(cases)}, assignment_digests)
+        self.assertEqual({full_manifest["output_sha256"]}, source_digests)
+        self.assertEqual({MODULE.hashlib.sha256(MODULE.manifest_bytes(full_manifest)).hexdigest()}, authority_digests)
+        self.assertEqual("5ebe02313362e386de4a0163752ffecb7d5ccc254c66fb2c5df6127b9a0c8bc5", assignment_digests.pop())
+        self.assertEqual("87e01fd7985796a4f50b79f6c6b62daf0ae8f9a83a2687df026a14747b8f56a5", source_digests.pop())
+        self.assertEqual("8e232817d29e2ef21f00bc8de25ed9129903c5808ab14b703a30319ff6c59818", authority_digests.pop())
+        self.assertEqual(
+            {
+                "development": "4097aa13224a2ab83daa70c9077e66dd1ddb03e2f90dcfb74ac1567ee0145786",
+                "validation": "a2b4ef415fa8a4624e4e5618ca68ecfc5dac66fcf3727d9fe92f375d229f1a0d",
+                "test": "05f0e10ca799dbbf19d6a21b9312d1c065acdc93882503f12b607e0cbfa47138",
+            },
+            {split: manifest["output_sha256"] for split, manifest in manifests.items()},
         )
-        target = cases[0]["split"]
-        selected, manifest = MODULE.select_split(
-            cases,
-            {"cases": len(cases), "counts": {MODULE.DATASET_ID: len(cases)}, "output_sha256": "old"},
-            target,
-        )
-        self.assertTrue(selected)
-        self.assertTrue(all(case["split"] == target for case in selected))
-        self.assertEqual(len(selected), manifest["cases"])
-        self.assertEqual({MODULE.DATASET_ID: len(selected)}, manifest["counts"])
-        body = "".join(MODULE.canonical_json(case) + "\n" for case in selected).encode()
-        self.assertEqual(MODULE.hashlib.sha256(body).hexdigest(), manifest["output_sha256"])
-        self.assertEqual(target, manifest["split"])
 
     def test_cases_validate_against_case_schema(self) -> None:
         cases, _ = MODULE.normalize_rows([row()])
