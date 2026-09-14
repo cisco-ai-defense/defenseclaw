@@ -163,6 +163,7 @@ def test_real_pinned_subset_normalizes_and_validates() -> None:
         pytest.skip("pinned Cyber Task Horizons subset is not present")
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
+    assert manifest["cases"] == len(cases)
     assert manifest["counts"] == {
         "action_cases": 562,
         "benign_controls": 0,

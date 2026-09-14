@@ -484,6 +484,7 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
         "source_revision": SOURCE_REVISION,
         "source_license": SOURCE_LICENSE,
         "source_files": source_files,
+        "cases": len(cases),
         "row_count": len(cases),
         "counts": dict(sorted(counts.items())),
         "categories": dict(sorted(categories.items())),

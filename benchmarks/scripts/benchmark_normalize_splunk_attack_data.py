@@ -752,6 +752,7 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
         "source_files": hashes,
         "selected_subsets": [subset.data_path for subset in SUBSETS],
         "rejected_subsets": REJECTED_SUBSETS,
+        "cases": len(cases),
         "row_count": len(cases),
         "counts": dict(sorted(counts.items())),
         "subset_counts": dict(sorted(subset_counts.items())),

@@ -152,6 +152,7 @@ def test_real_targeted_projection_validates() -> None:
         pytest.skip("targeted Splunk fixture is not present")
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
+    assert manifest["cases"] == len(cases)
     assert manifest["counts"]["selected_events"] > 0
     assert manifest["counts"]["action_authoritative_cases"] > 0
     assert manifest["rejected_subsets"]
