@@ -3314,6 +3314,14 @@ targets:
                         -Phase 'finalized'
                 }
             }
+            # A finalized teardown journal is only reachable in production
+            # after prepare published the scope-bound contract cleanup receipt
+            # and finalization advanced it, so committed cleanup skips
+            # finalization and Purge still demands that receipt as its only
+            # proof of same-connector scope authority.
+            $teardownAlreadyFinalized = (
+                $AlreadyUninstalled -and -not $PreexistingPrepared
+            )
             $events = [Collections.Generic.List[string]]::new()
             $script:HarnessState = @{
                 crash_at = $CrashAt
@@ -3379,6 +3387,14 @@ targets:
                 gateway_started_before_guardian = $false
                 barrier_required = $true
                 barrier_complete = $false
+            }
+            if ($teardownAlreadyFinalized) {
+                # Seeded after $script:HarnessState so the Set-DefenseClawPathAcl
+                # mock can resolve this case layout and stamp the exact AdminFile
+                # contract the production receipt reader enforces.
+                Write-HarnessContractCleanupReceipt `
+                    -Layout $layout `
+                    -Phase finalized
             }
             $failed = $false
             $failureMessage = ''
@@ -3507,7 +3523,11 @@ targets:
                 Assert-Harness `
                     -Condition (
                         $script:HarnessState.purge_contract_lock_finalizations -eq
-                            $(if ($Purge) { 1 } else { 0 })
+                            $(if ($Purge -and -not $teardownAlreadyFinalized) {
+                                1
+                            } else {
+                                0
+                            })
                     ) `
                     -Message "$Name did not preserve purge-only contract-lock cleanup"
             }
