@@ -3116,6 +3116,28 @@ function Set-DefenseClawPathAcl {
         -LiteralPath $Path `
         -AclObject $security `
         -ErrorAction Stop
+    # Windows PowerShell 5.1's Set-Acl on a file that already existed
+    # before an atomic Move-Item -Force replacement can silently omit
+    # PROTECTED_DACL_SECURITY_INFORMATION from the underlying
+    # SetSecurityInfo call, leaving the destination's DACL without
+    # SE_DACL_PROTECTED (observed as actualFlags=0x8004 vs the
+    # expectedFlags=0x9004 in Assert-DefenseClawCanonicalRawPathAcl).
+    # The fix: read the on-disk descriptor back, explicitly re-modify
+    # its protection state (which .NET tracks separately from the
+    # protection value), and re-apply. This guarantees the Persist()
+    # path includes PROTECTED_DACL_SECURITY_INFORMATION so the flag
+    # actually stamps.
+    $reapply = Microsoft.PowerShell.Security\Get-Acl `
+        -LiteralPath $Path
+    if (-not $reapply.AreAccessRulesProtected) {
+        # Force _modifiedProtectedAccess on the just-read descriptor so
+        # the second Persist reliably includes SE_DACL_PROTECTED.
+        $reapply.SetAccessRuleProtection($true, $false)
+        Microsoft.PowerShell.Security\Set-Acl `
+            -LiteralPath $Path `
+            -AclObject $reapply `
+            -ErrorAction Stop
+    }
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
