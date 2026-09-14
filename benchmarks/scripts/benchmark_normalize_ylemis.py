@@ -34,6 +34,10 @@ def sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def byte_offset(text: str, character_offset: int) -> int:
+    return len(text[:character_offset].encode("utf-8"))
+
+
 def normalized_span(text: str, entity: object, case_id: str = "case") -> tuple[dict[str, Any], str]:
     if not isinstance(entity, dict):
         raise ValueError(f"{case_id}: entity is not an object")
@@ -43,7 +47,11 @@ def normalized_span(text: str, entity: object, case_id: str = "case") -> tuple[d
         raise ValueError(f"{case_id}: unsupported source entity type {entity_type!r}")
     if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start or end > len(text):
         raise ValueError(f"{case_id}: invalid entity span")
-    return {"label": LABEL_MAP.get(entity_type, entity_type), "start": start, "end": end}, entity_type
+    return {
+        "label": LABEL_MAP.get(entity_type, entity_type),
+        "start": byte_offset(text, start),
+        "end": byte_offset(text, end),
+    }, entity_type
 
 
 def normalize(input_path: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
