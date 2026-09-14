@@ -3131,6 +3131,7 @@ function Set-DefenseClawPathAcl {
     # GROUP + DACL bindings in one atomic call. Extend it to AdminFile
     # files by passing expectedSize=0 (no fixed-length invariant).
     if (-not $isDirectory -and $Kind -eq 'AdminFile') {
+        [Console]::Error.WriteLine("[ADMINFILE-DEBUG] entering native branch path=$Path")
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
         $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
             $Path,
@@ -3139,11 +3140,19 @@ function Set-DefenseClawPathAcl {
         $sddl = $security.GetSecurityDescriptorSddlForm(
             [Security.AccessControl.AccessControlSections]::All
         )
+        [Console]::Error.WriteLine("[ADMINFILE-DEBUG] sddl=$sddl")
         $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
             $Path,
             $sddl,
             [uint32]0,
             [string]$before.Identity
+        )
+        $afterFlags = [int]([Security.AccessControl.RawSecurityDescriptor]::new(
+            [byte[]]$after.SecurityDescriptor,
+            0
+        ).ControlFlags)
+        [Console]::Error.WriteLine(
+            "[ADMINFILE-DEBUG] afterFlags=0x$($afterFlags.ToString('x8'))"
         )
         if ([string]$after.Identity -cne [string]$before.Identity) {
             throw "managed AdminFile identity changed during ACL replacement: $Path"
@@ -3157,6 +3166,7 @@ function Set-DefenseClawPathAcl {
             -Expected $security
         return
     }
+    [Console]::Error.WriteLine("[ADMINFILE-DEBUG] SKIP native branch (isDir=$isDirectory kind=$Kind) path=$Path")
     Microsoft.PowerShell.Security\Set-Acl `
         -LiteralPath $Path `
         -AclObject $security `
