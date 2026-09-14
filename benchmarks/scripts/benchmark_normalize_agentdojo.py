@@ -467,36 +467,36 @@ def build_corpus(root: Path, revision: str, split: str) -> tuple[list[dict[str, 
 
     cases.sort(key=lambda row: row["id"])
     tree_material = canonical_json(source_files).encode("utf-8")
+    tree_sha256 = hashlib.sha256(tree_material).hexdigest()
+    adapter_statistics = dict(sorted(statistics.items()))
+    adapter_statistics.update(
+        {f"skipped_{reason}": count for reason, count in sorted(skipped.items())}
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_revision": revision,
-        "source_url": SOURCE_URL,
-        "source_license": SOURCE_LICENSE,
-        "source_license_url": LICENSE_URL,
-        "source_redistribution": SOURCE_REDISTRIBUTION,
-        "source_file_count": len(source_files),
-        "source_tree_sha256": hashlib.sha256(tree_material).hexdigest(),
-        "split": split,
-        "pre_partition_split": PRE_PARTITION_SPLIT,
-        "partition_authority": PARTITION_AUTHORITY,
+        "datasets": [DATASET_ID],
         "cases": len(cases),
-        "row_count": len(cases),
-        "adapter_statistics": dict(sorted(statistics.items())),
-        "surface_counts": dict(sorted(Counter(row["surface"] for row in cases).items())),
-        "truth_counts": dict(sorted(Counter(row["truth"]["source_truth"] for row in cases).items())),
-        "statistics": dict(sorted(statistics.items())),
-        "skipped": dict(sorted(skipped.items())),
-        "language_policy": ("English-only AgentDojo v1 suites: banking, slack, travel, workspace"),
-        "execution_policy": ("Only linked role=tool messages are executed calls; assistant-only calls are excluded"),
-        "window_policy": (
-            "Rolling windows end at each executed call and contain at most eight "
-            "events; only a complete violated trajectory is a contextual positive"
-        ),
-        "content_policy": (
-            "Prompts and reasoning are excluded; bounded structured arguments "
-            "and linked tool results/errors are retained"
-        ),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {DATASET_ID: adapter_statistics},
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "runs",
+            "bytes": sum(item["bytes"] for item in source_files),
+            "files": len(source_files),
+            "rows": len(source_files),
+            "sha256": tree_sha256,
+            "language": "en",
+            "trajectory_verification": (
+                "executed results joined by exact ID or message-local evidence; "
+                "prompts and reasoning excluded; complete bounded violations only"
+            ),
+            "source_url": SOURCE_URL,
+        },
     }
     return cases, manifest
 

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"runtime/debug"
+	"sort"
 	"strings"
 	"testing"
 
@@ -145,6 +146,76 @@ func stubRunBinaryProvenance(t *testing.T, repoRoot string) {
 		gitStateForRun = previousGitState
 		runningBinaryVCSForRun = previousBinaryVCS
 	})
+}
+
+func TestValidateBenchmarkChecksStrictNormalizationManifest(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", "..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	corpusPath := filepath.Join(repoRoot, "benchmarks", "fixtures", "smoke.jsonl")
+	lockPath := filepath.Join(repoRoot, "benchmarks", "datasets.lock.json")
+	corpusSHA256, cases, _, _, err := loadInputs(corpusPath, lockPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := make(map[string]int)
+	statistics := make(map[string]map[string]int)
+	for _, benchmarkCase := range cases {
+		counts[benchmarkCase.Source.Dataset]++
+		statistics[benchmarkCase.Source.Dataset] = map[string]int{"projected_rows": counts[benchmarkCase.Source.Dataset]}
+	}
+	datasets := make([]string, 0, len(counts))
+	for dataset := range counts {
+		datasets = append(datasets, dataset)
+	}
+	sort.Strings(datasets)
+	manifest := benchmark.NormalizationManifest{
+		SchemaVersion:          benchmark.SchemaVersion,
+		Datasets:               datasets,
+		Cases:                  len(cases),
+		Counts:                 counts,
+		AdapterStatistics:      statistics,
+		OutputSHA256:           corpusSHA256,
+		ExactPayloadDuplicates: 0,
+		LabelConflictsExcluded: 0,
+	}
+	data, err := json.Marshal(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifestPath := filepath.Join(t.TempDir(), "strict.manifest.json")
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var stdout bytes.Buffer
+	if err := validateBenchmark([]string{
+		"--corpus", corpusPath,
+		"--dataset-lock", lockPath,
+		"--normalization-manifest", manifestPath,
+	}, &stdout); err != nil {
+		t.Fatalf("strict normalization manifest rejected: %v", err)
+	}
+
+	var malformed map[string]any
+	if err := json.Unmarshal(data, &malformed); err != nil {
+		t.Fatal(err)
+	}
+	malformed["adapter_statistics"] = map[string]int{"projected_rows": len(cases)}
+	data, err = json.Marshal(malformed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(manifestPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBenchmark([]string{
+		"--corpus", corpusPath,
+		"--dataset-lock", lockPath,
+		"--normalization-manifest", manifestPath,
+	}, &bytes.Buffer{}); err == nil || !strings.Contains(err.Error(), "adapter_statistics") {
+		t.Fatalf("flat adapter statistics error = %v, want strict decode rejection", err)
+	}
 }
 
 func TestCompareBenchmarkUsesTruthOverlay(t *testing.T) {

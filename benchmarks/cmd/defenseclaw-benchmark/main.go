@@ -361,12 +361,22 @@ func validateBenchmark(args []string, stdout io.Writer) error {
 	flags.SetOutput(io.Discard)
 	corpusPath := flags.String("corpus", "benchmarks/fixtures/smoke.jsonl", "normalized JSONL corpus")
 	lockPath := flags.String("dataset-lock", "benchmarks/datasets.lock.json", "dataset lock")
+	normalizationManifestPath := flags.String("normalization-manifest", "", "optional normalization manifest to validate against the corpus")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
-	_, cases, _, lock, err := loadInputs(*corpusPath, *lockPath)
+	corpusSHA256, cases, _, lock, err := loadInputs(*corpusPath, *lockPath)
 	if err != nil {
 		return err
+	}
+	normalizationData, err := readNormalizationManifest(*normalizationManifestPath, *corpusPath)
+	if err != nil {
+		return err
+	}
+	if len(normalizationData) > 0 {
+		if _, err := benchmark.BuildCorpusManifest(cases, corpusSHA256, normalizationData); err != nil {
+			return err
+		}
 	}
 	_, err = fmt.Fprintf(stdout, "validated %d cases and %d locked datasets\n", len(cases), len(lock.Datasets))
 	return err

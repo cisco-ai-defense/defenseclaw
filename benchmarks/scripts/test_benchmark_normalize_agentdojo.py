@@ -124,8 +124,9 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         )
         self.assertEqual("record-0", actions[0]["payload"]["args"]["query"])
         self.assertNotIn("delete_everything", json.dumps(cases))
-        self.assertEqual(1, manifest["statistics"]["unobserved_emitted_calls"])
-        self.assertEqual(3, manifest["statistics"]["result_join_exact_id"])
+        statistics = manifest["adapter_statistics"][MODULE.DATASET_ID]
+        self.assertEqual(1, statistics["unobserved_emitted_calls"])
+        self.assertEqual(3, statistics["result_join_exact_id"])
 
     def test_preserves_linked_results_errors_and_run_outcomes_without_prompts(
         self,
@@ -216,8 +217,9 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         self.write_run("unknown-suite", unknown_suite)
         cases, manifest = self.build()
         self.assertEqual([], cases)
-        self.assertEqual(1, manifest["skipped"]["mismatched_tool_call_id"])
-        self.assertEqual(1, manifest["skipped"]["non_english_or_unknown_suite"])
+        statistics = manifest["adapter_statistics"][MODULE.DATASET_ID]
+        self.assertEqual(1, statistics["skipped_mismatched_tool_call_id"])
+        self.assertEqual(1, statistics["skipped_non_english_or_unknown_suite"])
         with self.assertRaisesRegex(ValueError, "must be pinned"):
             MODULE.build_corpus(self.root, "0" * 40, "development")
 
@@ -229,14 +231,45 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(first_manifest, second_manifest)
         MODULE.validate_cases(first, MODULE.DEFAULT_SCHEMA)
-        self.assertEqual(MODULE.SOURCE_URL, first_manifest["source_url"])
-        self.assertEqual(MODULE.LICENSE_URL, first_manifest["source_license_url"])
-        self.assertEqual(MODULE.PINNED_REVISION, first_manifest["source_revision"])
-        self.assertEqual("MIT", first_manifest["source_license"])
+        self.assertEqual(
+            {
+                "schema_version",
+                "datasets",
+                "cases",
+                "counts",
+                "exact_payload_duplicates_removed",
+                "label_conflicts_excluded",
+                "adapter_statistics",
+                "source",
+            },
+            set(first_manifest),
+        )
+        source = first_manifest["source"]
+        self.assertEqual(
+            {
+                "dataset",
+                "revision",
+                "license",
+                "redistribution",
+                "path",
+                "bytes",
+                "files",
+                "rows",
+                "sha256",
+                "language",
+                "trajectory_verification",
+                "source_url",
+            },
+            set(source),
+        )
+        self.assertEqual(MODULE.SOURCE_URL, source["source_url"])
+        self.assertEqual(MODULE.PINNED_REVISION, source["revision"])
+        self.assertEqual("MIT", source["license"])
+        self.assertEqual("download-only", source["redistribution"])
+        self.assertEqual(MODULE.DATASET_ID, source["dataset"])
+        self.assertEqual({MODULE.DATASET_ID: len(first)}, first_manifest["counts"])
         self.assertEqual(len(first), first_manifest["cases"])
-        self.assertEqual(MODULE.PRE_PARTITION_SPLIT, first_manifest["pre_partition_split"])
-        self.assertEqual(MODULE.PARTITION_AUTHORITY, first_manifest["partition_authority"])
-        self.assertEqual(first_manifest["statistics"], first_manifest["adapter_statistics"])
+        self.assertIsInstance(first_manifest["adapter_statistics"][MODULE.DATASET_ID], dict)
         self.assertTrue(all(row["split"] == MODULE.PRE_PARTITION_SPLIT for row in first))
 
     def test_rejects_adapter_owned_final_split_assignment(self) -> None:
@@ -260,6 +293,32 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         self.assertEqual(9, result["groups"])
         self.assertTrue(all(result["partitions"][split]["cases"] for split in PARTITION.SPLITS))
         PARTITION.verify_partition(corpus, normalization, output, 741983, 60, 20)
+        for split in PARTITION.SPLITS:
+            split_manifest = json.loads((output / f"{split}.manifest.json").read_text())
+            self.assertEqual(
+                {
+                    "schema_version",
+                    "datasets",
+                    "cases",
+                    "counts",
+                    "exact_payload_duplicates_removed",
+                    "label_conflicts_excluded",
+                    "adapter_statistics",
+                    "output_sha256",
+                    "partition",
+                },
+                set(split_manifest),
+            )
+            self.assertEqual(
+                {MODULE.DATASET_ID},
+                set(split_manifest["adapter_statistics"]),
+            )
+            self.assertTrue(
+                all(
+                    type(value) is int
+                    for value in split_manifest["adapter_statistics"][MODULE.DATASET_ID].values()
+                )
+            )
 
 
 if __name__ == "__main__":
