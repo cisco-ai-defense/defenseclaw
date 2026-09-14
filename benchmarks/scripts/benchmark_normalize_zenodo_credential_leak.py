@@ -685,31 +685,30 @@ def normalize_archive(path: Path, revision: str) -> tuple[list[dict[str, Any]], 
         cases.extend(benign)
         counts.update(audit_counts)
     cases.sort(key=lambda row: row["id"])
+    statistics = dict(sorted(counts.items()))
+    statistics["selected_members"] = len(selected_hashes)
+    statistics.update({f"exclusion:{key}": value for key, value in sorted(exclusions.items())})
     manifest: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
-        "dataset": DATASET_ID,
+        "datasets": [DATASET_ID],
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"zenodo-credential-leak-v1": statistics},
         "source": {
-            "url": SOURCE_URL,
-            "doi": SOURCE_DOI,
+            "dataset": DATASET_ID,
             "revision": SOURCE_REVISION,
-            "published": "2026-08-09",
             "license": SOURCE_LICENSE,
-            "archive": ARCHIVE_NAME,
-            "archive_sha256": ARCHIVE_SHA256,
-            "archive_bytes": path.stat().st_size,
-            "selected_member_sha256": dict(sorted(selected_hashes.items())),
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": ARCHIVE_NAME,
+            "bytes": path.stat().st_size,
+            "files": 1,
+            "rows": counts["source_runs"],
+            "sha256": ARCHIVE_SHA256,
+            "trajectory_verification": "confirmed exfiltration plus exact result-to-network canary lineage and successful network result",
+            "source_url": SOURCE_URL,
         },
-        "method": {
-            "maximum_predecessors": MAX_PREDECESSORS,
-            "authoritative_truth": (
-                "collector/detector confirmation plus exact result-to-input canary lineage "
-                "plus successful network result"
-            ),
-            "failed_attack_handling": "out_of_scope_detect_only_never_benign",
-            "redaction": "domain-separated SHA-256 value, lineage, result, and audit references",
-        },
-        "counts": dict(sorted(counts.items())),
-        "exclusions": dict(sorted(exclusions.items())),
     }
     return cases, manifest
 
@@ -749,14 +748,10 @@ def main() -> int:
     cases, manifest = normalize_archive(args.input.resolve(strict=True), args.revision)
     validate_cases(cases, args.schema.resolve(strict=True))
     output_text = "".join(canonical_json(case) + "\n" for case in cases)
-    manifest["output"] = {
-        "cases": len(cases),
-        "sha256": hashlib.sha256(output_text.encode()).hexdigest(),
-        "bytes": len(output_text.encode()),
-    }
+    manifest["output_sha256"] = hashlib.sha256(output_text.encode()).hexdigest()
     atomic_write(args.output, output_text)
     atomic_write(args.manifest, canonical_json(manifest) + "\n")
-    print(canonical_json(manifest["output"]))
+    print(canonical_json({"cases": len(cases), "output_sha256": manifest["output_sha256"]}))
     return 0
 
 

@@ -477,30 +477,34 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
     counts["unique_tasks"] = len(task_ids)
     counts["benign_controls"] = 0
     counts["deterministic_malicious_proofs"] = 0
+    statistics = dict(sorted(counts.items()))
+    statistics.update({f"category:{key}": value for key, value in sorted(categories.items())})
+    statistics.update({f"model:{key}": value for key, value in sorted(models.items())})
+    statistics.update({f"rejection:{key}": value for key, value in sorted(rejections.items())})
+    source_sha256 = digest(
+        *(f"{name}:{metadata['sha256']}" for name, metadata in sorted(source_files.items()))
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": SOURCE_REVISION,
-        "source_license": SOURCE_LICENSE,
-        "source_files": source_files,
+        "datasets": [DATASET_ID],
         "cases": len(cases),
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "categories": dict(sorted(categories.items())),
-        "models": dict(sorted(models.items())),
-        "rejections": dict(sorted(rejections.items())),
-        "normalization": (
-            "Exact linked Bash/Python arguments and bounded order retained. Explicit result errors "
-            "map to failed; linked non-error results remain unknown because process exit codes are absent. "
-            "Prompts, reasoning, targets, result bodies, flags, credentials, attachments, and model output "
-            "are excluded. Stateful offsets are ordinal because messages have no per-call timestamps."
-        ),
-        "label_limitation": (
-            "Correct CTF score is complete-trajectory contextual truth. No atomic call is promoted to "
-            "malicious and no case is deterministic_malicious. Only complete projections within eight "
-            "calls are in-scope detect-only contextual positives; this corpus has no benign controls."
-        ),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"cyber-task-horizons-v1": statistics},
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": SOURCE_REVISION,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "selected evaluation archives",
+            "paths": sorted(source_files),
+            "bytes": sum(int(metadata["bytes"]) for metadata in source_files.values()),
+            "files": len(source_files),
+            "rows": counts["source_samples"],
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
     }
     return cases, manifest
 

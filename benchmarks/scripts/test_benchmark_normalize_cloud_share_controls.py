@@ -163,22 +163,34 @@ def test_normalized_counts_and_measurement_boundary() -> None:
     )
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
     assert len(cases) == 10
-    assert manifest["scoreable_negative_cases"] == 8
-    assert manifest["parser_only_out_of_scope_cases"] == 2
-    assert manifest["counts_by_control_kind"] == {
-        "failed_no_effect": 5,
-        "incomplete_failure": 2,
-        "successful_remove": 3,
-    }
-    assert "too small for production false-positive-rate claims" in manifest["limitations"][0]
-    assert manifest["labeling"] == {
-        "method": "deterministic_source_argument_and_outcome_projection",
-        "llm_labels": False,
-        "secrets_retained": False,
-    }
-    assert all(source["redistribution"] == "download-only" for source in manifest["sources"])
-    assert all(len(source["revision"]) == 40 for source in manifest["sources"])
-    assert all(source["source_url"].endswith(source["revision"]) for source in manifest["sources"])
+    statistics = manifest["adapter_statistics"]["cloud-share-same-operation-controls-v1"]
+    assert statistics["scoreable_negative_cases"] == 8
+    assert statistics["parser_only_out_of_scope_cases"] == 2
+    assert {key: statistics[f"control_kind:{key}"] for key in (
+        "failed_no_effect",
+        "incomplete_failure",
+        "successful_remove",
+    )} == {"failed_no_effect": 5, "incomplete_failure": 2, "successful_remove": 3}
+    assert all(source.redistribution == "download-only" for source in MODULE.SOURCES.values())
+    assert all(len(source.revision) == 40 for source in MODULE.SOURCES.values())
+    assert all(source.source_url.endswith(source.revision) for source in MODULE.SOURCES.values())
+
+
+def test_traildiscover_only_manifest_excludes_disabled_companion_datasets() -> None:
+    cases, manifest = MODULE.normalize_records(
+        elastic_records(),
+        cybersec_records(),
+        traildiscover_records(),
+        cybersec_successes_excluded=1,
+        selected_sources=["traildiscover"],
+    )
+
+    assert len(cases) == 3
+    assert manifest["datasets"] == [MODULE.SOURCES["traildiscover"].dataset]
+    assert manifest["counts"] == {MODULE.SOURCES["traildiscover"].dataset: 3}
+    assert manifest["adapter_statistics"]["cloud-share-same-operation-controls-v1"][
+        "cybersec_successful_additions_excluded"
+    ] == 0
 
 
 def test_projection_preserves_detector_argument_shape_but_excludes_result_and_sensitive_fields() -> None:
@@ -278,6 +290,7 @@ def test_real_pinned_sources_normalize_when_downloaded() -> None:
         pytest.skip("pinned public source artifacts are not present")
     cases, manifest = MODULE.normalize_sources(elastic, cybersec, traildiscover)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert manifest["scoreable_negative_cases"] == 8
-    assert manifest["parser_only_out_of_scope_cases"] == 2
-    assert manifest["cybersec_successful_additions_excluded"] == 1
+    statistics = manifest["adapter_statistics"]["cloud-share-same-operation-controls-v1"]
+    assert statistics["scoreable_negative_cases"] == 8
+    assert statistics["parser_only_out_of_scope_cases"] == 2
+    assert statistics["cybersec_successful_additions_excluded"] == 1

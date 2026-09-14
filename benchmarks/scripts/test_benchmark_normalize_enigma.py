@@ -43,6 +43,11 @@ def trajectory(records: list[dict[str, object]], *, status: str = "submitted", s
 
 
 class EnigmaNormalizerTest(unittest.TestCase):
+    def test_lock_paths_match_pinned_source_layout(self) -> None:
+        lock = json.loads((MODULE.REPO_ROOT / "benchmarks/datasets.lock.json").read_text(encoding="utf-8"))
+        entry = next(item for item in lock["datasets"] if item["id"] == MODULE.DATASET_ID)
+        self.assertEqual(["LICENSE", "README.md", *MODULE.SOURCE_ROOTS], entry["include_paths"])
+
     def write_source(self, root: Path, document: dict[str, object], name: str = "task.traj") -> Path:
         path = root / "CyBench" / "pass1"
         path.mkdir(parents=True, exist_ok=True)
@@ -73,8 +78,9 @@ class EnigmaNormalizerTest(unittest.TestCase):
         self.assertIn("hidden_source_observation_lineage", cases[0]["truth"]["categories"])
         self.assertIn("detector_visible_proof_absent", cases[0]["truth"]["categories"])
         self.assertIn("payload.events", cases[0]["truth"]["exclusion_reason"])
-        self.assertEqual(1, manifest["audit"]["successful_outcome_closure"])
-        self.assertEqual({"8": 1}, manifest["audit"]["proof_event_lengths"])
+        statistics = manifest["adapter_statistics"][MODULE.ADAPTER]
+        self.assertEqual(1, statistics["audit_successful_outcome_closure"])
+        self.assertEqual(1, statistics["proof_events_8"])
 
     def test_nine_event_proof_is_not_called_bounded(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -87,8 +93,9 @@ class EnigmaNormalizerTest(unittest.TestCase):
             cases, manifest, _ = MODULE.build_corpus(root)
 
         self.assertEqual(1, len(cases))
-        self.assertEqual(0, manifest["audit"]["successful_outcome_closure"])
-        self.assertEqual({}, manifest["audit"]["proof_event_lengths"])
+        statistics = manifest["adapter_statistics"][MODULE.ADAPTER]
+        self.assertEqual(0, statistics.get("audit_successful_outcome_closure", 0))
+        self.assertFalse(any(key.startswith("proof_events_") for key in statistics))
 
     def test_natural_language_filter_ignores_non_linguistic_observations(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -112,9 +119,10 @@ class EnigmaNormalizerTest(unittest.TestCase):
             self.write_source(root, trajectory([record("echo safe")], status="exit_cost"))
             _, manifest, _ = MODULE.build_corpus(root)
 
-        self.assertEqual(0, manifest["audit"]["result_identity_present"])
-        self.assertEqual(0, manifest["audit"]["verifier_identity_present"])
-        self.assertTrue(manifest["audit"]["exact_tool_arguments"])
+        statistics = manifest["adapter_statistics"][MODULE.ADAPTER]
+        self.assertEqual(0, statistics.get("audit_result_identity_present", 0))
+        self.assertEqual(0, statistics.get("audit_verifier_identity_present", 0))
+        self.assertEqual(1, statistics["exact_tool_arguments"])
 
 
 if __name__ == "__main__":

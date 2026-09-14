@@ -41,6 +41,13 @@ ADAPTER = "enigma-trajectories-v1"
 PRE_PARTITION_SPLIT = "smoke"
 PARTITION_AUTHORITY = "benchmarks/scripts/benchmark_partition.py"
 GROUPING_STRATEGY = "enigma-benchmark-task-identity-v1"
+SOURCE_ROOT_COUNTS = {
+    "CyBench": 160,
+    "HTB": 148,
+    "InterCode_CTF": 299,
+    "NYU_CTF": 1_350,
+}
+SOURCE_ROOTS = tuple(SOURCE_ROOT_COUNTS)
 
 MIN_PROOF_EVENTS = 2
 MAX_PROOF_EVENTS = 8
@@ -148,6 +155,16 @@ def canonical_json(value: object) -> bytes:
 
 def digest(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def sha256_path(path: Path) -> str:
+    if path.is_symlink() or not path.is_file():
+        raise ProjectionError("invalid_source_file")
+    checksum = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            checksum.update(chunk)
+    return checksum.hexdigest()
 
 
 def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -497,6 +514,7 @@ def build_corpus(
     input_dir: Path,
     *,
     revision: str = SOURCE_REVISION,
+    enforce_release: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     if revision != SOURCE_REVISION:
         raise ValueError(f"EnIGMA revision must be pinned to {SOURCE_REVISION}")
@@ -512,12 +530,27 @@ def build_corpus(
     group_metadata: dict[str, tuple[str, str]] = {}
     audit: Counter[str] = Counter()
     proof_lengths: Counter[str] = Counter()
+    source_identities: list[str] = []
+    source_bytes = 0
 
-    paths = sorted(root.rglob("*.traj"), key=lambda path: path.relative_to(root).as_posix())
+    paths = sorted(
+        (path for source_root in SOURCE_ROOTS for path in (root / source_root).rglob("*.traj")),
+        key=lambda path: path.relative_to(root).as_posix(),
+    )
+    if enforce_release:
+        observed_root_counts = Counter(path.relative_to(root).parts[0] for path in paths)
+        if dict(observed_root_counts) != SOURCE_ROOT_COUNTS:
+            raise ValueError(
+                f"EnIGMA source cardinality differs: observed={dict(observed_root_counts)}, "
+                f"expected={SOURCE_ROOT_COUNTS}"
+            )
     for path in paths:
         counts["source_files"] += 1
         try:
             document = load_source(path)
+            relative_path = path.relative_to(root).as_posix()
+            source_identities.append(f"{relative_path}:{sha256_path(path)}")
+            source_bytes += path.stat().st_size
             audit["english_only_checked"] += 1
             if not english_only(document):
                 skipped["non_english_trajectory"] += 1
@@ -570,35 +603,35 @@ def build_corpus(
     output_bytes = b"".join(canonical_json(case) for case in cases)
     adapter_statistics = {key: int(value) for key, value in sorted(counts.items())}
     adapter_statistics.update({f"skipped_{key}": int(value) for key, value in sorted(skipped.items())})
+    adapter_statistics.update({f"audit_{key}": int(value) for key, value in sorted(audit.items())})
+    adapter_statistics.update(
+        {f"proof_events_{key}": int(value) for key, value in sorted(proof_lengths.items(), key=lambda item: int(item[0]))}
+    )
+    adapter_statistics["proof_event_bound_min"] = MIN_PROOF_EVENTS
+    adapter_statistics["proof_event_bound_max"] = MAX_PROOF_EVENTS
+    adapter_statistics["exact_tool_arguments"] = 1
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "datasets": [DATASET_ID],
-        "source_revision": revision,
-        "source_url": SOURCE_URL,
-        "lock_include_paths": ["LICENSE", "README.md", "trajectories"],
         "cases": len(cases),
         "counts": {DATASET_ID: len(cases)},
         "exact_payload_duplicates_removed": 0,
         "label_conflicts_excluded": 0,
         "adapter_statistics": {ADAPTER: adapter_statistics},
         "output_sha256": hashlib.sha256(output_bytes).hexdigest(),
-        "audit": {
-            "english_only": True,
-            "source_files": counts["source_files"],
-            "english_trajectories": audit["english_only_checked"] - skipped["non_english_trajectory"],
-            "non_english_trajectories": skipped["non_english_trajectory"],
-            "source_submitted": audit["submitted"],
-            "source_fields": {
-                "result_identity": "result",
-                "verifier_identity": "verifier",
-                "successful_outcome": "info.exit_status=submitted + info.submission + exact submit action",
-            },
-            "result_identity_present": audit["result_identity_present"],
-            "verifier_identity_present": audit["verifier_identity_present"],
-            "successful_outcome_closure": audit["successful_outcome_closure"],
-            "proof_event_lengths": {key: proof_lengths[key] for key in sorted(proof_lengths, key=int)},
-            "proof_event_bound": [MIN_PROOF_EVENTS, MAX_PROOF_EVENTS],
-            "exact_tool_arguments": True,
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "pinned trajectory roots",
+            "paths": list(SOURCE_ROOTS),
+            "bytes": source_bytes,
+            "files": len(source_identities),
+            "rows": len(paths),
+            "sha256": digest(*source_identities),
+            "trajectory_verification": "accepted submission plus exact submitted flag lineage within eight source events",
+            "source_url": SOURCE_URL,
         },
     }
     group_manifest = {
@@ -642,7 +675,11 @@ def atomic_write(path: Path, data: bytes) -> None:
 
 def main() -> int:
     args = parse_args()
-    cases, manifest, group_manifest = build_corpus(args.input_dir, revision=args.revision)
+    cases, manifest, group_manifest = build_corpus(
+        args.input_dir,
+        revision=args.revision,
+        enforce_release=True,
+    )
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     group_path = args.group_manifest or args.output.with_suffix(".groups.json")

@@ -164,7 +164,14 @@ def test_real_pinned_subset_normalizes_and_validates() -> None:
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
     assert manifest["cases"] == len(cases)
-    assert manifest["counts"] == {
+    assert manifest["counts"] == {MODULE.DATASET_ID: len(cases)}
+    statistics = manifest["adapter_statistics"]["cyber-task-horizons-v1"]
+    core_statistics = {
+        key: value
+        for key, value in statistics.items()
+        if not key.startswith(("category:", "model:", "rejection:"))
+    }
+    assert core_statistics == {
         "action_cases": 562,
         "benign_controls": 0,
         "cases": 1008,
@@ -186,7 +193,10 @@ def test_real_pinned_subset_normalizes_and_validates() -> None:
         "trajectories_without_projected_events": 4,
         "unique_tasks": 74,
     }
-    assert not manifest["rejections"]
+    assert not any(
+        key.startswith("rejection:")
+        for key in statistics
+    )
     assert not any(case["truth"].get("deterministic_truth") == "deterministic_malicious" for case in cases)
     assert all(len(case["payload"].get("events", [])) <= MODULE.MAX_EVENTS for case in cases)
     rendered = json.dumps(cases)

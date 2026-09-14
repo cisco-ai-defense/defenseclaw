@@ -131,6 +131,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--elastic-checkout", type=Path, required=True)
     parser.add_argument("--cybersec-jsonl", type=Path, required=True)
     parser.add_argument("--traildiscover-checkout", type=Path, required=True)
+    parser.add_argument("--source", action="append", choices=tuple(SOURCES))
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
@@ -545,8 +546,11 @@ def normalize_records(
     traildiscover: Sequence[tuple[str, Mapping[str, Any]]],
     *,
     cybersec_successes_excluded: int,
+    selected_sources: Sequence[str] | None = None,
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    groups = {"elastic": elastic, "cybersec": cybersec, "traildiscover": traildiscover}
+    all_groups = {"elastic": elastic, "cybersec": cybersec, "traildiscover": traildiscover}
+    selected = tuple(dict.fromkeys(selected_sources or all_groups))
+    groups = {key: all_groups[key] for key in selected}
     cases: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     seen: set[tuple[str, str]] = set()
@@ -567,59 +571,54 @@ def normalize_records(
             source_counts[source_key] += 1
             operation_counts[str(event["resource_class"])] += 1
     cases.sort(key=lambda case: str(case["id"]))
-    expected = {"successful_remove": 3, "failed_no_effect": 5, "incomplete_failure": 2}
+    expected_by_source = {
+        "elastic": {"successful_remove": 3},
+        "cybersec": {"failed_no_effect": 4},
+        "traildiscover": {"failed_no_effect": 1, "incomplete_failure": 2},
+    }
+    expected: Counter[str] = Counter()
+    for key in selected:
+        expected.update(expected_by_source[key])
     if dict(counts) != expected:
         raise ValueError(f"unexpected pinned control counts: {dict(counts)}")
-    if dict(source_counts) != {"elastic": 3, "cybersec": 4, "traildiscover": 3}:
+    expected_source_counts = {key: sum(expected_by_source[key].values()) for key in selected}
+    if dict(source_counts) != expected_source_counts:
         raise ValueError(f"unexpected pinned source counts: {dict(source_counts)}")
-    manifest_sources = []
-    for key in ("elastic", "cybersec", "traildiscover"):
-        spec = SOURCES[key]
-        manifest_sources.append(
-            {
-                "key": key,
-                "dataset": spec.dataset,
-                "revision": spec.revision,
-                "license": spec.license,
-                "license_note": spec.license_note,
-                "redistribution": spec.redistribution,
-                "source_url": spec.source_url,
-                "selected_cases": source_counts[key],
-                "artifacts": SOURCE_ARTIFACTS[key],
-            }
-        )
-    manifest = {
-        "schema_version": SCHEMA_VERSION,
-        "corpus": "cloud-share-same-operation-controls-v1",
-        "cases": len(cases),
+    statistics = {
         "scoreable_negative_cases": counts["successful_remove"] + counts["failed_no_effect"],
         "parser_only_out_of_scope_cases": counts["incomplete_failure"],
-        "counts_by_control_kind": {key: counts[key] for key in sorted(counts)},
-        "counts_by_resource_class": {key: operation_counts[key] for key in sorted(operation_counts)},
-        "cybersec_successful_additions_excluded": cybersec_successes_excluded,
-        "labeling": {
-            "method": "deterministic_source_argument_and_outcome_projection",
-            "llm_labels": False,
-            "secrets_retained": False,
-        },
-        "measurement_scope": "Post-action successful external-share effect only; failed operations and successful permission removals are negative controls.",
-        "limitations": [
-            "The eight-case scoreable denominator is too small for production false-positive-rate claims.",
-            "CloudTrail does not prove whether a successful cross-account grant was approved; authorization requires deployment policy.",
-            "Incomplete failed records are parser-only and excluded from precision and FPR scoring.",
-        ],
-        "sources": manifest_sources,
+        "cybersec_successful_additions_excluded": (
+            cybersec_successes_excluded if "cybersec" in selected else 0
+        ),
+    }
+    statistics.update({f"control_kind:{key}": counts[key] for key in sorted(counts)})
+    statistics.update({f"resource_class:{key}": operation_counts[key] for key in sorted(operation_counts)})
+    manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "datasets": sorted(SOURCES[key].dataset for key in selected),
+        "cases": len(cases),
+        "counts": {SOURCES[key].dataset: source_counts[key] for key in sorted(selected)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"cloud-share-same-operation-controls-v1": statistics},
     }
     return cases, manifest
 
 
-def normalize_sources(elastic_root: Path, cybersec_path: Path, traildiscover_root: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def normalize_sources(
+    elastic_root: Path,
+    cybersec_path: Path,
+    traildiscover_root: Path,
+    *,
+    selected_sources: Sequence[str] | None = None,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     cybersec, excluded = load_cybersec(cybersec_path)
     return normalize_records(
         load_elastic(elastic_root),
         cybersec,
         load_traildiscover(traildiscover_root),
         cybersec_successes_excluded=excluded,
+        selected_sources=selected_sources,
     )
 
 
@@ -666,7 +665,12 @@ def write_outputs(
 
 def main() -> int:
     args = parse_args()
-    cases, manifest = normalize_sources(args.elastic_checkout, args.cybersec_jsonl, args.traildiscover_checkout)
+    cases, manifest = normalize_sources(
+        args.elastic_checkout,
+        args.cybersec_jsonl,
+        args.traildiscover_checkout,
+        selected_sources=args.source,
+    )
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     output_manifest = write_outputs(cases, manifest, args.output, manifest_path)

@@ -802,7 +802,7 @@
       "source_url": "https://github.com/enigma-agent/trajectories",
       "revision": "431dda6896b261ecebf658a5e6fc05ee695efe76",
       "fetch": "git",
-      "include_paths": ["LICENSE", "README.md", "trajectories"],
+      "include_paths": ["LICENSE", "README.md", "CyBench", "HTB", "InterCode_CTF", "NYU_CTF"],
       "license": "MIT",
       "license_status": "approved",
       "redistribution": "download-only",

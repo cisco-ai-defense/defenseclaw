@@ -756,43 +756,39 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
 
     cases.sort(key=lambda case: str(case["id"]))
     counts["cases"] = len(cases)
+    statistics = dict(sorted(counts.items()))
+    for prefix, counter in (
+        ("rejected", rejected),
+        ("operation", operations),
+        ("technique", techniques),
+        ("domain", domains),
+        ("result", result_strata),
+        ("provider", providers),
+    ):
+        statistics.update({f"{prefix}:{key}": value for key, value in sorted(counter.items())})
+    source_sha256 = digest(
+        *(f"{name}:{metadata['sha256']}" for name, metadata in sorted(archive_manifest.items()))
+    )
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": revision,
-        "source_license": SOURCE_LICENSE,
-        "source_files": archive_manifest,
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "rejected": dict(sorted(rejected.items())),
-        "operations": dict(sorted(operations.items())),
-        "techniques": dict(sorted(techniques.items())),
-        "domains": dict(sorted(domains.items())),
-        "results": dict(sorted(result_strata.items())),
-        "providers": dict(sorted(providers.items())),
-        "exact_closure_evidence": [
-            {
-                "provider": provider,
-                "technique": technique,
-                "operation": operation,
-                "script_member": SCRIPT_EVIDENCE[(provider, technique, operation)][0],
-                "workload_operation": SCRIPT_EVIDENCE[(provider, technique, operation)][1],
-            }
-            for provider, technique, operation in sorted(EXACT_CLOSURES)
-        ],
-        "normalization": (
-            "Canonical provider audit exports only; exact operations, bounded allowlisted arguments, "
-            "actor/resource identities, timestamps, order, and structured result evidence retained. "
-            "Credentials, key material, response bodies, command/content bodies, source addresses, "
-            "user agents, request metadata, claims, and prose excluded."
-        ),
-        "label_limitation": (
-            "Payload-present files establish trajectory context only. Exact successful terminal operations "
-            "remain policy-relevant contextual cases because resource deletion and IAM removal are legitimate "
-            "administration without protected-resource policy. Controls, teardown, failures, and unresolved "
-            "outcomes also remain contextual development cases."
-        ),
+        "datasets": [DATASET_ID],
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"cross-cloud-telemetry-v1": statistics},
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "pinned Zenodo archives",
+            "paths": sorted(archive_manifest),
+            "bytes": sum(int(metadata["bytes"]) for metadata in archive_manifest.values()),
+            "files": len(archive_manifest),
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
     }
     return cases, manifest
 

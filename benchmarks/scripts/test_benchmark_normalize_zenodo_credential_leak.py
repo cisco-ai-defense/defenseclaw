@@ -179,10 +179,11 @@ def test_real_pinned_projection_is_schema_valid_and_deterministic() -> None:
         pytest.skip("pinned Zenodo 21860163 archive is not present")
     cases, manifest = MODULE.normalize_archive(Path(fixture), MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert manifest["source"]["archive_sha256"] == MODULE.ARCHIVE_SHA256
+    assert manifest["source"]["sha256"] == MODULE.ARCHIVE_SHA256
     assert manifest["source"]["license"] == "CC-BY-4.0"
-    assert manifest["counts"]["malicious_stateful_cases"] > 0
-    assert manifest["counts"]["benign_action_cases"] > 0
+    statistics = manifest["adapter_statistics"]["zenodo-credential-leak-v1"]
+    assert statistics["malicious_stateful_cases"] > 0
+    assert statistics["benign_action_cases"] > 0
     assert all(len(case["payload"]["events"]) <= 9 for case in cases if case["surface"] == "stateful")
     assert all(
         case["truth"]["source_truth"] != "benign"

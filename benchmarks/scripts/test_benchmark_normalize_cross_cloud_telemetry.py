@@ -189,10 +189,14 @@ def test_real_pinned_corpus_normalizes_and_validates() -> None:
         pytest.skip("pinned Cross-Platform Cloud Telemetry fixture is not present")
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert manifest["counts"]["action_cases"] > 0
-    assert manifest["counts"]["exact_closure_events"] > 0
-    assert sum(manifest["providers"].values()) == manifest["counts"]["action_cases"]
-    assert len(manifest["exact_closure_evidence"]) == 3
+    assert manifest["counts"] == {MODULE.DATASET_ID: len(cases)}
+    statistics = manifest["adapter_statistics"]["cross-cloud-telemetry-v1"]
+    assert statistics["action_cases"] > 0
+    assert statistics["exact_closure_events"] > 0
+    assert sum(value for key, value in statistics.items() if key.startswith("provider:")) == statistics[
+        "action_cases"
+    ]
+    assert len(MODULE.EXACT_CLOSURES) == 3
     assert {case["strata"]["platform"] for case in cases} == {"aws", "azure", "gcp"}
     assert all(case["split"] == "development" for case in cases)
     assert all(

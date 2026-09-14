@@ -742,30 +742,29 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
     cases.sort(key=lambda item: item["id"])
     counts["cases"] = len(cases)
     combined_hash = digest(*(f"{path}:{value}" for path, value in sorted(hashes.items())))
+    statistics = dict(sorted(counts.items()))
+    statistics.update({f"subset:{key}": value for key, value in sorted(subset_counts.items())})
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "source_id": DATASET_ID,
-        "source_url": SOURCE_URL,
-        "source_revision": revision,
-        "source_license": SOURCE_LICENSE,
-        "source_sha256": combined_hash,
-        "source_files": hashes,
-        "selected_subsets": [subset.data_path for subset in SUBSETS],
-        "rejected_subsets": REJECTED_SUBSETS,
+        "datasets": [DATASET_ID],
         "cases": len(cases),
-        "row_count": len(cases),
-        "counts": dict(sorted(counts.items())),
-        "subset_counts": dict(sorted(subset_counts.items())),
-        "normalization": (
-            "Targeted exact command lines and allowlisted consequence fields only. Host, user, process, "
-            "parent, container/resource, timestamp, result and order identities are retained where present. "
-            "Hashes, network addresses, secrets, annotations, response prose and unrelated event bodies are excluded."
-        ),
-        "label_limitation": (
-            "Attack-range provenance does not make every process start an atomic TP. Only exact completed "
-            "Defender exclusion or logging-disable consequence events are authoritative. SQL, credential, "
-            "firewall, audit-policy and Kubernetes dual-use or denied records remain contextual development cases."
-        ),
+        "counts": {DATASET_ID: len(cases)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"splunk-attack-data-v1": statistics},
+        "source": {
+            "dataset": DATASET_ID,
+            "revision": revision,
+            "license": SOURCE_LICENSE,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "path": "targeted audited subsets",
+            "paths": sorted(hashes),
+            "bytes": sum((resolved / path).stat().st_size for path in hashes),
+            "files": len(hashes),
+            "rows": counts["source_events"],
+            "sha256": combined_hash,
+            "source_url": SOURCE_URL,
+        },
     }
     return cases, manifest
 

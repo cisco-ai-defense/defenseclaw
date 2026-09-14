@@ -153,9 +153,11 @@ def test_real_targeted_projection_validates() -> None:
     cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
     MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
     assert manifest["cases"] == len(cases)
-    assert manifest["counts"]["selected_events"] > 0
-    assert manifest["counts"]["action_authoritative_cases"] > 0
-    assert manifest["rejected_subsets"]
+    assert manifest["counts"] == {MODULE.DATASET_ID: len(cases)}
+    statistics = manifest["adapter_statistics"]["splunk-attack-data-v1"]
+    assert statistics["selected_events"] > 0
+    assert statistics["action_authoritative_cases"] > 0
+    assert MODULE.REJECTED_SUBSETS
     assert all(case["split"] == "development" for case in cases)
     assert all(
         len(case["payload"].get("events", [])) <= MODULE.MAX_EVENTS for case in cases if case["surface"] == "stateful"
