@@ -868,7 +868,7 @@
         "id": "CMD-PIPE-CURL",
         "tool_call_only": true,
         "expression": "f.commands.exists(c, c.argv_complete && c.program in ['curl', 'curl.exe', 'invoke-webrequest', 'iwr', 'invoke-restmethod', 'irm'] && (defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_FETCH in c.operations || defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))",
-        "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\\b|python(?:[0-9.]*)?\\s+-\\b|(?:perl|ruby)\\b)|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
+        "pattern": "(?i)(?:\\bcurl\\b\\s+[^|;\\r\\n]*\\|\\s*(?:[/\\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\\b|python(?:[0-9.]*)?\\s+-(?:\\s|$)|(?:perl|ruby)\\b)|\\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\\b[^|;\\r\\n]*\\|\\s*(?:invoke-expression|iex)\\b)",
         "title": "curl piped to shell",
         "severity": "CRITICAL",
         "confidence": 0.95,
@@ -6291,14 +6291,14 @@
     },
     {
       "id": "RECIPE-PATH-ETC-PASSWD",
-      "title": "/etc/passwd mutation",
+      "title": "/etc/passwd typed read or mutation",
       "kind": "rule:sensitive-path",
       "body": {
         "id": "PATH-ETC-PASSWD",
         "tool_call_only": true,
-        "expression": "f.paths.exists(p, p.normalized == '/etc/passwd' && p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])",
+        "expression": "f.paths.exists(p, p.normalized == '/etc/passwd' && (p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE] || (p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ && f.commands.exists(c, c.id == p.command_id && c.dialect == defenseclaw.guardrail.semantic.v1.Dialect.DIALECT_ARGV && c.program in ['read', 'readfile', 'read_file', 'read-file', 'fsread', 'fs_read', 'fs-read', 'fs.read', 'fs.read_file', 'fileread', 'file_read', 'file-read', 'catfile', 'cat_file', 'cat-file', 'openfile', 'open_file', 'open-file', 'viewfile', 'view_file', 'view-file', 'getfile', 'get_file', 'get-file']))))",
         "pattern": "a^",
-        "title": "/etc/passwd mutation",
+        "title": "/etc/passwd typed read or mutation",
         "severity": "HIGH",
         "confidence": 0.9,
         "tags": [
