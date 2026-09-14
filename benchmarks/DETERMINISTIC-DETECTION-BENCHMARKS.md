@@ -544,13 +544,19 @@ python benchmarks/scripts/benchmark_normalize.py \
 ### Run, score, and verify
 
 ```bash
-go run ./benchmarks/cmd/defenseclaw-benchmark run \
+test -z "$(git status --porcelain)"
+benchmark_commit="$(git rev-parse --verify HEAD)"
+go build -buildvcs=true -trimpath \
+  -ldflags "-X main.buildCommit=$benchmark_commit -X main.buildDirty=false" \
+  -o bin/defenseclaw-benchmark ./benchmarks/cmd/defenseclaw-benchmark
+
+./bin/defenseclaw-benchmark run \
   --corpus "$BENCHMARK_DATA_DIR/public-command-validation.jsonl" \
   --dataset-lock benchmarks/datasets.lock.json \
   --profiles default,permissive,strict \
   --output outputs/benchmarks/public-command-validation
 
-go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+./bin/defenseclaw-benchmark verify \
   --output outputs/benchmarks/public-command-validation
 ```
 

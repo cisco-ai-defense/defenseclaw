@@ -14,10 +14,97 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime/debug"
+	"strings"
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/benchmarks/internal/benchmark"
 )
+
+func TestBinaryVCSSettings(t *testing.T) {
+	revision, modified := binaryVCSSettings([]debug.BuildSetting{
+		{Key: "vcs.revision", Value: "0123456789abcdef"},
+		{Key: "vcs.modified", Value: "false"},
+	})
+	if revision != "0123456789abcdef" || modified == nil || *modified {
+		t.Fatalf("binary VCS state = revision %q modified %v", revision, modified)
+	}
+
+	revision, modified = binaryVCSSettings(nil)
+	if revision != "" || modified != nil {
+		t.Fatalf("unknown binary VCS state = revision %q modified %v", revision, modified)
+	}
+
+	revision, modified = linkedBinaryVCS("abcdefabcdefabcdefabcdefabcdefabcdefabcd", "false")
+	if revision != "abcdefabcdefabcdefabcdefabcdefabcdefabcd" || modified == nil || *modified {
+		t.Fatalf("linked binary VCS state = revision %q modified %v", revision, modified)
+	}
+}
+
+func TestValidateRunBinaryProvenance(t *testing.T) {
+	clean := false
+	dirty := true
+	tests := []struct {
+		name           string
+		commit         string
+		repoDirty      bool
+		binaryRevision string
+		binaryModified *bool
+		wantError      bool
+	}{
+		{name: "match", commit: "0123456789abcdef0123456789abcdef01234567", binaryRevision: "0123456789abcdef0123456789abcdef01234567", binaryModified: &clean},
+		{name: "mismatch", commit: "0123456789abcdef0123456789abcdef01234567", binaryRevision: "fedcba9876543210fedcba9876543210fedcba98", binaryModified: &clean, wantError: true},
+		{name: "unknown binary revision", commit: "0123456789abcdef0123456789abcdef01234567", binaryModified: &clean, wantError: true},
+		{name: "unknown modified state", commit: "0123456789abcdef0123456789abcdef01234567", binaryRevision: "0123456789abcdef0123456789abcdef01234567", wantError: true},
+		{name: "dirty binary", commit: "0123456789abcdef0123456789abcdef01234567", binaryRevision: "0123456789abcdef0123456789abcdef01234567", binaryModified: &dirty, wantError: true},
+		{name: "dirty repository", commit: "0123456789abcdef0123456789abcdef01234567", repoDirty: true, binaryRevision: "0123456789abcdef0123456789abcdef01234567", binaryModified: &clean, wantError: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateRunBinaryProvenance(test.commit, test.repoDirty, test.binaryRevision, test.binaryModified)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validateRunBinaryProvenance() error = %v, want error %v", err, test.wantError)
+			}
+		})
+	}
+}
+
+func TestRunBenchmarkRejectsBinaryProvenanceBeforeLoadingCorpus(t *testing.T) {
+	commit := "0123456789abcdef0123456789abcdef01234567"
+	clean := false
+	previousGitState := gitStateForRun
+	previousBinaryVCS := runningBinaryVCSForRun
+	gitStateForRun = func(string) (string, bool) { return commit, false }
+	runningBinaryVCSForRun = func() (string, *bool) {
+		return "fedcba9876543210fedcba9876543210fedcba98", &clean
+	}
+	t.Cleanup(func() {
+		gitStateForRun = previousGitState
+		runningBinaryVCSForRun = previousBinaryVCS
+	})
+
+	err := runBenchmark([]string{
+		"--repo-root", t.TempDir(),
+		"--corpus", filepath.Join(t.TempDir(), "must-not-be-opened.jsonl"),
+	}, &bytes.Buffer{})
+	if err == nil || !strings.Contains(err.Error(), "differs from selected clean repository commit") {
+		t.Fatalf("runBenchmark() error = %v, want pre-input binary revision mismatch", err)
+	}
+}
+
+func stubRunBinaryProvenance(t *testing.T, repoRoot string) {
+	t.Helper()
+	commit, _ := gitState(repoRoot)
+	clean := false
+	previousGitState := gitStateForRun
+	previousBinaryVCS := runningBinaryVCSForRun
+	gitStateForRun = func(string) (string, bool) { return commit, false }
+	runningBinaryVCSForRun = func() (string, *bool) { return commit, &clean }
+	t.Cleanup(func() {
+		gitStateForRun = previousGitState
+		runningBinaryVCSForRun = previousBinaryVCS
+	})
+}
 
 func TestCompareBenchmarkUsesTruthOverlay(t *testing.T) {
 	dir := t.TempDir()
@@ -87,6 +174,7 @@ func TestRunBenchmarkEvaluatesRowsPromotedByTruthOverlay(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stubRunBinaryProvenance(t, repoRoot)
 	sourceCase := benchmark.Case{
 		SchemaVersion: benchmark.SchemaVersion,
 		ID:            "test/promoted-command",
@@ -150,6 +238,8 @@ func TestRunBenchmarkEvaluatesRowsPromotedByTruthOverlay(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !reflect.DeepEqual(environment.Profiles, []string{"default"}) ||
+		environment.BinaryProvenanceVersion != benchmark.BinaryProvenanceSchemaVersion ||
+		environment.BinaryVCSRevision == "" || environment.BinaryVCSModified == nil || *environment.BinaryVCSModified ||
 		len(environment.OptInPolicyPacks) != 0 || environment.OptInPolicyRoot != "" ||
 		len(environment.PolicyPostures) != 0 {
 		t.Fatalf("standard-only environment changed: %+v", environment)
@@ -162,6 +252,7 @@ func TestRunBenchmarkLoadsAndLabelsOptInPolicyPack(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	stubRunBinaryProvenance(t, repoRoot)
 	outputDir := filepath.Join(dir, "output")
 	if err := runBenchmark([]string{
 		"--corpus", filepath.Join(repoRoot, "benchmarks", "fixtures", "cloud-production-conformance-v1.jsonl"),

@@ -53,6 +53,58 @@ func TestClassificationSHA256ExcludesRunIdentityAndTiming(t *testing.T) {
 	}
 }
 
+func TestValidatePublicationProvenance(t *testing.T) {
+	clean := false
+	dirty := true
+	tests := []struct {
+		name      string
+		env       Environment
+		wantError bool
+	}{
+		{
+			name: "matching binary",
+			env:  Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryProvenanceVersion: BinaryProvenanceSchemaVersion, BinaryVCSRevision: "0123456789abcdef0123456789abcdef01234567", BinaryVCSModified: &clean},
+		},
+		{
+			name:      "mismatching binary",
+			env:       Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryVCSRevision: "fedcba9876543210fedcba9876543210fedcba98", BinaryVCSModified: &clean},
+			wantError: true,
+		},
+		{
+			name: "legacy unknown binary",
+			env:  Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567"},
+		},
+		{
+			name:      "partial matching revision without version or modified state",
+			env:       Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryVCSRevision: "0123456789abcdef0123456789abcdef01234567"},
+			wantError: true,
+		},
+		{
+			name:      "partial clean modified state without version or revision",
+			env:       Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryVCSModified: &clean},
+			wantError: true,
+		},
+		{
+			name:      "dirty binary",
+			env:       Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryProvenanceVersion: BinaryProvenanceSchemaVersion, BinaryVCSRevision: "0123456789abcdef0123456789abcdef01234567", BinaryVCSModified: &dirty},
+			wantError: true,
+		},
+		{
+			name:      "marked provenance is incomplete",
+			env:       Environment{DefenseClawCommit: "0123456789abcdef0123456789abcdef01234567", BinaryProvenanceVersion: BinaryProvenanceSchemaVersion},
+			wantError: true,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := validatePublicationProvenance(test.env)
+			if (err != nil) != test.wantError {
+				t.Fatalf("validatePublicationProvenance() error = %v, want error %v", err, test.wantError)
+			}
+		})
+	}
+}
+
 func TestBenchmarkSmokeCorpusUsesProductionPaths(t *testing.T) {
 	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
 	file, err := os.Open(filepath.Join(repoRoot, "benchmarks", "fixtures", "smoke.jsonl"))

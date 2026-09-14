@@ -30,8 +30,11 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
+	"runtime/debug"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,6 +42,13 @@ import (
 )
 
 const defaultSeed int64 = 741983
+
+var (
+	buildCommit string
+	buildDirty  string
+)
+
+var fullGitCommitPattern = regexp.MustCompile(`^[0-9a-fA-F]{40}$`)
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
@@ -99,6 +109,11 @@ func runBenchmark(args []string, stdout io.Writer) error {
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
+	commit, dirty := gitStateForRun(*repoRoot)
+	binaryRevision, binaryModified := runningBinaryVCSForRun()
+	if err := validateRunBinaryProvenance(commit, dirty, binaryRevision, binaryModified); err != nil {
+		return err
+	}
 
 	corpusSHA256, cases, lockData, _, err := loadInputs(*corpusPath, *lockPath)
 	if err != nil {
@@ -147,7 +162,6 @@ func runBenchmark(args []string, stdout io.Writer) error {
 		}
 		optInPolicyRootMetadata = filepath.Clean(*optInPolicyRoot)
 	}
-	commit, dirty := gitState(*repoRoot)
 	if *runID == "" {
 		short := commit
 		if len(short) > 12 {
@@ -189,26 +203,29 @@ func runBenchmark(args []string, stdout io.Writer) error {
 		return err
 	}
 	environment := benchmark.Environment{
-		RunID:             *runID,
-		CaseCount:         len(cases),
-		PredictionCount:   len(predictions),
-		DefenseClawCommit: commit,
-		Dirty:             dirty,
-		GOOS:              runtime.GOOS,
-		GOARCH:            runtime.GOARCH,
-		GoVersion:         runtime.Version(),
-		PythonVersion:     pythonVersion(),
-		Profiles:          policyLabels,
-		PolicyRoot:        filepath.Clean(*policyRoot),
-		OptInPolicyPacks:  optInPacks,
-		OptInPolicyRoot:   optInPolicyRootMetadata,
-		PolicyPostures:    policyPostures,
-		CorpusSHA256:      corpusSHA256,
-		TruthCorpusSHA256: truthCorpusSHA256,
-		DatasetLockSHA256: benchmark.SHA256Hex(lockData),
-		PolicyDigests:     policyDigests,
-		Command:           append([]string{"defenseclaw-benchmark", "run"}, args...),
-		Seed:              *seed,
+		RunID:                   *runID,
+		CaseCount:               len(cases),
+		PredictionCount:         len(predictions),
+		DefenseClawCommit:       commit,
+		Dirty:                   dirty,
+		BinaryProvenanceVersion: benchmark.BinaryProvenanceSchemaVersion,
+		BinaryVCSRevision:       binaryRevision,
+		BinaryVCSModified:       binaryModified,
+		GOOS:                    runtime.GOOS,
+		GOARCH:                  runtime.GOARCH,
+		GoVersion:               runtime.Version(),
+		PythonVersion:           pythonVersion(),
+		Profiles:                policyLabels,
+		PolicyRoot:              filepath.Clean(*policyRoot),
+		OptInPolicyPacks:        optInPacks,
+		OptInPolicyRoot:         optInPolicyRootMetadata,
+		PolicyPostures:          policyPostures,
+		CorpusSHA256:            corpusSHA256,
+		TruthCorpusSHA256:       truthCorpusSHA256,
+		DatasetLockSHA256:       benchmark.SHA256Hex(lockData),
+		PolicyDigests:           policyDigests,
+		Command:                 append([]string{"defenseclaw-benchmark", "run"}, args...),
+		Seed:                    *seed,
 	}
 	classificationDigest, err := benchmark.ClassificationSHA256(predictions)
 	if err != nil {
@@ -708,6 +725,69 @@ func gitState(repoRoot string) (string, bool) {
 		dirty = len(bytes.TrimSpace(output)) != 0
 	}
 	return commit, dirty
+}
+
+var gitStateForRun = gitState
+var runningBinaryVCSForRun = runningBinaryVCS
+
+func runningBinaryVCS() (string, *bool) {
+	info, ok := debug.ReadBuildInfo()
+	if ok {
+		revision, modified := binaryVCSSettings(info.Settings)
+		if revision != "" || modified != nil {
+			return revision, modified
+		}
+	}
+	return linkedBinaryVCS(buildCommit, buildDirty)
+}
+
+func binaryVCSSettings(settings []debug.BuildSetting) (string, *bool) {
+	var revision string
+	var modified *bool
+	for _, setting := range settings {
+		switch setting.Key {
+		case "vcs.revision":
+			revision = strings.TrimSpace(setting.Value)
+		case "vcs.modified":
+			value, err := strconv.ParseBool(strings.TrimSpace(setting.Value))
+			if err == nil {
+				modified = &value
+			}
+		}
+	}
+	return revision, modified
+}
+
+func linkedBinaryVCS(revision, modifiedValue string) (string, *bool) {
+	revision = strings.TrimSpace(revision)
+	modified, err := strconv.ParseBool(strings.TrimSpace(modifiedValue))
+	if err != nil {
+		return revision, nil
+	}
+	return revision, &modified
+}
+
+func validateRunBinaryProvenance(commit string, repoDirty bool, binaryRevision string, binaryModified *bool) error {
+	if !fullGitCommitPattern.MatchString(commit) {
+		return fmt.Errorf("benchmark run requires a full 40-hex selected repository commit")
+	}
+	if repoDirty {
+		return fmt.Errorf("benchmark run requires a clean selected repository worktree")
+	}
+	if !fullGitCommitPattern.MatchString(binaryRevision) || binaryModified == nil {
+		return fmt.Errorf("benchmark run requires embedded binary VCS provenance; build with -buildvcs=true")
+	}
+	if *binaryModified {
+		return fmt.Errorf("benchmark run requires an unmodified benchmark binary")
+	}
+	if !strings.EqualFold(commit, binaryRevision) {
+		return fmt.Errorf(
+			"benchmark binary revision %q differs from selected clean repository commit %q",
+			binaryRevision,
+			commit,
+		)
+	}
+	return nil
 }
 
 func firstNonEmpty(values ...string) string {

@@ -41,19 +41,31 @@ alias, not a fourth experimental arm.
 ## Run the smoke suite
 
 ```bash
-go run ./benchmarks/cmd/defenseclaw-benchmark run \
+test -z "$(git status --porcelain)"
+benchmark_commit="$(git rev-parse --verify HEAD)"
+go build -buildvcs=true -trimpath \
+  -ldflags "-X main.buildCommit=$benchmark_commit -X main.buildDirty=false" \
+  -o bin/defenseclaw-benchmark ./benchmarks/cmd/defenseclaw-benchmark
+
+./bin/defenseclaw-benchmark run \
   --corpus benchmarks/fixtures/smoke.jsonl \
   --dataset-lock benchmarks/datasets.lock.json \
   --profiles default,permissive,strict \
   --gate \
   --output outputs/benchmarks/smoke
 
-go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+./bin/defenseclaw-benchmark verify \
   --output outputs/benchmarks/smoke
 ```
 
 The runner writes case-level predictions, environment and policy inventories,
 aggregate metrics, corpus and dataset manifests, and checksums.
+It refuses to evaluate a corpus unless the selected worktree is clean and the
+running binary contains clean, embedded VCS metadata matching its exact
+40-hex repository commit. The explicit linker values above support linked Git
+worktrees where Go omits `vcs.*` build settings even with `-buildvcs=true`;
+native Go build metadata takes precedence when present. Publication verification remains
+backward-compatible with older bundles that predate binary provenance fields.
 
 ## Run an opt-in policy pack
 
@@ -62,14 +74,14 @@ profiles. Select them by their repository name; each runs with the balanced
 (`default`) action posture and is reported under an `opt-in/<name>` label:
 
 ```bash
-go run ./benchmarks/cmd/defenseclaw-benchmark run \
+./bin/defenseclaw-benchmark run \
   --corpus benchmarks/fixtures/cloud-production-conformance-v1.jsonl \
   --dataset-lock benchmarks/datasets.lock.json \
   --profiles default \
   --opt-in-packs cloud-production-protection \
   --output outputs/benchmarks/cloud-production-conformance
 
-go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+./bin/defenseclaw-benchmark verify \
   --output outputs/benchmarks/cloud-production-conformance
 ```
 

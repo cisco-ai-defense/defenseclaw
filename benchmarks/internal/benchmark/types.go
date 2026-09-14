@@ -242,28 +242,33 @@ type Prediction struct {
 }
 
 type Environment struct {
-	RunID                string            `json:"run_id"`
-	CaseCount            int               `json:"case_count"`
-	PredictionCount      int               `json:"prediction_count"`
-	DefenseClawCommit    string            `json:"defenseclaw_commit"`
-	Dirty                bool              `json:"dirty"`
-	GOOS                 string            `json:"goos"`
-	GOARCH               string            `json:"goarch"`
-	GoVersion            string            `json:"go_version"`
-	PythonVersion        string            `json:"python_version"`
-	Profiles             []string          `json:"profiles"`
-	PolicyRoot           string            `json:"policy_root"`
-	OptInPolicyPacks     []string          `json:"opt_in_policy_packs,omitempty"`
-	OptInPolicyRoot      string            `json:"opt_in_policy_root,omitempty"`
-	PolicyPostures       map[string]string `json:"policy_postures,omitempty"`
-	CorpusSHA256         string            `json:"corpus_sha256"`
-	TruthCorpusSHA256    string            `json:"truth_corpus_sha256,omitempty"`
-	DatasetLockSHA256    string            `json:"dataset_lock_sha256"`
-	PolicyDigests        map[string]string `json:"policy_digests"`
-	ClassificationSHA256 string            `json:"classification_sha256"`
-	Command              []string          `json:"command"`
-	Seed                 int64             `json:"seed"`
+	RunID                   string            `json:"run_id"`
+	CaseCount               int               `json:"case_count"`
+	PredictionCount         int               `json:"prediction_count"`
+	DefenseClawCommit       string            `json:"defenseclaw_commit"`
+	Dirty                   bool              `json:"dirty"`
+	BinaryProvenanceVersion int               `json:"binary_provenance_version,omitempty"`
+	BinaryVCSRevision       string            `json:"binary_vcs_revision,omitempty"`
+	BinaryVCSModified       *bool             `json:"binary_vcs_modified,omitempty"`
+	GOOS                    string            `json:"goos"`
+	GOARCH                  string            `json:"goarch"`
+	GoVersion               string            `json:"go_version"`
+	PythonVersion           string            `json:"python_version"`
+	Profiles                []string          `json:"profiles"`
+	PolicyRoot              string            `json:"policy_root"`
+	OptInPolicyPacks        []string          `json:"opt_in_policy_packs,omitempty"`
+	OptInPolicyRoot         string            `json:"opt_in_policy_root,omitempty"`
+	PolicyPostures          map[string]string `json:"policy_postures,omitempty"`
+	CorpusSHA256            string            `json:"corpus_sha256"`
+	TruthCorpusSHA256       string            `json:"truth_corpus_sha256,omitempty"`
+	DatasetLockSHA256       string            `json:"dataset_lock_sha256"`
+	PolicyDigests           map[string]string `json:"policy_digests"`
+	ClassificationSHA256    string            `json:"classification_sha256"`
+	Command                 []string          `json:"command"`
+	Seed                    int64             `json:"seed"`
 }
+
+const BinaryProvenanceSchemaVersion = 1
 
 var boundedIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
