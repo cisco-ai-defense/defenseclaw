@@ -4217,9 +4217,12 @@ def test_uninstall_transaction_smoke_keeps_receipt_paths_powershell_51_compatibl
     assert "rollback_verification_only" in smoke
     assert "disconnected target teardown incomplete" in smoke
 
-    assert "('dcut-' + [Guid]::NewGuid().ToString('N'))" in smoke
+    # UUID is truncated to 8 hex chars so the fixture path stays under
+    # Windows MAX_PATH once the module's staging suffix (.new.<32-hex>) is
+    # appended. See enterprise-uninstall-transaction-smoke.ps1 comment.
+    assert "('dcut-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))" in smoke
     assert "function New-HarnessCaseRoot" in smoke
-    assert "$receiptProbe.Length -ge 240" in smoke
+    assert "$stagedProbe.Length -ge 255" in smoke
     assert "legacy MAX_PATH boundary" in smoke
     assert smoke.count("New-HarnessCaseRoot") == 14
     assert "fresh-install-service-bootstrap-rollback-retry" in smoke

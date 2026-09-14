@@ -2970,6 +2970,16 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
+        # Diagnostic to name the actual flag state seen at the failure
+        # site. Shard 3 has been hitting this branch on Windows PowerShell 5.1
+        # for one specific fixture (see enterprise-uninstall-transaction-
+        # smoke.ps1 c061) and the observed flags identify which .NET
+        # AccessControl path stripped the protection bit.
+        $expectedFlags = [int]$expectedDescriptor.ControlFlags
+        $actualFlags = [int]$Actual.ControlFlags
+        [Console]::Error.WriteLine(
+            "[DACL-DEBUG] path=$Path expectedFlags=0x$($expectedFlags.ToString('x8')) actualFlags=0x$($actualFlags.ToString('x8'))"
+        )
         throw "managed DACL is not protected after exact ACL replacement: $Path"
     }
     $ownerSID = if ($null -eq $Actual.Owner) {

@@ -15,9 +15,17 @@ $modulePath = [IO.Path]::GetFullPath(
 $installerPath = [IO.Path]::GetFullPath(
     (Microsoft.PowerShell.Management\Join-Path $PSScriptRoot '..\install-enterprise.ps1')
 )
+# Use an 8-char UUID (was 32-char full GUID) to keep the fixture root
+# short. Windows MAX_PATH is 260, and the module writes staging leaves
+# named managed-hook-contract-cleanup-<64-hex>.json.new.<32-hex> — 136
+# chars just for the leaf. With GitHub Actions' TEMP prefix +
+# DefenseClaw-PowerShellSmoke-<8> + dcut-<full-uuid>\c<NNN>\lifecycle,
+# the total path was 264 chars and CreateFileW failed on shard 3 with
+# "open file for raw security query failed". Trimming this UUID saves
+# 24 chars per fixture and brings all leaves back under MAX_PATH.
 $testRoot = Microsoft.PowerShell.Management\Join-Path `
     ([IO.Path]::GetTempPath()) `
-    ('dcut-' + [Guid]::NewGuid().ToString('N'))
+    ('dcut-' + [Guid]::NewGuid().ToString('N').Substring(0, 8))
 Microsoft.PowerShell.Management\New-Item `
     -ItemType Directory `
     -Path $testRoot `
@@ -204,17 +212,26 @@ try {
             # One-shot diagnostic to name the failing case in CI. The DACL
             # failure at psm1:2973 emits a file path with cNNN but no label,
             # making the case impossible to identify from macOS. Remove once
-            # the DACL root-cause is landed.
+            # every diagnosed case is landed.
             $harnessCaseTag = 'c{0:d3}' -f $script:HarnessCaseSequence
             [Console]::Error.WriteLine("[HARNESS-DEBUG] BEGIN $($harnessCaseTag): $($Label)")
             $root = Microsoft.PowerShell.Management\Join-Path `
                 $Parent `
                 ('c{0:d3}' -f $script:HarnessCaseSequence)
-            $receiptProbe = Microsoft.PowerShell.Management\Join-Path `
+            # The prior probe used the shorter 'purge-<64>.json' intent
+            # leaf. But Write-DefenseClawProtectedTextAtomic writes the
+            # cleanup-receipt via a much longer staged leaf:
+            #     managed-hook-contract-cleanup-<64-hex>.json.new.<32-hex>
+            # (136 chars vs the intent leaf's 74 chars). Probe against the
+            # actual longest staged leaf, and cap at MAX_PATH - 5 for a
+            # small safety margin.
+            $stagedProbeLeaf = 'managed-hook-contract-cleanup-' + ('1' * 64) +
+                '.json.new.' + ('1' * 32)
+            $stagedProbe = Microsoft.PowerShell.Management\Join-Path `
                 (Microsoft.PowerShell.Management\Join-Path $root 'lifecycle') `
-                ('purge-' + ('1' * 64) + '.json')
-            if ($receiptProbe.Length -ge 240) {
-                throw "PowerShell 5.1 fixture path is too long for ${Label}: $receiptProbe"
+                $stagedProbeLeaf
+            if ($stagedProbe.Length -ge 255) {
+                throw "Windows fixture path exceeds MAX_PATH for ${Label}: $stagedProbe"
             }
             return $root
         }
