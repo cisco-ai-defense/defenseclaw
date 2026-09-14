@@ -10,8 +10,9 @@ parser, and verdict mapping. It combines those predictions with the same
 datasets and deterministic engine used by this benchmark. Tool-risk training
 and protected corpora are outside this lane.
 
-All external sources are publicly accessible and revision-pinned in
-[`datasets.lock.json`](datasets.lock.json). Source records are downloaded into
+Sources used by the published public suite are publicly accessible and
+revision-pinned in [`datasets.lock.json`](datasets.lock.json). The lock may also
+track candidate sources that are not admitted to a published score. Source records are downloaded into
 an ignored local data directory and are not committed. The harness never
 executes commands or tool calls from a dataset.
 
@@ -31,7 +32,7 @@ alias, not a fourth experimental arm.
 
 ## Requirements
 
-- Go 1.24 or newer
+- Go 1.26.4 or the exact version declared by `go.mod`
 - Python 3.11 or newer
 - `git`
 - `pyarrow` and `jsonschema` for Parquet-backed datasets
@@ -55,6 +56,9 @@ go build -buildvcs=true -trimpath \
   --output outputs/benchmarks/smoke
 
 ./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/smoke
+
+./bin/defenseclaw-benchmark verify --publication \
   --output outputs/benchmarks/smoke
 ```
 
@@ -82,6 +86,9 @@ profiles. Select them by their repository name; each runs with the balanced
   --output outputs/benchmarks/cloud-production-conformance
 
 ./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/cloud-production-conformance
+
+./bin/defenseclaw-benchmark verify --publication \
   --output outputs/benchmarks/cloud-production-conformance
 ```
 

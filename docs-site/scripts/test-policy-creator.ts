@@ -246,6 +246,92 @@ test('deterministic inventory: fixed chain and YARA IDs match runtime sources', 
   assert.equal(sourceYaraIds.length, 10);
 });
 
+test('deterministic docs: profile totals and chain posture match canonical sources', () => {
+  const totals = new Map<string, {
+    declared: number;
+    enabled: number;
+    semantic: number;
+    toolCallOnly: number;
+    neverMatch: number;
+  }>();
+
+  for (const profile of ['default', 'permissive', 'strict']) {
+    const rulesDir = new URL(`../../policies/guardrail/${profile}/rules/`, import.meta.url);
+    const rules = readdirSync(rulesDir)
+      .filter((name) => name.endsWith('.yaml'))
+      .flatMap((name) => {
+        const source = yaml.load(readFileSync(new URL(name, rulesDir), 'utf8')) as {
+          rules?: Array<{
+            enabled?: boolean;
+            expression?: string;
+            tool_call_only?: boolean;
+            pattern?: string;
+          }>;
+        };
+        return source.rules ?? [];
+      });
+    const enabled = rules.filter((rule) => rule.enabled !== false);
+    totals.set(profile, {
+      declared: rules.length,
+      enabled: enabled.length,
+      semantic: enabled.filter((rule) => typeof rule.expression === 'string').length,
+      toolCallOnly: enabled.filter((rule) => rule.tool_call_only === true).length,
+      neverMatch: enabled.filter((rule) => rule.pattern === 'a^').length,
+    });
+  }
+
+  const reference = readFileSync(
+    new URL('../content/docs/policies/deterministic-detection.mdx', import.meta.url),
+    'utf8',
+  );
+  const creator = readFileSync(
+    new URL('../content/docs/policies/creator.mdx', import.meta.url),
+    'utf8',
+  );
+  const index = readFileSync(
+    new URL('../content/docs/policies/index.mdx', import.meta.url),
+    'utf8',
+  );
+
+  const balanced = totals.get('default')!;
+  const permissive = totals.get('permissive')!;
+  const strict = totals.get('strict')!;
+  assert.ok(reference.includes(
+    `| Balanced/default | ${balanced.declared} | ${balanced.enabled} | ${balanced.semantic} | ${balanced.toolCallOnly} | ${balanced.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `| Permissive | ${permissive.declared} | ${permissive.enabled} | ${permissive.semantic} | ${permissive.toolCallOnly} | ${permissive.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `| Strict | ${strict.declared} | ${strict.enabled} | ${strict.semantic} | ${strict.toolCallOnly} | ${strict.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `The balanced/default enabled rule catalog contains ${balanced.enabled} local rules`,
+  ));
+  assert.ok(index.includes(
+    `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
+  ));
+  assert.ok(creator.includes(
+    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
+  ));
+
+  const enforcementCapable = BOUNDED_CHAINS.filter(
+    (chain) => chain.mode === 'enforcement-capable',
+  ).length;
+  assert.ok(reference.includes(`The fixed chain catalog contains ${BOUNDED_CHAINS.length} ordered behaviors.`));
+  assert.equal(enforcementCapable, 4);
+  for (const page of [
+    reference,
+    readFileSync(new URL('../content/docs/policies/cel/engine.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/policies/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
+  ]) {
+    assert.ok(page.includes(`${BOUNDED_CHAINS.length} ordered chains`) ||
+      page.includes(`${BOUNDED_CHAINS.length} ordered behaviors`));
+    assert.ok(!page.includes('The six ordered chains'));
+    assert.ok(!page.includes('contains 18 ordered'));
+  }
+});
+
 test('use-case packs: generated selectable rules match canonical YAML', () => {
   const generated = JSON.parse(
     readFileSync(new URL('../data/policy-use-case-packs.json', import.meta.url), 'utf8'),

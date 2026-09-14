@@ -139,23 +139,22 @@ the proposal. Successful steps and deduplication receipts live in DefenseClaw's
 SQLite store so reviewed chains can span turns and gateway restarts while still
 respecting wall-clock and event-count windows.
 
-The six ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
+The 26 ordered chains are a fixed compiled catalog; CEL/YAML rule authoring
 does not define new sequences. Custom CEL rules remain single-action matchers.
+Twenty-two chains are alert-only. Four can contribute enforcement-safe proof:
+reverse-shell payload persistence, AD CS certificate-to-PFX authentication,
+S4U ticket-to-Kerberos credential extraction, and same-table sensitive SQLite
+read followed by an unbounded delete. The SQLite chain additionally requires
+the explicit database-destruction protection pack. Connector capability,
+profile posture, successful result evidence, and the same-rule proof gate still
+apply; a complete chain is not an unconditional block.
 
-The fixed catalog contains six ordered chain definitions: guardrails-off then
-egress, permission denial then bypass, privilege discovery then elevation,
-secret read then egress, secret-manager read then egress, and workload identity
-then lateral execution. Five currently have production projection paths. Of
-those, permission-denial then bypass and privilege-discovery then elevation are
-block-capable when both steps carry exact enforcement evidence. Secret read,
-secret-manager read, and workload identity followed by their respective second
-steps are detection-only because temporal proximity does not prove data flow.
-Guardrails-off then egress is reserved and dormant: no current connector exposes
-the exact authenticated state transition needed for its first step, and
-DefenseClaw does not infer it from configuration text. Coincidental steps may
-produce detection telemetry, but only enforcement-safe facts can contribute to
-a synchronous block. A later risky proposal may be blocked using already
-committed predecessors; the blocked proposal is never recorded as successful.
+The canonical list, exact joins, time windows, and enforcement posture are in
+the [deterministic detection reference](/docs/policies/deterministic-detection#bounded-tool-call-chains).
+Coincidental steps may produce detection telemetry, but only enforcement-safe
+facts can contribute to a synchronous block. A later risky proposal may be
+blocked using already committed predecessors; the blocked proposal is never
+recorded as successful.
 
 ## Connector outcome and identity matrix
 

@@ -27,8 +27,8 @@ produced 0.89–2.78% default/permissive alert FPR and 0.97–2.95% strict alert
 FPR, but zero benign blocks. That alert noise is a documented limitation.
 
 The work added exact ActionFacts projections, bounded CEL and regex selectors,
-code-owned semantic validators, five MCP-description YARA signatures, opt-in
-production-protection packs, and 11 new bounded chains. Runtime enforcement
+code-owned semantic validators, ten MCP-description YARA signatures, opt-in
+production-protection packs, and a 26-proof bounded-chain catalog. Runtime enforcement
 remains fully deterministic; GPT-OSS was used only for optional offline label
 proposals and error analysis.
 
@@ -188,7 +188,7 @@ signals stayed alert-only or strict-only.
 ### 6. Bounded sequence proofs
 
 Contextual attacks are not classified from nearby suspicious words. The
-runtime stores value-minimized ActionFacts and evaluates a fixed catalog of 18
+runtime stores value-minimized ActionFacts and evaluates a fixed catalog of 26
 chains over at most the current event plus eight successful predecessors, in
 one authenticated session and within 30 minutes.
 
@@ -420,18 +420,21 @@ stdin. This lets rules join typed identities instead of nearby words.
 
 ### Bounded chains
 
-The catalog expanded from seven to 18 proofs. New chains cover download then
-execution of the same artifact, sensitive egress then execution, firewall
-trust expansion, SQL Server command execution, privileged Kubernetes host-root
-operations, wireless capture/deauthentication, credential dump to remote
-execution, cloud principal/admin attachment, privileged CronJob mutation,
-command-capable SQL UDF creation/invocation, and reverse-shell persistence.
+The catalog contains 26 proofs. They cover artifact download/decode/execution,
+sensitive reads and literal external transmission, endpoint-security results,
+firewall trust expansion, SQL command execution and cross-resource value flow,
+privileged Kubernetes operations, wireless capture/deauthentication,
+credential or certificate acquisition followed by authentication or remote
+execution, cloud principal/admin attachment, reverse-shell persistence,
+same-table SQLite read/delete, and same-artifact email transfer.
 
 ### YARA
 
-Five alert-only MCP-description signatures were added for addressed sensitive
-data transfer, concrete financial action, exact destructive user-data action,
-security-control downgrade, and multi-attribute profile changes. The canonical
+Ten alert-only MCP-description signatures cover addressed sensitive-data
+transfer, concrete financial action, exact destructive user-data action,
+security-control downgrade, multi-attribute profile changes, addressed edit
+grants, sensitive health-data changes, traffic-control overrides, physical
+access changes, and network-security policy changes. The canonical
 rules are in
 [`policies/yara/mcp-tools/description_injection.yara`](../policies/yara/mcp-tools/description_injection.yara).
 

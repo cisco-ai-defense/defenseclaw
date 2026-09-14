@@ -193,10 +193,14 @@ connector hook events with the required session and invocation identity can
 advance the SQLite state ledger. Inspect, proxy, router, and OTLP traffic never
 advance a chain.
 
-The six ordered chains are a fixed compiled catalog. Adding a CEL/YAML rule
-does not define a new sequence; custom CEL rules remain single-action matchers.
-See [Stateful connector lifecycle](/docs/policies/cel/tool-call-state) for the
-pending-to-success contract and connector matrix.
+The 26 ordered chains are a fixed compiled catalog. Adding a CEL/YAML rule does
+not define a new sequence; custom CEL rules remain single-action matchers.
+Twenty-two chains are alert-only and four can contribute enforcement-safe
+proof, still subject to connector capability, profile posture, and the
+same-rule proof gate. See the
+[deterministic detection reference](/docs/policies/deterministic-detection#bounded-tool-call-chains)
+for the canonical inventory and [Stateful connector lifecycle](/docs/policies/cel/tool-call-state)
+for the pending-to-success contract and connector matrix.
 
 ## Test engine behavior
 
