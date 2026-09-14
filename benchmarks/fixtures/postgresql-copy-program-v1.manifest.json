@@ -1,0 +1,29 @@
+{
+  "adapter_statistics": {
+    "defenseclaw-postgresql-copy-program-v1": {
+      "rows_emitted": 10,
+      "rows_read": 10
+    }
+  },
+  "cases": 10,
+  "counts": {
+    "defenseclaw-postgresql-copy-program-v1": 10
+  },
+  "datasets": [
+    "defenseclaw-postgresql-copy-program-v1"
+  ],
+  "exact_payload_duplicates_removed": 0,
+  "label_conflicts_excluded": 0,
+  "output_sha256": "c1e5ef6523a6d50080ab80f81c6bddee2884ad5c1c73f573b9ef10b90d66ab1c",
+  "schema_version": "1",
+  "source": {
+    "bytes": 9573,
+    "dataset": "defenseclaw-postgresql-copy-program-v1",
+    "license": "Apache-2.0",
+    "path": "benchmarks/fixtures/postgresql-copy-program-v1.jsonl",
+    "redistribution": "vendored",
+    "revision": "1",
+    "rows": 10,
+    "sha256": "c1e5ef6523a6d50080ab80f81c6bddee2884ad5c1c73f573b9ef10b90d66ab1c"
+  }
+}

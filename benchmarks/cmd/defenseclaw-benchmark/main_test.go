@@ -69,6 +69,47 @@ func TestValidateRunBinaryProvenance(t *testing.T) {
 	}
 }
 
+func TestVendoredFixturesPassStrictNormalizationGate(t *testing.T) {
+	repoRoot := filepath.Clean(filepath.Join("..", "..", ".."))
+	lockPath := filepath.Join(repoRoot, "benchmarks", "datasets.lock.json")
+	fixtureNames := []string{
+		"smoke",
+		"cloud-production-conformance-v1",
+		"database-destruction-conformance-v1",
+		"kubernetes-production-conformance-v1",
+		"infrastructure-destruction-conformance-v1",
+		"postgresql-copy-program-v1",
+		"sql-command-udf-atomic-v1",
+	}
+	for _, fixtureName := range fixtureNames {
+		t.Run(fixtureName, func(t *testing.T) {
+			corpusPath := filepath.Join(repoRoot, "benchmarks", "fixtures", fixtureName+".jsonl")
+			corpusSHA256, cases, _, _, err := loadInputs(corpusPath, lockPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			normalizationData, err := readNormalizationManifest("", corpusPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(normalizationData) == 0 {
+				t.Fatal("strict normalization sidecar was not loaded")
+			}
+			manifest, err := benchmark.BuildCorpusManifest(cases, corpusSHA256, normalizationData)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if manifest.Normalization == nil || manifest.Normalization.Source == nil {
+				t.Fatal("strict normalization source authority was not preserved")
+			}
+			wantPath := filepath.ToSlash(filepath.Join("benchmarks", "fixtures", fixtureName+".jsonl"))
+			if manifest.Normalization.Source.Path != wantPath {
+				t.Fatalf("normalization source path = %q, want %q", manifest.Normalization.Source.Path, wantPath)
+			}
+		})
+	}
+}
+
 func TestRunBenchmarkRejectsBinaryProvenanceBeforeLoadingCorpus(t *testing.T) {
 	commit := "0123456789abcdef0123456789abcdef01234567"
 	clean := false

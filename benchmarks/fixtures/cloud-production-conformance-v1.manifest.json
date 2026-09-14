@@ -1,0 +1,29 @@
+{
+  "adapter_statistics": {
+    "defenseclaw-cloud-production-conformance-v1": {
+      "rows_emitted": 29,
+      "rows_read": 29
+    }
+  },
+  "cases": 29,
+  "counts": {
+    "defenseclaw-cloud-production-conformance-v1": 29
+  },
+  "datasets": [
+    "defenseclaw-cloud-production-conformance-v1"
+  ],
+  "exact_payload_duplicates_removed": 0,
+  "label_conflicts_excluded": 0,
+  "output_sha256": "70e5996aea2b703a148dfa475a76b12e4f82a492aa8acc7bee0fde54bd9fa7ff",
+  "schema_version": "1",
+  "source": {
+    "bytes": 18505,
+    "dataset": "defenseclaw-cloud-production-conformance-v1",
+    "license": "Apache-2.0",
+    "path": "benchmarks/fixtures/cloud-production-conformance-v1.jsonl",
+    "redistribution": "vendored",
+    "revision": "1",
+    "rows": 29,
+    "sha256": "70e5996aea2b703a148dfa475a76b12e4f82a492aa8acc7bee0fde54bd9fa7ff"
+  }
+}
