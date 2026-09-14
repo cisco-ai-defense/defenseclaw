@@ -4,7 +4,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
+import json
 import sys
 import tempfile
 import unittest
@@ -155,6 +157,48 @@ class DynamicMCPBenchNormalizerTest(unittest.TestCase):
             source.write_text('{"trace_id":"one","trace_id":"two"}\n', encoding="utf-8")
             with self.assertRaises(MODULE.ProjectionError):
                 list(MODULE.jsonl_rows(source))
+
+    def test_strict_manifest_is_value_free_and_byte_deterministic(self) -> None:
+        cases, metadata = MODULE.normalize(
+            {"trace-1": source_spec()},
+            [source_trace()],
+            revision=REVISION,
+            split="development",
+        )
+        output_data = "".join(
+            MODULE.canonical_json(case) + "\n" for case in cases
+        ).encode()
+        first = MODULE.strict_manifest(
+            cases, metadata, output_data=output_data,
+            source_bytes=1234, source_sha256="a" * 64,
+        )
+        second = MODULE.strict_manifest(
+            cases, metadata, output_data=output_data,
+            source_bytes=1234, source_sha256="a" * 64,
+        )
+        first_data = (json.dumps(first, indent=2, sort_keys=True) + "\n").encode()
+        second_data = (json.dumps(second, indent=2, sort_keys=True) + "\n").encode()
+
+        self.assertEqual(first_data, second_data)
+        self.assertEqual(
+            {
+                "adapter_statistics", "cases", "counts", "datasets",
+                "exact_payload_duplicates_removed", "label_conflicts_excluded",
+                "output_sha256", "schema_version", "source",
+            },
+            set(first),
+        )
+        self.assertEqual({MODULE.DATASET_ID: len(cases)}, first["counts"])
+        statistics = first["adapter_statistics"][MODULE.ADAPTER]
+        self.assertTrue(all(type(value) is int for value in statistics.values()))
+        self.assertEqual(REVISION, first["source"]["revision"])
+        self.assertEqual("a" * 64, first["source"]["sha256"])
+        self.assertEqual(hashlib.sha256(output_data).hexdigest(), first["output_sha256"])
+        for excluded in (
+            "label_limitation", "language", "normalization", "result_policy",
+            "source_files", "source_schema_versions", "split",
+        ):
+            self.assertNotIn(f'"{excluded}"', first_data.decode())
 
 
 if __name__ == "__main__":

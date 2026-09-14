@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -191,6 +192,56 @@ class CrossMCPBenchNormalizerTest(unittest.TestCase):
 
             self.assertEqual(1, len(parsed))
             self.assertFalse(marker.exists())
+
+    def test_written_manifest_is_strict_value_free_and_byte_deterministic(self) -> None:
+        cases, metadata = MODULE.normalize(
+            [source_row()], revision=REVISION, split="development"
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "scenarios.jsonl"
+            source.write_text(json.dumps(source_row()) + "\n", encoding="utf-8")
+            outputs: list[tuple[bytes, bytes]] = []
+            for name in ("first", "second"):
+                output = root / name / "cases.jsonl"
+                manifest = root / name / "manifest.json"
+                MODULE.write_outputs(
+                    cases,
+                    metadata,
+                    output=output,
+                    manifest_path=manifest,
+                    source_path=source,
+                )
+                outputs.append((output.read_bytes(), manifest.read_bytes()))
+
+            self.assertEqual(outputs[0], outputs[1])
+            manifest = json.loads(outputs[0][1])
+            self.assertEqual(
+                {
+                    "adapter_statistics", "cases", "counts", "datasets",
+                    "exact_payload_duplicates_removed", "label_conflicts_excluded",
+                    "output_sha256", "schema_version", "source",
+                },
+                set(manifest),
+            )
+            self.assertEqual({MODULE.DATASET_ID: 1}, manifest["counts"])
+            statistics = manifest["adapter_statistics"][MODULE.ADAPTER]
+            self.assertTrue(all(type(value) is int for value in statistics.values()))
+            self.assertEqual(REVISION, manifest["source"]["revision"])
+            self.assertEqual(source.stat().st_size, manifest["source"]["bytes"])
+            self.assertEqual(
+                hashlib.sha256(source.read_bytes()).hexdigest(),
+                manifest["source"]["sha256"],
+            )
+            self.assertEqual(
+                hashlib.sha256(outputs[0][0]).hexdigest(), manifest["output_sha256"]
+            )
+            serialized = outputs[0][1].decode("utf-8")
+            for excluded in (
+                "excluded_fields", "label_limitation", "normalization",
+                "source_id", "split", "tool_names",
+            ):
+                self.assertNotIn(f'"{excluded}"', serialized)
 
 
 if __name__ == "__main__":

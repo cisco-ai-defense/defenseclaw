@@ -29,6 +29,7 @@ SCHEMA_VERSION = "1"
 TRACE_SCHEMA_VERSION = "0.1.0"
 SPEC_SCHEMA_VERSION = "0.2.0"
 DATASET_ID = "TokenWasteGroup/DynamicMCPBench"
+ADAPTER = "dynamicmcpbench-v2"
 SOURCE_URL = "https://huggingface.co/datasets/TokenWasteGroup/DynamicMCPBench"
 SOURCE_LICENSE = "CC-BY-4.0"
 SOURCE_REDISTRIBUTION = "download-only"
@@ -467,9 +468,47 @@ def atomic_write(path: Path, data: bytes) -> None:
         raise
 
 
+def strict_manifest(
+    cases: Sequence[Mapping[str, Any]],
+    metadata: Mapping[str, Any],
+    *,
+    output_data: bytes,
+    source_bytes: int,
+    source_sha256: str,
+) -> dict[str, Any]:
+    statistics = dict(metadata["counts"])
+    statistics.update(
+        {f"skipped_{key}": int(value) for key, value in metadata["skipped"].items()}
+    )
+    return {
+        "adapter_statistics": {
+            ADAPTER: {key: int(value) for key, value in sorted(statistics.items())}
+        },
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "datasets": [DATASET_ID],
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "output_sha256": hashlib.sha256(output_data).hexdigest(),
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "bytes": source_bytes,
+            "dataset": DATASET_ID,
+            "files": len(SOURCE_FILES),
+            "license": SOURCE_LICENSE,
+            "path": "",
+            "paths": list(SOURCE_FILES),
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "revision": metadata["source_revision"],
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
+        },
+    }
+
+
 def main() -> int:
     args = parse_args()
-    hashes, aggregate = source_hashes(args.input_dir)
+    _, aggregate = source_hashes(args.input_dir)
     specs = load_specs(args.input_dir / "specs.jsonl")
     cases, manifest = normalize(
         specs,
@@ -479,20 +518,11 @@ def main() -> int:
     )
     validate_cases(cases, args.schema)
     output_data = "".join(canonical_json(case) + "\n" for case in cases).encode()
-    manifest = {
-        **manifest,
-        "source_schema_versions": {
-            "specs.jsonl": SPEC_SCHEMA_VERSION,
-            "traces.jsonl": TRACE_SCHEMA_VERSION,
-        },
-        "source_files": hashes,
-        "source_sha256": aggregate,
-        "source_sha256_algorithm": (
-            "sha256(filename NUL raw-file-sha256-bytes) in SOURCE_FILES order"
-        ),
-        "language": "en",
-        "output_sha256": hashlib.sha256(output_data).hexdigest(),
-    }
+    source_bytes = sum((args.input_dir / filename).stat().st_size for filename in SOURCE_FILES)
+    manifest = strict_manifest(
+        cases, manifest, output_data=output_data,
+        source_bytes=source_bytes, source_sha256=aggregate,
+    )
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     atomic_write(args.output, output_data)
     atomic_write(manifest_path, (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode())

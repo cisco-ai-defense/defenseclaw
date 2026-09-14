@@ -33,9 +33,11 @@ from typing import Any
 
 SCHEMA_VERSION = "1"
 DATASET_ID = "MLZoo/CrossMCP-Bench"
+ADAPTER = "crossmcp-bench-v2"
 SOURCE_URL = "https://huggingface.co/datasets/MLZoo/CrossMCP-Bench"
 SOURCE_LICENSE = "CC-BY-4.0"
 SOURCE_REDISTRIBUTION = "download-only"
+SOURCE_PATH = "data/scenarios.jsonl"
 MAX_SOURCE_LINE_BYTES = 1_048_576
 MAX_TOOL_EVENTS = 64
 MAX_CONTEXT_BYTES = 64 * 1024
@@ -109,6 +111,14 @@ def canonical_json(value: object) -> str:
 
 def digest(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def file_sha256(path: Path) -> str:
+    result = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            result.update(chunk)
+    return result.hexdigest()
 
 
 def required_text(value: object, code: str, *, maximum: int) -> str:
@@ -331,6 +341,8 @@ def normalize(
     rows: Iterable[Mapping[str, Any]], *, revision: str, split: str
 ) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     revision = required_text(revision, "invalid_revision", maximum=160)
+    if not re.fullmatch(r"[0-9a-f]{40}", revision):
+        raise ValueError("revision must be a full lowercase Git commit")
     if split not in {"development", "validation", "test"}:
         raise ValueError("invalid split")
 
@@ -471,14 +483,41 @@ def write_outputs(
     *,
     output: Path,
     manifest_path: Path,
-) -> None:
+    source_path: Path,
+) -> dict[str, Any]:
     output_data = "".join(canonical_json(case) + "\n" for case in cases).encode("utf-8")
-    manifest = {**manifest, "output_sha256": hashlib.sha256(output_data).hexdigest()}
+    statistics = dict(manifest["counts"])
+    statistics.update(
+        {f"skipped_{key}": int(value) for key, value in manifest["skipped"].items()}
+    )
+    manifest = {
+        "adapter_statistics": {
+            ADAPTER: {key: int(value) for key, value in sorted(statistics.items())}
+        },
+        "cases": len(cases),
+        "counts": {DATASET_ID: len(cases)},
+        "datasets": [DATASET_ID],
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "output_sha256": hashlib.sha256(output_data).hexdigest(),
+        "schema_version": SCHEMA_VERSION,
+        "source": {
+            "bytes": source_path.stat().st_size,
+            "dataset": DATASET_ID,
+            "license": SOURCE_LICENSE,
+            "path": SOURCE_PATH,
+            "redistribution": SOURCE_REDISTRIBUTION,
+            "revision": manifest["source_revision"],
+            "sha256": file_sha256(source_path),
+            "source_url": SOURCE_URL,
+        },
+    }
     atomic_write(output, output_data)
     atomic_write(
         manifest_path,
         (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8"),
     )
+    return manifest
 
 
 def main() -> int:
@@ -488,7 +527,13 @@ def main() -> int:
     )
     validate_cases(cases, args.schema)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
-    write_outputs(cases, manifest, output=args.output, manifest_path=manifest_path)
+    manifest = write_outputs(
+        cases,
+        manifest,
+        output=args.output,
+        manifest_path=manifest_path,
+        source_path=args.input,
+    )
     print(json.dumps({"output": str(args.output), **manifest}, sort_keys=True))
     return 0
 
