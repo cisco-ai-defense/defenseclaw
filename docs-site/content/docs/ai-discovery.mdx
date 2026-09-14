@@ -576,6 +576,7 @@ present* is an agent that arrived by a path the inventory does not cover, and
 only the runtime planes see that.
 
 ```bash
+# Selects all three planes by default. Use --no-enable-host-plane for A/B only.
 defenseclaw agent discovery runtime enable --restart
 defenseclaw agent discovery runtime selftest
 defenseclaw agent discovery runtime findings
@@ -603,8 +604,10 @@ argv is collected, and it is classified as **content** on the wire — each
 destination's [redaction profile](/docs/reference/redaction) governs whether it
 leaves the host. Provider hostnames are content for the same reason.
 Environment variable *values* are never read on any runtime path, matching the
-inventory scanner's names-only rule. DNS capture and the host plane each need
-their own explicit opt-in.
+inventory scanner's names-only rule. Enabling runtime or continuous discovery
+selects all three planes and prints a Plane C warning; use
+`--no-enable-host-plane` for an A/B-only runtime. DNS capture remains a separate
+explicit opt-in.
 </Callout>
 
 ### What each platform actually delivers
@@ -927,7 +930,7 @@ leave no trace, and absence is the hardest thing to alert on.
 | --- | --- |
 | `--poll-interval-s` | Seconds between polls (5–3600). Also the window that distinguishes sustained inference from a momentary CPU spike. |
 | `--min-risk-to-report` | Reporting floor (1–100). Defaults to 30, the medium band. |
-| `--enable-host-plane` | Explicit opt-in for Plane C. Listing `c` in `planes` without this is ignored. |
+| `--enable-host-plane` | Select Plane C. Runtime enablement defaults this on; pass `--no-enable-host-plane` for A/B only. Listing `c` in `planes` without this is ignored. |
 | `--dns-capture` | Name peers from the answer the process received rather than inferring from an address. Needs elevated privilege. |
 
 Two knobs are config-only, because neither belongs in a one-shot command:

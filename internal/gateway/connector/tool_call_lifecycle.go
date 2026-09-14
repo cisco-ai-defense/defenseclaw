@@ -807,6 +807,19 @@ func hermesToolCallLifecycle() ToolCallLifecycleContract {
 	}
 }
 
+func hermesToolCallLifecycleV2() ToolCallLifecycleContract {
+	contract := hermesToolCallLifecycle()
+	contract.OfficialSourceURLs = []string{
+		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/agent/shell_hooks.py",
+		"https://github.com/NousResearch/hermes-agent/blob/345cd2b057a452236de401d3534b8502a7465e8d/hermes_cli/plugins.py",
+	}
+	contract.Limitations = []string{
+		"Only pre_tool_call can block. Exit code 2 now blocks pre_tool_call; other non-zero exits still parse stdout. Timeouts and spawn errors fail open unless the hook spec sets fail_closed.",
+		"A post_tool_call commits success only when its documented top-level status is ok; error and blocked statuses must not advance state.",
+	}
+	return contract
+}
+
 func cursorToolCallLifecycle() ToolCallLifecycleContract {
 	return ToolCallLifecycleContract{
 		Version:                           ToolCallLifecycleContractVersion,
@@ -1075,8 +1088,8 @@ func openCodeToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/anomalyco/opencode/blob/2b72179c663cadcb54f54d9f19221b3fb3d11fb6/packages/plugin/src/index.ts",
-			"https://github.com/anomalyco/opencode/blob/2b72179c663cadcb54f54d9f19221b3fb3d11fb6/packages/opencode/src/session/tools.ts",
+			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/plugin/src/index.ts",
+			"https://github.com/anomalyco/opencode/blob/014614d35b397775e5d397a490fc72368c894ec2/packages/opencode/src/session/tools.ts",
 		},
 		Limitations: []string{
 			"Stateful success requires the v7 bridge, which forwards input.args plus the actual output and awaits delivery before returning to the agent.",
@@ -1143,7 +1156,7 @@ func omniGentToolCallLifecycle() ToolCallLifecycleContract {
 			ToolSurfaceSkills,
 		},
 		OfficialSourceURLs: []string{
-			"https://github.com/omnigent-ai/omnigent/blob/73657266ed68e50f30965a0202bc334f06507a30/omnigent/policies/schema.py",
+			"https://github.com/omnigent-ai/omnigent/blob/eebef804e1fe4beddc61ea232b951cddddd7f890/omnigent/policies/schema.py",
 			"https://omnigent.ai/docs/policies/custom",
 		},
 		Limitations: []string{

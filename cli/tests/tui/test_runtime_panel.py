@@ -79,19 +79,19 @@ def test_findings_sort_worst_first() -> None:
 
 
 def test_plane_strip_is_always_present_and_expands_to_reasons() -> None:
-    # Collapsed, the strip is a badge per plane; expanded, every non-running
-    # plane must say why. A blind plane that renders as silence is
-    # indistinguishable from a clean host.
+    # Expanded by default so an operator sees why a plane is idle or
+    # blind. Collapsed, the strip is a badge per plane. A blind plane
+    # that renders as silence is indistinguishable from a clean host.
     model = _model()
+    expanded = model.plane_strip()
+    assert any("eslogger not found" in line for line in expanded)
+    assert any("available but not running" in line for line in expanded)
+
+    assert model.handle_key("p") is RuntimePanelAction.TOGGLE_PLANES
     collapsed = model.plane_strip()
     assert len(collapsed) == 3
     assert "agent actions: blind" in collapsed
     assert "shadow egress: idle" in collapsed
-
-    assert model.handle_key("p") is RuntimePanelAction.TOGGLE_PLANES
-    expanded = model.plane_strip()
-    assert any("eslogger not found" in line for line in expanded)
-    assert any("available but not running" in line for line in expanded)
 
 
 def test_header_carries_coverage_not_just_a_finding_count() -> None:
@@ -129,6 +129,64 @@ def test_filter_narrows_rows_without_losing_the_total() -> None:
     assert len(model.filtered) == 2
 
 
+def test_overview_body_includes_runtime_coverage() -> None:
+    from defenseclaw.tui.app import DefenseClawTUI
+    from defenseclaw.tui.services.overview_state import OverviewPanelModel
+
+    overview = OverviewPanelModel()
+    overview.set_runtime_overview(_model().overview())
+    app = DefenseClawTUI(overview_model=overview)
+    body = app._overview_body_text(overview.service_cards())  # noqa: SLF001
+    assert "[bold" in body and "RUNTIME" in body
+    assert "412" in body
+    assert "unobserved" in body
+
+
+def test_overview_notices_explain_unobserved_runtime_and_elevated_sidecar() -> None:
+    from defenseclaw.tui.services.overview_state import OverviewPanelModel
+
+    overview = OverviewPanelModel()
+    overview.set_gateway_probe(
+        "running",
+        "elevated sidecar: PID file is root-owned; TUI is using the authenticated API",
+    )
+    overview.set_runtime_overview(_model().overview())
+    messages = [notice.message for notice in overview.build_notices()]
+    assert any("elevated" in message.lower() for message in messages)
+    assert any("unobserved" in message for message in messages)
+
+
+def test_overview_summary_names_unobserved_findings_and_the_next_scan() -> None:
+    model = _model()
+    overview = model.overview()
+    assert overview.health_title == "DEGRADED"
+    assert overview.findings == 2
+    assert overview.unobserved == 1
+    assert overview.processes == 412
+    assert "unobserved" in overview.context
+    assert "AI Discovery" in overview.next_action
+    assert any("claude" in line and "inventory accounted" in line for line in overview.top_findings)
+
+
+def test_findings_context_explains_a_quiet_healthy_host() -> None:
+    model = RuntimePanelModel()
+    model.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-11T12:00:00Z",
+        "processes_observed": 743,
+        "connections_observed": 146,
+        "planes": [
+            {"plane": "a", "name": "inference", "available": True, "running": True, "mechanism": "ps"},
+            {"plane": "b", "name": "egress", "available": True, "running": True, "mechanism": "lsof"},
+            {"plane": "c", "name": "actions", "available": True, "running": True, "mechanism": "eslogger"},
+        ],
+    })
+    assert model.health_title() == "HEALTHY"
+    assert "743 processes" in model.findings_context()
+    assert "clean host" in model.findings_context()
+    assert model.next_action() == ""
+
+
 def test_empty_state_distinguishes_disabled_from_never_polled_from_clean() -> None:
     disabled = RuntimePanelModel()
     disabled.set_snapshot({"enabled": False})
@@ -159,6 +217,106 @@ def test_scan_and_refresh_map_to_the_nested_cli_commands() -> None:
     assert scan is not None and scan.argv == ("agent", "discovery", "runtime", "scan")
     refresh = model.command_for(RuntimePanelAction.REFRESH)
     assert refresh is not None and refresh.argv[:3] == ("agent", "discovery", "runtime")
+    enable = model.command_for(RuntimePanelAction.ENABLE)
+    assert enable is not None
+    assert enable.argv == (
+        "agent", "discovery", "runtime", "enable", "--yes", "--no-enable-host-plane",
+    )
+    assert model.handle_key("e") is RuntimePanelAction.ENABLE
+
+
+def test_health_badge_explains_degraded_versus_healthy() -> None:
+    degraded = _model()
+    assert degraded.health_state() == "degraded"
+    assert degraded.health_title() == "DEGRADED"
+    explanation = degraded.health_explanation()
+    assert "partial" in explanation
+    assert "HEALTHY" in explanation
+    assert "eslogger not found" in explanation
+
+    healthy = RuntimePanelModel()
+    healthy.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-11T21:00:00Z",
+        "degraded": False,
+        "planes": [
+            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+            {"plane": "b", "name": "shadow egress", "available": True, "running": True, "mechanism": "lsof(8)"},
+            {"plane": "c", "name": "agent actions", "available": True, "running": True, "mechanism": "eslogger"},
+        ],
+    })
+    assert healthy.health_state() == "healthy"
+    assert healthy.health_title() == "HEALTHY"
+    assert "HEALTHY" in " ".join(healthy.header_parts())
+    assert "watching" in healthy.health_explanation()
+
+
+def test_user_level_planes_are_healthy_without_endpoint_security() -> None:
+    model = RuntimePanelModel()
+    model.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-14T13:50:27Z",
+        "degraded": True,
+        "degraded_reasons": [
+            "agent actions available but not running: plane: Endpoint Security needs root; "
+            "re-run the gateway elevated",
+            "shadow egress partially covered: egress attribution is limited to this "
+            "process's own sockets; run the gateway elevated for machine-wide coverage",
+        ],
+        "processes_observed": 5,
+        "connections_observed": 9,
+        "planes": [
+            {
+                "plane": "a",
+                "name": "inference heartbeat",
+                "available": True,
+                "running": True,
+                "mechanism": "ps(1)",
+            },
+            {
+                "plane": "b",
+                "name": "shadow egress",
+                "available": True,
+                "running": True,
+                "mechanism": "lsof(8)",
+                "reason": (
+                    "egress attribution is limited to this process's own sockets; "
+                    "run the gateway elevated for machine-wide coverage"
+                ),
+            },
+            {
+                "plane": "c",
+                "name": "agent actions",
+                "available": True,
+                "running": False,
+                "reason": "plane: Endpoint Security needs root; re-run the gateway elevated",
+            },
+        ],
+    })
+    assert model.health_title() == "HEALTHY"
+    assert model.needs_enable() is False
+    assert "optional" in model.health_explanation().lower()
+
+
+def test_needs_enable_when_plane_c_is_not_selected() -> None:
+    model = RuntimePanelModel()
+    model.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-11T21:00:00Z",
+        "degraded": True,
+        "planes": [
+            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+            {"plane": "c", "name": "agent actions", "available": True, "running": False,
+             "reason": "not selected in ai_discovery.runtime.planes"},
+        ],
+    })
+    assert model.needs_enable() is False
+    assert "optional" in model.plane_fix(model.snapshot.planes[1]).lower()
+
+    off = RuntimePanelModel()
+    off.set_snapshot({"enabled": False})
+    assert off.needs_enable() is True
+    assert off.health_title() == "OFF"
 
 
 @pytest.mark.asyncio

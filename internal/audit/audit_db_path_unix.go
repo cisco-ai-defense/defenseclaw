@@ -45,7 +45,7 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 	}
 	owner := int(stat.Uid)
 	effectiveUser := os.Geteuid()
-	if owner != effectiveUser && !(directory && owner == 0) {
+	if !auditDBOwnerTrusted(owner, effectiveUser, directory) {
 		return errors.New("audit: database path has an untrusted owner")
 	}
 	if info.Mode().Perm()&0o022 != 0 {
@@ -90,4 +90,14 @@ func auditDBModeMatches(info os.FileInfo, want os.FileMode) bool {
 
 func auditDBImmediateDirectoryModeTrusted(info os.FileInfo) bool {
 	return info.Mode().Perm()&0o022 == 0
+}
+
+func auditDBOwnerTrusted(owner, effectiveUser int, directory bool) bool {
+	// Root can already read, replace, or seteuid to any local uid. Requiring
+	// the audit file to be euid-owned blocked both `sudo defenseclaw-gateway`
+	// against a user tree and a later user-level TUI reading leftover
+	// root-owned 0600 files. Non-root still cannot open another user's
+	// database. The directory flag is kept for call-site compatibility.
+	_ = directory
+	return effectiveUser == 0 || owner == 0 || owner == effectiveUser
 }

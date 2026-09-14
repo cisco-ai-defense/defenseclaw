@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import stat
 import subprocess
 import sys
 from types import SimpleNamespace
@@ -488,3 +489,130 @@ def test_windows_process_evidence_treats_unknown_open_error_as_unavailable(monke
 
     assert evidence.status == "unavailable"
     assert "could not" in evidence.reason
+
+
+def test_trusted_runtime_owner_accepts_root_and_self_only() -> None:
+    assert file_permissions.trusted_runtime_owner(501, current_uid=0) is True
+    assert file_permissions.trusted_runtime_owner(0, current_uid=501) is True
+    assert file_permissions.trusted_runtime_owner(501, current_uid=501) is True
+    assert file_permissions.trusted_runtime_owner(502, current_uid=501) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_root_owned_private_regular_file_rejects_group_or_other_access(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "gateway.pid"
+    path.write_text("{}\n", encoding="utf-8")
+    real_lstat = os.lstat
+
+    def lstat_root(candidate, *args, **kwargs):
+        info = real_lstat(candidate, *args, **kwargs)
+        fields = list(info)
+        fields[stat.ST_UID] = 0
+        return os.stat_result(fields)
+
+    monkeypatch.setattr(file_permissions.os, "lstat", lstat_root)
+    monkeypatch.setattr(file_permissions.os, "geteuid", lambda: 501)
+
+    os.chmod(path, 0o600)
+    assert file_permissions.root_owned_private_regular_file(path) is True
+    os.chmod(path, 0o640)
+    assert file_permissions.root_owned_private_regular_file(path) is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_sudo_runtime_leftover_relpaths_names_root_owned_runtime_files(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    lock = tmp_path / "hook_contract_lock.json"
+    lock.write_text("{}\n", encoding="utf-8")
+    os.chmod(lock, 0o600)
+    (tmp_path / "hooks").mkdir()
+    token = tmp_path / "hooks" / ".hook-codex.token"
+    token.write_text("token\n", encoding="utf-8")
+    os.chmod(token, 0o600)
+    real_lstat = os.lstat
+
+    def lstat_root(path, *args, **kwargs):
+        info = real_lstat(path, *args, **kwargs)
+        resolved = os.path.abspath(os.fspath(path))
+        if resolved in {os.path.abspath(lock), os.path.abspath(token)}:
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(file_permissions.os, "lstat", lstat_root)
+    monkeypatch.setattr(file_permissions.os, "geteuid", lambda: 501)
+
+    leftovers = file_permissions.sudo_runtime_leftover_relpaths(tmp_path)
+
+    assert leftovers == ["hook_contract_lock.json", "hooks/.hook-codex.token"]
+    command = file_permissions.sudo_runtime_leftover_reclaim_command(tmp_path, leftovers)
+    assert "sudo chown" in command
+    assert "hook_contract_lock.json" in command
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
+    monkeypatch.setattr(
+        cmd_doctor,
+        "sudo_runtime_leftover_relpaths",
+        lambda _data_dir: ["hook_contract_lock.json", "gateway.pid"],
+    )
+    result = cmd_doctor._DoctorResult(quiet=True)
+
+    cmd_doctor._check_sudo_runtime_leftovers(
+        SimpleNamespace(data_dir=os.fspath(tmp_path)),
+        result,
+    )
+
+    check = result.checks[-1]
+    assert check["status"] == "fail"
+    assert check["label"] == "Sudo leftovers"
+    assert "hook_contract_lock.json" in check["detail"]
+    assert "sudo chown" in check["detail"]
+    assert check["reason_code"] == "sudo-runtime-leftovers"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_data_dir_integrity_names_root_owned_sudo_leftover(monkeypatch, tmp_path) -> None:
+    info = tmp_path.stat()
+    fields = list(info)
+    fields[stat.ST_UID] = 0
+    monkeypatch.setattr(cmd_doctor.os, "lstat", lambda _path: os.stat_result(fields))
+    monkeypatch.setattr(cmd_doctor.os, "geteuid", lambda: 501)
+
+    problem = cmd_doctor._gateway_data_dir_integrity_problem(
+        SimpleNamespace(data_dir=os.fspath(tmp_path)),
+    )
+
+    assert problem == "gateway data directory is root-owned from a sudo-started gateway"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
+def test_dotenv_safety_names_root_owned_sudo_leftover_without_reading(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    dotenv = tmp_path / ".env"
+    dotenv.write_text("DEFENSECLAW_GATEWAY_TOKEN=synthetic\n", encoding="utf-8")
+    os.chmod(dotenv, 0o600)
+    info = dotenv.lstat()
+    fields = list(info)
+    fields[stat.ST_UID] = 0
+    monkeypatch.setattr(cmd_doctor.os, "lstat", lambda _path: os.stat_result(fields))
+    monkeypatch.setattr(cmd_doctor.os, "geteuid", lambda: 501)
+    monkeypatch.setattr(cmd_doctor, "_gateway_data_dir_integrity_problem", lambda _cfg: "")
+    read = Mock(side_effect=AssertionError("must not consume a root-owned dotenv"))
+    monkeypatch.setattr(cmd_doctor, "read_regular_file_no_follow", read)
+
+    problem = cmd_doctor._gateway_dotenv_safety_problem(
+        SimpleNamespace(data_dir=os.fspath(tmp_path)),
+    )
+
+    assert problem == "dotenv is root-owned from a sudo-started gateway"
+    read.assert_not_called()

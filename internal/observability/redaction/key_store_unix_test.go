@@ -217,6 +217,9 @@ func TestCorrelationKeyRevalidatesExistingFileAfterInitialStat(t *testing.T) {
 
 func TestCorrelationKeyRejectsWrongEffectiveOwner(t *testing.T) {
 	t.Parallel()
+	if os.Geteuid() == 0 {
+		t.Skip("root is a trusted accessor of any local owner")
+	}
 	stat := unix.Stat_t{
 		Mode: unix.S_IFREG | 0o600,
 		Uid:  uint32(os.Geteuid() + 1),
@@ -224,6 +227,21 @@ func TestCorrelationKeyRejectsWrongEffectiveOwner(t *testing.T) {
 	}
 	if err := validateCorrelationKeyStat(&stat); !IsKeyStoreError(err, KeyStoreErrorUnsafeOwner) {
 		t.Fatalf("error = %v, want unsafe owner", err)
+	}
+}
+
+func TestCorrelationKeyRootAcceptsForeignOwner(t *testing.T) {
+	t.Parallel()
+	if os.Geteuid() != 0 {
+		t.Skip("root accessor exception is only observable as euid 0")
+	}
+	stat := unix.Stat_t{
+		Mode: unix.S_IFREG | 0o600,
+		Uid:  65534,
+		Size: hashV1KeySize,
+	}
+	if err := validateCorrelationKeyStat(&stat); err != nil {
+		t.Fatalf("root opening a user-owned correlation key: %v", err)
 	}
 }
 

@@ -9,6 +9,7 @@ import os
 import re
 import shutil
 import sqlite3
+import stat
 import subprocess
 import time
 from collections.abc import Iterable, Iterator
@@ -36,6 +37,7 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__, connector_paths
 from defenseclaw import config as config_module
+from defenseclaw.doctor_gateway import paths_same
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
@@ -76,6 +78,7 @@ from defenseclaw.tui.panels.overview import (
     OverviewCommandIntent,
     OverviewConfig,
     OverviewPanelModel,
+    string_detail,
 )
 from defenseclaw.tui.panels.plugins import PluginsPanelModel
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistryPanelAction
@@ -875,6 +878,7 @@ class DefenseClawTUI(App[None]):
         overview_model: OverviewPanelModel | None = None,
         inventory_model: InventoryPanelModel | None = None,
         ai_discovery_model: AIDiscoveryPanelModel | None = None,
+        runtime_model: RuntimePanelModel | None = None,
         setup_model: SetupPanelModel | None = None,
         first_run_model: FirstRunPanelModel | None = None,
         first_run: bool = False,
@@ -947,7 +951,10 @@ class DefenseClawTUI(App[None]):
         self.overview_model = overview_model or OverviewPanelModel(_overview_config(config), version=__version__)
         self.inventory_model = inventory_model or InventoryPanelModel(connector=connector)
         self.ai_discovery_model = ai_discovery_model or AIDiscoveryPanelModel()
-        self.runtime_model = RuntimePanelModel()
+        self._runtime_model_injected = runtime_model is not None
+        self.runtime_model = runtime_model or RuntimePanelModel()
+        if runtime_model is not None:
+            self.overview_model.set_runtime_overview(self.runtime_model.overview())
         self.setup_model = setup_model or SetupPanelModel(config)
         self.catalog_models: dict[str, CatalogListModel[Any]] = {
             "skills": self.skills_model,
@@ -987,6 +994,7 @@ class DefenseClawTUI(App[None]):
         self._credentials_refresh_running = False
         self._health_poll_running = False
         self._ai_usage_poll_running = False
+        self._runtime_poll_running = False
         self._observability_status_load_running = False
         self._observability_status_reload_pending = False
         # Fingerprints of the last payload pushed into the body and
@@ -1359,6 +1367,38 @@ class DefenseClawTUI(App[None]):
                         id="ai-export",
                         compact=True,
                         tooltip="Save the AI usage snapshot to disk",
+                    )
+                with Horizontal(id="runtime-controls", classes="panel-controls hidden"):
+                    yield Button(
+                        "Enable Runtime",
+                        id="runtime-enable",
+                        compact=True,
+                        variant="success",
+                        tooltip="Turn on the user-level inference and egress planes (`runtime enable --yes --no-enable-host-plane`)",
+                    )
+                    yield Button(
+                        "Poll now",
+                        id="runtime-scan",
+                        compact=True,
+                        tooltip="Poll the runtime planes now (`agent discovery runtime scan`)",
+                    )
+                    yield Button(
+                        "Refresh",
+                        id="runtime-refresh",
+                        compact=True,
+                        tooltip="Re-read the last runtime snapshot",
+                    )
+                    yield Button(
+                        "Permissions",
+                        id="runtime-permissions",
+                        compact=True,
+                        tooltip="Show the host grants each plane needs (`runtime permissions`)",
+                    )
+                    yield Button(
+                        "Open finding",
+                        id="runtime-open-detail",
+                        compact=True,
+                        tooltip="Open the highlighted finding (Enter)",
                     )
                 # ─── Catalog panels (Skills / MCPs / Plugins / Tools) ────────
                 # All four panels share ``CatalogListModel`` semantics, so the
@@ -1758,6 +1798,10 @@ class DefenseClawTUI(App[None]):
         # let the interval keep it fresh.
         self.set_interval(3.0, self._schedule_health_poll)
         self._schedule_health_poll()
+        # Runtime coverage is Overview's most useful live signal after
+        # sudo-start. Poll it independently of the Runtime tab visit.
+        self.set_interval(15.0, self._schedule_runtime_poll)
+        self._schedule_runtime_poll()
         # Native delivery evidence changes while the TUI is open; refresh the
         # same bounded snapshot periodically without coupling it to 3s health.
         self.set_interval(30.0, self._schedule_observability_status_load)
@@ -2140,7 +2184,11 @@ class DefenseClawTUI(App[None]):
         self._queue_deferred_panel_render(panel, generation)
         if panel == "ai" and self.ai_discovery_model.snapshot is None:
             self.run_worker(self._load_ai_discovery_model(), exclusive=False, thread=False)
-        if panel == "runtime" and not self.runtime_model.snapshot.scanned_at:
+        if (
+            panel == "runtime"
+            and not self._runtime_model_injected
+            and not self.runtime_model.snapshot.scanned_at
+        ):
             self.run_worker(self._load_runtime_model(), exclusive=False, thread=False)
         # Mirror Go TUI: catalog + inventory panels auto-load on first
         # visit so the operator sees "Loading…" then the rows, instead
@@ -3035,6 +3083,10 @@ class DefenseClawTUI(App[None]):
             event.stop()
             self._handle_ai_control(button_id)
             return
+        if button_id.startswith("runtime-"):
+            event.stop()
+            self._handle_runtime_control(button_id)
+            return
         # All four catalog panels share ``CatalogListModel`` and the
         # ``_apply_catalog_action`` dispatcher, so the button-id →
         # handle_key mapping is uniform. Routing each prefix into its
@@ -3398,6 +3450,7 @@ class DefenseClawTUI(App[None]):
             self.inventory_model.set_cursor(event.cursor_row)
         elif self.active_panel == "runtime":
             self.runtime_model.cursor = event.cursor_row
+            self._sync_runtime_controls()
         elif self.active_panel == "ai":
             self.ai_discovery_model.set_cursor(event.cursor_row)
         elif self.active_panel == "setup":
@@ -4101,28 +4154,7 @@ class DefenseClawTUI(App[None]):
         if self.active_panel == "runtime":
             self._table_columns = self.runtime_model.data_table_columns()
             self._table_rows = self.runtime_model.data_table_rows()
-            header = ", ".join(self.runtime_model.header_parts())
-            # The plane strip is rendered unconditionally. A detector reporting
-            # clean because it was never able to look is indistinguishable, on
-            # a dashboard, from a host that is genuinely clean.
-            strip = "\n".join(
-                f"  {rich_escape(line)}" for line in self.runtime_model.plane_strip()
-            )
-            detail = self.runtime_model.detail_text() if self.runtime_model.detail_open else ""
-            empty = self.runtime_model.empty_state()
-            filter_prompt = ""
-            if self.runtime_model.filtering:
-                filter_prompt = f"\nFilter: / {rich_escape(self.runtime_model.filter_text)}"
-            elif self.runtime_model.filter_text:
-                filter_prompt = f"\nFilter: {rich_escape(self.runtime_model.filter_text)}"
-            suffix = f"\n\n{rich_escape(detail)}" if detail else f"\n\n{empty}" if empty else ""
-            self.body_text = (
-                f"[bold #22D3EE]AI Discovery Runtime[/]  {rich_escape(header)}\n"
-                f"{strip}\n"
-                "Keys: r refresh, s poll now, p plane detail, Enter finding detail, / filter."
-                f"{filter_prompt}"
-                f"{suffix}"
-            )
+            self.body_text = self._runtime_body_text()
             return self.body_text
         if self.active_panel == "setup":
             self._table_columns, self._table_rows = self._setup_table()
@@ -4166,6 +4198,103 @@ class DefenseClawTUI(App[None]):
 
     def _status_text(self) -> str:
         return f"backend=textual  panel={self.active_panel}  hints=: command | ? help | q local close | Ctrl+C quit"
+
+    def _runtime_body_text(self) -> str:
+        """Colored Runtime header: health first, then planes, coverage, findings."""
+
+        model = self.runtime_model
+        state = model.health_state()
+        title = model.health_title()
+        color = {
+            "off": TOKENS.text_muted,
+            "waiting": TOKENS.accent_blue,
+            "degraded": TOKENS.accent_amber,
+            "healthy": TOKENS.accent_green,
+        }[state]
+        badge_color = {
+            "up": TOKENS.accent_green,
+            "idle": TOKENS.accent_amber,
+            "blind": TOKENS.accent_red,
+        }
+        snap = model.snapshot
+        meta: list[str] = [
+            f"[{TOKENS.text_secondary}]{len(model.filtered)}/{len(snap.rows)} findings[/]"
+        ]
+        if snap.scanned_at:
+            meta.append(f"[{TOKENS.text_muted}]polled {rich_escape(snap.scanned_at)}[/]")
+
+        lines = [
+            f"[bold {TOKENS.accent_cyan}]AI Discovery Runtime[/]  "
+            f"[bold {color}]● {title}[/]  "
+            + "  ".join(meta),
+            "",
+            f"[bold {color}]{title}[/]  [{TOKENS.text_secondary}]{rich_escape(model.health_explanation())}[/]",
+            "",
+            f"[bold {TOKENS.text_primary}]PLANES[/]",
+        ]
+        if not snap.planes:
+            lines.append(
+                f"  [{TOKENS.text_muted}]plane health unavailable: the gateway reported no planes[/]"
+            )
+        elif model.planes_expanded:
+            for plane in snap.planes:
+                badge = plane.badge.upper()
+                hue = badge_color.get(plane.badge, TOKENS.text_muted)
+                if plane.running:
+                    detail = f"watching via {plane.mechanism or 'unknown mechanism'}"
+                else:
+                    detail = plane.reason or "no reason reported"
+                lines.append(
+                    f"  [bold {hue}]● {badge:<5}[/]  [bold]{rich_escape(plane.name)}[/]  "
+                    f"[{TOKENS.text_secondary}]{rich_escape(detail)}[/]"
+                )
+                fix = model.plane_fix(plane)
+                if fix:
+                    lines.append(f"           [{TOKENS.accent_cyan}]→ {rich_escape(fix)}[/]")
+        else:
+            for compact in model.plane_strip():
+                lines.append(f"  [{TOKENS.text_secondary}]{rich_escape(compact)}[/]")
+
+        skipped = f"  [{TOKENS.text_muted}]({snap.processes_skipped} partial)[/]" if snap.processes_skipped else ""
+        unattrib = (
+            f"  [{TOKENS.accent_amber}]({snap.connections_unattributed} unattributed)[/]"
+            if snap.connections_unattributed
+            else ""
+        )
+        context = model.findings_context()
+        next_action = model.next_action()
+        lines.extend(
+            [
+                "",
+                f"[bold {TOKENS.text_primary}]COVERAGE[/]",
+                f"  [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes watched{skipped}",
+                f"  [{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections seen{unattrib}",
+                f"  [{TOKENS.text_secondary}]{rich_escape(context)}[/]",
+            ]
+        )
+        if next_action:
+            lines.append(f"  [{TOKENS.accent_cyan}]→ {rich_escape(next_action)}[/]")
+
+        keys = (
+            "Keys: e enable user-level planes · r refresh · s poll now · p compact planes · "
+            "Enter finding · / filter"
+        )
+        lines.extend(["", f"[{TOKENS.text_muted}]{keys}[/]"])
+
+        if model.filtering:
+            lines.append(f"Filter: / {rich_escape(model.filter_text)}")
+        elif model.filter_text:
+            lines.append(f"Filter: {rich_escape(model.filter_text)}")
+
+        if model.detail_open:
+            detail = model.detail_text()
+            if detail:
+                lines.extend(["", rich_escape(detail)])
+        else:
+            empty = model.empty_state()
+            if empty and not model.filtered:
+                lines.extend(["", f"[{TOKENS.text_secondary}]{rich_escape(empty)}[/]"])
+        return "\n".join(lines)
 
     def _render_native_widgets(self) -> None:
         self._render_overview_metrics()
@@ -4266,6 +4395,7 @@ class DefenseClawTUI(App[None]):
         setup_wizard = self.query_one("#setup-wizard-controls", Horizontal)
         activity = self.query_one("#activity-controls", Horizontal)
         ai = self.query_one("#ai-controls", Horizontal)
+        runtime = self.query_one("#runtime-controls", Horizontal)
         # Catalog control bars — Skills/MCPs/Plugins/Tools are independent
         # ``Horizontal`` containers (rather than one shared bar keyed on
         # active_panel) so each panel can advertise the action keys it
@@ -4302,6 +4432,7 @@ class DefenseClawTUI(App[None]):
         )
         activity.set_class(self.active_panel != "activity" or self.help_open, "hidden")
         ai.set_class(self.active_panel != "ai" or self.help_open, "hidden")
+        runtime.set_class(self.active_panel != "runtime" or self.help_open, "hidden")
         skills.set_class(self.active_panel != "skills" or self.help_open, "hidden")
         mcps.set_class(self.active_panel != "mcps" or self.help_open, "hidden")
         # Keep the plugins bar panel-scoped. When a connector cannot
@@ -4336,6 +4467,8 @@ class DefenseClawTUI(App[None]):
             self._sync_activity_controls()
         if self.active_panel == "ai" and not self.help_open:
             self._sync_ai_controls()
+        if self.active_panel == "runtime" and not self.help_open:
+            self._sync_runtime_controls()
         if self.active_panel in self.catalog_models and not self.help_open:
             self._sync_catalog_controls(self.active_panel)
 
@@ -4573,6 +4706,22 @@ class DefenseClawTUI(App[None]):
         self.query_one("#ai-open-detail", Button).disabled = self.ai_discovery_model.selected() is None
         # Export needs an actual snapshot.
         self.query_one("#ai-export", Button).disabled = snapshot is None
+
+    def _sync_runtime_controls(self) -> None:
+        """Show Enable Runtime only when planes are off or not selected."""
+
+        try:
+            refresh = self.query_one("#runtime-refresh", Button)
+            detail = self.query_one("#runtime-open-detail", Button)
+        except NoMatches:
+            return
+        model = self.runtime_model
+        enabled = bool(model.snapshot.enabled)
+        self._set_button_visible("#runtime-enable", model.needs_enable())
+        self._set_button_visible("#runtime-scan", enabled)
+        self._set_button_visible("#runtime-permissions", model.health_state() == "degraded")
+        refresh.disabled = False
+        detail.disabled = model.selected() is None
 
     # Per-catalog-panel button-id → key map. Each catalog panel routes
     # its action bar through ``handle_key`` so the click flow is
@@ -5336,6 +5485,36 @@ class DefenseClawTUI(App[None]):
         if button_id == "ai-export":
             self._export_ai_discovery_snapshot()
             return
+
+    def _runtime_enable_command(self) -> str:
+        """Enable user-level planes; Endpoint Security stays an explicit opt-in."""
+
+        intent = self.runtime_model.command_for(RuntimePanelAction.ENABLE)
+        if intent is None:
+            return "defenseclaw agent discovery runtime enable --yes --no-enable-host-plane"
+        return "defenseclaw " + " ".join(intent.argv)
+
+    def _handle_runtime_control(self, button_id: str) -> None:
+        """Route a Runtime action-bar button to the matching CLI command."""
+
+        if button_id == "runtime-enable":
+            self._submit_command_text(self._runtime_enable_command())
+            return
+        if button_id == "runtime-scan":
+            self._apply_runtime_action(RuntimePanelAction.SCAN)
+            return
+        if button_id == "runtime-refresh":
+            self._apply_runtime_action(RuntimePanelAction.REFRESH)
+            return
+        if button_id == "runtime-permissions":
+            self._submit_command_text("defenseclaw agent discovery runtime permissions")
+            return
+        if button_id == "runtime-open-detail":
+            if self.runtime_model.selected() is None:
+                self._set_status("Highlight a finding first (↑/↓), then click Open finding.")
+                return
+            self.runtime_model.detail_open = True
+            self._render_chrome()
 
     def _export_ai_discovery_snapshot(self) -> None:
         """Write the loaded AI usage snapshot to a JSON file on disk.
@@ -7578,7 +7757,7 @@ class DefenseClawTUI(App[None]):
         # emitted. ``notice.message`` also routinely includes bracketed
         # tokens (``[skill] missing scan``) — same crash class.
         notice_block: list[Text] = []
-        for notice in notices[:3]:
+        for notice in notices[:4]:
             if notice.level == "error":
                 icon, color = "[!]", TOKENS.accent_red
             elif notice.level == "warn":
@@ -7685,6 +7864,10 @@ class DefenseClawTUI(App[None]):
                 else cfg.cisco_ai_defense_endpoint
             )
             cfg_rows.append(("AI Defense", Text(label)))
+        if health is not None:
+            api_addr = string_detail(health.api.details, "addr")
+            if api_addr:
+                cfg_rows.append(("API", Text(api_addr)))
         for label, value in cfg_rows:
             cfg_table.add_row(Text(label, style=TOKENS.text_secondary), value)
 
@@ -8051,10 +8234,15 @@ class DefenseClawTUI(App[None]):
             padding=(0, 1),
         )
 
+        runtime_panel = self._overview_runtime_panel()
+
         columns = Table.grid(expand=True, padding=(0, 1))
         columns.add_column(ratio=1)
         columns.add_column(ratio=1)
-        columns.add_row(Group(services_panel, cfg_panel), Group(enf_panel, sc_panel, doc_panel))
+        columns.add_row(
+            Group(services_panel, cfg_panel),
+            Group(enf_panel, runtime_panel, sc_panel, doc_panel),
+        )
 
         observability_panel = self._overview_observability_panel()
 
@@ -8115,6 +8303,52 @@ class DefenseClawTUI(App[None]):
         stable_text = re.sub(r"\buptime=\d+s\b", "uptime=<live>", self.body_text)
         stable_text = re.sub(r"\b\d+(?:s|m|h|d) ago\b", "<live> ago", stable_text)
         return ("overview", self.help_open, stable_text)
+
+    def _overview_runtime_panel(self) -> RenderableType:
+        """Always-visible Runtime coverage so Overview is not a services-only wall."""
+
+        runtime = self.overview_model.runtime
+        title_color = {
+            "HEALTHY": TOKENS.accent_green,
+            "DEGRADED": TOKENS.accent_amber,
+            "STARTING": TOKENS.accent_blue,
+            "OFF": TOKENS.text_muted,
+        }.get(runtime.health_title, TOKENS.text_secondary)
+        table = Table.grid(padding=(0, 1), expand=True)
+        table.add_column(overflow="fold")
+        if runtime.health_title:
+            header = Text()
+            header.append(f"● {runtime.health_title}", style=f"bold {title_color}")
+            if runtime.processes or runtime.connections or runtime.findings:
+                header.append(
+                    f"   {runtime.findings} findings   "
+                    f"{runtime.processes} processes   "
+                    f"{runtime.connections} connections",
+                    style=TOKENS.text_secondary,
+                )
+            table.add_row(header)
+        if runtime.plane_summary:
+            table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+        if runtime.context:
+            table.add_row(Text(runtime.context, style=TOKENS.text_primary))
+        for line in runtime.top_findings:
+            table.add_row(Text(f"  {line}", style=TOKENS.text_secondary))
+        if runtime.next_action:
+            table.add_row(Text(f"→ {runtime.next_action}", style=TOKENS.accent_cyan))
+        if not runtime.health_title and not runtime.context:
+            table.add_row(
+                Text(
+                    "Runtime snapshot pending. The TUI polls /ai-usage/runtime every 15s.",
+                    style=TOKENS.text_muted,
+                )
+            )
+        return Panel(
+            table,
+            title=Text("RUNTIME", style=f"bold {TOKENS.accent_cyan}"),
+            title_align="left",
+            border_style=TOKENS.accent_cyan,
+            padding=(0, 1),
+        )
 
     def _overview_connectors_panel(
         self, rows: list[ConnectorOverviewRow]
@@ -8515,7 +8749,7 @@ class DefenseClawTUI(App[None]):
         connector_scope = self._overview_connector_scope_text()
 
         notice_lines = []
-        for notice in notices[:3]:
+        for notice in notices[:4]:
             color = TOKENS.accent_red if notice.level == "error" else TOKENS.accent_amber
             if notice.level == "info":
                 color = TOKENS.accent_blue
@@ -8556,6 +8790,24 @@ class DefenseClawTUI(App[None]):
 
         connectors_text = self._overview_connectors_text(overview_connector_rows)
         observability_text = self._overview_observability_text()
+        runtime = self.overview_model.runtime
+        runtime_lines = []
+        if runtime.health_title:
+            runtime_lines.append(
+                f"  {runtime.health_title}  {runtime.findings} findings  "
+                f"{runtime.processes} processes  {runtime.connections} connections"
+            )
+        if runtime.plane_summary:
+            runtime_lines.append(f"  {runtime.plane_summary}")
+        if runtime.context:
+            runtime_lines.append(f"  {runtime.context}")
+        for line in runtime.top_findings:
+            runtime_lines.append(f"  {line}")
+        if runtime.next_action:
+            runtime_lines.append(f"  -> {runtime.next_action}")
+        if not runtime_lines:
+            runtime_lines.append("  Runtime snapshot pending")
+        runtime_text = "\n".join(runtime_lines)
 
         scanner_lines = [
             ("Gateway", state_by_key.get("gateway", "unknown"), detail_by_key.get("gateway", "")),
@@ -8698,6 +8950,7 @@ class DefenseClawTUI(App[None]):
             + "\n".join(notice_lines)
             + "\n\n"
             f"[bold {TOKENS.accent_blue}]SERVICES[/]\n{services_text}\n\n"
+            f"[bold {TOKENS.accent_cyan}]RUNTIME[/]\n{runtime_text}\n\n"
             + observability_text
             + (
                 f"[bold {TOKENS.accent_amber}]ENFORCEMENT · {enf_selected}[/]\n"
@@ -9749,6 +10002,9 @@ class DefenseClawTUI(App[None]):
             return True
         if action is RuntimePanelAction.SCAN:
             self._submit_command_text("defenseclaw agent discovery runtime scan")
+            return True
+        if action is RuntimePanelAction.ENABLE:
+            self._submit_command_text(self._runtime_enable_command())
             return True
         if action is RuntimePanelAction.START_FILTER:
             self._set_status("Filter runtime findings: type to narrow, esc to clear.")
@@ -10974,10 +11230,34 @@ class DefenseClawTUI(App[None]):
     async def _load_runtime_model(self) -> None:
         """Fetch the runtime-plane snapshot into the panel."""
         self._set_status("Loading runtime planes...")
+        await self._refresh_runtime_snapshot(render=True)
+
+    def _schedule_runtime_poll(self) -> None:
+        if getattr(self, "_app_shutting_down", False):
+            return
+        if self._runtime_model_injected:
+            return
+        if getattr(self, "_runtime_poll_running", False):
+            return
+        self._runtime_poll_running = True
+        self.run_worker(self._poll_runtime_once(), exclusive=False, thread=False)
+
+    async def _poll_runtime_once(self) -> None:
+        try:
+            await self._refresh_runtime_snapshot(render=self.active_panel in {"overview", "runtime"})
+        finally:
+            self._runtime_poll_running = False
+
+    async def _refresh_runtime_snapshot(self, *, render: bool) -> None:
         payload = await asyncio.to_thread(_fetch_ai_runtime, self.config)
         if payload is not None:
             self.runtime_model.set_snapshot(payload)
-        self._render_chrome()
+            self.overview_model.set_runtime_overview(self.runtime_model.overview())
+        if render and not self.help_open:
+            if self.active_panel == "overview":
+                self._schedule_overview_sampled_refresh()
+            else:
+                self._render_chrome()
 
     async def _load_ai_discovery_model(self) -> None:
         intent = self.ai_discovery_model.load_intent()
@@ -12391,8 +12671,11 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         trust = _trusted_gateway_listener(config)
     except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
         return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
+    elevated = False
     if not trust.trusted:
-        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+        elevated = _elevated_sidecar_pid_in_home(config)
+        if not elevated:
+            return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
 
     try:
         document = client.status()
@@ -12418,11 +12701,17 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     if not isinstance(payload, dict):
         return GatewayHealthResult("error", "authenticated sidecar status is invalid")
     try:
-        runtime_ok, runtime_detail = _authenticated_runtime_matches(
-            config,
-            trust.pid,
-            json.dumps(document),
-        )
+        if elevated:
+            runtime_ok, runtime_detail = _authenticated_runtime_home_matches(
+                config,
+                json.dumps(document),
+            )
+        else:
+            runtime_ok, runtime_detail = _authenticated_runtime_matches(
+                config,
+                trust.pid,
+                json.dumps(document),
+            )
     except (TypeError, ValueError):
         runtime_ok, runtime_detail = False, "authenticated runtime metadata is malformed"
     if not runtime_ok:
@@ -12433,7 +12722,60 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         return GatewayHealthResult("error", "authenticated sidecar health is invalid")
     snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
-    return GatewayHealthResult(state, _gateway_snapshot_detail(snapshot, state), snapshot)
+    detail = _gateway_snapshot_detail(snapshot, state)
+    if elevated:
+        detail = (
+            "elevated sidecar: PID file is root-owned; TUI is using the authenticated API"
+            + (f" ({detail})" if detail else "")
+        )
+    return GatewayHealthResult(state, detail, snapshot)
+
+
+def _elevated_sidecar_pid_in_home(config: object) -> bool:
+    """True when this home's gateway.pid is a private root-owned leaf.
+
+    ``sudo defenseclaw-gateway`` writes 0600 root files the operator cannot
+    read. lstat still proves the file is this install's elevated sidecar
+    rather than a foreign listener, so Overview can use the same
+    authenticated API the Runtime tab already uses.
+    """
+
+    data_dir = str(getattr(config, "data_dir", "") or "").strip()
+    if not data_dir:
+        return False
+    path = os.path.join(data_dir, "gateway.pid")
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if not stat.S_ISREG(info.st_mode):
+        return False
+    geteuid = getattr(os, "geteuid", None)
+    current_uid = geteuid() if callable(geteuid) else None
+    if current_uid is None or current_uid == 0:
+        return False
+    if info.st_uid != 0:
+        return False
+    return not bool(stat.S_IMODE(info.st_mode) & 0o022)
+
+
+def _authenticated_runtime_home_matches(config: object, body: str) -> tuple[bool, str]:
+    """Bind an elevated sidecar to this data home without a readable PID record."""
+
+    try:
+        payload = json.loads(body)
+        runtime = payload.get("runtime", {}) if isinstance(payload, dict) else {}
+    except (json.JSONDecodeError, TypeError):
+        return False, "authenticated runtime metadata is malformed"
+    if not isinstance(runtime, dict):
+        return False, "authenticated runtime metadata is unavailable"
+    runtime_home = runtime.get("data_dir", "")
+    if not isinstance(runtime_home, str) or not runtime_home.strip():
+        return False, "authenticated runtime data home is unavailable"
+    configured = str(getattr(config, "data_dir", "") or "").strip()
+    if not configured or not paths_same(runtime_home, configured):
+        return False, "authenticated runtime uses a different canonical data home"
+    return True, ""
 
 
 def _fetch_v8_operator_status(
@@ -13190,6 +13532,8 @@ def _styled_cell(column: str, value: str) -> Text:
         "unknown",
         "warn",
         "warning",
+        "degraded",
+        "healthy",
     }:
         text.stylize(state_color(value))
         if normalized in {"running", "active", "enabled", "allowed", "blocked", "error", "stopped"}:

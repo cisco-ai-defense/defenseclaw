@@ -1874,6 +1874,12 @@ func (s *Store) Init() error {
 	// captured by a new event-history writer.
 	s.ready.Store(false)
 
+	// Incremental auto_vacuum can only be enabled before the first table exists.
+	// Retention then reclaims freed pages without a blocking full-file VACUUM.
+	if err := s.enableIncrementalAutoVacuumIfUnset(); err != nil {
+		return err
+	}
+
 	// Ensure the schema_version tracking table exists.
 	if _, err := s.execDB(context.Background(), "audit", `CREATE TABLE IF NOT EXISTS schema_version (
 		version INTEGER PRIMARY KEY,
@@ -2101,6 +2107,35 @@ func (s *Store) applyMigration(ver int, m migration) error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("audit: commit migration %d: %w", ver, err)
+	}
+	return nil
+}
+
+func (s *Store) enableIncrementalAutoVacuumIfUnset() error {
+	if s == nil || s.db == nil {
+		return fmt.Errorf("audit: store is not initialized")
+	}
+	var mode int
+	if err := s.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		return fmt.Errorf("audit: read auto_vacuum: %w", err)
+	}
+	if mode == 2 {
+		return nil
+	}
+	var tables int
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM sqlite_master WHERE type='table'`).Scan(&tables); err != nil {
+		return fmt.Errorf("audit: inspect auto_vacuum eligibility: %w", err)
+	}
+	if tables > 0 {
+		return nil
+	}
+	if _, err := s.db.Exec(`PRAGMA auto_vacuum=INCREMENTAL`); err != nil {
+		return fmt.Errorf("audit: enable incremental auto_vacuum: %w", err)
+	}
+	// WAL-opened files already have a header page, so the pragma does not
+	// persist until VACUUM rewrites the empty database.
+	if _, err := s.db.Exec(`VACUUM`); err != nil {
+		return fmt.Errorf("audit: apply incremental auto_vacuum: %w", err)
 	}
 	return nil
 }

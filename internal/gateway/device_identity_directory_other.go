@@ -16,7 +16,10 @@ func validateDeviceIdentityPathSyntax(_, _ string) error { return nil }
 
 func validateFreshIdentityDirectoryPlatform(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok {
+		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
+	}
+	if os.Geteuid() != 0 && stat.Uid != 0 && stat.Uid != uint32(os.Geteuid()) {
 		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
 	}
 	resolved, err := filepath.EvalSymlinks(path)

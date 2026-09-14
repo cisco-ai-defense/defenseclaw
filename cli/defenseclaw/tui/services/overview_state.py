@@ -37,6 +37,7 @@ from defenseclaw.observability.v8_status import (
 )
 from defenseclaw.tui.services import connector_filter
 from defenseclaw.tui.services.ai_discovery_state import AIUsageSignal, AIUsageSnapshot
+from defenseclaw.tui.services.runtime_state import RuntimeOverview
 
 NoticeLevel = Literal["info", "warn", "error"]
 STALENESS_WINDOW = timedelta(minutes=15)
@@ -530,6 +531,7 @@ class OverviewPanelModel:
         self.observability_status: V8OperatorStatus | None = None
         self.observability_status_error = ""
         self.native_delivery_summary: NativeDeliverySummary | None = None
+        self.runtime = RuntimeOverview()
 
     def set_cfg(self, cfg: OverviewConfig | None) -> None:
         """Hot-swap the cached config snapshot (e.g. after ``setup``).
@@ -597,6 +599,11 @@ class OverviewPanelModel:
         """Install bounded native OTLP evidence without treating absence as failure."""
 
         self.native_delivery_summary = summary
+
+    def set_runtime_overview(self, runtime: RuntimeOverview | None) -> None:
+        """Install the latest Runtime-plane summary used by Overview."""
+
+        self.runtime = runtime if runtime is not None else RuntimeOverview()
 
     def action_intent(self, key: str) -> OverviewCommandIntent | None:
         if key == "m":
@@ -743,6 +750,34 @@ class OverviewPanelModel:
             uptime = timedelta(milliseconds=self.health.uptime_ms)
             if self.health.connector.requests == 0 and uptime > timedelta(minutes=1):
                 notices.append(OverviewNotice("info", zero_connector_requests_notice(live, uptime)))
+
+        probe_detail = gateway_availability.last_error.strip().lower()
+        if not gateway_broken and "elevated sidecar" in probe_detail:
+            notices.append(
+                OverviewNotice(
+                    "info",
+                    "Gateway is elevated (sudo). The TUI is using the authenticated API; "
+                    "PID custody will verify after the next non-root-owned write.",
+                )
+            )
+        runtime = self.runtime
+        if runtime.unobserved:
+            notices.append(
+                OverviewNotice(
+                    "info",
+                    f"{runtime.unobserved} runtime finding(s) are inventory-unobserved. "
+                    "Open AI Discovery and press Scan now so Runtime can correlate them.",
+                )
+            )
+        elif runtime.scanned and runtime.findings == 0 and runtime.processes:
+            notices.append(
+                OverviewNotice(
+                    "info",
+                    f"Runtime is {runtime.health_title or 'watching'}: "
+                    f"{runtime.processes} processes and {runtime.connections} connections, "
+                    "no findings above the reporting floor.",
+                )
+            )
 
         return tuple(notices)
 
@@ -1831,6 +1866,7 @@ __all__ = [
     "ObservabilityStorageStatus",
     "QUICK_ACTIONS",
     "RenderedDoctorCheck",
+    "RuntimeOverview",
     "STALENESS_WINDOW",
     "ServiceCard",
     "SubsystemHealth",

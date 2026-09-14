@@ -32,12 +32,26 @@ SEVERITY_ORDER: tuple[str, ...] = ("critical", "high", "medium", "low", "info")
 _SEVERITY_RANK = {name: index for index, name in enumerate(SEVERITY_ORDER)}
 
 
+def _selected_plane_gap(plane: PlaneRow) -> bool:
+    """True when a down plane was asked to run, not merely left as an opt-in."""
+
+    reason = plane.reason.lower()
+    if "not selected" in reason or "enable_host_plane" in reason:
+        return False
+    if plane.plane == "c" and (
+        "needs root" in reason or "gateway elevated" in reason
+    ):
+        return False
+    return True
+
+
 class RuntimePanelAction(Enum):
     """What a keypress asked the panel to do."""
 
     NONE = "none"
     REFRESH = "refresh"
     SCAN = "scan"
+    ENABLE = "enable"
     OPEN_DETAIL = "open_detail"
     CLOSE_DETAIL = "close_detail"
     TOGGLE_PLANES = "toggle_planes"
@@ -157,6 +171,23 @@ class RuntimeSnapshot:
     degraded_reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class RuntimeOverview:
+    """Compact Runtime facts for Overview. Absence is a zero value, not an error."""
+
+    health_title: str = ""
+    enabled: bool = False
+    scanned: bool = False
+    findings: int = 0
+    unobserved: int = 0
+    processes: int = 0
+    connections: int = 0
+    plane_summary: str = ""
+    context: str = ""
+    top_findings: tuple[str, ...] = ()
+    next_action: str = ""
+
+
 def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
     """Decode the gateway response.
 
@@ -235,7 +266,10 @@ class RuntimePanelModel:
         self.filter_text = ""
         self.filtering = False
         self.detail_open = False
-        self.planes_expanded = False
+        # Expanded by default: a collapsed "name: idle" strip hides why
+        # the host is DEGRADED, which is the question this panel exists
+        # to answer.
+        self.planes_expanded = True
         self.message = ""
 
     def set_snapshot(self, payload: Any) -> None:
@@ -282,11 +316,222 @@ class RuntimePanelModel:
         if not self.snapshot.enabled:
             return (
                 "The runtime planes are disabled.\n"
-                "Enable with: defenseclaw agent discovery runtime enable"
+                "Click Enable Runtime, or run: defenseclaw agent discovery runtime enable "
+                "--no-enable-host-plane"
             )
         if not self.snapshot.scanned_at:
-            return "The runtime planes have not completed a poll yet."
-        return "No findings at or above the reporting floor."
+            return "The runtime planes have not completed a poll yet. Click Poll now."
+        return (
+            "No findings at or above the reporting floor. "
+            f"{self.snapshot.processes_observed} processes and "
+            f"{self.snapshot.connections_observed} connections were watched. "
+            "A quiet table is a clean host, not a blind sensor."
+        )
+
+    def inventory_unobserved_count(self) -> int:
+        return sum(
+            1
+            for row in self.snapshot.rows
+            if (row.correlation_verdict or "").strip().lower() == "unobserved"
+        )
+
+    def findings_context(self) -> str:
+        """What a sparse or uncorrelated table actually means."""
+
+        if not self.snapshot.enabled or not self.snapshot.scanned_at:
+            return self.empty_state().replace("\n", " ")
+        watched = (
+            f"{self.snapshot.processes_observed} processes and "
+            f"{self.snapshot.connections_observed} connections watched"
+        )
+        if not self.snapshot.rows:
+            return (
+                f"No findings at or above the reporting floor. {watched}. "
+                "A quiet table is a clean host, not a blind sensor."
+            )
+        unobserved = self.inventory_unobserved_count()
+        parts = [f"{len(self.snapshot.rows)} scored finding(s). {watched}."]
+        if unobserved:
+            parts.append(
+                f"{unobserved} not yet correlated with AI Discovery "
+                "(inventory unobserved). Open AI Discovery and press Scan now."
+            )
+        return " ".join(parts)
+
+    def next_action(self) -> str:
+        """One operator move that would add information, or empty."""
+
+        if not self.snapshot.enabled:
+            return (
+                "Click Enable Runtime, or run: defenseclaw agent discovery runtime enable "
+                "--no-enable-host-plane"
+            )
+        if not self.snapshot.scanned_at:
+            return "Click Poll now to collect the first runtime snapshot."
+        if self.inventory_unobserved_count():
+            return "Open AI Discovery and press Scan now so Runtime can correlate findings."
+        if self.needs_enable():
+            return "Click Enable Runtime to turn on every selected plane."
+        return ""
+
+    def overview(self) -> RuntimeOverview:
+        """Facts Overview can render without visiting this tab."""
+
+        if not self.snapshot.enabled and not self.snapshot.scanned_at:
+            return RuntimeOverview(
+                health_title=self.health_title(),
+                context="Runtime has not reported a snapshot yet.",
+                next_action=self.next_action(),
+            )
+        top: list[str] = []
+        for row in self.filtered[:3]:
+            agent = f"  {row.agent_name}" if row.agent_name else ""
+            providers = f"  {row.provider_summary}" if row.provider_summary != "-" else ""
+            inventory = row.correlation_verdict or "-"
+            top.append(
+                f"{row.severity}  {row.process} pid {row.pid}{agent}{providers}  "
+                f"inventory {inventory}"
+            )
+        return RuntimeOverview(
+            health_title=self.health_title(),
+            enabled=self.snapshot.enabled,
+            scanned=bool(self.snapshot.scanned_at),
+            findings=len(self.snapshot.rows),
+            unobserved=self.inventory_unobserved_count(),
+            processes=self.snapshot.processes_observed,
+            connections=self.snapshot.connections_observed,
+            plane_summary="  ".join(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes),
+            context=self.findings_context(),
+            top_findings=tuple(top),
+            next_action=self.next_action(),
+        )
+
+    def health_state(self) -> str:
+        """Operator-facing health: off, waiting, degraded, or healthy."""
+
+        if not self.snapshot.enabled:
+            return "off"
+        if not self.snapshot.scanned_at:
+            return "waiting"
+        if self.snapshot.degraded and not self._only_expected_user_level_gaps():
+            return "degraded"
+        return "healthy"
+
+    def _only_expected_user_level_gaps(self) -> bool:
+        """True when every down plane is an opt-in or unprivileged limit."""
+
+        if not self.snapshot.planes:
+            return False
+        return not any(
+            plane.badge != "up" and _selected_plane_gap(plane)
+            for plane in self.snapshot.planes
+        )
+
+    def health_title(self) -> str:
+        return {
+            "off": "OFF",
+            "waiting": "STARTING",
+            "degraded": "DEGRADED",
+            "healthy": "HEALTHY",
+        }[self.health_state()]
+
+    def health_explanation(self) -> str:
+        """What the badge means, and what a quiet findings table does not mean."""
+
+        state = self.health_state()
+        if state == "off":
+            return (
+                "Runtime is not collecting. HEALTHY means every selected plane "
+                "is watching. Click Enable Runtime to turn on the user-level "
+                "inference and egress planes."
+            )
+        if state == "waiting":
+            return (
+                "Runtime is on but has not finished a poll yet. Click Poll now, "
+                "or wait for the next interval. HEALTHY appears after every "
+                "selected plane reports up."
+            )
+        if state == "degraded":
+            up = sum(1 for plane in self.snapshot.planes if plane.badge == "up")
+            idle = sum(
+                1
+                for plane in self.snapshot.planes
+                if plane.badge == "idle" and _selected_plane_gap(plane)
+            )
+            blind = sum(
+                1
+                for plane in self.snapshot.planes
+                if plane.badge == "blind" and _selected_plane_gap(plane)
+            )
+            parts: list[str] = []
+            if up:
+                parts.append(f"{up} watching")
+            if idle:
+                parts.append(f"{idle} selected but not running")
+            if blind:
+                parts.append(f"{blind} cannot see the host")
+            coverage = ", ".join(parts) or "one or more planes cannot watch the host"
+            extra = ""
+            if self.snapshot.degraded_reasons:
+                extra = " " + "; ".join(self.snapshot.degraded_reasons) + "."
+            return (
+                f"DEGRADED means coverage is partial ({coverage}).{extra} "
+                "Findings below are still valid for the planes that are up. "
+                "HEALTHY means every selected plane is watching."
+            )
+        unobserved = self.inventory_unobserved_count()
+        extra = ""
+        if unobserved:
+            extra = (
+                f" {unobserved} finding(s) are inventory-unobserved: AI Discovery "
+                "has no snapshot to correlate yet. Open that tab and press Scan now."
+            )
+        return (
+            "HEALTHY means the user-level inference and egress planes are watching. "
+            "Endpoint Security is optional and needs an elevated gateway. "
+            "A quiet findings table is a clean host, not a blind sensor."
+            + extra
+        )
+
+    def needs_enable(self) -> bool:
+        """True when the one-click Enable Runtime action would change config."""
+
+        if not self.snapshot.enabled:
+            return True
+        return any(
+            plane.plane != "c"
+            and (not plane.running)
+            and (
+                "not selected" in plane.reason.lower()
+                or "enable_host_plane" in plane.reason.lower()
+            )
+            for plane in self.snapshot.planes
+        )
+
+    def plane_fix(self, plane: PlaneRow) -> str:
+        """Next action for an idle or blind plane. Empty when the plane is up."""
+
+        if plane.running:
+            return ""
+        reason = plane.reason.lower()
+        if plane.plane == "c" or "not selected" in reason or "enable_host_plane" in reason:
+            if plane.plane == "c":
+                return (
+                    "Agent actions is optional and needs an elevated gateway. "
+                    "Use Permissions, then run runtime enable with "
+                    "--enable-host-plane if you can grant Endpoint Security."
+                )
+            return "Click Enable Runtime to turn on inference and egress."
+        if any(
+            token in reason
+            for token in ("eslogger", "full disk", "privilege", "permission", "tcc")
+        ):
+            return "Click Permissions for the host grant this plane needs."
+        if "connection table" in reason or "lsof" in reason:
+            return "Plane B cannot read sockets. Click Permissions, then Poll now."
+        if not plane.available:
+            return "This plane cannot see the host. Click Permissions."
+        return "This plane is available but not running. Click Enable Runtime or Poll now."
 
     def header_parts(self) -> tuple[str, ...]:
         """The header line.
@@ -295,7 +540,8 @@ class RuntimePanelModel:
         reader who sees only the finding count cannot tell a quiet host from a
         blind sensor.
         """
-        parts = [f"{len(self.filtered)}/{len(self.snapshot.rows)} findings"]
+        parts = [self.health_title()]
+        parts.append(f"{len(self.filtered)}/{len(self.snapshot.rows)} findings")
         if self.snapshot.scanned_at:
             parts.append(f"polled {self.snapshot.scanned_at}")
         parts.append(
@@ -310,8 +556,6 @@ class RuntimePanelModel:
                 else ""
             )
         )
-        if self.snapshot.degraded:
-            parts.append("DEGRADED")
         return tuple(parts)
 
     def plane_strip(self) -> tuple[str, ...]:
@@ -365,6 +609,8 @@ class RuntimePanelModel:
             return RuntimePanelAction.REFRESH
         if key == "s":
             return RuntimePanelAction.SCAN
+        if key == "e":
+            return RuntimePanelAction.ENABLE
         if key == "p":
             self.planes_expanded = not self.planes_expanded
             return RuntimePanelAction.TOGGLE_PLANES
@@ -393,5 +639,17 @@ class RuntimePanelModel:
             return RuntimeCommandIntent(
                 argv=("agent", "discovery", "runtime", "status"),
                 description="Re-read the last runtime snapshot",
+            )
+        if action is RuntimePanelAction.ENABLE:
+            return RuntimeCommandIntent(
+                argv=(
+                    "agent",
+                    "discovery",
+                    "runtime",
+                    "enable",
+                    "--yes",
+                    "--no-enable-host-plane",
+                ),
+                description="Enable the user-level inference and egress planes",
             )
         return None

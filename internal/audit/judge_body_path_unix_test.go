@@ -229,7 +229,19 @@ func TestJudgeBodyStoreRejectsPermissionChangeDuringOpen(t *testing.T) {
 	}
 }
 
-func TestJudgeBodyStoreRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
+func TestJudgeBodyOwnerTrusted(t *testing.T) {
+	if !judgeBodyOwnerTrusted(501, 0, false) {
+		t.Fatal("root must be able to open a user-owned judge-body file")
+	}
+	if judgeBodyOwnerTrusted(502, 501, false) {
+		t.Fatal("non-root must not open another user's judge-body file")
+	}
+	if !judgeBodyOwnerTrusted(0, 501, false) {
+		t.Fatal("root-owned files stay trusted leftovers of a sudo-started gateway")
+	}
+}
+
+func TestJudgeBodyStoreAllowsRootToOpenForeignOwnerWhenChownAvailable(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("changing file ownership requires root")
 	}
@@ -240,10 +252,19 @@ func TestJudgeBodyStoreRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
 	if err := os.Chown(path, 65534, -1); err != nil {
 		t.Skipf("chown is unavailable: %v", err)
 	}
-	assertJudgeBodyStorePathError(t, path, "untrusted owner")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJudgeBodyPlatformTrust(path, info, false, true); err != nil {
+		t.Fatalf("root opening a user-owned judge-body file: %v", err)
+	}
 }
 
 func TestJudgeBodyUnixTrustRejectsSyntheticUntrustedOwner(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root is a trusted accessor of any local owner")
+	}
 	path := filepath.Join(t.TempDir(), "judge_bodies.db")
 	if err := os.WriteFile(path, nil, 0o600); err != nil {
 		t.Fatal(err)

@@ -61,6 +61,19 @@ refuse() {
 
 REPO_ROOT="$(cd "${REPO_ROOT_INPUT}" && pwd -P)"
 readonly REPO_ROOT
+if [[ "${IS_WINDOWS}" -eq 0 ]] && command -v id >/dev/null 2>&1 && [[ "$(id -u)" -eq 0 ]]; then
+    checkout_uid=""
+    if checkout_uid="$(stat -f %u "${REPO_ROOT}" 2>/dev/null)"; then
+        :
+    elif checkout_uid="$(stat -c %u "${REPO_ROOT}" 2>/dev/null)"; then
+        :
+    else
+        refuse "cannot inspect checkout owner under sudo/root"
+    fi
+    if [[ "${checkout_uid}" != "0" ]]; then
+        refuse "sudo/root source-install is not supported for a user-owned checkout; run make all as the checkout owner"
+    fi
+fi
 if [[ "${IS_WINDOWS}" -eq 1 ]]; then
     if [[ "${INSTALL_DIR_INPUT}" =~ ^[A-Za-z]:[\\/] \
        || "${INSTALL_DIR_INPUT}" =~ ^\\\\ \

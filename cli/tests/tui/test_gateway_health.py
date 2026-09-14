@@ -17,6 +17,7 @@ import requests
 from defenseclaw.tui.app import (
     DefenseClawTUI,
     GatewayHealthResult,
+    _elevated_sidecar_pid_in_home,
     _fetch_gateway_health,
     _project_omnigent_effective_readiness,
 )
@@ -314,6 +315,75 @@ def test_unverified_listener_is_rejected_before_tui_sends_the_token(
     assert result.state == "error"
     assert "unverified" in result.detail
     assert requested is False
+
+
+def test_elevated_root_owned_pid_allows_authenticated_home_probe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = False
+
+    class ElevatedClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def status(self) -> dict[str, object]:
+            nonlocal requested
+            requested = True
+            return _status_payload(gateway_state="running")
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", ElevatedClient)
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: SimpleNamespace(
+            trusted=False,
+            pid=0,
+            detail="managed gateway PID record could not be verified",
+        ),
+    )
+    monkeypatch.setattr(
+        "defenseclaw.tui.app._elevated_sidecar_pid_in_home",
+        lambda _config: True,
+    )
+
+    result = _fetch_gateway_health(_config())
+
+    assert requested is True
+    assert result.state == "running"
+    assert result.snapshot is not None
+    assert "elevated sidecar" in result.detail
+
+
+def test_elevated_sidecar_pid_in_home_requires_private_root_leaf(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    import os
+    import stat
+
+    pid_file = tmp_path / "gateway.pid"
+    pid_file.write_text("4242", encoding="utf-8")
+    os.chmod(pid_file, 0o600)
+    config = _config()
+    config.data_dir = os.fspath(tmp_path)
+
+    assert _elevated_sidecar_pid_in_home(config) is False
+
+    real_lstat = os.lstat
+
+    def lstat_root(target, *args, **kwargs):
+        info = real_lstat(target, *args, **kwargs)
+        if os.fspath(target) == os.fspath(pid_file):
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr("defenseclaw.tui.app.os.lstat", lstat_root)
+    monkeypatch.setattr("defenseclaw.tui.app.os.geteuid", lambda: 501)
+    assert _elevated_sidecar_pid_in_home(config) is True
+
+    os.chmod(pid_file, 0o622)
+    assert _elevated_sidecar_pid_in_home(config) is False
 
 
 @pytest.mark.parametrize(

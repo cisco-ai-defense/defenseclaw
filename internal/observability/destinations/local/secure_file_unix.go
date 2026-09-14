@@ -152,7 +152,10 @@ func validateSecureFileInfo(info os.FileInfo) error {
 		return unsafeFailure()
 	}
 	status, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || status.Uid != uint32(os.Geteuid()) || status.Nlink != 1 {
+	if !ok || status.Nlink != 1 {
+		return unsafeFailure()
+	}
+	if os.Geteuid() != 0 && status.Uid != 0 && status.Uid != uint32(os.Geteuid()) {
 		return unsafeFailure()
 	}
 	return nil
@@ -174,7 +177,10 @@ func validateSecureDirectory(_ string, info os.FileInfo) error {
 		return unsafeFailure()
 	}
 	status, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || (status.Uid != 0 && status.Uid != uint32(os.Geteuid())) {
+	if !ok {
+		return unsafeFailure()
+	}
+	if os.Geteuid() != 0 && status.Uid != 0 && status.Uid != uint32(os.Geteuid()) {
 		return unsafeFailure()
 	}
 	return nil

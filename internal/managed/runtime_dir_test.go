@@ -10,6 +10,31 @@ import (
 	"testing"
 )
 
+func TestReclaimWrittenFileToDirectoryOwnerNoopWhenNotRoot(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("reclaim is a no-op only for an unprivileged writer")
+	}
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gateway.pid")
+	if err := os.WriteFile(path, []byte(`{"pid":1}`), 0o600); err != nil {
+		t.Fatalf("write fixture: %v", err)
+	}
+	before, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("stat fixture: %v", err)
+	}
+	if err := ReclaimWrittenFileToDirectoryOwner(path); err != nil {
+		t.Fatalf("unprivileged reclaim: %v", err)
+	}
+	after, err := os.Lstat(path)
+	if err != nil {
+		t.Fatalf("re-stat fixture: %v", err)
+	}
+	if after.Mode() != before.Mode() {
+		t.Fatalf("unprivileged reclaim changed mode: %v -> %v", before.Mode(), after.Mode())
+	}
+}
+
 func TestWriteServiceRuntimeFileSelfManagedKeepsPrivateContract(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "hook-token")

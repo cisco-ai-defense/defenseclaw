@@ -687,6 +687,9 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		}
 		return spec, ok
 	case "hermes":
+		if hookContractID != "hermes-hooks-v1" && hookContractID != "hermes-hooks-v2" {
+			return CorrelationSpec{}, false
+		}
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "extra.session_id"),
 			reported(CorrelationTargetTurn, ns, "turn", "extra.turn_id"),
@@ -704,7 +707,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			reported(CorrelationTargetSourceEvent, ns, "observer_event", "extra.event_id", "extra.observer_event_id"),
 			reported(CorrelationTargetSourceSeq, ns, "observer_sequence", "extra.sequence", "extra.seq"),
 		)
-		return makeSpec(CorrelationProfileHermesV1, "hermes-hooks-v1", []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "legacy shell events may omit turn identity"))
+		return makeSpec(CorrelationProfileHermesV1, hookContractID, []CorrelationSurface{CorrelationSurfaceHook}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceSubagentIdentity, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessComplete, CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "legacy shell events may omit turn identity"))
 	case "cursor":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "conversation", "conversation_id", "conversationId"),

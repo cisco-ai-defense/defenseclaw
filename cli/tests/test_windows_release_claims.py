@@ -454,7 +454,7 @@ def test_opencode_docs_exclude_unqualified_enforcement_media() -> None:
     assert len(contracts) == 1
     assert contracts[0]["agent_version"] == {
         "min_inclusive": "1.18.10",
-        "max_exclusive": "1.18.20",
+        "max_exclusive": "1.19.0",
     }
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
@@ -550,10 +550,15 @@ def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:
         )
     )["connectors"]["hermes"]
 
-    assert len(contracts) == 1
+    assert len(contracts) == 2
     assert contracts[0]["agent_version"] == {
         "min_inclusive": "0.19.0",
         "max_exclusive": "0.21.0",
+    }
+    assert contracts[1]["contract_id"] == "hermes-hooks-v2"
+    assert contracts[1]["agent_version"] == {
+        "min_inclusive": "0.21.0",
+        "max_exclusive": "0.22.0",
     }
     assert validated["live"] is False
     assert validated["os"]["windows"] == {
@@ -561,22 +566,22 @@ def test_hermes_latest_source_recheck_matches_the_pinned_contract() -> None:
         "last_validated_at": "",
         "run_url": "",
     }
-    assert "v2026.8.3 (0.20.0)" in validated["notes"]
+    assert "v0.21.3 (v2026.9.14)" in validated["notes"]
 
     connector_text = " ".join(connector_page.split())
     assert (
-        "latest official release rechecked on 2026-08-04 is "
-        "v0.20.0 (`v2026.8.3`)"
+        "latest official release rechecked on 2026-09-14 is "
+        "v0.21.3 (`v2026.9.14`)"
     ) in connector_text
     assert "v0.19.1 (`v2026.7.30`)" not in connector_page
     assert "live: false" in connector_page
     assert "source review is not packaged or real-client certification" in connector_text
 
-    assert "Last verified: **2026-08-04**" in research
-    assert "Hermes Agent v0.20.0, tag `v2026.8.3`" in research
+    assert "Last verified: **2026-09-14**" in research
+    assert "Hermes Agent v0.21.3, tag `v2026.9.14`" in research
     assert "DefenseClaw status: **supported**" in research
     assert "authentic-client evidence and certification metadata" in research
-    assert "latest rechecked tag [`v2026.8.3`]" in acceptance
+    assert "latest rechecked tag [`v2026.9.14`]" in acceptance
 
 
 def test_amp_validation_status_is_boolean_and_pending_note_is_explicit() -> None:

@@ -365,6 +365,116 @@ func TestRetentionACKMaterializationUsesTheSameBoundedCandidateBatch(t *testing.
 	}
 }
 
+func TestRetentionDeletesExpiredAuditHistoryBeforeCorrelationDrain(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events
+		(id, timestamp, action, actor, details, severity)
+		VALUES ('expired-audit', ?, 'scan', 'operator', 'old', 'LOW')`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+		INSERT INTO correlation_connector_instances (
+			connector_instance_id, connector, export_custody, profile_version,
+			managed_config_digest, is_default, created_time_unix_nano, updated_time_unix_nano
+		) VALUES (
+			'11111111-1111-4111-8111-111111111111', 'splunk', 'external', 'v1',
+			NULL, 0, 1000000000, 1000000000
+		);
+		INSERT INTO correlation_cursors (
+			connector_instance_id, session_id, agent_id, phase, sequence,
+			profile_version, active, updated_time_unix_nano
+		) VALUES (
+			'11111111-1111-4111-8111-111111111111', 'sess', 'agent', 'idle', 0,
+			'v1', 0, 1000000000
+		);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{
+		beforeAuditBatchCommit: func(class RetentionTableClass) error {
+			if class == RetentionCorrelationCursors {
+				return errors.New("correlation drain blocked")
+			}
+			return nil
+		},
+	})
+	result, err := reaper.Run(t.Context())
+	if err == nil {
+		t.Fatal("expected correlation drain failure")
+	}
+	if result.RowsDeleted[RetentionAuditEvents] != 1 {
+		t.Fatalf("expired audit rows deleted=%d want 1", result.RowsDeleted[RetentionAuditEvents])
+	}
+	if got := countRetentionRows(t, store.db, "audit_events"); got != 0 {
+		t.Fatalf("audit_events remaining=%d want 0", got)
+	}
+}
+
+func TestNewStoreEnablesIncrementalAutoVacuum(t *testing.T) {
+	store, _ := newRetentionStores(t)
+	var mode int
+	if err := store.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != sqliteAutoVacuumIncremental {
+		t.Fatalf("auto_vacuum=%d want %d (incremental)", mode, sqliteAutoVacuumIncremental)
+	}
+}
+
+func TestRetentionReclaimsFreedPagesWhenIncrementalAutoVacuumIsEnabled(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339Nano)
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := tx.Prepare(`INSERT INTO activity_events
+		(id, timestamp, actor, action, target_type, target_id)
+		VALUES (?, ?, 'operator', 'config-update', 'config', 'old')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4000; index++ {
+		if _, err := statement.Exec(fmt.Sprintf("reclaim-%04d", index), old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = statement.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	var pagesBefore int
+	if err := store.db.QueryRow(`PRAGMA page_count`).Scan(&pagesBefore); err != nil {
+		t.Fatal(err)
+	}
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{})
+	if _, err := reaper.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	var pagesAfter, freelist int
+	if err := store.db.QueryRow(`PRAGMA page_count`).Scan(&pagesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelist); err != nil {
+		t.Fatal(err)
+	}
+	if pagesAfter >= pagesBefore {
+		t.Fatalf("page_count after reclaim=%d before=%d freelist=%d", pagesAfter, pagesBefore, freelist)
+	}
+	if got := countRetentionRows(t, store.db, "activity_events"); got != 0 {
+		t.Fatalf("activity_events remaining=%d want 0", got)
+	}
+}
+
 func TestRetentionActiveDeleteTransactionAllowsReaderAndSerializesWriter(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)

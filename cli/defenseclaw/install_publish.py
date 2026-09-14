@@ -1334,6 +1334,11 @@ def _ensure_retirement_intent(
 def _bind_custody_fd(descriptor: int, *, create: bool, label: str) -> None:
     metadata = os.fstat(descriptor)
     if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
+        geteuid = getattr(os, "geteuid", None)
+        if callable(geteuid) and geteuid() == 0 and metadata.st_uid != 0:
+            raise PublishError(
+                f"retirement custody is user-owned; sudo/root source-install is not supported: {label}"
+            )
         raise PublishError(f"retirement custody is not private and caller-owned: {label}")
     marker = ".defenseclaw-custody-v1"
     existing = _read_regular_at(descriptor, marker, missing_ok=True)

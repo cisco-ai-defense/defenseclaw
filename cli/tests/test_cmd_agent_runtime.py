@@ -236,6 +236,26 @@ def test_runtime_restart_actually_restarts_the_gateway(
     assert cfg.ai_discovery.runtime.enabled is expected_state
 
 
+def test_runtime_enable_defaults_all_three_planes(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = False
+    cfg.ai_discovery.runtime.planes = []
+    cfg.ai_discovery.runtime.enable_host_plane = False
+
+    result = _invoke("enable", "--yes", "--no-restart")
+
+    assert result.exit_code == 0, result.output
+    assert cfg.ai_discovery.runtime.enabled is True
+    assert cfg.ai_discovery.runtime.planes == ["a", "b", "c"]
+    assert cfg.ai_discovery.runtime.enable_host_plane is True
+    assert not restart_spy.calls
+
+
 def test_runtime_no_restart_says_the_change_is_not_live(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -301,7 +321,6 @@ def test_runtime_permissions_covers_every_os_and_plane():
     that answer is a plane whose blindness nobody was warned about.
     """
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     for target in ("darwin", "linux", "windows"):
@@ -331,7 +350,6 @@ def test_runtime_permissions_names_the_macos_tcc_grant():
     root without it, Endpoint Security refused the client outright.
     """
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     result = CliRunner().invoke(runtime_permissions, ["--os", "darwin"])
@@ -347,7 +365,6 @@ def test_runtime_permissions_names_the_windows_command_line_policy():
     argument-vector tactic silently does not.
     """
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     result = CliRunner().invoke(runtime_permissions, ["--os", "windows"])
@@ -364,7 +381,6 @@ def test_runtime_permissions_reports_state_not_just_requirements():
     [unknown] an operator cannot act on is the same as no answer.
     """
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     result = CliRunner().invoke(runtime_permissions, ["--json"])
@@ -390,7 +406,6 @@ def test_runtime_permissions_does_not_probe_another_host_os():
     confident wrong answer, which is worse than declining to answer.
     """
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     other = "windows" if sys.platform != "win32" else "linux"
@@ -444,7 +459,6 @@ def test_grant_commands_are_scoped_and_reversible():
 def test_grant_refuses_to_act_on_another_host_os():
     """--grant must never run this host's commands under another OS's label."""
     from click.testing import CliRunner
-
     from defenseclaw.commands.cmd_agent import runtime_permissions
 
     other = "windows" if sys.platform != "win32" else "linux"
@@ -463,7 +477,6 @@ def test_grant_declined_at_the_prompt_changes_nothing(monkeypatch):
     vacuously.
     """
     import click
-
     from defenseclaw.commands import cmd_agent
 
     ran: list[list[str]] = []
@@ -484,7 +497,6 @@ def test_grant_declined_at_the_prompt_changes_nothing(monkeypatch):
 def test_grant_confirmed_runs_exactly_the_planned_commands(monkeypatch):
     """Confirming runs the plan, and only the plan."""
     import click
-
     from defenseclaw.commands import cmd_agent
 
     ran: list[list[str]] = []

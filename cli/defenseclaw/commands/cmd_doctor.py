@@ -121,6 +121,9 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_process_control,
     dotenv_key_is_valid,
     read_regular_file_no_follow,
+    root_owned_private_regular_file,
+    sudo_runtime_leftover_reclaim_command,
+    sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
     windows_acl_confidentiality_error,
 )
@@ -875,6 +878,38 @@ def _check_config(cfg, r: _DoctorResult) -> None:
     )
 
 
+def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
+    """Name root-owned ~/.defenseclaw leftovers from a sudo-started gateway."""
+
+    if os.name == "nt":
+        return
+    data_dir = _configured_gateway_data_dir(cfg)
+    if not data_dir:
+        return
+    leftovers = sudo_runtime_leftover_relpaths(data_dir)
+    if not leftovers:
+        _emit(
+            "pass",
+            "Sudo leftovers",
+            "no root-owned runtime files in the data directory",
+            r=r,
+            check_id="doctor.state.sudo-leftovers",
+        )
+        return
+    command = sudo_runtime_leftover_reclaim_command(data_dir, leftovers)
+    _emit(
+        "fail",
+        "Sudo leftovers",
+        "root-owned from a sudo-started gateway: "
+        + ", ".join(leftovers)
+        + f"; reclaim with `{command}`",
+        r=r,
+        check_id="doctor.state.sudo-leftovers",
+        reason_code="sudo-runtime-leftovers",
+        remediation=command,
+    )
+
+
 def _doctor_config_present(cfg) -> bool:
     """Return whether Doctor has an initialized config it may repair."""
     from defenseclaw.config import config_path_for_data_dir
@@ -1031,6 +1066,8 @@ def _gateway_data_dir_integrity_problem(cfg) -> str:
             return f"gateway data directory has unsafe ACLs ({problem})" if problem else ""
         geteuid = getattr(os, "geteuid", None)
         if callable(geteuid) and info.st_uid != geteuid():
+            if info.st_uid == 0:
+                return "gateway data directory is root-owned from a sudo-started gateway"
             return "gateway data directory is not owned by the current user"
         if stat.S_IMODE(info.st_mode) & 0o022:
             return "gateway data directory is writable by another local principal"
@@ -1061,14 +1098,18 @@ def _gateway_dotenv_safety_problem(cfg) -> str:
             return "dotenv is a symbolic link or reparse point"
         if not stat.S_ISREG(info.st_mode):
             return "dotenv is not a regular file"
+        if os.name != "nt":
+            geteuid = getattr(os, "geteuid", None)
+            if callable(geteuid) and info.st_uid != geteuid():
+                if info.st_uid == 0:
+                    return "dotenv is root-owned from a sudo-started gateway"
+                return "dotenv is not owned by the current user"
         read_regular_file_no_follow(path, max_bytes=MAX_DOTENV_BYTES)
         if os.name == "nt":
             from defenseclaw.file_permissions import windows_acl_confidentiality_error
 
             return windows_acl_confidentiality_error(path) or ""
         geteuid = getattr(os, "geteuid", None)
-        if callable(geteuid) and info.st_uid != geteuid():
-            return "dotenv is not owned by the current user"
         if stat.S_IMODE(info.st_mode) != 0o600:
             return "dotenv permissions are not 0600"
         if sys.platform == "darwin":
@@ -1280,6 +1321,22 @@ def _check_hilt_support(cfg, connector: str, r: _DoctorResult) -> None:
         _emit("warn", "Human approval", f"connector {connector!r} support is unknown", r=r)
 
 
+def _configured_local_retention_days(cfg) -> int:
+    """Return the configured local retention window, defaulting to 7 days."""
+    observability = getattr(cfg, "observability", None)
+    local = getattr(observability, "local", None)
+    raw = getattr(local, "retention_days", None)
+    if raw is None and isinstance(observability, dict):
+        raw = (observability.get("local") or {}).get("retention_days")
+    if raw is None:
+        return 7
+    try:
+        days = int(raw)
+    except (TypeError, ValueError):
+        return 7
+    return days if days >= 0 else 7
+
+
 def _check_audit_db(cfg, r: _DoctorResult) -> None:
     from defenseclaw.doctor_recovery import AuditDBHealthStatus, inspect_audit_db
 
@@ -1326,13 +1383,53 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
             remediation=remediation,
         )
         return
+    if health.integrity_scanned:
+        detail = f"{db_path}; SQLite quick_check=ok; required schema present"
+    else:
+        size_mib = max(health.file_bytes, 0) // (1024 * 1024)
+        detail = (
+            f"{db_path}; required schema present; full integrity scan skipped "
+            f"for {size_mib} MiB file"
+        )
     _emit(
         "pass",
         "Audit database",
-        f"{db_path}; SQLite quick_check=ok; required schema present",
+        detail,
         r=r,
         check_id="doctor.state.audit-db",
     )
+    if health.file_bytes >= 1024 * 1024 * 1024:
+        reclaim_mib = max(health.freelist_bytes, 0) // (1024 * 1024)
+        _emit(
+            "warn",
+            "Audit database size",
+            f"{health.file_bytes // (1024 * 1024)} MiB on disk "
+            f"({reclaim_mib} MiB already deleted but not reclaimed); "
+            "SQLite does not shrink after retention deletes",
+            r=r,
+            check_id="doctor.state.audit-storage-size",
+            reason_code="audit-storage-unreclaimed",
+            remediation=(
+                "let the gateway finish the 7-day retention pass, then compact "
+                "with a one-time VACUUM after stopping the gateway"
+            ),
+        )
+    retention_days = _configured_local_retention_days(cfg)
+    if (
+        retention_days > 0
+        and health.oldest_retention_unix_nano is not None
+        and health.oldest_retention_unix_nano
+        < int((time.time() - retention_days * 24 * 60 * 60) * 1_000_000_000)
+    ):
+        _emit(
+            "warn",
+            "Audit retention window",
+            f"oldest retained event is older than the configured {retention_days}-day window",
+            r=r,
+            check_id="doctor.state.audit-retention-lag",
+            reason_code="audit-retention-lag",
+            remediation="keep the gateway running so the 7-day reaper can finish draining history",
+        )
 
     try:
         free_bytes = shutil.disk_usage(os.path.dirname(os.path.abspath(db_path)) or os.curdir).free
@@ -7336,6 +7433,7 @@ def doctor(
 
     r.set_section("configuration")
     _check_config(cfg, r)
+    _check_sudo_runtime_leftovers(cfg, r)
     _check_audit_db(cfg, r)
     _check_device_identity(cfg, r)
 
@@ -9440,6 +9538,22 @@ def _check_hook_contract_lock(
         else:
             _emit("warn", "Hook contract", "no hook_contract_lock.json yet — restart gateway after setup", r=r)
         return
+    except PermissionError:
+        if root_owned_private_regular_file(lock_path):
+            command = sudo_runtime_leftover_reclaim_command(
+                data_dir,
+                ["hook_contract_lock.json"],
+            )
+            _emit(
+                "fail",
+                "Hook contract",
+                "hook_contract_lock.json is root-owned from a sudo-started gateway; "
+                f"reclaim with `{command}`",
+                r=r,
+            )
+            return
+        _emit("fail", "Hook contract", "hook_contract_lock.json could not be read", r=r)
+        return
     except Exception as exc:
         _emit("fail", "Hook contract", f"cannot read {lock_path}: {exc}", r=r)
         return
@@ -9558,7 +9672,10 @@ def _check_hook_contract_lock(
         discovered_binary = os.path.basename(discovered_path).lower()
         if discovered_binary in {"cursor", "cursor.exe", "cursor.cmd", "cursor.bat", "cursor.com"}:
             if current_version:
-                detail += f" desktop={current_version} (separate; not Agent CLI contract evidence)"
+                detail += (
+                    f" desktop={current_version} "
+                    "(Desktop hook host; compared separately from Agent CLI date-hash pins)"
+                )
             current_version = ""
     if current_version and raw_version and current_version != raw_version:
         _emit(
@@ -11217,6 +11334,12 @@ def _fix_dotenv_perms(
     mode = info.st_mode & 0o777
     geteuid = getattr(os, "geteuid", None)
     if callable(geteuid) and info.st_uid != geteuid():
+        if info.st_uid == 0:
+            return (
+                "fail",
+                "dotenv is root-owned from a sudo-started gateway; "
+                "refusing permission or credential repair",
+            )
         return (
             "fail",
             "dotenv is not owned by the current user; refusing permission or credential repair",

@@ -132,7 +132,7 @@ func validateCorrelationKeyStat(stat *unix.Stat_t) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return keyStoreError(KeyStoreErrorUnsafeType)
 	}
-	if int(stat.Uid) != os.Geteuid() {
+	if os.Geteuid() != 0 && int(stat.Uid) != 0 && int(stat.Uid) != os.Geteuid() {
 		return keyStoreError(KeyStoreErrorUnsafeOwner)
 	}
 	if stat.Mode&0o077 != 0 {

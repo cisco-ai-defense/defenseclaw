@@ -117,12 +117,12 @@ func TestPlaneHealthIsReportedEvenWhenAPlaneIsNotRunning(t *testing.T) {
 		}
 	}
 	// Plane C is selected only through the host-plane opt-in, which this
-	// config does not set, so the snapshot must be degraded and say why.
-	if !snapshot.Degraded {
-		t.Error("a snapshot with plane C not running was not marked degraded")
-	}
-	if len(snapshot.DegradedReasons) == 0 {
-		t.Error("a degraded snapshot carried no reasons")
+	// config does not set. It must remain visible with a reason, but an
+	// operator-selected omission is not a runtime degradation.
+	for _, reason := range snapshot.DegradedReasons {
+		if strings.Contains(strings.ToLower(reason), "not selected") {
+			t.Errorf("deselected plane was reported as degraded: %q", reason)
+		}
 	}
 }
 

@@ -478,10 +478,16 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 // Three states are distinguished because they need three different fixes:
 // unavailable is a platform or grant problem, stopped is a runtime failure,
 // and partially covered is a privilege gap that leaves the plane useful but
-// incomplete.
+// incomplete. User-level coverage is not degradation: an unprivileged
+// gateway is expected to watch via ps(1)/lsof(8) and to leave Endpoint
+// Security off. Calling that DEGRADED made every self-managed install look
+// broken unless the operator ran sudo.
 func degradedReasonsFor(snapshot Snapshot) []string {
 	reasons := make([]string, 0, len(snapshot.Planes))
 	for _, health := range snapshot.Planes {
+		if planeIsDeselected(health) || planeIsUnprivilegedExpectedGap(health) {
+			continue
+		}
 		switch {
 		case !health.Available:
 			reasons = append(reasons, health.Plane.Name()+" unavailable: "+planeIdleReason(health))
@@ -493,10 +499,37 @@ func degradedReasonsFor(snapshot Snapshot) []string {
 			// A plane delivering process events but not file events is missing
 			// a whole tactic class, and a snapshot that called that complete
 			// would let an operator read reduced coverage as a clean host.
+			leftover := withoutUnprivilegedEgressLimit(health.Reason)
+			if leftover == "" {
+				continue
+			}
 			reasons = append(reasons, health.Plane.Name()+" partially covered: "+health.Reason)
 		}
 	}
 	return reasons
+}
+
+func planeIsDeselected(health PlaneHealth) bool {
+	reason := strings.ToLower(health.Reason)
+	return strings.Contains(reason, "not selected") ||
+		strings.Contains(reason, "enable_host_plane")
+}
+
+func planeIsUnprivilegedExpectedGap(health PlaneHealth) bool {
+	if health.Plane != platform.PlaneC || health.Running {
+		return false
+	}
+	reason := strings.ToLower(health.Reason)
+	return strings.Contains(reason, "needs root") ||
+		strings.Contains(reason, "re-run the gateway elevated")
+}
+
+const unprivilegedEgressLimit = "egress attribution is limited to this process's own sockets; " +
+	"run the gateway elevated for machine-wide coverage"
+
+func withoutUnprivilegedEgressLimit(reason string) string {
+	trimmed := strings.ReplaceAll(reason, unprivilegedEgressLimit, "")
+	return strings.Trim(trimmed, " ;")
 }
 
 // namingBudget caps how long one poll may spend naming peers.
@@ -566,9 +599,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// the unattributed count stays near zero and a blinded plane
 				// is indistinguishable from a host with no egress. Coverage
 				// is reported, never implied.
-				limits = append(limits,
-					"egress attribution is limited to this process's own sockets; "+
-						"run the gateway elevated for machine-wide coverage")
+				limits = append(limits, unprivilegedEgressLimit)
 			}
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less

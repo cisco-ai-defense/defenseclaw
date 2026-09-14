@@ -2181,6 +2181,36 @@ class AIRuntimeConfig:
     correlate: bool | None = None
 
 
+FULL_RUNTIME_PLANES: tuple[str, ...] = ("a", "b", "c")
+
+
+def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, object, object]]:
+    """Turn on every runtime plane, including the host plane.
+
+    Plane C only runs when both ``planes`` lists ``c`` and
+    ``enable_host_plane`` is true. Returns the fields that actually
+    changed so callers can preview the same diff they persist.
+    """
+
+    desired: tuple[tuple[str, object], ...] = (
+        ("enabled", True),
+        ("planes", list(FULL_RUNTIME_PLANES)),
+        ("enable_host_plane", True),
+    )
+    changes: list[tuple[str, object, object]] = []
+    for field_name, value in desired:
+        current = getattr(runtime, field_name)
+        if field_name == "planes":
+            current_planes = [str(item).strip().lower() for item in (current or [])]
+            if current_planes == list(FULL_RUNTIME_PLANES):
+                continue
+        elif current == value:
+            continue
+        changes.append((field_name, current, value))
+        setattr(runtime, field_name, value)
+    return changes
+
+
 @dataclass
 class AIDiscoveryConfig:
     enabled: bool = False
@@ -5204,13 +5234,15 @@ def default_config() -> Config:
         ai_discovery=AIDiscoveryConfig(
             enabled=True,
             confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
-            # A fresh install gets the two runtime planes that need no
-            # privilege beyond what the gateway already has, and reports
-            # honestly where they cannot see. Plane C stays off: it reads
-            # kernel process, file, and identity events, and that decision
-            # belongs to the operator rather than to a default. DNS capture is
-            # off for the same reason.
-            runtime=AIRuntimeConfig(enabled=True, planes=["a", "b"]),
+            # Enabling AI discovery also enables every runtime plane. Plane C
+            # reports idle or blind when the host lacks privilege instead of
+            # staying unselected. DNS capture stays off: it is a separate
+            # elevated capture, not one of the three planes.
+            runtime=AIRuntimeConfig(
+                enabled=True,
+                planes=list(FULL_RUNTIME_PLANES),
+                enable_host_plane=True,
+            ),
         ),
         gateway=GatewayConfig(
             device_key_file=os.path.join(data_dir, "device.key"),

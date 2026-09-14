@@ -67,7 +67,7 @@ class TestAlertsSubcommands(unittest.TestCase):
 
                 runner = CliRunner()
                 with unittest.mock.patch(
-                    "defenseclaw.gateway.OrchestratorClient",
+                    "defenseclaw.commands.cmd_alerts.OrchestratorClient",
                     return_value=client,
                 ):
                     result = runner.invoke(
@@ -103,7 +103,7 @@ class TestAlertsSubcommands(unittest.TestCase):
 
         dry_client = MagicMock()
         dry_client.set_alert_disposition.return_value = preview
-        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=dry_client):
+        with unittest.mock.patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=dry_client):
             result = CliRunner().invoke(
                 alerts,
                 ["dismiss", "--id", "alert-a", "--dry-run"],
@@ -128,7 +128,7 @@ class TestAlertsSubcommands(unittest.TestCase):
                 "failures": [{"id": "alert-a", "code": "stale_projection_version"}],
             },
         ]
-        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=partial_client):
+        with unittest.mock.patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=partial_client):
             result = CliRunner().invoke(
                 alerts,
                 ["acknowledge", "--id", "alert-a"],
@@ -155,7 +155,7 @@ class TestAlertsSubcommands(unittest.TestCase):
             "selection_digest": "sha256:v1:" + "3" * 64,
             "targets": [],
         }
-        with unittest.mock.patch("defenseclaw.gateway.OrchestratorClient", return_value=client):
+        with unittest.mock.patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=client):
             result = CliRunner().invoke(
                 alerts,
                 ["dismiss", "--connector", "codex"],
@@ -184,6 +184,76 @@ class TestAlertsSubcommands(unittest.TestCase):
             vector_path = "/__defenseclaw_identity_vector__/audit.db"
             expected = "sha256:v1:edf22eb16e6d1bf09331b1581c9a33b4694ced26bf3f6c6085a7b06f83291c60"
         self.assertEqual(_alert_audit_db_identity(vector_path), expected)
+
+    def test_disposition_timeout_scales_with_bulk_selection(self) -> None:
+        from defenseclaw.gateway import alert_disposition_timeout_seconds
+
+        self.assertEqual(alert_disposition_timeout_seconds(0), 30)
+        self.assertEqual(alert_disposition_timeout_seconds(1), 31)
+        self.assertEqual(alert_disposition_timeout_seconds(325), 300)
+        self.assertEqual(alert_disposition_timeout_seconds(10_000), 300)
+
+    def test_timeout_is_not_swallowed_as_generic_confirmation_failure(self) -> None:
+        import requests
+        from defenseclaw.commands.cmd_alerts import alerts
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+        from defenseclaw.context import AppContext
+
+        app = AppContext()
+        app.cfg = prepare_fresh_v8_config(default_config())
+        app.cfg.audit_db = str(Path(tempfile.mkdtemp(prefix="dc-alert-timeout-")) / "audit.db")
+        app.cfg.gateway.token = "test-alert-review-token"
+        client = MagicMock()
+        client.timeout = 30
+        client.set_alert_disposition.side_effect = requests.Timeout()
+        with unittest.mock.patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=client) as constructed:
+            result = CliRunner().invoke(
+                alerts,
+                ["dismiss", "--id", "alert-a"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertIn("timed out", result.output)
+        self.assertNotIn("Canonical alert disposition was not confirmed", result.output)
+        self.assertGreaterEqual(constructed.call_args.kwargs["timeout"], 30)
+
+    def test_apply_timeout_scales_from_preview_match_count(self) -> None:
+        from defenseclaw.commands.cmd_alerts import alerts
+        from defenseclaw.config import default_config, prepare_fresh_v8_config
+        from defenseclaw.context import AppContext
+
+        app = AppContext()
+        app.cfg = prepare_fresh_v8_config(default_config())
+        app.cfg.audit_db = str(Path(tempfile.mkdtemp(prefix="dc-alert-bulk-")) / "audit.db")
+        app.cfg.gateway.token = "test-alert-review-token"
+        client = MagicMock()
+        client.timeout = 30
+        client.set_alert_disposition.side_effect = [
+            {
+                "_http_status": 200,
+                "matched": 325,
+                "selection_digest": "sha256:v1:" + "4" * 64,
+                "targets": [],
+            },
+            {
+                "_http_status": 200,
+                "matched": 325,
+                "applied": 325,
+                "no_change": 0,
+                "rejected": 0,
+                "failed": 0,
+            },
+        ]
+        with unittest.mock.patch("defenseclaw.commands.cmd_alerts.OrchestratorClient", return_value=client):
+            result = CliRunner().invoke(
+                alerts,
+                ["dismiss", "--severity", "HIGH", "--yes"],
+                obj=app,
+                catch_exceptions=False,
+            )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertGreaterEqual(client.set_alert_disposition.call_args_list[1].kwargs["timeout"], 300)
 
 
 class TestSettingsSave(unittest.TestCase):

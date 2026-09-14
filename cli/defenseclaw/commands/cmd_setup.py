@@ -75,6 +75,7 @@ from defenseclaw.config import (
     HILTConfig,
     PerConnectorGuardrailConfig,
     config_path_for_data_dir,
+    enable_all_runtime_planes,
     locked_config_yaml,
     locked_file_update,
 )
@@ -105,6 +106,8 @@ from defenseclaw.file_permissions import (
     open_regular_file_no_follow,
     read_regular_file_no_follow,
     reject_reparse_path,
+    root_owned_private_regular_file,
+    trusted_runtime_owner,
     windows_acl_custody_confidentiality_error,
     windows_acl_custody_write_error,
     windows_acl_write_error,
@@ -1017,6 +1020,7 @@ def setup_llm(
         return
 
     click.echo()
+    terminal_checkbox.restore_line_prompt_mode()
     ux.section("Unified LLM configuration")
     ux.subhead("Every LLM-using component (guardrail judge, MCP scanner,")
     ux.subhead("skill scanner, plugin scanner) resolves through this block")
@@ -1272,6 +1276,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         list_custom_instances,
         pick_auth_mode,
         pick_key_env,
+        pick_local_runtime,
         pick_model,
         pick_provider,
         pick_region,
@@ -1289,27 +1294,30 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         flag_value=None,
         non_interactive=False,
     )
-    instance_obj = custom_instance(data_dir, llm.instance_name) if llm.instance_name else None
-    llm.model = pick_model(
-        current=llm.model or "",
-        provider=llm.provider,
-        instance=instance_obj,
-        flag_value=None,
-        non_interactive=False,
-    )
-
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
-        # Local runtimes: no API key. Prompt for the endpoint URL with a
-        # sensible default so the scanner can find the loopback server.
+        # Local runtimes: no API key. Ask for the endpoint first so we
+        # can list the models actually installed on that runtime.
         default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
-        llm.base_url = click.prompt(
-            f"  {llm.provider} base URL",
-            default=default_base,
-            show_default=True,
+        llm.model, llm.base_url = pick_local_runtime(
+            provider=llm.provider,
+            current_model=llm.model or "",
+            current_base_url=llm.base_url or "",
+            default_base_url=default_base,
+            flag_model=None,
+            flag_base_url=None,
+            non_interactive=False,
         )
         llm.api_key = ""
         llm.api_key_env = ""
     else:
+        instance_obj = custom_instance(data_dir, llm.instance_name) if llm.instance_name else None
+        llm.model = pick_model(
+            current=llm.model or "",
+            provider=llm.provider,
+            instance=instance_obj,
+            flag_value=None,
+            non_interactive=False,
+        )
         # Cloud providers: prompt once for the unified key and store it
         # under DEFENSECLAW_LLM_KEY so every scanner / guardrail call
         # picks it up via Config.resolve_llm(...).
@@ -4710,17 +4718,20 @@ def _connector_contract_upgrade_guidance(
         return f"Use a {label} version covered by a DefenseClaw hook contract, then rerun setup."
 
     contract = contracts[0]
+    requirement_parts: list[str] = []
     if contract.exact_agent_versions:
-        requirement = "one of " + ", ".join(contract.exact_agent_versions)
-    elif contract.min_agent_version and contract.max_agent_version:
-        requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
+        requirement_parts.append("one of " + ", ".join(contract.exact_agent_versions))
+    range_requirement = ""
+    if contract.min_agent_version and contract.max_agent_version:
+        range_requirement = f">={contract.min_agent_version} and <{contract.max_agent_version}"
     elif contract.min_agent_version:
-        requirement = f">={contract.min_agent_version}"
+        range_requirement = f">={contract.min_agent_version}"
     elif contract.max_agent_version:
-        requirement = f"<{contract.max_agent_version}"
-    else:
-        requirement = "an explicitly supported version"
-    if normalized_version and not contract.exact_agent_versions:
+        range_requirement = f"<{contract.max_agent_version}"
+    if range_requirement:
+        requirement_parts.append(range_requirement)
+    requirement = " or ".join(requirement_parts) if requirement_parts else "an explicitly supported version"
+    if normalized_version and range_requirement:
         if contract.min_agent_version and compare_agent_versions(
             normalized_version,
             contract.min_agent_version,
@@ -6549,14 +6560,29 @@ def _capture_protected_setup_file(
     path: str,
     maximum: int,
     label: str,
+    *,
+    repair_owned_read_bits: bool = False,
+    skip_if_untrusted: bool = False,
 ) -> tuple[bool, bytes, tuple[int, int, int, int] | None]:
-    """Read one bounded private regular file without following path redirects."""
+    """Read one bounded private regular file without following path redirects.
+
+    ``repair_owned_read_bits`` tightens an owner-only file that is merely
+    group/other-readable (no extra write bits) so an informational hint
+    written with a loose umask does not abort first-run. World-writable
+    or foreign-owned files stay untrusted. ``skip_if_untrusted`` treats
+    those untrusted hint files as missing instead of failing the
+    transaction — used only for advisory files such as ``picked_connector``.
+    """
 
     try:
         fd = open_regular_file_no_follow(path)
     except FileNotFoundError:
         return False, b"", None
     except OSError:
+        if root_owned_private_regular_file(path):
+            raise OSError(
+                f"{label} rollback source is root-owned from a sudo-started gateway"
+            ) from None
         raise OSError(f"{label} rollback source is unavailable") from None
     try:
         info = os.fstat(fd)
@@ -6567,12 +6593,29 @@ def _capture_protected_setup_file(
         if os.name == "nt":
             acl_error = windows_acl_write_error(path)
             if acl_error is not None:
+                if skip_if_untrusted:
+                    return False, b"", None
                 raise OSError(f"{label} rollback source is not protected")
         else:
-            if hasattr(os, "geteuid") and info.st_uid != os.geteuid():
-                raise OSError(f"{label} rollback source is not owned by the current user")
-            if stat.S_IMODE(info.st_mode) & 0o077:
-                raise OSError(f"{label} rollback source is not private")
+            if not trusted_runtime_owner(info.st_uid):
+                if skip_if_untrusted:
+                    return False, b"", None
+                raise OSError(f"{label} rollback source is not owned by a trusted principal")
+            extra_bits = stat.S_IMODE(info.st_mode) & 0o077
+            if extra_bits:
+                can_repair = (
+                    repair_owned_read_bits
+                    and (extra_bits & 0o022) == 0
+                    and (not hasattr(os, "geteuid") or info.st_uid == os.geteuid())
+                )
+                if can_repair:
+                    os.fchmod(fd, stat.S_IMODE(info.st_mode) & 0o700)
+                    info = os.fstat(fd)
+                    extra_bits = stat.S_IMODE(info.st_mode) & 0o077
+                if extra_bits:
+                    if skip_if_untrusted:
+                        return False, b"", None
+                    raise OSError(f"{label} rollback source is not private")
         body = bytearray()
         while len(body) <= maximum:
             chunk = os.read(fd, min(64 << 10, maximum + 1 - len(body)))
@@ -7153,6 +7196,8 @@ def _capture_setup_desired_snapshot_once(cfg) -> _SetupConfigSnapshot:
             os.path.join(os.path.abspath(os.fspath(data_dir)), _PICKED_CONNECTOR_FILENAME),
             4096,
             "picked_connector",
+            repair_owned_read_bits=True,
+            skip_if_untrusted=True,
         )
     selection_existed = False
     selection_body = b""
@@ -8714,6 +8759,7 @@ def _apply_hook_connector_setup(
         cfg.ai_discovery.include_package_manifests = True
         cfg.ai_discovery.include_env_var_names = True
         cfg.ai_discovery.include_network_domains = True
+        enable_all_runtime_planes(cfg.ai_discovery.runtime)
 
     try:
         cfg.save()

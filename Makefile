@@ -430,6 +430,7 @@ proto-check: proto
 		internal/guardrail/semanticpb/facts.pb.go
 
 gateway: sync-openclaw-extension
+	@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
@@ -460,6 +461,7 @@ endif
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
 sync-openclaw-extension:
+	@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
@@ -1179,6 +1181,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	uv build --wheel --out-dir $(DIST_DIR)
 
 _bundle-data:
+	@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail

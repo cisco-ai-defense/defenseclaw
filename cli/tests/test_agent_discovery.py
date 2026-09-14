@@ -1796,7 +1796,7 @@ def test_devin_windows_discovery_rejects_gui_product_root(
     assert ad._path_key(str(binary)) not in tuple(map(ad._path_key, candidates))
 
 
-def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path):
+def test_cursor_discovery_prefers_desktop_over_agent_cli(monkeypatch, tmp_path):
     primary = tmp_path / "agent.exe"
     compatibility = tmp_path / "cursor-agent.exe"
     desktop = tmp_path / "cursor.cmd"
@@ -1814,8 +1814,38 @@ def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path
     resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
 
     assert tuple(map(ad._path_key, resolved)) == tuple(
-        map(ad._path_key, (str(primary), str(compatibility)))
+        map(ad._path_key, (str(desktop), str(primary), str(compatibility)))
     )
+
+
+def test_cursor_macos_prefers_desktop_app_over_path_agent(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    applications = tmp_path / "Applications"
+    desktop = (
+        applications
+        / "Cursor.app"
+        / "Contents"
+        / "Resources"
+        / "app"
+        / "bin"
+        / "cursor"
+    )
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"desktop cursor")
+    desktop.chmod(0o755)
+    agent_cli = tmp_path / "bin" / "agent"
+    agent_cli.parent.mkdir()
+    agent_cli.write_bytes(b"agent cli")
+    agent_cli.chmod(0o755)
+    monkeypatch.setattr(ad, "_macos_application_roots", lambda: (applications,))
+    monkeypatch.setattr(ad, "_which", lambda name: str(agent_cli) if name == "agent" else "")
+
+    resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+
+    assert tuple(map(ad._path_key, resolved))[0] == ad._path_key(str(desktop))
 
 
 def test_cursor_windows_discovery_uses_official_token_bound_agent_root(

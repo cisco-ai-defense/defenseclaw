@@ -31,16 +31,21 @@ Design rules:
 
 from __future__ import annotations
 
+import http.client
+import ipaddress
 import json as _json
 import os
 import re
+import socket
+import ssl
 from dataclasses import asdict
 from importlib.resources import files
 from typing import Any
+from urllib.parse import urlparse
 
 import click
 
-from defenseclaw import ux
+from defenseclaw import terminal_checkbox, ux
 from defenseclaw.config import (
     DEFENSECLAW_LLM_KEY_ENV,
     AzureKeyConfig,
@@ -218,6 +223,7 @@ def pick_provider(
     click.echo()
 
     default_label = current if current in valid else (valid[0] if valid else "")
+    terminal_checkbox.restore_line_prompt_mode()
     while True:
         raw = click.prompt(
             "  Pick provider (number, name, or 'm' for free-form)",
@@ -261,11 +267,14 @@ def pick_model(
     flag_value: str | None,
     non_interactive: bool,
     flag_name: str = "--model",
+    live_models: list[str] | None = None,
 ) -> str:
     """Pick a model id for the chosen provider.
 
-    When ``instance`` is set, prefers its ``available_models`` over the
-    catalog's defaults.
+    When ``live_models`` is provided (including an empty list), that
+    list is the source of truth — typically models discovered from a
+    local runtime. Otherwise, when ``instance`` is set, prefers its
+    ``available_models`` over the catalog's defaults.
     """
     if flag_value:
         return flag_value.strip()
@@ -276,16 +285,20 @@ def pick_model(
         return ""
 
     models: list[str] = []
-    if instance:
+    source = f"for {provider}"
+    if live_models is not None:
+        models = [str(m) for m in live_models if str(m).strip()]
+        source = f"currently installed on {provider}"
+    elif instance:
         models = [str(m) for m in (instance.get("available_models") or []) if m]
-    if not models:
+    if live_models is None and not models:
         entry = catalog_entry(provider)
         if entry:
             models = [str(m) for m in (entry.get("models") or []) if m]
 
     click.echo()
     if models:
-        ux.subhead(f"Models for {provider}:")
+        ux.subhead(f"Models {source}:")
         for idx, m in enumerate(models, start=1):
             click.echo(f"    [{idx}] {m}")
         click.echo("    [c] type a custom model id")
@@ -302,11 +315,242 @@ def pick_model(
             if raw in models:
                 return raw
             return raw  # accept any free-form id LiteLLM/Bifrost can route
+    if live_models is not None:
+        ux.subhead(f"No models reported by {provider} at this endpoint.")
+        return click.prompt(
+            "  Type model id",
+            default=current or "",
+            show_default=bool(current),
+        ).strip()
     return click.prompt(
         "  LLM model id (e.g. 'claude-sonnet-4-5', 'gpt-4o', 'llama3.3')",
         default=current or "",
         show_default=bool(current),
     ).strip()
+
+
+_LOCAL_LIST_MAX_BYTES = 1 << 20
+_LOCAL_LIST_TIMEOUT = 2.0
+_LOCAL_LLM_PROVIDERS = frozenset({"ollama", "vllm", "lm_studio", "lmstudio"})
+
+
+def pick_local_runtime(
+    *,
+    provider: str,
+    current_model: str,
+    current_base_url: str,
+    default_base_url: str,
+    flag_model: str | None,
+    flag_base_url: str | None,
+    non_interactive: bool,
+) -> tuple[str, str]:
+    """Prompt for a local runtime base URL, poll installed models, pick one.
+
+    Returns ``(model, base_url)``. Non-interactive mode never contacts
+    the local API — it keeps the supplied flag/current values.
+    """
+    if flag_base_url is not None:
+        base_url = flag_base_url.strip()
+    elif non_interactive:
+        base_url = (current_base_url or default_base_url).strip()
+    else:
+        base_url = click.prompt(
+            f"  {provider} base URL",
+            default=current_base_url or default_base_url,
+            show_default=True,
+        ).strip()
+
+    live_models: list[str] | None = None
+    if base_url and not non_interactive:
+        click.echo(f"    Querying {provider} for installed models…")
+        discovered, error = list_local_provider_models(provider, base_url)
+        if error:
+            click.echo(f"    Could not list local models ({error}). Falling back to catalog suggestions.")
+        else:
+            live_models = discovered
+            if discovered:
+                click.echo(f"    Found {len(discovered)} model(s) on the local runtime.")
+            else:
+                click.echo("    The local runtime reported no installed models.")
+
+    model = pick_model(
+        current=current_model or "",
+        provider=provider,
+        instance=None,
+        flag_value=flag_model,
+        non_interactive=non_interactive,
+        live_models=live_models,
+    )
+    return model, base_url
+
+
+def list_local_provider_models(
+    provider: str,
+    base_url: str,
+    *,
+    timeout: float = _LOCAL_LIST_TIMEOUT,
+) -> tuple[list[str], str]:
+    """Return ``(models, error)`` from a loopback local LLM runtime.
+
+    Never raises. ``error`` is empty on success (the model list may
+    still be empty). Only http/https loopback endpoints are contacted.
+    """
+    urls = _local_model_list_urls(provider, base_url)
+    if not urls:
+        return [], "missing or unsupported local endpoint"
+    last_error = "no local model endpoint"
+    for url in urls:
+        try:
+            payload = _loopback_get_json(url, timeout=timeout, max_bytes=_LOCAL_LIST_MAX_BYTES)
+        except Exception as exc:
+            last_error = str(exc).strip().splitlines()[0][:160] or type(exc).__name__
+            continue
+        models = _parse_local_model_payload(payload)
+        return models, ""
+    return [], last_error
+
+
+def _local_model_list_urls(provider: str, base_url: str) -> list[str]:
+    raw = (base_url or "").strip()
+    if not raw:
+        return []
+    base = raw.rstrip("/")
+    key = (provider or "").strip().lower()
+    if key == "ollama":
+        if base.endswith("/v1"):
+            return [f"{base}/models", f"{base[:-3]}/api/tags"]
+        return [f"{base}/api/tags", f"{base}/v1/models"]
+    if key in _LOCAL_LLM_PROVIDERS - {"ollama"}:
+        if base.endswith("/v1"):
+            return [f"{base}/models"]
+        return [f"{base}/v1/models", f"{base}/models"]
+    return []
+
+
+def _parse_local_model_payload(payload: Any) -> list[str]:
+    names: list[str] = []
+    if not isinstance(payload, dict):
+        return []
+    models = payload.get("models")
+    if isinstance(models, list):
+        for item in models:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("model") or item.get("id")
+                if name:
+                    names.append(str(name))
+            elif isinstance(item, str) and item.strip():
+                names.append(item)
+    data = payload.get("data")
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, dict) and item.get("id"):
+                names.append(str(item["id"]))
+            elif isinstance(item, str) and item.strip():
+                names.append(item)
+    seen: set[str] = set()
+    out: list[str] = []
+    for name in names:
+        cleaned = name.strip()
+        if cleaned and cleaned not in seen:
+            seen.add(cleaned)
+            out.append(cleaned)
+    return out
+
+
+def _loopback_get_json(url: str, *, timeout: float, max_bytes: int) -> Any:
+    """GET JSON from an operator-selected local LLM endpoint.
+
+    SSRF posture: only http/https, no userinfo, resolve the host, require
+    every answer to be loopback, then connect to that resolved address
+    (not the original hostname) so a later DNS change cannot retarget
+    the request. Redirects are not followed.
+    """
+    parsed = urlparse(url)
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("only http/https local endpoints are allowed")
+    if parsed.username or parsed.password:
+        raise ValueError("local LLM URLs must not include credentials")
+    host = (parsed.hostname or "").strip().lower()
+    if not host:
+        raise ValueError("local LLM URL is missing a host")
+    if host != "localhost":
+        try:
+            literal_host = ipaddress.ip_address(host)
+        except ValueError:
+            raise ValueError(
+                "local LLM URL host must be localhost or a literal loopback address"
+            ) from None
+        if isinstance(literal_host, ipaddress.IPv6Address) and literal_host.ipv4_mapped:
+            literal_host = literal_host.ipv4_mapped
+        if not literal_host.is_loopback:
+            raise ValueError("refusing non-loopback local LLM endpoint")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    loopback_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    for info in infos:
+        ip = ipaddress.ip_address(info[4][0])
+        if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
+            ip = ip.ipv4_mapped
+        if not ip.is_loopback:
+            raise ValueError("refusing non-loopback local LLM endpoint")
+        if loopback_ip is None:
+            loopback_ip = ip
+    if loopback_ip is None:
+        raise ValueError("could not resolve local LLM endpoint")
+
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+    header_host = host if ":" not in host else f"[{host}]"
+    if parsed.port:
+        header_host = f"{header_host}:{parsed.port}"
+    headers = {
+        "Host": header_host,
+        "Accept": "application/json",
+        "User-Agent": "defenseclaw-local-model-list",
+    }
+    connect_host = str(loopback_ip)
+    if parsed.scheme == "https":
+        conn = _pinned_https_connection(
+            connect_host=connect_host,
+            server_hostname=host,
+            port=port,
+            timeout=timeout,
+        )
+    else:
+        conn = http.client.HTTPConnection(connect_host, port, timeout=timeout)
+    try:
+        conn.request("GET", path, headers=headers)
+        resp = conn.getresponse()
+        if resp.status != 200:
+            raise ValueError(f"HTTP {resp.status}")
+        body = resp.read(max_bytes + 1)
+        if len(body) > max_bytes:
+            raise ValueError("local model list response is too large")
+        return _json.loads(body.decode("utf-8"))
+    finally:
+        conn.close()
+
+
+def _pinned_https_connection(
+    *,
+    connect_host: str,
+    server_hostname: str,
+    port: int,
+    timeout: float,
+) -> http.client.HTTPConnection:
+    """Connect to a vetted IP while validating TLS for the URL hostname."""
+
+    context = ssl.create_default_context()
+    raw_socket = socket.create_connection((connect_host, port), timeout=timeout)
+    try:
+        tls_socket = context.wrap_socket(raw_socket, server_hostname=server_hostname)
+    except Exception:
+        raw_socket.close()
+        raise
+    connection = http.client.HTTPConnection(server_hostname, port, timeout=timeout)
+    connection.sock = tls_socket
+    return connection
 
 
 def pick_region(

@@ -34,6 +34,7 @@ import io
 import json
 import os
 import shlex
+import stat
 import sys
 import unittest
 from dataclasses import replace
@@ -1965,6 +1966,74 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertIn("config.yaml rollback source is unavailable", str(raised.exception))
         self.assertNotIn(private_detail, str(raised.exception))
         self.assertNotIn("private-profile", str(raised.exception))
+
+    def test_protected_snapshot_names_root_owned_sudo_leftover(self):
+        lock_path = os.path.join(self.app.cfg.data_dir, "hook_contract_lock.json")
+        with open(lock_path, "w", encoding="utf-8") as fh:
+            fh.write("{}\n")
+        os.chmod(lock_path, 0o600)
+        real_lstat = os.lstat
+
+        def lstat_root(target, *args, **kwargs):
+            info = real_lstat(target, *args, **kwargs)
+            if os.path.abspath(os.fspath(target)) == os.path.abspath(lock_path):
+                fields = list(info)
+                fields[stat.ST_UID] = 0
+                return os.stat_result(fields)
+            return info
+
+        with (
+            patch(
+                "defenseclaw.commands.cmd_setup.open_regular_file_no_follow",
+                side_effect=PermissionError("denied"),
+            ),
+            patch("defenseclaw.file_permissions.os.lstat", lstat_root),
+            patch("defenseclaw.file_permissions.os.geteuid", lambda: 501),
+            self.assertRaises(OSError) as raised,
+        ):
+            cmd_setup._capture_protected_setup_file(lock_path, 4096, "hook_contract_lock.json")
+
+        self.assertIn("root-owned from a sudo-started gateway", str(raised.exception))
+        self.assertNotIn(lock_path, str(raised.exception))
+
+    def test_picked_connector_hint_repairs_owner_readable_mode(self):
+        hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
+        with open(hint_path, "w", encoding="utf-8") as fh:
+            fh.write("codex\n")
+        os.chmod(hint_path, 0o644)
+
+        existed, body, generation = cmd_setup._capture_protected_setup_file(
+            hint_path,
+            4096,
+            "picked_connector",
+            repair_owned_read_bits=True,
+            skip_if_untrusted=True,
+        )
+
+        self.assertTrue(existed)
+        self.assertEqual(body, b"codex\n")
+        self.assertIsNotNone(generation)
+        self.assertEqual(os.stat(hint_path).st_mode & 0o777, 0o600)
+
+    def test_picked_connector_hint_skips_world_writable_without_failing(self):
+        hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
+        with open(hint_path, "w", encoding="utf-8") as fh:
+            fh.write("codex\n")
+        os.chmod(hint_path, 0o666)
+
+        existed, body, generation = cmd_setup._capture_protected_setup_file(
+            hint_path,
+            4096,
+            "picked_connector",
+            repair_owned_read_bits=True,
+            skip_if_untrusted=True,
+        )
+
+        self.assertFalse(existed)
+        self.assertEqual(body, b"")
+        self.assertIsNone(generation)
+        snapshot = cmd_setup._capture_setup_desired_snapshot_once(self.app.cfg)
+        self.assertFalse(snapshot.picked_connector_existed)
 
     def test_name_stable_failed_registration_path_cannot_report_exact_success(self):
         prior_path = os.path.abspath(os.path.join(self.tmp_dir, "registrations", "prior-a.json"))

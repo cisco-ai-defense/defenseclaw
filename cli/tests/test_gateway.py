@@ -472,6 +472,29 @@ class OrchestratorClientWireFormatTests(unittest.TestCase):
         out = client.ai_usage_validate_confidence_policy("x" * 100)
         self.assertEqual(out, {"valid": False, "error": "policy file exceeds size limit"})
 
+    def test_set_alert_disposition_scales_timeout_for_bulk_ids(self) -> None:
+        from unittest.mock import MagicMock
+
+        client = gateway.OrchestratorClient(timeout=10, token="t")
+        captured: dict[str, object] = {}
+        resp = MagicMock()
+        resp.status_code = 200
+        resp.json.return_value = {"matched": 1}
+
+        def _post(*_args: object, **kwargs: object) -> MagicMock:
+            captured["timeout"] = kwargs["timeout"]
+            return resp
+
+        client._session.post = _post
+        client.set_alert_disposition(
+            operation_id="alert-review-test",
+            audit_db_identity="sha256:v1:" + "a" * 64,
+            disposition="dismissed",
+            selector={"ids": [f"alert-{index}" for index in range(325)]},
+            preview=True,
+        )
+        self.assertGreaterEqual(int(captured["timeout"]), 300)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -26,9 +26,9 @@ import os
 import posixpath
 import sqlite3
 import stat
-import threading
 import subprocess
 import sys
+import threading
 from contextlib import closing, nullcontext
 from pathlib import Path
 
@@ -174,7 +174,25 @@ def test_audit_db_inspection_distinguishes_missing_invalid_and_valid_state(
     plan = plan_missing_audit_db(target, data_dir=data_dir)
     result = apply_audit_db_recovery(plan, approved=True, unattended=True)
     assert result.status is RecoveryApplyStatus.CREATED
-    assert inspect_audit_db(target, data_dir=data_dir).status is AuditDBHealthStatus.VALID
+    valid = inspect_audit_db(target, data_dir=data_dir)
+    assert valid.status is AuditDBHealthStatus.VALID
+    assert valid.integrity_scanned is True
+
+
+def test_audit_db_inspection_skips_full_quick_check_on_large_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = _private_data_dir(tmp_path)
+    target = data_dir / "audit.db"
+    plan = plan_missing_audit_db(target, data_dir=data_dir)
+    apply_audit_db_recovery(plan, approved=True, unattended=True)
+    monkeypatch.setattr(recovery, "_AUDIT_FULL_INTEGRITY_MAX_BYTES", 0)
+
+    health = inspect_audit_db(target, data_dir=data_dir)
+
+    assert health.status is AuditDBHealthStatus.VALID
+    assert health.integrity_scanned is False
+    assert health.file_bytes > 0
 
 
 def test_audit_db_apply_creates_verified_private_schema(tmp_path: Path) -> None:

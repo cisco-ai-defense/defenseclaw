@@ -33,6 +33,7 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw.config import FULL_RUNTIME_PLANES, AIRuntimeConfig, enable_all_runtime_planes
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
@@ -1104,35 +1105,36 @@ def discovery_enable(
 
     from defenseclaw import ux
 
-    if ad.enabled:
+    diff = _preview_discovery_changes(ad, pending)
+    runtime_diff = _preview_runtime_all_planes(ad)
+    if ad.enabled and not diff and not runtime_diff:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
-        # than a no-op. Otherwise the only way to nudge the scan
-        # interval on an already-enabled install would be to disable
-        # then re-enable, which is an unnecessary downtime window
-        # and surprises scripts that pipeline these commands.
-        diff = _preview_discovery_changes(ad, pending)
-        if not diff:
-            click.echo(
-                f"  {ux.dim('AI discovery is already enabled')} "
-                f"(mode={ad.mode!r}, scan_interval_min={ad.scan_interval_min}).",
+        # than a no-op. Runtime planes are part of the same enable
+        # contract: an already-enabled discovery with planes still
+        # off is incomplete.
+        click.echo(
+            f"  {ux.dim('AI discovery is already enabled')} "
+            f"(mode={ad.mode!r}, scan_interval_min={ad.scan_interval_min}).",
+        )
+        if scan and restart:
+            _trigger_post_enable_scan(
+                app,
+                gateway_host=gateway_host,
+                gateway_port=gateway_port,
+                gateway_token_env=gateway_token_env,
             )
-            if scan and restart:
-                _trigger_post_enable_scan(
-                    app,
-                    gateway_host=gateway_host,
-                    gateway_port=gateway_port,
-                    gateway_token_env=gateway_token_env,
-                )
-            return
+        return
 
+    if ad.enabled:
         ux.section("Updating AI discovery settings")
     else:
         ux.section("Enabling AI discovery")
 
-    diff = _preview_discovery_changes(ad, pending)
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
+    for field, before, after in runtime_diff:
+        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar starts the discovery service.",
@@ -1162,12 +1164,21 @@ def discovery_enable(
     ad.enabled = True
     if not ad.mode:
         ad.mode = "enhanced"
+    runtime_changes = _apply_runtime_all_planes(ad)
+    if any(field == "enable_host_plane" and after is True for field, _before, after in runtime_changes):
+        ux.warn(
+            "runtime plane C (agent actions) reads kernel process, file, and "
+            "identity events. Every signal it raises is gated on an AI agent "
+            "in the process lineage.",
+            indent="  ",
+        )
 
     try:
         cfg.save()
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
-            f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min})",
+            f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
+            "runtime planes a/b/c on)",
             indent="  ",
         )
     except OSError as exc:
@@ -1629,6 +1640,7 @@ def discovery_setup(
     )
     diff = _preview_discovery_changes(ad, pending)
     enabled_changed = bool(ad.enabled) != bool(enable_pref)
+    runtime_diff = _preview_runtime_all_planes(ad) if enable_pref else []
 
     click.echo()
     ux.section("Summary")
@@ -1637,11 +1649,13 @@ def discovery_setup(
             f"enabled: {bool(ad.enabled)!r} → {bool(enable_pref)!r}",
             indent="  ",
         )
-    if not diff and not enabled_changed:
+    if not diff and not enabled_changed and not runtime_diff:
         click.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
         return
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
+    for field, before, after in runtime_diff:
+        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar applies these settings.",
@@ -1673,13 +1687,17 @@ def discovery_setup(
     ad.enabled = bool(enable_pref)
     if not ad.mode:
         ad.mode = "enhanced"
+    if enable_pref:
+        _apply_runtime_all_planes(ad)
 
     try:
         cfg.save()
         ux.ok(
             "Config saved (ai_discovery.enabled = "
             f"{str(ad.enabled).lower()}, mode={ad.mode}, "
-            f"scan_interval_min={ad.scan_interval_min})",
+            f"scan_interval_min={ad.scan_interval_min}"
+            + (", runtime planes a/b/c on" if enable_pref else "")
+            + ")",
             indent="  ",
         )
     except OSError as exc:
@@ -2815,6 +2833,11 @@ def _apply_runtime_settings(
             setattr(runtime, field, value)
 
     stage("enabled", enabled)
+    if enabled:
+        if enable_host_plane is None:
+            enable_host_plane = True
+        desired_planes = list(FULL_RUNTIME_PLANES) if enable_host_plane else ["a", "b"]
+        stage("planes", desired_planes)
     stage("enable_host_plane", enable_host_plane)
     stage("dns_capture", dns_capture)
     stage("poll_interval_s", poll_interval_s)
@@ -2963,6 +2986,48 @@ def _build_discovery_overrides(
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
     return overrides
+
+
+def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
+    """Return the AI discovery runtime block, creating one if missing."""
+
+    runtime = getattr(ad, "runtime", None)
+    if isinstance(runtime, AIRuntimeConfig):
+        return runtime
+    created = AIRuntimeConfig()
+    if runtime is not None:
+        for field_name in ("enabled", "planes", "enable_host_plane"):
+            if hasattr(runtime, field_name):
+                setattr(created, field_name, getattr(runtime, field_name))
+    try:
+        ad.runtime = created
+    except Exception:  # noqa: BLE001 - fixtures may be read-only namespaces
+        pass
+    return created
+
+
+def _preview_runtime_all_planes(ad: Any) -> list[tuple[str, object, object]]:
+    """Diff turning on planes A/B/C without mutating the live config."""
+
+    runtime = getattr(ad, "runtime", None)
+    if runtime is None:
+        return [
+            ("enabled", False, True),
+            ("planes", [], list(FULL_RUNTIME_PLANES)),
+            ("enable_host_plane", False, True),
+        ]
+    probe = AIRuntimeConfig(
+        enabled=bool(getattr(runtime, "enabled", False)),
+        planes=list(getattr(runtime, "planes", []) or []),
+        enable_host_plane=bool(getattr(runtime, "enable_host_plane", False)),
+    )
+    return enable_all_runtime_planes(probe)
+
+
+def _apply_runtime_all_planes(ad: Any) -> list[tuple[str, object, object]]:
+    """Turn on every runtime plane on the live config and return the diff."""
+
+    return enable_all_runtime_planes(_discovery_runtime(ad))
 
 
 def _preview_discovery_changes(

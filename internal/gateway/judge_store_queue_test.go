@@ -271,6 +271,92 @@ func TestJudgeStore_ErrorActionsEmitOneCanonicalFailedLog(t *testing.T) {
 	}
 }
 
+type cancelAwareJudgeRuntimeV8Emitter struct {
+	captureJudgeRuntimeV8Emitter
+}
+
+func (e *cancelAwareJudgeRuntimeV8Emitter) EmitRuntimeV8(
+	ctx context.Context,
+	metadata router.Metadata,
+	build audit.RuntimeV8Builder,
+) (audit.RuntimeV8EmitOutcome, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return audit.RuntimeV8EmitOutcome{}, err
+		}
+	}
+	return e.captureJudgeRuntimeV8Emitter.EmitRuntimeV8(ctx, metadata, build)
+}
+
+func TestJudgeStore_CancelledHookContextStillEmitsCompletion(t *testing.T) {
+	auditStore, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("audit.NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = auditStore.Close() })
+	if err := auditStore.Init(); err != nil {
+		t.Fatalf("audit.Init: %v", err)
+	}
+	logger := audit.NewLogger(auditStore)
+	t.Cleanup(func() { logger.Close() })
+	runtime := &cancelAwareJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(runtime)
+
+	hold := make(chan struct{})
+	fi := &fakeInserter{hold: hold}
+	js := NewJudgeStore(fi, logger, 8)
+	payload, dir := makeJob(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	if err := js.PersistJudgeEvent(ctx, dir, payload, "", "", "", ""); err != nil {
+		t.Fatalf("PersistJudgeEvent: %v", err)
+	}
+	cancel()
+	fi.mu.Lock()
+	fi.hold = nil
+	fi.mu.Unlock()
+	close(hold)
+	if err := js.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
+	}
+
+	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventGuardrailJudgeCompleted); got != 1 {
+		t.Fatalf("canonical completions = %d, want 1 after the hook context was cancelled", got)
+	}
+	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventSubsystemDegraded); got != 0 {
+		t.Fatalf("subsystem.degraded records = %d, want 0 for a cancelled hook context", got)
+	}
+}
+
+func TestJudgeStore_RepeatedAuditEmitFailureAlertsOnce(t *testing.T) {
+	auditStore, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("audit.NewStore: %v", err)
+	}
+	t.Cleanup(func() { _ = auditStore.Close() })
+	if err := auditStore.Init(); err != nil {
+		t.Fatalf("audit.Init: %v", err)
+	}
+	logger := audit.NewLogger(auditStore)
+	t.Cleanup(func() { logger.Close() })
+	runtime := &captureJudgeRuntimeV8Emitter{}
+	logger.SetRuntimeV8Emitter(runtime)
+
+	js := &JudgeStore{logger: logger}
+	emitErr := errors.New("observability local-log pipeline failed: context_done")
+	for i := 0; i < 5; i++ {
+		js.logErrorEvent(context.Background(), "judge_audit.emit", emitErr, map[string]string{"kind": "pii"})
+	}
+	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventSubsystemDegraded); got != 1 {
+		t.Fatalf("subsystem.degraded records = %d, want 1 for a repeated judge_audit.emit failure", got)
+	}
+
+	js.clearHealthDegraded("judge_audit.emit")
+	js.logErrorEvent(context.Background(), "judge_audit.emit", emitErr, map[string]string{"kind": "pii"})
+	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventSubsystemDegraded); got != 2 {
+		t.Fatalf("subsystem.degraded records = %d, want 2 after the emit path recovered and failed again", got)
+	}
+}
+
 func judgeCanonicalAttributes(t *testing.T, record observability.Record) map[string]any {
 	t.Helper()
 	body, ok := record.Body()
@@ -768,9 +854,11 @@ func TestJudgeStoreGeneratedMetricPreservesW3CCorrelation(t *testing.T) {
 //  3. emit one canonical completion for every invocation, including rows whose
 //     optional forensic body failed. Body retention and ordinary observability
 //     are separate domains.
+//  4. emit one HIGH platform.health transition for the insert outage, not one
+//     alert per failed row.
 //
 // We drive 10 jobs through a fake that fails every 3rd insert (rows
-// 3, 6, 9 — three drops, seven committed) and assert all three
+// 3, 6, 9 — three drops, seven committed) and assert all four
 // post-conditions.
 func TestJudgeStore_PartialInsertFailureCountsDrops(t *testing.T) {
 	metrics := &captureJudgeRuntimeV8Emitter{}
@@ -834,8 +922,8 @@ func TestJudgeStore_PartialInsertFailureCountsDrops(t *testing.T) {
 	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventGuardrailJudgeCompleted); got != N {
 		t.Fatalf("canonical completions = %d, want %d despite %d body failures", got, N, wantFailed)
 	}
-	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventSubsystemDegraded); got != wantFailed {
-		t.Fatalf("canonical body failure health records = %d, want %d", got, wantFailed)
+	if got := countCanonicalEvent(runtime.snapshot(), observability.TelemetryEventSubsystemDegraded); got != 1 {
+		t.Fatalf("canonical body failure health records = %d, want 1", got)
 	}
 	if got := countAuditAction(t, auditStore, "judge_persist.insert"); got != 0 {
 		t.Fatalf("legacy body failure health rows = %d, want 0", got)

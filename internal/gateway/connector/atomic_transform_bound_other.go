@@ -26,7 +26,7 @@ func validateAtomicTransformBoundDirectoryPlatform(file *os.File, requirePrivate
 		return nil
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || (stat.Uid != uint32(os.Geteuid()) && os.Geteuid() != 0) {
 		return fmt.Errorf("bound compare-and-swap state directory is not owned by current user")
 	}
 	if info.Mode().Perm()&0o077 != 0 {
@@ -41,7 +41,7 @@ func validateAtomicTransformBoundFilePrivatePlatform(file *os.File) error {
 		return err
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || (stat.Uid != uint32(os.Geteuid()) && os.Geteuid() != 0) {
 		return fmt.Errorf("bound compare-and-swap receipt is not owned by current user")
 	}
 	if !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {

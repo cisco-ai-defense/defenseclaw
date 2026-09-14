@@ -184,5 +184,11 @@ func hookAPITrustedOwner(uid uint32) bool {
 }
 
 func hookAPITrustedRuntimeOwner(uid uint32, realUID, effectiveUID int) bool {
+	// Root can already seteuid to any local account. Refusing a user-owned
+	// token while euid is 0 only blocked `sudo defenseclaw-gateway` against
+	// ~/.defenseclaw. A privilege-dropped euid still has to match the file.
+	if effectiveUID == 0 {
+		return true
+	}
 	return uid == 0 || int(uid) == realUID || int(uid) == effectiveUID
 }

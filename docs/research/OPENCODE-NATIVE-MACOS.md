@@ -1,18 +1,18 @@
-# OpenCode v1.18.10-v1.18.19 native connector evidence
+# OpenCode v1.18.10-v1.18.31 native connector evidence
 
-Reviewed 2026-08-21 against the official OpenCode `v1.18.19` tag, with the
+Reviewed 2026-09-14 against the official OpenCode `v1.18.31` tag, with the
 connector's bounded compatibility floor at `v1.18.10`.
 
 Primary sources:
 
-- [OpenCode v1.18.19 release](https://github.com/anomalyco/opencode/releases/tag/v1.18.19)
-- [Plugin type contract](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/plugin/src/index.ts)
-- [Runtime plugin dispatcher](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/plugin/index.ts)
-- [Configuration loader and component discovery](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/config/config.ts)
-- [Configuration path resolution](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/config/paths.ts)
-- [Instruction resolution](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/session/instruction.ts)
-- [Skill discovery](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/skill/index.ts)
-- [Tool registry](https://github.com/anomalyco/opencode/blob/v1.18.19/packages/opencode/src/tool/registry.ts)
+- [OpenCode v1.18.31 release](https://github.com/anomalyco/opencode/releases/tag/v1.18.31)
+- [Plugin type contract](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/plugin/src/index.ts)
+- [Runtime plugin dispatcher](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/plugin/index.ts)
+- [Configuration loader and component discovery](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/config.ts)
+- [Configuration path resolution](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/config/paths.ts)
+- [Instruction resolution](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/session/instruction.ts)
+- [Skill discovery](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/skill/index.ts)
+- [Tool registry](https://github.com/anomalyco/opencode/blob/v1.18.31/packages/opencode/src/tool/registry.ts)
 - [Official plugin documentation](https://opencode.ai/docs/plugins/)
 
 ## Reviewed contract
@@ -22,7 +22,7 @@ OpenCode loads global and project JS/TS plugins and awaits
 boundary. `tool.execute.after` is post-execution telemetry only. DefenseClaw
 bridge v7 uses that awaited contract and does not insert a model proxy or
 claim a resumable native confirmation surface. The validated compatibility
-range is `>=1.18.10,<1.18.20`, with `1.18.19` the current pin.
+range is `>=1.18.10,<1.19.0`, with `1.18.31` the current pin.
 
 The reviewed source accepts singular and plural component directories:
 `agent`/`agents`, `command`/`commands`, `plugin`/`plugins`, `skill`/`skills`,
@@ -37,7 +37,7 @@ permission map, not a custom-tool declaration.
 | Surface | Disposition |
 | --- | --- |
 | Enforcement | Managed dependency-free `defenseclaw.js`; awaited pre-tool throw; bridge v7 |
-| Version | `>=1.18.10,<1.18.20`; current pin `1.18.19` |
+| Version | `>=1.18.10,<1.19.0`; current pin `1.18.31` |
 | Platforms | Same local discovery contract on native Windows, macOS, and Linux |
 | Project scope | Explicit workspace only; upward walk stops at the nearest regular `.git` file or `.git` directory |
 | Skills | Native read roots; installs target project `.opencode/skills` or user/custom config `skills` |

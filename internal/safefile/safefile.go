@@ -78,7 +78,12 @@ func ReplaceFile(source, destination string) error {
 // WritePrivate protects the managed parent directory and holds it against
 // replacement while atomically writing a sensitive state file.
 func WritePrivate(path string, data []byte) error {
-	return writePrivate(path, data, nil)
+	if err := writePrivate(path, data, nil); err != nil {
+		return err
+	}
+	// Root writing into a user-owned directory must not leave 0600 root
+	// files the operator's TUI, Doctor, and first-run cannot read.
+	return ReclaimToDirectoryOwner(path)
 }
 
 func writePrivate(path string, data []byte, beforeWrite func()) error {

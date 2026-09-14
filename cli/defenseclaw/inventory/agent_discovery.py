@@ -2047,21 +2047,17 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             if os.path.isfile(candidate)
         )
     candidates: list[str] = []
-    # Cursor made ``agent`` its primary CLI entrypoint on 2026-01-08 while
-    # retaining ``cursor-agent`` as a compatibility alias. The Desktop
-    # ``cursor`` launcher has a separate release/version stream and therefore
-    # must never become Agent CLI hook-contract evidence.
+    # Cursor Desktop is the hook host for the 21-event hooks.json surface.
+    # Prefer its PATH shim and macOS app bundle over Agent CLI fallbacks.
+    # Windows certification remains the official Agent CLI install root.
     binary_names = (spec.binary_name,)
     if name == "cursor":
-        if _is_macos_host():
-            # Keep both standalone and app-bundle launchers. The latter is
-            # metadata-probed without execution and must still pass the
-            # configured application-root trust boundary.
-            binary_names = ("cursor-agent", "cursor", "agent")
-        else:
+        if _is_windows_host():
             # Cursor renamed the primary Agent CLI entrypoint to ``agent``;
             # ``cursor-agent`` remains the compatibility alias.
             binary_names = ("agent", "cursor-agent")
+        else:
+            binary_names = ("cursor", "agent", "cursor-agent")
     # Windows Devin discovery is deliberately not PATH-based. The native
     # product exposes one canonical CLI under token-bound LocalAppData.
     if not (name == "devin" and _is_windows_host()):
@@ -2069,7 +2065,11 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
             path = _which(binary_name)
             if path:
                 candidates.append(path)
-    if not _is_windows_host() and _is_macos_host():
+            if name == "cursor" and binary_name == "cursor" and _is_macos_host():
+                for candidate in _macos_binary_candidates(name):
+                    if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                        candidates.append(os.path.abspath(candidate))
+    if not _is_windows_host() and _is_macos_host() and name != "cursor":
         for candidate in _macos_binary_candidates(name):
             if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                 candidates.append(os.path.abspath(candidate))

@@ -19,6 +19,7 @@ func TestHookAPITrustedRuntimeOwnerAcceptsPrivilegeDropEffectiveUID(t *testing.T
 		{name: "root", owner: 0, realUID: 1000, effectiveUID: 1001, want: true},
 		{name: "real uid", owner: 1000, realUID: 1000, effectiveUID: 1001, want: true},
 		{name: "effective target uid", owner: 1001, realUID: 0, effectiveUID: 1001, want: true},
+		{name: "sudo root opening user file", owner: 1000, realUID: 0, effectiveUID: 0, want: true},
 		{name: "unrelated uid", owner: 2002, realUID: 0, effectiveUID: 1001, want: false},
 	}
 	for _, test := range tests {

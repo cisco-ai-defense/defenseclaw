@@ -120,6 +120,9 @@ func TestStore_PragmasAppliedAcrossPool(t *testing.T) {
 		{"synchronous", 1},
 		// foreign_keys: bool 0/1
 		{"foreign_keys", 1},
+		// incremental auto_vacuum lets retention reclaim deleted pages
+		// without a blocking full-file VACUUM on new databases.
+		{"auto_vacuum", 2},
 	}
 	for _, tc := range cases {
 		var got int64

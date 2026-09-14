@@ -69,6 +69,7 @@ STATE_STYLES: Mapping[str, str] = {
     "allowed": DEFAULT_TOKENS.accent_green,
     "clean": DEFAULT_TOKENS.accent_green,
     "enabled": DEFAULT_TOKENS.accent_green,
+    "healthy": DEFAULT_TOKENS.accent_green,
     "running": DEFAULT_TOKENS.accent_green,
     "blocked": DEFAULT_TOKENS.accent_red,
     "rejected": DEFAULT_TOKENS.accent_red,
@@ -119,7 +120,7 @@ def state_color(state: str, tokens: ThemeTokens = DEFAULT_TOKENS) -> str:
     """Return the theme color for a service or policy state."""
 
     normalized = state.lower()
-    if normalized in {"active", "allowed", "clean", "enabled", "running"}:
+    if normalized in {"active", "allowed", "clean", "enabled", "healthy", "running"}:
         return tokens.accent_green
     if normalized in {"blocked", "error", "rejected", "stopped"}:
         return tokens.accent_red

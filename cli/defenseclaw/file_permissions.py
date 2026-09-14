@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import contextlib
 import os
+import shlex
 import stat
 import subprocess
 import sys
@@ -62,6 +63,103 @@ class UnsafePathError(OSError):
 
 
 MAX_DOTENV_BYTES = 1024 * 1024
+
+
+def trusted_runtime_owner(st_uid: int, *, current_uid: int | None = None) -> bool:
+    """True when *st_uid* may hold a self-managed ~/.defenseclaw runtime file.
+
+    Root is a trusted accessor (``sudo`` opening a user tree) and a trusted
+    writer (a sudo-started gateway leaving 0600 files). A foreign non-root
+    owner stays untrusted. Group/other-writable bits are a separate check.
+    """
+
+    if current_uid is None:
+        geteuid = getattr(os, "geteuid", None)
+        current_uid = geteuid() if callable(geteuid) else st_uid
+    return current_uid == 0 or st_uid in {0, current_uid}
+
+
+def root_owned_private_regular_file(path: str | os.PathLike[str]) -> bool:
+    """True when *path* is a private regular file owned by root.
+
+    ``lstat`` works without read access, so first-run and Doctor can name a
+    sudo leftover instead of calling the file unavailable.
+    """
+
+    if os.name == "nt" or not hasattr(os, "geteuid"):
+        return False
+    try:
+        current_uid = os.geteuid()
+        info = os.lstat(path)
+    except OSError:
+        return False
+    if current_uid == 0 or info.st_uid != 0:
+        return False
+    return bool(stat.S_ISREG(info.st_mode) and not (stat.S_IMODE(info.st_mode) & 0o077))
+
+
+# Files a sudo-started self-managed gateway writes into ~/.defenseclaw.
+# Doctor and first-run name these leftovers instead of calling them unavailable.
+SUDO_RUNTIME_LEFTOVER_NAMES: tuple[str, ...] = (
+    "gateway.pid",
+    "watchdog.pid",
+    "hook_contract_lock.json",
+    "active_connector.json",
+    "ai_discovery_state.json",
+    "application_protection_state.json",
+    "redaction-correlation.key",
+    "device.key",
+    "device.key.provenance",
+)
+
+
+def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str]:
+    """Return relative paths of private root-owned leftovers under *data_dir*."""
+
+    if os.name == "nt" or not hasattr(os, "geteuid"):
+        return []
+    root = os.fspath(data_dir)
+    leftovers: list[str] = []
+    for name in SUDO_RUNTIME_LEFTOVER_NAMES:
+        if root_owned_private_regular_file(os.path.join(root, name)):
+            leftovers.append(name)
+
+    hooks_dir = os.path.join(root, "hooks")
+    try:
+        info = os.lstat(hooks_dir)
+    except OSError:
+        return leftovers
+    if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+        return leftovers
+    current_uid = os.geteuid()
+    if (
+        current_uid != 0
+        and info.st_uid == 0
+        and not (stat.S_IMODE(info.st_mode) & 0o022)
+    ):
+        leftovers.append("hooks/")
+    try:
+        names = os.listdir(hooks_dir)
+    except OSError:
+        return leftovers
+    for name in sorted(names):
+        if not (name.startswith(".hook-") and name.endswith(".token")):
+            continue
+        rel = f"hooks/{name}"
+        if root_owned_private_regular_file(os.path.join(hooks_dir, name)):
+            leftovers.append(rel)
+    return leftovers
+
+
+def sudo_runtime_leftover_reclaim_command(
+    data_dir: str | os.PathLike[str],
+    relpaths: list[str],
+) -> str:
+    """Return a copy-pasteable ``chown`` that returns leftovers to the operator."""
+
+    root = os.fspath(data_dir)
+    quoted = " ".join(shlex.quote(os.path.join(root, rel)) for rel in relpaths)
+    return f'sudo chown "$(id -un):$(id -gn)" -- {quoted}'
 
 _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
     {

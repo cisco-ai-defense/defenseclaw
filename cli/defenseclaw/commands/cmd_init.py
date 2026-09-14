@@ -1202,6 +1202,7 @@ def _prompt_action_policy(
     # because silently bricking the agent on a transient delivery or response
     # error is worse than leaking a single tool call.
     if fail_mode is None:
+        terminal_checkbox.restore_line_prompt_mode()
         ux.section("Hook fail-mode (delivery and response failures)")
         ux.subhead(
             "What hooks do when delivery/authentication fails or the gateway response is invalid.",
@@ -1364,6 +1365,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         )
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
+    elif signal is not None and getattr(signal, "version", ""):
+        record["reason"] = (
+            f"installed version {signal.version} is not covered by a known hook contract"
+        )
+        record["installed_version"] = signal.version
     return record
 
 
@@ -1570,6 +1576,7 @@ def _prompt_first_run(
         data_dir=data_dir,
         trusted_prompt_cache=trusted_prompt_cache,
     )
+    terminal_checkbox.restore_line_prompt_mode()
 
     # Scanner mode is process-wide guardrail config, so it is asked once
     # regardless of how many connectors are being configured. Rule/regex
@@ -1620,7 +1627,11 @@ def _prompt_first_run(
             hilt_min_severity=hilt_min_severity,
         )
 
-    judge_candidates = [c for c in connectors if c in action_set]
+    # Offer the judge for every connector the operator selected for action.
+    # Hook-contract downgrades still apply to the saved profile, but they
+    # must not hide the checkbox — `defenseclaw setup` already uses the
+    # requested action set here.
+    judge_candidates = [c for c in connectors if c in set(requested_action)]
     if judge_candidates:
         judge_hook_connectors = _prompt_first_run_judge_connectors(judge_candidates, default_all=with_judge)
     else:
@@ -1686,7 +1697,7 @@ def _prompt_first_run_judge_llm_config(
     ):
         return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url
 
-    from defenseclaw.commands._llm_picker import pick_key_env, pick_model, pick_provider
+    from defenseclaw.commands._llm_picker import pick_key_env, pick_local_runtime, pick_model, pick_provider
     from defenseclaw.commands.cmd_setup import (
         _LOCAL_LLM_DEFAULT_BASE_URL,
         _LOCAL_LLM_WIZARD_PROVIDERS,
@@ -1699,6 +1710,18 @@ def _prompt_first_run_judge_llm_config(
         flag_value=None,
         non_interactive=False,
     )
+    if provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+        model, base_url = pick_local_runtime(
+            provider=provider,
+            current_model=llm_model or "",
+            current_base_url=llm_base_url or "",
+            default_base_url=_LOCAL_LLM_DEFAULT_BASE_URL.get(provider, ""),
+            flag_model=None,
+            flag_base_url=None,
+            non_interactive=False,
+        )
+        return provider, model, "", "", base_url
+
     model = pick_model(
         current=llm_model or "",
         provider=provider,
@@ -1706,13 +1729,6 @@ def _prompt_first_run_judge_llm_config(
         flag_value=None,
         non_interactive=False,
     )
-    if provider in _LOCAL_LLM_WIZARD_PROVIDERS:
-        base_url = click.prompt(
-            f"  {provider} base URL",
-            default=llm_base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(provider, ""),
-            show_default=True,
-        )
-        return provider, model, "", "", base_url
 
     key_env = pick_key_env(
         provider=provider,
@@ -2365,6 +2381,11 @@ def _validate_private_identity_directory(path: str) -> None:
         ) or windows_acl_confidentiality_error(path)
     else:
         problem = None
+        if info.st_uid == 0 and os.geteuid() != 0:
+            raise click.ClickException(
+                "cannot safely create device identity "
+                "(directory-chain-is-root-owned-sudo-leftover)"
+            )
         if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
             problem = "directory is not owner-private"
         else:

@@ -3450,10 +3450,10 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 	}
 	actionMode := strings.EqualFold(s.currentConfig().EffectiveGuardrailModeForConnector(conn.Name()), "action")
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnknown && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
+		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
 	}
 	if !guardianManagedLifecycle && contractResolution.Status == connector.HookCompatibilityUnversioned && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), agentVersion, contractResolution.Reason)
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), agentVersion, contractResolution.Reason)
 	}
 	// Compatibility checks intentionally use the filtered read below, so a
 	// fresh protected Windows Codex repair receipt can supersede the old lock.
@@ -3468,7 +3468,7 @@ func (s *Sidecar) runGuardrail(ctx context.Context) error {
 			// an explicit setup/restart from refreshing an existing connector.
 			// Only an upstream agent-version/contract change requires the action-mode override.
 			if connector.HookContractCompatibilityDrifted(previous, current) && actionMode && os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-				return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+				return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 			}
 		}
 	}
@@ -4793,6 +4793,17 @@ func (s *Sidecar) setupConnectorsIsolatedTransaction(ctx context.Context, conns 
 			}
 		}
 		if err := s.setupOneConnector(ctx, registration.conn, registration.opts, masterKey, cache); err != nil {
+			// Admission failures happen before Setup writes hook files. Tearing
+			// down here deletes a still-valid install (for example Cursor
+			// Desktop vs Agent CLI probing the same cursor-hooks-v1 contract).
+			if errors.Is(err, ErrHookContractAdmission) {
+				if restoreErr := restoreFailedConnectorLock(registration.opts.DataDir, registration.conn.Name(), previousLock); restoreErr != nil {
+					fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v; restore prior hook contract lock: %v\n", registration.conn.Name(), err, restoreErr)
+					continue
+				}
+				fmt.Fprintf(os.Stderr, "[guardrail] WARNING: connector %s setup failed, skipping (other connectors unaffected): %v\n", registration.conn.Name(), err)
+				continue
+			}
 			// Isolate: roll back this connector's partial state, log, leave
 			// the other connectors untouched, continue.
 			var rollbackErrors []error
@@ -5200,7 +5211,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		(actionMode || strictUnknownVersion) &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return fmt.Errorf("%w: connector %s agent version %q is not covered by a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if contractResolution.Status == connector.HookCompatibilityUnknown &&
 		!actionMode && !strictUnknownVersion &&
@@ -5210,7 +5221,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 	if contractResolution.Status == connector.HookCompatibilityUnversioned &&
 		actionMode &&
 		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-		return fmt.Errorf("connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", conn.Name(), opts.AgentVersion, contractResolution.Reason)
+		return fmt.Errorf("%w: connector %s agent version %q is not verified against a known hook contract: %s (set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 only for exploratory testing)", ErrHookContractAdmission, conn.Name(), opts.AgentVersion, contractResolution.Reason)
 	}
 	if previous := connector.LoadHookContractLockEntry(s.currentConfig().DataDir, conn.Name()); previous.Connector != "" {
 		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
@@ -5221,7 +5232,7 @@ func (s *Sidecar) setupOneConnector(ctx context.Context, conn connector.Connecto
 		if connector.HookContractCompatibilityDrifted(previous, current) &&
 			actionMode &&
 			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
-			return fmt.Errorf("connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
+			return fmt.Errorf("%w: connector %s hook contract drift detected: previous version=%q contract=%s current version=%q contract=%s (rerun discovery/setup to refresh the lock, or set DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT=1 for exploratory testing)", ErrHookContractAdmission, conn.Name(), previous.RawAgentVersion, previous.ContractID, current.RawAgentVersion, current.ContractID)
 		}
 	}
 
@@ -5996,6 +6007,12 @@ var (
 	saveWindsurfReadyActiveState = connector.SaveActiveConnector
 	markWindsurfReadyInactive    = connector.MarkConnectorInactive
 )
+
+// ErrHookContractAdmission is returned when action-mode setup refuses a
+// connector before writing hook files. Callers must not tear down an already
+// installed hook surface for this error — the existing registration is still
+// the last verified contract.
+var ErrHookContractAdmission = errors.New("hook contract admission failed")
 
 func (s *Sidecar) failWindsurfReadyStatePublication(ctx context.Context, opts connector.SetupOpts, conn connector.Connector, cause error) error {
 	fmt.Fprintf(os.Stderr, "[guardrail] connector windsurf atomic readiness publication failed: %v\n", cause)

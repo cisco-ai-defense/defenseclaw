@@ -85,8 +85,9 @@ const (
 var ErrAlertProjectionUnhealthy = errors.New("alert acknowledgement projection is unhealthy")
 
 // ErrAlertTargetIneligible prevents acknowledgement state from being created
-// for an arbitrary caller-supplied identifier that has no alert occurrence or
-// pre-existing protected state.
+// for an identifier that is not in the Alerts queue. Eligibility must match
+// alertEligibilitySQL so Dismiss all can clear the same HIGH health and
+// enforcement rows the TUI loaded.
 var ErrAlertTargetIneligible = errors.New("alert acknowledgement target is not eligible")
 
 // ErrAlertCommandFingerprintUnavailable is deliberately value-free. It covers
@@ -456,32 +457,24 @@ func requireEligibleAlertTarget(ctx context.Context, tx *sql.Tx, alertID string)
 	if protectedState == 1 {
 		return nil
 	}
-	var bucket, eventName, action, severity sql.NullString
+	legacyActions := legacyAlertEligibleActions()
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
+	args := make([]any, 0, 1+len(legacyActions))
+	args = append(args, alertID)
+	for _, action := range legacyActions {
+		args = append(args, action)
+	}
+	var matched int
 	err := tx.QueryRowContext(ctx, `
-		SELECT bucket, event_name, action, severity FROM audit_events WHERE id=?`, alertID).
-		Scan(&bucket, &eventName, &action, &severity)
+		SELECT 1 FROM audit_events AS event
+		WHERE event.id=? AND `+alertEligibilitySQL(placeholders), args...).Scan(&matched)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrAlertTargetIneligible
 	}
 	if err != nil {
 		return fmt.Errorf("audit: inspect alert target occurrence: %w", err)
 	}
-	if bucket.Valid {
-		if bucket.String == string(observability.BucketSecurityFinding) &&
-			eventName.String == "finding.observed" {
-			return nil
-		}
-		return ErrAlertTargetIneligible
-	}
-	if !legacyAlertActionEligible(action.String) {
-		return ErrAlertTargetIneligible
-	}
-	switch strings.ToUpper(strings.TrimSpace(severity.String)) {
-	case "CRITICAL", "HIGH", "MEDIUM", "LOW", "ERROR", "INFO":
-		return nil
-	default:
-		return ErrAlertTargetIneligible
-	}
+	return nil
 }
 
 // ReconcileAlertAcknowledgement replays the gap-free applied sequence and

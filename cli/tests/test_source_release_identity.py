@@ -824,6 +824,14 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
     assert "all: _source-install-dev-preflight" in makefile
     assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
+    assert '_bundle-data:\n\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"' in makefile
+    assert (
+        'gateway: sync-openclaw-extension\n\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"'
+        in makefile
+    )
+    assert "sudo/root source-install is not supported" in (
+        ROOT / "scripts/source-install-preflight.sh"
+    ).read_text(encoding="utf-8")
     assert "source-install-preflight.sh dev-check" in makefile
     assert "source-install-preflight.sh dev-publish-gateway" in makefile
     assert "source-install-preflight.sh dev-claim" in makefile
@@ -918,3 +926,77 @@ def test_parallel_make_install_refuses_before_dependency_or_build_commands(
     assert not build_log.exists()
     assert (install_dir / "defenseclaw").readlink() == release_cli
     assert (install_dir / "defenseclaw-gateway").read_bytes() == b"release gateway\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_refuse_sudo_user_checkout_allows_unprivileged_caller(tmp_path: Path) -> None:
+    completed = subprocess.run(
+        [BASH, str(ROOT / "scripts/refuse-sudo-user-checkout.sh"), str(tmp_path)],
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_refuse_sudo_user_checkout_blocks_root_against_user_tree(tmp_path: Path) -> None:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    environment = {
+        **os.environ,
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "OS": "",
+    }
+
+    completed = subprocess.run(
+        [BASH, str(ROOT / "scripts/refuse-sudo-user-checkout.sh"), str(tmp_path)],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=10,
+    )
+
+    assert completed.returncode == 1
+    assert "do not run this as root/sudo" in completed.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="sudo refuse is a POSIX checkout guard")
+def test_source_preflight_refuses_root_against_user_checkout(tmp_path: Path) -> None:
+    repo, install_dir, _source_gateway, _installed = _source_install_fixture(tmp_path)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    environment = {
+        **os.environ,
+        "HOME": str(tmp_path / "home"),
+        "DEFENSECLAW_HOME": str(tmp_path / "home/.defenseclaw"),
+        "PATH": f"{fake_bin}:/usr/bin:/bin",
+        "OS": "",
+    }
+
+    completed = subprocess.run(
+        [
+            BASH,
+            str(ROOT / "scripts/source-install-preflight.sh"),
+            "dev-check",
+            str(repo),
+            str(install_dir),
+            ".venv/bin",
+            "defenseclaw",
+            "defenseclaw-gateway",
+        ],
+        env=environment,
+        text=True,
+        capture_output=True,
+        check=False,
+        timeout=15,
+    )
+
+    assert completed.returncode != 0
+    assert "sudo/root source-install is not supported" in completed.stderr
+    assert "No installed files or services were changed" in completed.stderr

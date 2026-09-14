@@ -1029,6 +1029,27 @@ class TestInitFirstRunBackend(unittest.TestCase):
         key_env.assert_called_once()
         save_secret.assert_called_once_with("OPENAI_API_KEY", "sk-test", self.tmp_dir)
 
+    def test_interactive_judge_llm_config_polls_local_runtime(self):
+        from defenseclaw.commands import cmd_init
+
+        with patch.object(cmd_init.click, "confirm", return_value=True), \
+                patch("defenseclaw.commands._llm_picker.pick_provider", return_value="ollama"), \
+                patch(
+                    "defenseclaw.commands._llm_picker.pick_local_runtime",
+                    return_value=("qwen3.5:9b-mlx", "http://127.0.0.1:11434"),
+                ) as local_runtime:
+            got = cmd_init._prompt_first_run_judge_llm_config(
+                data_dir=self.tmp_dir,
+                llm_provider="",
+                llm_model="",
+                llm_api_key="",
+                llm_api_key_env="",
+                llm_base_url="",
+            )
+
+        self.assertEqual(got, ("ollama", "qwen3.5:9b-mlx", "", "", "http://127.0.0.1:11434"))
+        local_runtime.assert_called_once()
+
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
         atomic_write_private_bytes(
@@ -3642,6 +3663,50 @@ class TestMultiConnectorInit(unittest.TestCase):
         self.assertFalse(start_gateway)
         self.assertTrue(verify)
         self.assertEqual(checkbox_calls[2], (["claudecode"], "Select action connector(s) for LLM judge."))
+
+    def test_prompt_first_run_judge_lists_requested_action_after_downgrade(self):
+        """A hook-contract downgrade must not hide a requested action connector
+        from the optional LLM judge checkbox."""
+        from defenseclaw.commands import cmd_init
+
+        disc = self._disc({"claudecode", "cursor"})
+        prompts = iter(["local", "open", "HIGH"])
+        confirms = iter([True, False, True])  # HITL, start_gateway, verify
+        checkbox_returns = iter([["claudecode", "cursor"], ["claudecode", "cursor"], ["claudecode"]])
+        checkbox_calls: list[tuple[list[str], str]] = []
+
+        def checkbox(options, **kwargs):
+            checkbox_calls.append((list(options), kwargs.get("title", "")))
+            return next(checkbox_returns)
+
+        def gate(name, **_kwargs):
+            return name == "claudecode"
+
+        with patch.object(cmd_init.agent_discovery, "discover_agents", return_value=disc), \
+                patch.object(cmd_init.agent_discovery, "render_discovery_table", return_value=""), \
+                patch(
+                    "defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup",
+                    side_effect=gate,
+                ), \
+                patch.object(cmd_init, "_prompt_checkbox_selection", side_effect=checkbox), \
+                patch.object(cmd_init.click, "prompt", side_effect=lambda *a, **k: next(prompts)), \
+                patch.object(cmd_init.click, "confirm", side_effect=lambda *a, **k: next(confirms)):
+            settings, _scanner, with_judge, judge_connectors, _start, _verify = cmd_init._prompt_first_run(
+                connector=None, profile=None, scanner_mode="local", with_judge=False,
+                fail_mode=None, human_approval=None, hilt_min_severity=None,
+                start_gateway=False, verify=None, rescan_agents=False,
+            )
+
+        by_name = {s["connector"]: s for s in settings}
+        self.assertEqual(by_name["claudecode"]["profile"], "action")
+        self.assertEqual(by_name["cursor"]["profile"], "observe")
+        self.assertIsNotNone(by_name["cursor"]["mode_warning"])
+        self.assertTrue(with_judge)
+        self.assertEqual(judge_connectors, ["claudecode"])
+        self.assertEqual(
+            checkbox_calls[2],
+            (["claudecode", "cursor"], "Select action connector(s) for LLM judge."),
+        )
 
     def test_prompt_first_run_blank_action_keeps_all_observe(self):
         """Pressing Enter at the action prompt keeps every connector observe

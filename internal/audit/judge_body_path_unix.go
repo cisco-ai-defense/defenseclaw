@@ -37,8 +37,7 @@ func validateJudgeBodyPlatformTrust(_ string, info os.FileInfo, directory, _ boo
 	}
 	owner := int(stat.Uid)
 	effectiveUser := os.Geteuid()
-	trustedOwner := owner == effectiveUser || directory && owner == 0
-	if !trustedOwner {
+	if !judgeBodyOwnerTrusted(owner, effectiveUser, directory) {
 		return errors.New("judge_body: database path has an untrusted owner")
 	}
 	if info.Mode().Perm()&0o022 != 0 {
@@ -82,4 +81,13 @@ func judgeBodyModeMatches(info os.FileInfo, want os.FileMode) bool {
 
 func judgeBodyImmediateDirectoryModeTrusted(info os.FileInfo) bool {
 	return info.Mode().Perm()&0o022 == 0
+}
+
+func judgeBodyOwnerTrusted(owner, effectiveUser int, directory bool) bool {
+	// Same bidirectional root exception as audit.db: sudo may open a user
+	// tree, and a later user-level process may read leftover root-owned
+	// files from that sudo start. Non-root still cannot open another
+	// user's database.
+	_ = directory
+	return effectiveUser == 0 || owner == 0 || owner == effectiveUser
 }
