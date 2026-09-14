@@ -1154,7 +1154,10 @@ func TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio(t *testing.T) {
 	if err := os.MkdirAll(helperDir, 0o700); err != nil {
 		t.Fatalf("create hook binary directory: %v", err)
 	}
-	helper := filepath.Join(helperDir, "defenseclaw-hook.exe")
+	// Use a noncanonical basename so this command-boundary test does not activate
+	// the installer-owned stable-launcher state resolver. That trust boundary is
+	// covered separately and deliberately ignores project-provided hook state.
+	helper := filepath.Join(helperDir, "devin-hook-probe.exe")
 	packageDir, err := os.Getwd()
 	if err != nil {
 		t.Fatalf("resolve connector package directory: %v", err)
