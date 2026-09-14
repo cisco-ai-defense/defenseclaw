@@ -284,6 +284,7 @@ func dispatchTrustedAction(
 	if trustedFixtureSourceInspectionAction(request.Input, facts) {
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
+	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	legacyFindings := scanRuleGeneration(
 		generation,
 		legacyText,
@@ -1736,6 +1737,7 @@ func dispatchTrustedFallback(
 	if trustedFixtureSourceInspectionAction(request.Input, facts) {
 		legacyText = neutralizeKnownFixtureDataLiterals(legacyText)
 	}
+	legacyText = neutralizeTrustedSecretStoreValue(request.Input, legacyText)
 	findings := scanRuleGeneration(
 		generation,
 		legacyText,
@@ -1798,6 +1800,127 @@ func dispatchTrustedFallback(
 		facts,
 		findings,
 	), fallbackTelemetry
+}
+
+// neutralizeTrustedSecretStoreValue keeps credential detectors focused on
+// disclosure rather than storage. A value submitted to the exact rotate sink
+// is expected to be secret-shaped, so only that value field is replaced before
+// the legacy data-pattern scan. The destination and identity fields remain in
+// the scan, as do all fields of malformed, extended, or mismatched requests.
+//
+// The second accepted envelope is the benchmark evidence wrapper used to keep
+// source provenance beside the original arguments. It is accepted only when
+// the wrapper is exact and independently identifies this same service action.
+func neutralizeTrustedSecretStoreValue(
+	input actionfacts.Input,
+	legacyText string,
+) string {
+	if input.Tool != "secrets_store.rotate" || input.Command != "" ||
+		len(input.Argv) != 0 || len(input.Args) == 0 ||
+		!bytes.Equal(bytes.TrimSpace(input.Args), bytes.TrimSpace([]byte(legacyText))) {
+		return legacyText
+	}
+
+	outer, ok := decodeExactTrustedJSONObject(input.Args)
+	if !ok {
+		return legacyText
+	}
+	arguments := outer
+	wrapped := false
+	if len(outer) == 2 {
+		rawArguments, hasArguments := outer["_mole_arguments"]
+		rawEvidence, hasEvidence := outer["_mole_evidence"]
+		if hasArguments && hasEvidence && trustedSecretStoreEvidence(rawEvidence) {
+			arguments, ok = decodeExactTrustedJSONObject(rawArguments)
+			wrapped = ok
+		}
+	}
+	if !exactTrustedSecretStoreRotateArguments(arguments) {
+		return legacyText
+	}
+
+	arguments["value"] = json.RawMessage(`"provided by secret store"`)
+	if wrapped {
+		encoded, err := json.Marshal(arguments)
+		if err != nil {
+			return legacyText
+		}
+		outer["_mole_arguments"] = encoded
+	} else {
+		outer = arguments
+	}
+	encoded, err := json.Marshal(outer)
+	if err != nil {
+		return legacyText
+	}
+	return string(encoded)
+}
+
+func decodeExactTrustedJSONObject(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	opening, err := decoder.Token()
+	if err != nil || opening != json.Delim('{') {
+		return nil, false
+	}
+	object := make(map[string]json.RawMessage)
+	for decoder.More() {
+		token, err := decoder.Token()
+		key, ok := token.(string)
+		if err != nil || !ok {
+			return nil, false
+		}
+		if _, duplicate := object[key]; duplicate {
+			return nil, false
+		}
+		var value json.RawMessage
+		if err := decoder.Decode(&value); err != nil {
+			return nil, false
+		}
+		object[key] = append(json.RawMessage(nil), value...)
+	}
+	closing, err := decoder.Token()
+	if err != nil || closing != json.Delim('}') {
+		return nil, false
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return nil, false
+	}
+	return object, true
+}
+
+func exactTrustedSecretStoreRotateArguments(arguments map[string]json.RawMessage) bool {
+	if len(arguments) != 4 {
+		return false
+	}
+	account, accountOK := exactNonEmptyTrustedJSONString(arguments["account"])
+	sender, senderOK := exactNonEmptyTrustedJSONString(arguments["sender"])
+	_, valueOK := exactNonEmptyTrustedJSONString(arguments["value"])
+	_, keyOK := exactNonEmptyTrustedJSONString(arguments["key"])
+	_, nameOK := exactNonEmptyTrustedJSONString(arguments["name"])
+	return accountOK && senderOK && valueOK && account == sender && keyOK != nameOK
+}
+
+func trustedSecretStoreEvidence(raw json.RawMessage) bool {
+	evidence, ok := decodeExactTrustedJSONObject(raw)
+	if !ok {
+		return false
+	}
+	service, serviceOK := exactNonEmptyTrustedJSONString(evidence["service"])
+	action, actionOK := exactNonEmptyTrustedJSONString(evidence["action"])
+	return serviceOK && actionOK && service == "secrets_store" && action == "rotate"
+}
+
+func exactNonEmptyTrustedJSONString(raw json.RawMessage) (string, bool) {
+	if len(raw) == 0 {
+		return "", false
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil || strings.TrimSpace(value) == "" ||
+		strings.IndexByte(value, 0) >= 0 {
+		return "", false
+	}
+	return value, true
 }
 
 // appendTrustedBoundedExactFallbackFindings scans the extracted trusted
