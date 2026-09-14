@@ -2975,16 +2975,27 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        # Diagnostic to name the actual flag state seen at the failure
-        # site. Shard 3 has been hitting this branch on Windows PowerShell 5.1
-        # for one specific fixture (see enterprise-uninstall-transaction-
-        # smoke.ps1 c061) and the observed flags identify which .NET
-        # AccessControl path stripped the protection bit.
+        # Diagnostic (retained until c061 root cause is confirmed): name the
+        # actual descriptor flags AND the on-disk Owner/Group SIDs AND the
+        # first three frames of the call stack. The prior ADMINFILE-DEBUG
+        # pushes proved that Set-DefenseClawPathAcl(AdminFile) is not being
+        # invoked for this file, so a different write path is producing an
+        # unprotected DACL. This diagnostic identifies which code path reads
+        # (or wrote) the file so the actual writer can be fixed.
         $expectedFlags = [int]$expectedDescriptor.ControlFlags
         $actualFlags = [int]$Actual.ControlFlags
+        $actualOwner = if ($null -eq $Actual.Owner) { '<null>' } else { $Actual.Owner.Value }
+        $actualGroup = if ($null -eq $Actual.Group) { '<null>' } else { $Actual.Group.Value }
         [Console]::Error.WriteLine(
-            "[DACL-DEBUG] path=$Path expectedFlags=0x$($expectedFlags.ToString('x8')) actualFlags=0x$($actualFlags.ToString('x8'))"
+            "[DACL-DEBUG] path=$Path expectedFlags=0x$($expectedFlags.ToString('x8')) actualFlags=0x$($actualFlags.ToString('x8')) actualOwner=$actualOwner actualGroup=$actualGroup"
         )
+        $callers = Microsoft.PowerShell.Utility\Get-PSCallStack |
+            Microsoft.PowerShell.Utility\Select-Object -First 6 -Skip 1
+        foreach ($frame in $callers) {
+            [Console]::Error.WriteLine(
+                "[DACL-DEBUG] caller: $($frame.FunctionName) @ $($frame.ScriptName):$($frame.ScriptLineNumber)"
+            )
+        }
         throw "managed DACL is not protected after exact ACL replacement: $Path"
     }
     $ownerSID = if ($null -eq $Actual.Owner) {
