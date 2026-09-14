@@ -177,7 +177,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -194,7 +194,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 4
+          GO_TEST_SHARDS: 8
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
@@ -212,9 +212,13 @@ jobs:
           retention-days: 1
 
   go-test-other:
-    name: Go Test (remaining packages)
+    name: Go Test (remaining packages / shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -228,20 +232,32 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - name: Run remaining Go race/coverage suite once
+      - name: Run remaining Go race/coverage shard
+        env:
+          GO_PACKAGE_SHARD: ${{ matrix.shard }}
+          GO_PACKAGE_SHARDS: 4
         run: |
           set -euo pipefail
-          mapfile -t packages < <(
-            go list ./... | grep -v '^github.com/defenseclaw/defenseclaw/internal/gateway$'
+          mapfile -t all_packages < <(
+            go list ./... |
+              grep -v '^github.com/defenseclaw/defenseclaw/internal/gateway$' |
+              sort
           )
+          test "${#all_packages[@]}" -gt 0
+          packages=()
+          for index in "${!all_packages[@]}"; do
+            if (( index % GO_PACKAGE_SHARDS == GO_PACKAGE_SHARD )); then
+              packages+=("${all_packages[index]}")
+            fi
+          done
           test "${#packages[@]}" -gt 0
           go test -race -count=1 -timeout 45m \
-            -coverprofile=coverage-go-other.out \
+            -coverprofile="coverage-go-other-$GO_PACKAGE_SHARD.out" \
             "${packages[@]}"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: go-coverage-other
-          path: coverage-go-other.out
+          name: go-coverage-other-${{ matrix.shard }}
+          path: coverage-go-other-${{ matrix.shard }}.out
           retention-days: 1
 
   go-test:
@@ -274,7 +290,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 5
+          test "${#coverage_parts[@]}" -eq 12
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"
