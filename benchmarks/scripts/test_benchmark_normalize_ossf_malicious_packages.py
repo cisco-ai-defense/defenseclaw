@@ -64,7 +64,7 @@ def test_projection_is_value_free_and_has_no_command_authority() -> None:
         "packages.example.invalid",
     ):
         assert excluded not in rendered
-    assert case["surface"] == "plugin"
+    assert case["surface"] == "action"
     assert case["payload"]["tool_name"] == "package.registry.report"
     assert case["truth"]["applicability"] == "out_of_scope"
     assert case["truth"]["expected_disposition"] == "detect_only"
@@ -168,3 +168,41 @@ def test_tracked_dirty_input_is_rejected_but_untracked_is_irrelevant(tmp_path: P
     tracked.write_text("{}\n", encoding="utf-8")
     (repository / "osv" / "untracked.json").write_text("untracked\n", encoding="utf-8")
     MODULE.require_clean_tracked(repository)
+
+
+def test_manifest_uses_only_strict_runner_fields() -> None:
+    source = Path(
+        "/workspace/benchmark-data/sources/ossf-malicious-packages/"
+        "de3a859ea74ab1a4701902937140ae4f496c6a28"
+    )
+    if not source.exists():
+        pytest.skip("pinned OSSF source fixture is not present")
+    cases, manifest = MODULE.normalize_directory(source, MODULE.SOURCE_REVISION)
+    assert len(cases) == 237_189
+    assert set(manifest) == {
+        "schema_version",
+        "datasets",
+        "cases",
+        "counts",
+        "exact_payload_duplicates_removed",
+        "label_conflicts_excluded",
+        "adapter_statistics",
+        "source",
+    }
+    assert set(manifest["source"]) == {
+        "dataset",
+        "revision",
+        "license",
+        "redistribution",
+        "path",
+        "bytes",
+        "files",
+        "rows",
+        "sha256",
+        "source_url",
+    }
+    statistics = manifest["adapter_statistics"][MODULE.ADAPTER]
+    assert all(type(value) is int for value in statistics.values())
+    assert statistics["contextual_out_of_scope_cases"] == 237_189
+    assert statistics["atomic_command_authority_cases"] == 0
+    assert statistics["retained_version_strings"] == 0

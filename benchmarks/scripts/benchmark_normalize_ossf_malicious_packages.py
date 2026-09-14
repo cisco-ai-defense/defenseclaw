@@ -6,7 +6,7 @@
 
 The source owns a package-level malicious label, not proof that an arbitrary
 install command is malicious.  Active reports are therefore emitted as
-development-only, contextual plugin facts.  Narrative details, references,
+development-only, contextual registry action facts.  Narrative details, references,
 contacts, indicators, package contents, and version strings are excluded.
 Withdrawn and unmergable reports are counted but never emitted as positives.
 """
@@ -72,6 +72,10 @@ def canonical_json(value: object) -> str:
 
 def digest(*parts: str) -> str:
     return hashlib.sha256("\0".join(parts).encode("utf-8")).hexdigest()
+
+
+def statistic_key(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "unknown"
 
 
 def strict_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -309,7 +313,9 @@ def make_case(revision: str, facts: Mapping[str, Any]) -> dict[str, Any]:
             "redistribution": SOURCE_REDISTRIBUTION,
         },
         "split": "development",
-        "surface": "plugin",
+        # No package contents are retained, so this is a structured registry
+        # observation rather than a plugin-scanner artifact target.
+        "surface": "action",
         "payload": {
             "direction": "artifact",
             "tool_name": "package.registry.report",
@@ -390,8 +396,12 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
     counts["withdrawn_reports_excluded"] = len(withdrawn_paths)
     counts["unmergable_reports_excluded"] = len(unmergable_paths)
     counts["cases"] = len(cases)
+    counts["contextual_out_of_scope_cases"] = len(cases)
+    counts["atomic_command_authority_cases"] = 0
+    counts["retained_version_strings"] = 0
     statistics = {key: int(value) for key, value in sorted(counts.items())}
-    statistics["ecosystems"] = {key: int(value) for key, value in sorted(ecosystems.items())}
+    for ecosystem, count in sorted(ecosystems.items()):
+        statistics[f"ecosystem_{statistic_key(ecosystem)}"] = int(count)
     manifest = {
         "schema_version": SCHEMA_VERSION,
         "datasets": [DATASET_ID],
@@ -405,27 +415,12 @@ def normalize_directory(root: Path, revision: str) -> tuple[list[dict[str, Any]]
             "revision": revision,
             "license": SOURCE_LICENSE,
             "redistribution": SOURCE_REDISTRIBUTION,
-            "include_paths": list(INCLUDE_PATHS),
+            "path": ",".join(INCLUDE_PATHS),
             "bytes": source_bytes,
             "files": len(entries),
-            "git_osv_tree": SOURCE_OSV_TREE,
-            "index_sha256": SOURCE_INDEX_SHA256,
+            "rows": len(active_paths),
+            "sha256": SOURCE_INDEX_SHA256,
             "source_url": SOURCE_URL,
-        },
-        "authority": {
-            "package_label": "source-owned active report",
-            "atomic_command": "none",
-            "enforcement": "contextual detect-only development mining",
-            "excluded_fields": [
-                "affected version strings",
-                "contacts",
-                "credits",
-                "details",
-                "indicators",
-                "package contents",
-                "references",
-                "summary",
-            ],
         },
     }
     return cases, manifest
