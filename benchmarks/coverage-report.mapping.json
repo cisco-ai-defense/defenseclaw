@@ -554,9 +554,10 @@
         "soc-investigation",
         "real-tool-arguments"
       ],
-      "status": "missing",
+      "status": "normalized-mining-only",
       "limitations": [
-        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+        "Only exact simulated read-only investigation schemas from source traces with success=true receive benign authority.",
+        "Tool-result bodies, prompts, reasoning, diagnoses, evidence, and incident/task labels are excluded from detector payloads; failed traces and non-closed schemas remain contextual or excluded."
       ]
     },
     "open-swe-traces-v1.2": {

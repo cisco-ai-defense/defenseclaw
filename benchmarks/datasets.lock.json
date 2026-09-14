@@ -607,6 +607,13 @@
       "source_url": "https://huggingface.co/datasets/alirezaaminzadeh/soc-agent-traces-10k",
       "revision": "d69237c8890dea0f34400a33af488bc5ac108e83",
       "fetch": "manual",
+      "include_paths": [
+        "README.md",
+        "stats.json",
+        "data/train-00000-of-00001.parquet",
+        "data/validation-00000-of-00001.parquet",
+        "data/test-00000-of-00001.parquet"
+      ],
       "license": "Apache-2.0",
       "license_status": "approved",
       "redistribution": "download-only",
