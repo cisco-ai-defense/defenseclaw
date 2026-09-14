@@ -1081,6 +1081,11 @@ $teardownFailurePreserved = & $module {
     $failureLayout = @{
         ManifestPath = 'C:\missing\targets.yaml'
         ManagedHooksTeardownJournalPath = 'C:\missing\managed-hooks-teardown.json'
+        # The teardown wrapper validates this receipt path before it reaches
+        # the native helper's ProgramData-trust probe. Supply a placeholder
+        # so the wrapper progresses to the mocked "restricted fixture" error
+        # this test is trying to observe.
+        ManagedHookContractCleanupReceiptPath = 'C:\missing\managed-hook-contract-cleanup-receipt.json'
     }
     $caught = $null
     try {

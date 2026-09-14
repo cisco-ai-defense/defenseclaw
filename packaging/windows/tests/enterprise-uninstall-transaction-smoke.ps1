@@ -6315,7 +6315,11 @@ targets:
                     -Raw | Microsoft.PowerShell.Utility\ConvertFrom-Json
                 switch ($invalidCase) {
                     'schema' {
-                        $intent.schema_version = 2
+                        # The default published schema_version is 2, so
+                        # rewriting to 2 is a no-op. Mutate to an
+                        # unsupported version so the module's schema-vs-
+                        # phase gate actually trips and the retry throws.
+                        $intent.schema_version = 3
                     }
                     'scope' {
                         $intent.scope_sha256 = ('2' * 64)
