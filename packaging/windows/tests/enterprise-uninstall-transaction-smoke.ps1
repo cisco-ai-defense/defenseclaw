@@ -205,10 +205,8 @@ try {
             # failure at psm1:2973 emits a file path with cNNN but no label,
             # making the case impossible to identify from macOS. Remove once
             # the DACL root-cause is landed.
-            [Console]::Error.WriteLine(
-                "[HARNESS-DEBUG] BEGIN c{0:d3}: {1}" -f `
-                    $script:HarnessCaseSequence, $Label
-            )
+            $harnessCaseTag = 'c{0:d3}' -f $script:HarnessCaseSequence
+            [Console]::Error.WriteLine("[HARNESS-DEBUG] BEGIN $($harnessCaseTag): $($Label)")
             $root = Microsoft.PowerShell.Management\Join-Path `
                 $Parent `
                 ('c{0:d3}' -f $script:HarnessCaseSequence)
