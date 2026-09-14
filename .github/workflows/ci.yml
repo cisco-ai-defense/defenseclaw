@@ -218,7 +218,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -235,7 +235,7 @@ jobs:
       - name: Run remaining Go race/coverage shard
         env:
           GO_PACKAGE_SHARD: ${{ matrix.shard }}
-          GO_PACKAGE_SHARDS: 4
+          GO_PACKAGE_SHARDS: 8
         run: |
           set -euo pipefail
           mapfile -t all_packages < <(
@@ -290,7 +290,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 12
+          test "${#coverage_parts[@]}" -eq 16
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

@@ -1179,6 +1179,9 @@ func TestWindowsDevinDirectBashHookCommandAwaitsGUIHookWithStdio(t *testing.T) {
 	}
 	cmd := exec.CommandContext(ctx, bash, "-lc", command)
 	cmd.Env = minimalWindowsHookTestEnvironment(
+		// Git Bash's MSYS runtime otherwise guesses whether arbitrary environment
+		// values are paths and can rewrite the native DefenseClaw home.
+		"MSYS2_ENV_CONV_EXCL=DEFENSECLAW_HOME",
 		"PSModuleAnalysisCachePath="+filepath.Join(root, "module-analysis-cache"),
 		"DEFENSECLAW_HOME="+home,
 		"DEFENSECLAW_STRICT_AVAILABILITY=1",
