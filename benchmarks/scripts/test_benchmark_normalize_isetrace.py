@@ -145,6 +145,20 @@ def source_row(
     }
 
 
+def source_row_without_tool_calls(number: int) -> dict[str, object]:
+    row = source_row(number)
+    row["messages"] = [
+        row["messages"][0],
+        row["messages"][1],
+        {
+            "role": "assistant",
+            "content": "excluded final assistant prose",
+            "reasoning_content": "excluded private reasoning",
+        },
+    ]
+    return row
+
+
 class ISETraceNormalizerTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -220,6 +234,29 @@ class ISETraceNormalizerTests(unittest.TestCase):
         self.assertEqual(truth["deterministic_truth"], "benign")
         self.assertEqual(truth["expected_disposition"], "allow")
         self.assertTrue(rows[0]["strata"]["hard_negative"])
+
+    def test_quarantines_valid_trajectory_without_tool_calls(self) -> None:
+        rows, manifest, group_manifest = self.build([source_row(0), source_row_without_tool_calls(99)])
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(group_manifest["trajectory_count"], 1)
+        statistics = manifest["adapter_statistics"]["isetrace"]
+        self.assertEqual(statistics["source_rows"], 2)
+        self.assertEqual(statistics["trajectories_emitted"], 1)
+        self.assertEqual(statistics["trajectories_quarantined_no_tool_calls"], 1)
+        self.assertNotIn("trajectory-99", json.dumps(rows, sort_keys=True))
+
+    def test_all_no_tool_call_trajectories_produce_empty_fail_closed_corpus(self) -> None:
+        rows, manifest, group_manifest = self.build([source_row_without_tool_calls(99)])
+
+        self.assertEqual(rows, [])
+        self.assertEqual(manifest["cases"], 0)
+        self.assertEqual(group_manifest["trajectory_count"], 0)
+        self.assertEqual(group_manifest["groups"], [])
+        statistics = manifest["adapter_statistics"]["isetrace"]
+        self.assertEqual(statistics["source_rows"], 1)
+        self.assertEqual(statistics["trajectories_emitted"], 0)
+        self.assertEqual(statistics["trajectories_quarantined_no_tool_calls"], 1)
 
     def test_defers_all_split_assignment_to_canonical_partitioner(self) -> None:
         rows, manifest, group_manifest = self.build()
