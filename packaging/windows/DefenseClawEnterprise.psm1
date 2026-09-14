@@ -970,6 +970,11 @@ namespace $nativeNamespace
             if (information.NumberOfLinks != 1)
                 throw new InvalidOperationException(
                     "managed secret must have exactly one hard link: " + path);
+            // expectedSize == 0 opts out of the fixed-length invariant; used
+            // by variable-size protected files (e.g. cleanup receipts) that
+            // still want the no-follow + single-link invariants.
+            if (expectedSize == 0)
+                return;
             ulong size = ((ulong)information.FileSizeHigh << 32) |
                 (ulong)information.FileSizeLow;
             if (size != expectedSize)
@@ -3112,32 +3117,50 @@ function Set-DefenseClawPathAcl {
             -Expected $security
         return
     }
+    # For file kinds (not directories) that must have SE_DACL_PROTECTED
+    # stamped, bypass PowerShell's Set-Acl and go directly through
+    # SetSecurityInfo with an explicit PROTECTED_DACL_SECURITY_INFORMATION
+    # flag. Windows PowerShell 5.1's Set-Acl, when applying a fresh
+    # FileSecurity to a file whose destination existed prior to an
+    # atomic Move-Item -Force replacement, has been observed to omit
+    # the protection flag from the underlying SetSecurityInfo call
+    # (actualFlags=0x8004 vs expectedFlags=0x9004 in the
+    # Assert-DefenseClawCanonicalRawPathAcl diagnostic). The native
+    # writer already used for RuntimeSecretFile explicitly stamps
+    # PROTECTED_DACL_SECURITY_INFORMATION and enforces the OWNER +
+    # GROUP + DACL bindings in one atomic call. Extend it to AdminFile
+    # files by passing expectedSize=0 (no fixed-length invariant).
+    if (-not $isDirectory -and $Kind -eq 'AdminFile') {
+        $nativeSecurity = Initialize-DefenseClawNativeSecurity
+        $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
+            $Path,
+            [uint32]0
+        )
+        $sddl = $security.GetSecurityDescriptorSddlForm(
+            [Security.AccessControl.AccessControlSections]::All
+        )
+        $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
+            $Path,
+            $sddl,
+            [uint32]0,
+            [string]$before.Identity
+        )
+        if ([string]$after.Identity -cne [string]$before.Identity) {
+            throw "managed AdminFile identity changed during ACL replacement: $Path"
+        }
+        Assert-DefenseClawCanonicalRawPathAcl `
+            -Path $Path `
+            -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                [byte[]]$after.SecurityDescriptor,
+                0
+            )) `
+            -Expected $security
+        return
+    }
     Microsoft.PowerShell.Security\Set-Acl `
         -LiteralPath $Path `
         -AclObject $security `
         -ErrorAction Stop
-    # Windows PowerShell 5.1's Set-Acl on a file that already existed
-    # before an atomic Move-Item -Force replacement can silently omit
-    # PROTECTED_DACL_SECURITY_INFORMATION from the underlying
-    # SetSecurityInfo call, leaving the destination's DACL without
-    # SE_DACL_PROTECTED (observed as actualFlags=0x8004 vs the
-    # expectedFlags=0x9004 in Assert-DefenseClawCanonicalRawPathAcl).
-    # The fix: read the on-disk descriptor back, explicitly re-modify
-    # its protection state (which .NET tracks separately from the
-    # protection value), and re-apply. This guarantees the Persist()
-    # path includes PROTECTED_DACL_SECURITY_INFORMATION so the flag
-    # actually stamps.
-    $reapply = Microsoft.PowerShell.Security\Get-Acl `
-        -LiteralPath $Path
-    if (-not $reapply.AreAccessRulesProtected) {
-        # Force _modifiedProtectedAccess on the just-read descriptor so
-        # the second Persist reliably includes SE_DACL_PROTECTED.
-        $reapply.SetAccessRuleProtection($true, $false)
-        Microsoft.PowerShell.Security\Set-Acl `
-            -LiteralPath $Path `
-            -AclObject $reapply `
-            -ErrorAction Stop
-    }
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
