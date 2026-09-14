@@ -40,6 +40,8 @@ SOURCE_LICENSE = "MIT"
 SOURCE_REDISTRIBUTION = "download-only"
 ENGLISH_SUITES = frozenset({"banking", "slack", "travel", "workspace"})
 MAX_EVENTS = 8
+PRE_PARTITION_SPLIT = "smoke"
+PARTITION_AUTHORITY = "benchmarks/scripts/benchmark_partition.py"
 MAX_MESSAGES = 512
 MAX_FILE_BYTES = 16 * 1024 * 1024
 MAX_ARGUMENT_BYTES = 1024 * 1024
@@ -65,7 +67,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--revision", default=PINNED_REVISION)
-    parser.add_argument("--split", choices=("development", "validation", "test"), required=True)
+    parser.add_argument("--split", choices=(PRE_PARTITION_SPLIT,), default=PRE_PARTITION_SPLIT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
@@ -432,6 +434,10 @@ def project_record(
 def build_corpus(root: Path, revision: str, split: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if revision != PINNED_REVISION:
         raise ValueError(f"AgentDojo revision must be pinned to {PINNED_REVISION}; got {revision}")
+    if split != PRE_PARTITION_SPLIT:
+        raise ValueError(
+            f"AgentDojo normalization must remain pre-partitioned as {PRE_PARTITION_SPLIT}"
+        )
     base = runs_root(root)
     paths = source_paths(root)
     cases: list[dict[str, Any]] = []
@@ -472,7 +478,11 @@ def build_corpus(root: Path, revision: str, split: str) -> tuple[list[dict[str, 
         "source_file_count": len(source_files),
         "source_tree_sha256": hashlib.sha256(tree_material).hexdigest(),
         "split": split,
+        "pre_partition_split": PRE_PARTITION_SPLIT,
+        "partition_authority": PARTITION_AUTHORITY,
+        "cases": len(cases),
         "row_count": len(cases),
+        "adapter_statistics": dict(sorted(statistics.items())),
         "surface_counts": dict(sorted(Counter(row["surface"] for row in cases).items())),
         "truth_counts": dict(sorted(Counter(row["truth"]["source_truth"] for row in cases).items())),
         "statistics": dict(sorted(statistics.items())),

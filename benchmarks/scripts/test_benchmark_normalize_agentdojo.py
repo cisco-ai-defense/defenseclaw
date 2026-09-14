@@ -19,6 +19,13 @@ MODULE = importlib.util.module_from_spec(SPEC)
 sys.modules[SPEC.name] = MODULE
 SPEC.loader.exec_module(MODULE)
 
+PARTITION_PATH = Path(__file__).with_name("benchmark_partition.py")
+PARTITION_SPEC = importlib.util.spec_from_file_location("benchmark_partition", PARTITION_PATH)
+assert PARTITION_SPEC and PARTITION_SPEC.loader
+PARTITION = importlib.util.module_from_spec(PARTITION_SPEC)
+sys.modules[PARTITION_SPEC.name] = PARTITION
+PARTITION_SPEC.loader.exec_module(PARTITION)
+
 
 def tool_call(index: int, *, failed: bool = False) -> tuple[dict[str, object], dict[str, object]]:
     call = {
@@ -104,7 +111,7 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         return path
 
     def build(self):
-        return MODULE.build_corpus(self.root, MODULE.PINNED_REVISION, "development")
+        return MODULE.build_corpus(self.root, MODULE.PINNED_REVISION, MODULE.PRE_PARTITION_SPLIT)
 
     def test_projects_only_executed_tool_messages_with_real_arguments(self) -> None:
         self.write_run("user_task_1", source_record(emitted_only=True))
@@ -226,6 +233,33 @@ class AgentDojoNormalizerTests(unittest.TestCase):
         self.assertEqual(MODULE.LICENSE_URL, first_manifest["source_license_url"])
         self.assertEqual(MODULE.PINNED_REVISION, first_manifest["source_revision"])
         self.assertEqual("MIT", first_manifest["source_license"])
+        self.assertEqual(len(first), first_manifest["cases"])
+        self.assertEqual(MODULE.PRE_PARTITION_SPLIT, first_manifest["pre_partition_split"])
+        self.assertEqual(MODULE.PARTITION_AUTHORITY, first_manifest["partition_authority"])
+        self.assertEqual(first_manifest["statistics"], first_manifest["adapter_statistics"])
+        self.assertTrue(all(row["split"] == MODULE.PRE_PARTITION_SPLIT for row in first))
+
+    def test_rejects_adapter_owned_final_split_assignment(self) -> None:
+        self.write_run("safe", source_record(security=True))
+        with self.assertRaisesRegex(ValueError, "must remain pre-partitioned"):
+            MODULE.build_corpus(self.root, MODULE.PINNED_REVISION, "development")
+
+    def test_output_is_accepted_by_canonical_group_partitioner(self) -> None:
+        for index in range(9):
+            self.write_run(f"run-{index}", source_record(security=index % 2 == 0))
+        cases, manifest = self.build()
+        corpus = self.root / "agentdojo-staging.jsonl"
+        normalization = self.root / "agentdojo-staging.manifest.json"
+        MODULE.write_jsonl(corpus, cases)
+        manifest["output_sha256"] = MODULE.file_sha256(corpus)
+        MODULE.write_json(normalization, manifest)
+
+        output = self.root / "partitions"
+        result = PARTITION.partition(corpus, normalization, output, 741983, 60, 20)
+        self.assertEqual(len(cases), result["cases"])
+        self.assertEqual(9, result["groups"])
+        self.assertTrue(all(result["partitions"][split]["cases"] for split in PARTITION.SPLITS))
+        PARTITION.verify_partition(corpus, normalization, output, 741983, 60, 20)
 
 
 if __name__ == "__main__":
