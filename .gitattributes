@@ -21,3 +21,8 @@ internal/gateway/connector/hooks/opencode-plugin.js text eol=lf
 # bytes. Disable checkout-time newline conversion so Windows materializes the
 # same payload that the dependency lock reviewed.
 schemas/telemetry/v8/upstream/** -text
+
+# Benchmark conformance corpora and their manifests are likewise bound by
+# SHA-256 over exact bytes. They must survive a Windows checkout without CRLF
+# rewriting before the strict normalization gate reads them.
+benchmarks/fixtures/** -text
