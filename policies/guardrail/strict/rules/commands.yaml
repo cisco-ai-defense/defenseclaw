@@ -57,7 +57,7 @@ rules:
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_UPLOAD in c.operations))
     # Candidate discovery covers POSIX curl pipelines and PowerShell web-cmdlet
     # aliases. The exact fallback contract proves stdout-to-interpreter flow.
-    pattern: '(?i)(?:\bcurl\b\s+[^|;\r\n]*\|\s*(?:[/\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\b|python(?:[0-9.]*)?\s+-\b|(?:perl|ruby)\b)|\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[^|;\r\n]*\|\s*(?:invoke-expression|iex)\b)'
+    pattern: '(?i)(?:\bcurl\b\s+[^|;\r\n]*\|\s*(?:[/\w.-]+/)?(?:(?:bash|zsh|sh|dash|ksh)\b|python(?:[0-9.]*)?\s+-(?:\s|$)|(?:perl|ruby)\b)|\b(?:invoke-webrequest|iwr|invoke-restmethod|irm)\b[^|;\r\n]*\|\s*(?:invoke-expression|iex)\b)'
     title: "curl piped to shell"
     severity: CRITICAL
     confidence: 0.95
