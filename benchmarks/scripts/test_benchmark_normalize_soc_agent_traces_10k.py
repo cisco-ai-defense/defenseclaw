@@ -299,6 +299,41 @@ class NormalizeSOCAgentTraces10KTests(unittest.TestCase):
         )
         self.assertEqual(manifest["counts"], {MODULE.DATASET_ID: len(cases)})
 
+    def test_manifest_source_matches_go_normalization_contract(self) -> None:
+        source = row(
+            "SCT-10",
+            [
+                call_message("call_0", "get_asset_context", {"hostname": "WKS-001"}),
+                result_message("call_0", "get_asset_context", "ignored"),
+            ],
+        )
+        inventory = [
+            {"split": "test", "path": "data/z.parquet", "bytes": 7, "sha256": "b" * 64},
+            {"split": "development", "path": "data/a.parquet", "bytes": 11, "sha256": "a" * 64},
+        ]
+        _, manifest = MODULE.normalize_records(
+            [("test", source)], source_files=list(reversed(inventory))
+        )
+        source_manifest = manifest["source"]
+        self.assertEqual(source_manifest["paths"], ["data/a.parquet", "data/z.parquet"])
+        self.assertEqual(source_manifest["bytes"], 18)
+        self.assertEqual(source_manifest["files"], 2)
+        self.assertEqual(source_manifest["rows"], 1)
+        self.assertRegex(source_manifest["sha256"], r"^[0-9a-f]{64}$")
+        self.assertEqual(source_manifest["source_url"], MODULE.SOURCE_URL)
+        self.assertNotIsInstance(source_manifest["files"], list)
+        _, reordered = MODULE.normalize_records(
+            [("test", source)], source_files=inventory
+        )
+        self.assertEqual(source_manifest, reordered["source"])
+
+    def test_manifest_source_rejects_invalid_inventory(self) -> None:
+        invalid = [
+            {"split": "test", "path": "data/a.parquet", "bytes": -1, "sha256": "a" * 64}
+        ]
+        with self.assertRaisesRegex(ValueError, "invalid source inventory entry"):
+            MODULE.normalize_records([], source_files=invalid)
+
 
 if __name__ == "__main__":
     unittest.main()

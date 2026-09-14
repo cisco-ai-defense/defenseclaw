@@ -587,6 +587,24 @@ def deduplicate(candidates: Sequence[Candidate], statistics: Counter[str]) -> li
     return sorted((item.case for item in selected), key=lambda case: str(case["id"]))
 
 
+def source_bundle_sha256(source_files: Sequence[Mapping[str, Any]]) -> str:
+    """Bind the ordered source inventory without exposing source contents."""
+    value = hashlib.sha256(b"soc-agent-traces-10k-source-tree-v1\0")
+    for item in sorted(source_files, key=lambda source: str(source["path"])):
+        path = item["path"]
+        byte_count = item["bytes"]
+        sha256 = item["sha256"]
+        split = item["split"]
+        if (
+            not isinstance(path, str) or not isinstance(split, str)
+            or type(byte_count) is not int or byte_count < 0
+            or not isinstance(sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", sha256)
+        ):
+            raise ValueError("invalid source inventory entry")
+        value.update(f"{path}\0{byte_count}\0{sha256}\0{split}\n".encode("utf-8"))
+    return value.hexdigest()
+
+
 def normalize_records(
     records: Iterable[tuple[str, Mapping[str, Any]]],
     *,
@@ -610,6 +628,9 @@ def normalize_records(
         statistics.update(row_statistics)
         statistics["normalized_rows"] += 1
     cases = deduplicate(candidates, statistics)
+    ordered_sources = sorted(source_files, key=lambda source: str(source["path"]))
+    source_bytes = sum(int(source["bytes"]) for source in ordered_sources)
+    source_sha256 = source_bundle_sha256(ordered_sources)
     output = b"".join((canonical_json(case) + "\n").encode("utf-8") for case in cases)
     manifest = {
         "schema_version": SCHEMA_VERSION,
@@ -625,7 +646,12 @@ def normalize_records(
             "revision": revision,
             "license": SOURCE_LICENSE,
             "redistribution": SOURCE_REDISTRIBUTION,
-            "files": list(source_files),
+            "paths": [str(source["path"]) for source in ordered_sources],
+            "bytes": source_bytes,
+            "files": len(ordered_sources),
+            "rows": int(statistics["source_rows"]),
+            "sha256": source_sha256,
+            "source_url": SOURCE_URL,
         },
     }
     return cases, manifest
