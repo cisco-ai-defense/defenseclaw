@@ -2,7 +2,12 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Normalize Open-SWE-Traces v1.2 structured Bash calls as benign actions."""
+"""Normalize verified Open-SWE-Traces v1.2 Bash calls as benign actions.
+
+Only trajectories with explicit source success and a documented repository
+language are authoritative benign hard negatives. Prompts, reasoning, tool
+results, patches, and other message content are deliberately excluded.
+"""
 
 from __future__ import annotations
 
@@ -15,6 +20,20 @@ from pathlib import Path
 from typing import Any
 
 MAX_ARGUMENT_BYTES = 65_536
+RESOLVED_SUCCESS = 1
+RESOLVED_FAILED = 0
+RESOLVED_UNKNOWN = -1
+SUPPORTED_LANGUAGES = frozenset({
+    "c",
+    "cpp",
+    "go",
+    "java",
+    "javascript",
+    "php",
+    "python",
+    "rust",
+    "typescript",
+})
 
 
 def canonical_json(value: object) -> str:
@@ -36,13 +55,40 @@ def normalize(rows: Iterable[dict[str, Any]], revision: str) -> tuple[list[dict[
         if not isinstance(trajectory, str) or not trajectory or not isinstance(messages, list):
             skipped["invalid_row"] += 1
             continue
+        source_calls += sum(
+            len(message["tool_calls"])
+            for message in messages
+            if isinstance(message, dict) and isinstance(message.get("tool_calls"), list)
+        )
         group = digest(f"{revision}\0{trajectory}")[:24]
+        if "resolved" not in row or row["resolved"] is None:
+            skipped["missing_resolved_status"] += 1
+            continue
+        resolved = row["resolved"]
+        if type(resolved) is not int:
+            skipped["ambiguous_resolved_status"] += 1
+            continue
+        if resolved == RESOLVED_FAILED:
+            skipped["failed_trajectory"] += 1
+            continue
+        if resolved == RESOLVED_UNKNOWN:
+            skipped["unresolved_trajectory"] += 1
+            continue
+        if resolved != RESOLVED_SUCCESS:
+            skipped["unsupported_resolved_status"] += 1
+            continue
+        if "language" not in row or row["language"] is None:
+            skipped["missing_language"] += 1
+            continue
+        language = row["language"]
+        if not isinstance(language, str) or language not in SUPPORTED_LANGUAGES:
+            skipped["unsupported_language"] += 1
+            continue
         sequence = 0
         for message in messages:
             if not isinstance(message, dict) or not isinstance(message.get("tool_calls"), list):
                 continue
             for call in message["tool_calls"]:
-                source_calls += 1
                 call_index = sequence
                 sequence += 1
                 function = call.get("function") if isinstance(call, dict) else None
@@ -71,7 +117,7 @@ def normalize(rows: Iterable[dict[str, Any]], revision: str) -> tuple[list[dict[
                     "schema_version": "1", "id": f"open-swe-traces-v1.2/{identity[:24]}",
                     "source": {
                         "dataset": "open-swe-traces-v1.2", "revision": revision,
-                        "original_id": f"trajectory:{group}#call-{call_index}",
+                        "original_id": f"trajectory:{trajectory}#call-{call_index}",
                         "license": "CC-BY-4.0", "redistribution": "download-only",
                     },
                     "split": "development", "surface": "action",
@@ -80,7 +126,7 @@ def normalize(rows: Iterable[dict[str, Any]], revision: str) -> tuple[list[dict[
                         "source_truth": "benign",
                         "deterministic_truth": "benign",
                         "label_confidence": "medium",
-                        "label_source": "source:sandboxed_software_engineering_trajectory",
+                        "label_source": "source:resolved_sandboxed_software_engineering_trajectory",
                         "applicability": "in_scope",
                         "expected_disposition": "allow",
                         "categories": ["coding_agent_trace", "benign_hard_negative", "sandboxed_repository_task"],
@@ -88,6 +134,7 @@ def normalize(rows: Iterable[dict[str, Any]], revision: str) -> tuple[list[dict[
                     "strata": {
                         "domain": "shell_tool_call", "hard_negative": True, "split_group": group,
                         "trajectory_id": group, "sequence_index": call_index, "call_index": call_index,
+                        "language": language,
                     },
                 })
     cases.sort(key=lambda case: str(case["id"]))
@@ -95,13 +142,15 @@ def normalize(rows: Iterable[dict[str, Any]], revision: str) -> tuple[list[dict[
         "schema_version": "1", "source_id": "open-swe-traces-v1.2", "source_revision": revision,
         "source_license": "CC-BY-4.0", "source_rows": source_rows, "source_tool_calls": source_calls,
         "cases": len(cases), "row_count": len(cases), "skipped": dict(sorted(skipped.items())),
+        "required_resolved_status": RESOLVED_SUCCESS,
+        "supported_languages": sorted(SUPPORTED_LANGUAGES),
         "normalization": (
-            "exact Bash tool calls and decoded command argument only; prompts, reasoning, observations, patches, and "
-            "tool output excluded"
+            "explicitly resolved trajectories in documented repository languages; exact Bash tool calls and decoded "
+            "command argument only; prompts, reasoning, observations, patches, and tool output excluded"
         ),
         "label_limitation": (
-            "Development UX-noise corpus from sandboxed software-engineering tasks; an operation may require stronger "
-            "deployment-specific policy in production."
+            "Source success is execution-backed trajectory-level benign truth, not proof that every individual action "
+            "is safe in every deployment; deployment-specific protected-resource policy still applies."
         ),
     }
 
