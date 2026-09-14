@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 
@@ -167,21 +168,23 @@ func TestHandleAgentHook_FullChain_PerConnector(t *testing.T) {
 					"command": "rm -rf /",
 				},
 			}
-			scannerCommand := requestPayload["tool_input"].(map[string]interface{})["command"]
 			if sh.connector == "antigravity" {
+				command, cwd := "rm -rf /", "/workspace"
+				if runtime.GOOS == "windows" {
+					command, cwd = `Remove-Item -Recurse -Force C:\`, `C:\workspace`
+				}
 				requestPayload = map[string]interface{}{
 					"conversationId": "session-antigravity",
 					"stepIdx":        1,
-					"workspacePaths": []string{"/workspace"},
+					"workspacePaths": []string{cwd},
 					"toolCall": map[string]interface{}{
 						"name": sh.toolName,
 						"args": map[string]interface{}{
-							"Cwd":         `C:\workspace`,
-							"CommandLine": `Get-Content -LiteralPath C:\Windows\System32\config\SAM`,
+							"Cwd":         cwd,
+							"CommandLine": command,
 						},
 					},
 				}
-				requestPayload["toolCall"].(map[string]interface{})["args"].(map[string]interface{})["CommandLine"] = scannerCommand
 			}
 			if sh.connector == "copilot" {
 				// Exact native camelCase body: event identity is intentionally
