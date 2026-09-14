@@ -49,7 +49,6 @@ func TestSemanticIntegrityPersistenceOwnerContract(t *testing.T) {
 		"integrity.posix_system_shell_replacement",
 		"persistence.git_hook_write",
 		"persistence.malicious_download_execute_payload",
-		"persistence.posix_literal_password_change_trailing_shell",
 		"persistence.shell_profile_write",
 		"persistence.ssh_authorized_keys_command",
 		"privilege.container_runtime_socket_access",
@@ -1048,7 +1047,6 @@ func TestDualUseIntegrityOwnersCannotSynchronouslyBlock(t *testing.T) {
 	for _, ruleID := range []string{
 		"source.git_remote_tamper",
 		"integrity.history_tamper",
-		"persistence.posix_literal_password_change_trailing_shell",
 	} {
 		if owner := semanticIntegrityPersistenceOwners[ruleID]; !owner.detectionOnly || owner.alertOnly {
 			t.Fatalf("%s owner posture=%+v, want detection-only", ruleID, owner)

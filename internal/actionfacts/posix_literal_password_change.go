@@ -63,21 +63,6 @@ func ExactPOSIXLiteralPasswordChange(
 	return POSIXLiteralPasswordChangeFact{}, false
 }
 
-// ExactPOSIXLiteralPasswordChangeTrailingShell reports only the exact
-// three-stage literal password-change pipeline whose final command is a bare
-// Bash process. It is a value-free command-shape predicate for pre-execution
-// policy: account and password operands are validated and then discarded.
-// Ordinary two-stage password-change automation is deliberately excluded.
-func ExactPOSIXLiteralPasswordChangeTrailingShell(facts Facts) bool {
-	if !facts.Authoritative() || !facts.EnforcementEligible() {
-		return false
-	}
-	fact, ok := exactPOSIXLiteralPasswordChangePipeline(
-		facts.Commands, facts.DataFlows,
-	)
-	return ok && fact.Form == POSIXLiteralPasswordChangeThreeStageTrailingShell
-}
-
 func preclassifyPOSIXLiteralPasswordChange(out *parseOutput) {
 	if out == nil {
 		return

@@ -33,16 +33,10 @@ const (
 	// Owner eligibility accepts only executing mutations (or static redirects
 	// that remain executing in the enforcement projection), so an unrelated
 	// sibling mutation cannot lend it authority.
-	semanticActiveAgentInstructionMutationExpression          = `f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])`
-	semanticPOSIXLiteralPasswordChangeTrailingShellExpression = `f.commands.exists(c, c.argv_complete && c.program in ['passwd', 'chpasswd'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_ACCOUNT_CHANGE in c.operations) && f.commands.exists(c, c.argv_complete && c.program == 'bash') && f.data_flows.exists(d, d.from == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDOUT && d.to == defenseclaw.guardrail.semantic.v1.DataKind.DATA_KIND_STDIN)`
+	semanticActiveAgentInstructionMutationExpression = `f.paths.exists(p, p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND, defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])`
 )
 
 var semanticIntegrityPersistenceOwners = map[string]semanticOwner{
-	"persistence.posix_literal_password_change_trailing_shell": {
-		prerequisite:     actionfacts.ExactPOSIXLiteralPasswordChangeTrailingShell,
-		suppressFallback: authoritativeSemanticSafeNegative,
-		detectionOnly:    true,
-	},
 	"integrity.posix_system_shell_replacement": {
 		prerequisite:     actionfacts.ExactPOSIXSystemShellReplacement,
 		suppressFallback: authoritativeSemanticSafeNegative,
