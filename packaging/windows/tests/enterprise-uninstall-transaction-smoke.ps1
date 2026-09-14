@@ -5835,12 +5835,19 @@ targets:
         function Invoke-HarnessPurgeRetry {
             param(
                 [Parameter(Mandatory)][hashtable]$Layout,
-                [string]$Action = 'Uninstall'
+                [string]$Action = 'Uninstall',
+                [switch]$OmitNativeCleanupSource
             )
+            $sources = if ($OmitNativeCleanupSource) {
+                @{}
+            }
+            else {
+                @{native_cleanup = @{path = 'harness-native-cleanup'}}
+            }
             return Invoke-DefenseClawPreLayoutRecovery `
                 -Action $Action `
                 -Layout $Layout `
-                -Sources @{native_cleanup = @{path = 'harness-native-cleanup'}} `
+                -Sources $sources `
                 -GatewayServiceName 'DefenseClawGateway' `
                 -GuardianServiceName 'DefenseClawHookGuardian' `
                 -Purge:($Action -eq 'Uninstall')
@@ -6465,6 +6472,39 @@ targets:
             -Message 'retained-state Install without native_cleanup did not fail closed'
         Add-HarnessPurgeResult `
             -Name 'install-retained-state-requires-native-cleanup' `
+            -FailedClosed:$true `
+            -Retried:$false
+
+        # Fail-closed guard: an Uninstall/Purge retry must reject a Sources map
+        # that omits native_cleanup with the module's exact-scope purge branch
+        # ('exact-scope purge requires the authenticated native cleanup
+        # executable'). Every other purge case in this file routes through
+        # Invoke-HarnessPurgeRetry, which supplies native_cleanup by default;
+        # this case uses -OmitNativeCleanupSource so the purge fail-closed
+        # branch stays exercised end-to-end, not only via the contract-test
+        # grep.
+        $purgeFailClosedLayout = New-HarnessCommittedPurgeCase `
+            -Name 'purge-requires-native-cleanup-source'
+        Publish-HarnessPurgeReceipt -Layout $purgeFailClosedLayout
+        $purgeFailClosedThrew = $false
+        $purgeFailClosedMessage = ''
+        try {
+            [void](Invoke-HarnessPurgeRetry `
+                -Layout $purgeFailClosedLayout `
+                -OmitNativeCleanupSource)
+        }
+        catch {
+            $purgeFailClosedThrew = $true
+            $purgeFailClosedMessage = [string]$_.Exception.Message
+        }
+        Assert-Harness `
+            -Condition (
+                $purgeFailClosedThrew -and
+                $purgeFailClosedMessage -match 'exact-scope purge requires the authenticated native cleanup'
+            ) `
+            -Message 'purge without native_cleanup did not fail closed'
+        Add-HarnessPurgeResult `
+            -Name 'purge-requires-native-cleanup-source' `
             -FailedClosed:$true `
             -Retried:$false
 

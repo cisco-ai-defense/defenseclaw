@@ -5587,6 +5587,8 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert '-NativeCleanupSource $nativeCleanupSource' in pre_layout
     assert "$Sources['gateway']" in pre_layout
     assert 'retained-state Install requires the authenticated' in pre_layout
+    assert 'exact-scope purge requires the authenticated native cleanup' in module
+    assert 'purge-requires-native-cleanup-source' in smoke
     assert 'predates scope-bound connector cleanup ' in module
     assert 'authority; refusing Purge' in module
     assert 'legacy state-purge intent cannot authorize user contract cleanup' not in module
@@ -5623,7 +5625,8 @@ def test_delayed_purge_contract_cleanup_is_crash_stable_and_scope_bound() -> Non
     assert 'TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope' in (
         connector_cleanup_test
     )
-    assert 'TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded' in connector_cleanup_test
+    assert 'TestCleanupCaptureRemovesLegacyUnboundEntry' in connector_cleanup_test
+    assert 'TestCleanupCaptureRejectsWhitespaceGatewayBinding' in connector_cleanup_test
     assert 'TestCleanupClaimMissingStateRequiresPersistedMutationBarrier' in (
         connector_cleanup_test
     )

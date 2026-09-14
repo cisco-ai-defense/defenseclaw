@@ -455,11 +455,13 @@ func (pipeline *LocalLogPipeline) process(
 		return LocalLogOutcome{}, &Error{code: ErrorLocalProjection}
 	}
 	if err := pipeline.appender.AppendContext(ctx, record.Clone(), localProjection); err != nil {
-		// Diagnostic: surface the actual underlying error so we can localize
-		// enforcement-block audit-write failures. Remove once resolved.
+		// A raw `err` value here may wrap BeginTx / commit / health strings
+		// that leak backend state past the pipeline's bounded projection.
+		// Emit the fixed classification only; the wrapped cause stays inside
+		// `boundedPipelineError` where the pipeline redacts it.
 		fmt.Fprintf(os.Stderr,
-			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s err=%v\n",
-			record.Bucket(), record.EventName(), record.Signal(), record.Connector(), err)
+			"[obs-pipeline] appender.AppendContext failed bucket=%s event=%s signal=%s connector=%s error=%s\n",
+			record.Bucket(), record.EventName(), record.Signal(), record.Connector(), ErrorLocalWrite)
 		return LocalLogOutcome{}, boundedPipelineError(ErrorLocalWrite, err)
 	}
 	outcome.localPersisted = true

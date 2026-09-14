@@ -97,8 +97,10 @@ func CaptureManagedHookContractCleanupClaimForOwner(
 		// Legacy pre-binding entries have an empty ManagedGatewayServiceName.
 		// Teardown must still be able to remove such an entry, so treat empty
 		// as "no binding pin" and capture the SHA256 for CAS-safe removal by
-		// the apply path. A non-empty invalid value is still fail-closed.
-		legacyEntry := strings.TrimSpace(entry.ManagedGatewayServiceName) == ""
+		// the apply path. A whitespace-only or otherwise non-empty invalid
+		// value is tampered state, not a legacy artifact, and stays
+		// fail-closed via ValidateWindowsManagedGatewayServiceName below.
+		legacyEntry := entry.ManagedGatewayServiceName == ""
 		if !legacyEntry {
 			if err := ValidateWindowsManagedGatewayServiceName(
 				entry.ManagedGatewayServiceName,

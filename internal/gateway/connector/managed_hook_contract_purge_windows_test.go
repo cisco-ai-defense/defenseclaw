@@ -304,14 +304,14 @@ func TestCleanupCaptureDoesNotClaimCursorEntryFromNewGatewayScope(t *testing.T) 
 	}
 }
 
-// TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded — the earlier
-// fail-closed behavior made uninstall unable to clean up any lock entry
-// written by a pre-binding build (empty ManagedGatewayServiceName), stranding
-// upgrades. Cleanup capture now treats a legacy unbound entry as
-// automatically superseded so the apply path retires it without touching
-// bytes owned by a different scope; a NON-EMPTY but invalid identity value
-// remains fail-closed (that would be tampered state, not a legacy artifact).
-func TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded(t *testing.T) {
+// TestCleanupCaptureRemovesLegacyUnboundEntry — the earlier fail-closed
+// behavior made uninstall unable to clean up any lock entry written by a
+// pre-binding build (empty ManagedGatewayServiceName), stranding upgrades.
+// Cleanup capture now treats a legacy unbound entry as capturable for
+// physical removal under the connector CAS; a whitespace-only or otherwise
+// non-empty invalid identity value remains fail-closed (that would be
+// tampered state, not a legacy artifact).
+func TestCleanupCaptureRemovesLegacyUnboundEntry(t *testing.T) {
 	if err := requireWindowsCodexMachineAdministrator(); err != nil {
 		t.Skipf("managed purge requires an elevated Administrator or LocalSystem token: %v", err)
 	}
@@ -340,10 +340,64 @@ func TestCleanupCaptureAcceptsLegacyUnboundEntryAsSuperseded(t *testing.T) {
 		"DefenseClawGateway-ScopeA",
 	)
 	if err != nil {
-		t.Fatalf("legacy cleanup capture returned error = %v, want superseded claim", err)
+		t.Fatalf("legacy cleanup capture returned error = %v, want capturable claim", err)
 	}
-	if !claim.Superseded || claim.EntryPresent || claim.ApplicationStarted {
-		t.Fatalf("legacy claim = %+v, want Superseded=true EntryPresent=false ApplicationStarted=false", claim)
+	if claim.Superseded || !claim.EntryPresent || claim.ApplicationStarted {
+		t.Fatalf("legacy claim = %+v, want Superseded=false EntryPresent=true ApplicationStarted=false", claim)
+	}
+	if !strings.HasPrefix(claim.EntrySHA256, "sha256:") {
+		t.Fatalf("legacy claim missing entry digest: %+v", claim)
+	}
+	result, err := ApplyManagedHookContractCleanupClaimForOwner(claim)
+	if err != nil {
+		t.Fatalf("apply legacy claim: %v", err)
+	}
+	if !result.Removed || result.AlreadyAbsent || result.Superseded {
+		t.Fatalf("legacy apply result = %+v, want Removed=true", result)
+	}
+	stored, err := loadManagedHookContractLockForOwner(dataDir, ownerSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, exists := stored.Connectors["codex"]; exists {
+		t.Fatalf("legacy codex entry survived cleanup")
+	}
+}
+
+// TestCleanupCaptureRejectsWhitespaceGatewayBinding — whitespace-only
+// gateway identity is tampered state, not a legacy artifact. Cleanup
+// capture MUST fail closed via ValidateWindowsManagedGatewayServiceName
+// instead of routing through the legacy-empty branch.
+func TestCleanupCaptureRejectsWhitespaceGatewayBinding(t *testing.T) {
+	if err := requireWindowsCodexMachineAdministrator(); err != nil {
+		t.Skipf("managed purge requires an elevated Administrator or LocalSystem token: %v", err)
+	}
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	if err := ReconcileManagedNativeHookRuntime(
+		dataDir,
+		"127.0.0.1:18970",
+		"codex",
+		"tampered-token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	ownerSID := windowsProcessUserSIDForTest(t).String()
+	if err := SaveHookContractLockEntryForMode(dataDir, HookContractLockEntry{
+		Connector:                 "codex",
+		RawAgentVersion:           "tampered",
+		ContractID:                "codex-hooks-v1",
+		HookFailMode:              "closed",
+		ManagedGatewayServiceName: "   ",
+	}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CaptureManagedHookContractCleanupClaimForOwner(
+		dataDir,
+		"codex",
+		ownerSID,
+		"DefenseClawGateway-ScopeA",
+	); err == nil {
+		t.Fatal("whitespace-only gateway binding cleanup capture unexpectedly succeeded")
 	}
 }
 
@@ -435,6 +489,77 @@ func TestCleanupClaimMissingStateRequiresPersistedMutationBarrier(t *testing.T) 
 				}
 			})
 		}
+	}
+}
+
+// TestCleanupApplyBarrierAbortAbortsDelete — the mutation barrier is
+// the callback that lets the CLI wrapper durably record "this claim is
+// in-progress" before the connector entry is deleted, closing the
+// crash/reinstall ambiguity. Its two load-bearing properties are: the
+// callback runs while the connector lock is held (so a peer cannot
+// race the delete), and a callback error MUST abort the delete and
+// leave the entry intact so the CLI can retry safely.
+func TestCleanupApplyBarrierAbortAbortsDelete(t *testing.T) {
+	if err := requireWindowsCodexMachineAdministrator(); err != nil {
+		t.Skipf("managed purge requires an elevated Administrator or LocalSystem token: %v", err)
+	}
+	dataDir := filepath.Join(t.TempDir(), ".defenseclaw")
+	ownerSID := windowsProcessUserSIDForTest(t).String()
+	if err := ReconcileManagedNativeHookRuntime(
+		dataDir,
+		"127.0.0.1:18970",
+		"codex",
+		"barrier-token",
+	); err != nil {
+		t.Fatal(err)
+	}
+	entry := HookContractLockEntry{
+		Connector:                 "codex",
+		RawAgentVersion:           "barrier-codex",
+		ContractID:                "codex-hooks-v1",
+		HookFailMode:              "closed",
+		ManagedGatewayServiceName: "DefenseClawGateway-ScopeA",
+	}
+	if err := SaveHookContractLockEntryForMode(dataDir, entry, true); err != nil {
+		t.Fatal(err)
+	}
+	claim, err := CaptureManagedHookContractCleanupClaimForOwner(
+		dataDir,
+		"codex",
+		ownerSID,
+		"DefenseClawGateway-ScopeA",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !claim.EntryPresent {
+		t.Fatalf("cleanup claim was not captured: %+v", claim)
+	}
+	barrierErr := errors.New("harness rejected the mutation barrier")
+	barrierCalled := 0
+	result, err := ApplyManagedHookContractCleanupClaimForOwnerWithBarrier(
+		claim,
+		func() error {
+			barrierCalled++
+			return barrierErr
+		},
+	)
+	if barrierCalled != 1 {
+		t.Fatalf("mutation barrier callback ran %d times, want 1", barrierCalled)
+	}
+	if err == nil || !errors.Is(err, barrierErr) {
+		t.Fatalf("apply error = %v, want wrapped barrier error", err)
+	}
+	if result.Removed || result.AlreadyAbsent || result.Superseded {
+		t.Fatalf("apply result after barrier abort = %+v, want zero disposition", result)
+	}
+	stored, err := loadManagedHookContractLockForOwner(dataDir, ownerSID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, exists := stored.Connectors["codex"]; !exists ||
+		got.RawAgentVersion != "barrier-codex" || got.ContractID != "codex-hooks-v1" {
+		t.Fatalf("codex entry did not survive barrier abort: exists=%t entry=%+v", exists, got)
 	}
 }
 
