@@ -12,6 +12,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path
+from unittest import mock
 
 MODULE_PATH = Path(__file__).with_name("benchmark_normalize_agenthazard.py")
 SPEC = importlib.util.spec_from_file_location("benchmark_normalize_agenthazard", MODULE_PATH)
@@ -240,14 +241,25 @@ class SourceTree:
                 )
 
 
+def pinned_source_identities(root: Path) -> dict[str, tuple[int, str]]:
+    paths = [root / MODULE.CATALOG_PATH, root / MODULE.EVALUATIONS_PATH]
+    paths.extend(sorted((root / "traces").glob("*/*.zip")))
+    return {
+        path.relative_to(root).as_posix(): (path.stat().st_size, MODULE.file_sha256(path))
+        for path in paths
+    }
+
+
 class AgentHazardNormalizerTest(unittest.TestCase):
     def normalize(self, source: SourceTree) -> tuple[list[dict[str, object]], dict[str, object]]:
         source.write_metadata()
-        return MODULE.normalize_input(
-            source.root,
-            revision=MODULE.SOURCE_REVISION,
-            split="validation",
-        )
+        identities = pinned_source_identities(source.root)
+        with mock.patch.object(MODULE, "EXPECTED_SOURCE_FILES", identities):
+            return MODULE.normalize_input(
+                source.root,
+                revision=MODULE.SOURCE_REVISION,
+                split=MODULE.PRE_PARTITION_SPLIT,
+            )
 
     def test_openclaw_retains_exact_arguments_and_distinct_execution_outcomes(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
@@ -511,11 +523,77 @@ class AgentHazardNormalizerTest(unittest.TestCase):
         MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
         self.assertEqual("MIT", manifest["source"]["license"])
         self.assertEqual(MODULE.SOURCE_REVISION, manifest["source"]["revision"])
+        trajectory_source = manifest["trajectory_source"]
+        self.assertEqual(MODULE.PRE_PARTITION_SPLIT, trajectory_source["pre_partition_split"])
+        self.assertEqual(MODULE.PARTITION_AUTHORITY, trajectory_source["partition_authority"])
+        self.assertTrue(all(case["split"] == MODULE.PRE_PARTITION_SPLIT for case in cases))
+        source_files = trajectory_source["source_files"]
+        self.assertEqual(len(source_files), manifest["source"]["files"])
+        self.assertEqual(
+            {MODULE.CATALOG_PATH, MODULE.EVALUATIONS_PATH, "traces/openclaw/qwen3-coder.zip"},
+            {item["path"] for item in source_files},
+        )
+        self.assertEqual(MODULE.digest(MODULE.canonical_json(source_files)), manifest["source"]["sha256"])
 
     def test_unpinned_revision_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             with self.assertRaisesRegex(ValueError, "pinned AgentHazard revision"):
-                MODULE.normalize_input(Path(temporary), revision="0" * 40, split="development")
+                MODULE.normalize_input(Path(temporary), revision="0" * 40, split=MODULE.PRE_PARTITION_SPLIT)
+
+    def test_authority_metadata_tampering_is_rejected_before_parsing(self) -> None:
+        for relative in (MODULE.CATALOG_PATH, MODULE.EVALUATIONS_PATH):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary:
+                source = SourceTree(Path(temporary))
+                source.add_task(37)
+                source.add_archive(
+                    "openclaw",
+                    "qwen3-coder",
+                    {"qwen3-coder/37_session.jsonl": openclaw_lines()},
+                )
+                source.write_metadata()
+                identities = pinned_source_identities(source.root)
+                path = source.root / relative
+                path.write_bytes(path.read_bytes() + b" ")
+
+                with mock.patch.object(MODULE, "EXPECTED_SOURCE_FILES", identities):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        f"pinned AgentHazard source identity mismatch: {relative}",
+                    ):
+                        MODULE.normalize_input(
+                            source.root,
+                            revision=MODULE.SOURCE_REVISION,
+                            split=MODULE.PRE_PARTITION_SPLIT,
+                        )
+
+    def test_trace_archive_tampering_is_rejected_before_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            source = SourceTree(Path(temporary))
+            source.add_task(41)
+            source.add_archive(
+                "openclaw",
+                "qwen3-coder",
+                {"qwen3-coder/41_session.jsonl": openclaw_lines()},
+            )
+            source.write_metadata()
+            identities = pinned_source_identities(source.root)
+            relative = "traces/openclaw/qwen3-coder.zip"
+            path = source.root / relative
+            path.write_bytes(path.read_bytes() + b" ")
+
+            with mock.patch.object(MODULE, "EXPECTED_SOURCE_FILES", identities):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    f"pinned AgentHazard source identity mismatch: {relative}",
+                ):
+                    MODULE.normalize_input(
+                        source.root, revision=MODULE.SOURCE_REVISION, split=MODULE.PRE_PARTITION_SPLIT
+                    )
+
+    def test_non_staging_split_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "must remain pre-partitioned"):
+            MODULE.normalize_input(Path("unused"), revision=MODULE.SOURCE_REVISION, split="development")
+
 
 
 if __name__ == "__main__":

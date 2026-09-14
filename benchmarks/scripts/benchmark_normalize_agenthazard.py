@@ -46,6 +46,78 @@ CODE_URL = "https://github.com/Yunhao-Feng/AgentHazard"
 CODE_REVISION = "0ea6aabc77d697ee3c3c61af63d839cbeb2d5709"
 SOURCE_LICENSE = "MIT"
 SOURCE_REDISTRIBUTION = "download-only"
+PRE_PARTITION_SPLIT = "smoke"
+PARTITION_AUTHORITY = "benchmarks/scripts/benchmark_partition.py"
+EXPECTED_SOURCE_FILES: dict[str, tuple[int, str]] = {
+    "dataset.json": (
+        2026968,
+        "d7a0000669fed0e267784fd638b9541e6fda4a43df8b85624f1c44c28d8add00",
+    ),
+    "evaluation_results.csv": (
+        1427953,
+        "806499aafe99ea6ba7cefe9d9e0a23112ba652cff64a37c11224e6ca62fc5e79",
+    ),
+    "traces/claudecode/claude-Qwen3_32B.zip": (
+        1079051,
+        "267a9c3220525040e144d5d71a3916d0ff224dd44782661b094a8becdb57d30b",
+    ),
+    "traces/claudecode/claude-bailian_kimi_k2.5.zip": (
+        32240130,
+        "853cd1a22ed01ee344e732bcacc6bbc5ddeeae05caac374c79851c9e815d60f6",
+    ),
+    "traces/claudecode/claude-glm_4.6.zip": (
+        25928080,
+        "9be7169686f3b7cdb5eedb4027183d13a672d6cb2b3cae442501a9bce42d6452",
+    ),
+    "traces/claudecode/claude-kimi_k2.zip": (
+        1277427,
+        "738e2a87893ef85434ea25eceaa1fbf6f60ccb108a63595d0607cc9e99b33399",
+    ),
+    "traces/claudecode/claude-qwen2.5_72b_instruct.zip": (
+        1377392,
+        "d2cdd8fd62f43611482a64de71f56f626067cec1a6ac8e0be4fab94bcead8c88",
+    ),
+    "traces/claudecode/claude-qwen2.5_coder_32b_instruct.zip": (
+        3295551,
+        "72ff1ae46188d71fbd0bd7ba5d2e8f57bfd57bfc9b988293ddd8143f62ea593e",
+    ),
+    "traces/claudecode/claude-qwen3_vl_235b_a22b_instruct.zip": (
+        71971890,
+        "9c157f871457493c53eccaec04c09150894b0bc5556f9da0b45ae691992cc2c8",
+    ),
+    "traces/iflow/iflow-Qwen3_32B.zip": (
+        19609763,
+        "c3c21623885fe52836480c26e54b376d6ae78a1e49b899bea9b5ece202187c97",
+    ),
+    "traces/iflow/iflow-bailian_kimi_k2.5.zip": (
+        33346336,
+        "1821fe3af6a76feed0cab4fa37d4404519438020d0c3cc3b8eb1eb5a6cb0b801",
+    ),
+    "traces/iflow/iflow-glm_4.6.zip": (
+        37224016,
+        "4d2b9206c5d429f9b4a3cb89a688fb159e7475ec674446e146392e5d4e0ffb00",
+    ),
+    "traces/iflow/iflow-kimi_k2.zip": (
+        37635526,
+        "58e2daee655d8ef9c0001883a159415c574fea4f0e06b058d64f4ea1a286a27c",
+    ),
+    "traces/iflow/iflow-qwen2.5_72b_instruct.zip": (
+        12624726,
+        "2c84b1b1830c83818693507bd4f08725701edbb9bf083b88b63543d40221b492",
+    ),
+    "traces/iflow/iflow-qwen2.5_coder_32b_instruct.zip": (
+        12256595,
+        "5eea2ab7dc9a1ab8d4480a3a4f4dda186897654799e713075f2f876dba55b8b2",
+    ),
+    "traces/iflow/iflow-qwen3_vl_235b_a22b_instruct.zip": (
+        18553012,
+        "97d2cf3d8030e2e55ca8c3a5ebda8946973039f38238898f6da1008f3f20cd4d",
+    ),
+    "traces/openclaw/qwen3-coder.zip": (
+        9010708,
+        "a76ed6cf7b144e40c2908d3507c11ebe35f178579f478b703b3bf38b2663e774",
+    ),
+}
 CATALOG_PATH = "dataset.json"
 EVALUATIONS_PATH = "evaluation_results.csv"
 MAX_SOURCE_METADATA_BYTES = 32 * 1024 * 1024
@@ -224,7 +296,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--split", choices=("development", "validation", "test"), required=True)
+    parser.add_argument("--split", choices=(PRE_PARTITION_SPLIT,), default=PRE_PARTITION_SPLIT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--schema", type=Path, default=DEFAULT_SCHEMA)
@@ -990,9 +1062,45 @@ def project_cases(
     return cases
 
 
+def verified_source_inventory(input_dir: Path) -> list[dict[str, Any]]:
+    """Bind every authority-bearing source file to the pinned HF snapshot."""
+    root = input_dir.resolve(strict=True)
+    actual = {CATALOG_PATH, EVALUATIONS_PATH}
+    actual.update(path.relative_to(root).as_posix() for path in (root / "traces").glob("*/*.zip"))
+    if actual != set(EXPECTED_SOURCE_FILES):
+        missing = sorted(set(EXPECTED_SOURCE_FILES) - actual)
+        extra = sorted(actual - set(EXPECTED_SOURCE_FILES))
+        raise ValueError(f"AgentHazard source inventory mismatch: missing={missing}, extra={extra}")
+
+    inventory: list[dict[str, Any]] = []
+    for relative in sorted(EXPECTED_SOURCE_FILES):
+        expected_bytes, expected_sha256 = EXPECTED_SOURCE_FILES[relative]
+        candidate = root / relative
+        if candidate.is_symlink():
+            raise ValueError(f"AgentHazard source file must not be a symlink: {relative}")
+        try:
+            path = candidate.resolve(strict=True)
+            path.relative_to(root)
+        except (FileNotFoundError, ValueError) as exc:
+            raise ValueError(f"invalid AgentHazard source path: {relative}") from exc
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"AgentHazard source file must be regular: {relative}")
+        byte_count = path.stat().st_size
+        sha256 = file_sha256(path)
+        if byte_count != expected_bytes or sha256 != expected_sha256:
+            raise ValueError(f"pinned AgentHazard source identity mismatch: {relative}")
+        inventory.append({"path": relative, "bytes": byte_count, "sha256": sha256})
+    return inventory
+
+
 def normalize_input(input_dir: Path, *, revision: str, split: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if revision != SOURCE_REVISION:
         raise ValueError(f"revision must equal pinned AgentHazard revision {SOURCE_REVISION}")
+    if split != PRE_PARTITION_SPLIT:
+        raise ValueError(
+            f"AgentHazard normalization must remain pre-partitioned as {PRE_PARTITION_SPLIT}"
+        )
+    sources = verified_source_inventory(input_dir)
     catalog = load_catalog(input_dir / CATALOG_PATH)
     evaluations = load_evaluations(input_dir / EVALUATIONS_PATH)
     archives = sorted((input_dir / "traces").glob("*/*.zip"))
@@ -1003,7 +1111,6 @@ def normalize_input(input_dir: Path, *, revision: str, split: str) -> tuple[list
     cases: list[dict[str, Any]] = []
     counts: Counter[str] = Counter()
     skipped: Counter[str] = Counter()
-    sources: list[dict[str, Any]] = []
     seen: set[tuple[str, str]] = set()
     for archive_path in archives:
         relative = archive_path.relative_to(input_dir).as_posix()
@@ -1013,13 +1120,6 @@ def normalize_input(input_dir: Path, *, revision: str, split: str) -> tuple[list
             raise ValueError(f"invalid AgentHazard archive identity: {relative}")
         if archive_path.stat().st_size > MAX_ARCHIVE_BYTES:
             raise ValueError(f"oversized AgentHazard archive: {relative}")
-        sources.append(
-            {
-                "path": relative,
-                "bytes": archive_path.stat().st_size,
-                "sha256": file_sha256(archive_path),
-            }
-        )
         try:
             archive = zipfile.ZipFile(archive_path)
         except zipfile.BadZipFile as exc:
@@ -1115,7 +1215,13 @@ def normalize_input(input_dir: Path, *, revision: str, split: str) -> tuple[list
             "redistribution": SOURCE_REDISTRIBUTION,
             "path": "pinned-source-tree",
             "bytes": source_bytes,
+            "files": len(sources),
             "sha256": source_inventory_sha256,
+        },
+        "trajectory_source": {
+            "pre_partition_split": PRE_PARTITION_SPLIT,
+            "partition_authority": PARTITION_AUTHORITY,
+            "source_files": sources,
         },
     }
 

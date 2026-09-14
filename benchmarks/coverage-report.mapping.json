@@ -489,7 +489,8 @@
       ],
       "status": "normalized-mining-only",
       "limitations": [
-        "Normalized scenario-level harmful labels are retained for rule mining; they are not atomic call truth."
+        "Thirteen revision-, location-, and fingerprint-pinned intrinsically malicious atomic calls are scored; all neighboring calls remain unknown.",
+        "Scenario-level harmful labels are retained only on contextual out-of-scope stateful windows for development-partition mining; they are not atomic call truth."
       ]
     },
     "forgelab/mole": {
@@ -601,9 +602,10 @@
         "real-tool-arguments",
         "real-tool-results"
       ],
-      "status": "missing",
+      "status": "normalized-mining-only",
       "limitations": [
-        "No compatible aggregate result is currently available; this entry remains in the public source inventory."
+        "Toucan SFT provides no security truth, so every normalized trajectory remains contextual, out of scored scope, and restricted to development-partition mining.",
+        "Only exact paired tool names, structured arguments, and explicit result status are retained; prompts, reasoning, tool definitions, and result bodies are excluded from detector payloads."
       ]
     },
     "HuggingEnvs/data-agent-sft": {
