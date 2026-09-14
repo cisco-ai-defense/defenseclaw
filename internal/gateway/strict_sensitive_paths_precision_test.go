@@ -69,6 +69,30 @@ func TestStrictSensitivePathPrecision(t *testing.T) {
 			absent: "PATH-ETC-PASSWD",
 		},
 		{
+			name: "structured passwd read remains visible",
+			input: actionfacts.Input{
+				Tool: "read_file",
+				Args: sensitivePathArgs(t, "/etc/passwd", ""),
+			},
+			present: "PATH-ETC-PASSWD",
+		},
+		{
+			name: "structured passwd lookalike read is quiet",
+			input: actionfacts.Input{
+				Tool: "read_file",
+				Args: sensitivePathArgs(t, "/etc/passwd.bak", ""),
+			},
+			absent: "PATH-ETC-PASSWD",
+		},
+		{
+			name: "structured passwd search is quiet",
+			input: actionfacts.Input{
+				Tool: "search_files",
+				Args: sensitivePathArgs(t, "/etc/passwd", ""),
+			},
+			absent: "PATH-ETC-PASSWD",
+		},
+		{
 			name: "structured passwd mutation remains visible",
 			input: actionfacts.Input{
 				Tool: "write_file",
