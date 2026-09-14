@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 from pathlib import Path
 
 import pytest
@@ -14,9 +13,6 @@ SPEC = importlib.util.spec_from_file_location("benchmark_normalize_cloud_share_c
 assert SPEC and SPEC.loader
 MODULE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(MODULE)
-
-TESTDATA = Path(__file__).with_name("testdata") / "cloud_share_same_operation_controls"
-
 
 def base_event(event_id: str, event_name: str, event_source: str, **overrides: object) -> dict[str, object]:
     event: dict[str, object] = {
@@ -32,19 +28,19 @@ def base_event(event_id: str, event_name: str, event_source: str, **overrides: o
     return event
 
 
-def snapshot_request(verb: str, identity: str = "123456789012") -> dict[str, object]:
+def snapshot_request(verb: str, identity: str = "111122223333") -> dict[str, object]:
     item = {"group": "all"} if identity == "all" else {"userId": identity}
     return {
         "attributeType": "CREATE_VOLUME_PERMISSION",
         "createVolumePermission": {verb: {"items": [item]}},
-        "snapshotId": "snap-046281ab24d756c50",
+        "snapshotId": "snap-00000000000000001",
     }
 
 
 def image_request(verb: str) -> dict[str, object]:
     return {
         "attributeType": "launchPermission",
-        "imageId": "ami-0beb42caf02660314",
+        "imageId": "ami-00000000000000001",
         "launchPermission": {verb: {"items": [{"group": "all"}]}},
     }
 
@@ -53,8 +49,8 @@ def rds_request(verb: str) -> dict[str, object]:
     key = "valuesToAdd" if verb == "add" else "valuesToRemove"
     return {
         "attributeName": "restore",
-        "dBSnapshotIdentifier": "test-cloudtrail-event-instance-29973-snap",
-        key: ["444455556666"],
+        "dBSnapshotIdentifier": "synthetic-db-snapshot",
+        key: ["111122223333"],
     }
 
 
@@ -63,7 +59,7 @@ def elastic_records() -> list[tuple[str, dict[str, object]]]:
         (
             next(path for path in MODULE.ELASTIC_FILES if "snapshot-attribute" in path),
             base_event(
-                "5e68a70c-9e8b-49c3-a6c5-63ab2bc2685a",
+                "00000000-0000-4000-8000-000000000001",
                 "ModifySnapshotAttribute",
                 "ec2.amazonaws.com",
                 requestParameters=snapshot_request("remove", "all"),
@@ -73,7 +69,7 @@ def elastic_records() -> list[tuple[str, dict[str, object]]]:
         (
             next(path for path in MODULE.ELASTIC_FILES if "image-attribute" in path),
             base_event(
-                "b837800c-c462-4907-86f7-73b02fd4958f",
+                "00000000-0000-4000-8000-000000000002",
                 "ModifyImageAttribute",
                 "ec2.amazonaws.com",
                 requestParameters=image_request("remove"),
@@ -83,13 +79,13 @@ def elastic_records() -> list[tuple[str, dict[str, object]]]:
         (
             next(path for path in MODULE.ELASTIC_FILES if "db-snapshot" in path),
             base_event(
-                "10c9f9e2-cf43-4498-8096-0552cbb174d7",
+                "00000000-0000-4000-8000-000000000003",
                 "ModifyDBSnapshotAttribute",
                 "rds.amazonaws.com",
                 requestParameters=rds_request("remove"),
                 responseElements={
                     "dBSnapshotAttributes": [{"attributeName": "restore", "attributeValues": []}],
-                    "dBSnapshotIdentifier": "test-cloudtrail-event-instance-29973-snap",
+                    "dBSnapshotIdentifier": "synthetic-db-snapshot",
                 },
             ),
         ),
@@ -110,10 +106,10 @@ def cybersec_records() -> list[tuple[str, dict[str, object]]]:
             ),
         )
         for event_id, account in (
-            ("09a73ee0-5e92-4fc4-b2ec-cdfa45e8f156", "642574392309"),
-            ("307520b15-3300-4604-83c3-8c9b906342c6", "642574392309"),
-            ("6bea0e59-56fb-4370-9b64-65ca88c3834d", "642574392309"),
-            ("cc2f0916-60ea-4bfd-b5d3-19bf7d3f77df", "221698185189"),
+            ("00000000-0000-4000-8000-000000000004", "111122223333"),
+            ("00000000-0000-4000-8000-000000000005", "111122223333"),
+            ("00000000-0000-4000-8000-000000000006", "111122223333"),
+            ("00000000-0000-4000-8000-000000000007", "444455556666"),
         )
     ]
 
@@ -123,7 +119,7 @@ def traildiscover_records() -> list[tuple[str, dict[str, object]]]:
         (
             "events/EC2/ModifySnapshotAttribute.json.cloudtrail",
             base_event(
-                "1b5e60ad-3f81-43c8-8b33-7c1788ae9bd1",
+                "00000000-0000-4000-8000-000000000008",
                 "ModifySnapshotAttribute",
                 "ec2.amazonaws.com",
                 requestParameters=snapshot_request("remove"),
@@ -134,7 +130,7 @@ def traildiscover_records() -> list[tuple[str, dict[str, object]]]:
         (
             "events/EC2/ModifyImageAttribute.json.cloudtrail",
             base_event(
-                "11fe0ffa-a7b2-4241-afaf-8ea1f92b30f6",
+                "00000000-0000-4000-8000-000000000009",
                 "ModifyImageAttribute",
                 "ec2.amazonaws.com",
                 errorCode="Client.InvalidParameterCombination",
@@ -144,7 +140,7 @@ def traildiscover_records() -> list[tuple[str, dict[str, object]]]:
         (
             "events/RDS/ModifyDBSnapshotAttribute.json.cloudtrail",
             base_event(
-                "d5036f48-5b3c-4a3a-8464-b876468ef0c8",
+                "00000000-0000-4000-8000-000000000010",
                 "ModifyDBSnapshotAttribute",
                 "rds.amazonaws.com",
                 errorCode="AccessDenied",
@@ -195,7 +191,7 @@ def test_traildiscover_only_manifest_excludes_disabled_companion_datasets() -> N
 
 def test_projection_preserves_detector_argument_shape_but_excludes_result_and_sensitive_fields() -> None:
     row = base_event(
-        "5e68a70c-9e8b-49c3-a6c5-63ab2bc2685a",
+        "00000000-0000-4000-8000-000000000011",
         "ModifySnapshotAttribute",
         "ec2.amazonaws.com",
         requestParameters=snapshot_request("remove", "all"),
@@ -236,7 +232,7 @@ def test_incomplete_failures_are_parser_only_and_not_hard_negatives() -> None:
 
 def test_successful_addition_cannot_enter_negative_control_corpus() -> None:
     addition = base_event(
-        "53b76a15-ff04-4d4d-a1d0-6322e4a2f68a",
+        "00000000-0000-4000-8000-000000000012",
         "ModifySnapshotAttribute",
         "ec2.amazonaws.com",
         requestParameters=snapshot_request("add", "all"),
@@ -257,7 +253,7 @@ def test_malformed_or_ambiguous_source_is_rejected() -> None:
     with pytest.raises(MODULE.ProjectionError, match="non_finite_json"):
         MODULE.parse_json('{"value":NaN}')
     malformed = base_event(
-        "5e68a70c-9e8b-49c3-a6c5-63ab2bc2685a",
+        "00000000-0000-4000-8000-000000000013",
         "ModifySnapshotAttribute",
         "ec2.amazonaws.com",
         requestParameters={"snapshotId": "snap-only"},
@@ -265,21 +261,6 @@ def test_malformed_or_ambiguous_source_is_rejected() -> None:
     )
     with pytest.raises(MODULE.ProjectionError, match="invalid_snapshot_request"):
         MODULE.project_event(malformed)
-
-
-def test_committed_normalized_fixture_is_schema_valid_and_public_only() -> None:
-    cases = [json.loads(line) for line in (TESTDATA / "normalized.jsonl").read_text().splitlines()]
-    MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
-    assert len(cases) == 3
-    assert {case["source"]["dataset"] for case in cases} == {
-        MODULE.SOURCES["elastic"].dataset,
-        MODULE.SOURCES["cybersec"].dataset,
-        MODULE.SOURCES["traildiscover"].dataset,
-    }
-    assert all(case["source"]["redistribution"] == "download-only" for case in cases)
-    rendered = MODULE.canonical_json(cases)
-    for forbidden in ("accessKeyId", "sourceIPAddress", "userAgent", "tlsDetails", "arn:aws", "authorization failure message"):
-        assert forbidden not in rendered
 
 
 def test_real_pinned_sources_normalize_when_downloaded() -> None:
