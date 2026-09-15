@@ -5,9 +5,12 @@
 from __future__ import annotations
 
 import importlib
+import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 analysis = importlib.import_module("benchmark_error_analysis")
@@ -69,6 +72,40 @@ class ErrorAnalysisTests(unittest.TestCase):
         self.assertIsNotNone(projected)
         self.assertLess(len(projected["args"]["content"]), 9_000)
         self.assertTrue(projected["args"]["content"].endswith("<truncated>"))
+
+    def test_main_binds_cluster_metadata_to_exact_queue_bytes(self) -> None:
+        """The producer records the digest consumed by the near-miss builder."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            corpus_path = root / "corpus.jsonl"
+            predictions_path = root / "predictions.jsonl"
+            output_dir = root / "analysis"
+            corpus_path.write_text(
+                json.dumps(contextual_case("a", {"command": "safe"})) + "\n",
+                encoding="utf-8",
+            )
+            predictions_path.write_text(
+                json.dumps(prediction("a")) + "\n",
+                encoding="utf-8",
+            )
+            argv = [
+                "benchmark_error_analysis.py",
+                "--corpus",
+                str(corpus_path),
+                "--predictions",
+                str(predictions_path),
+                "--output-dir",
+                str(output_dir),
+                "--include-contextual-candidates",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(analysis.main(), 0)
+
+            queue_path = output_dir / "adjudication-queue.jsonl"
+            clusters = json.loads((output_dir / "clusters.json").read_text(encoding="utf-8"))
+            self.assertEqual(clusters["queue_sha256"], analysis.sha256_file(queue_path))
+            self.assertEqual(clusters["queue_count"], 1)
 
 
 if __name__ == "__main__":

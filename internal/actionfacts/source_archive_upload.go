@@ -3,7 +3,10 @@
 
 package actionfacts
 
-import "strings"
+import (
+	"net/netip"
+	"strings"
+)
 
 // ExactSourceArchiveUploads returns a defensive copy of exact bounded proofs.
 func ExactSourceArchiveUploads(facts Facts) []SourceArchiveUploadFact {
@@ -147,10 +150,26 @@ func hasSourceArchiveExternalUpload(facts Facts, commandID int64) bool {
 			(network.Scheme != "http" && network.Scheme != "https") {
 			continue
 		}
-		if network.Scope == NetworkScopePublic ||
-			network.Scope == NetworkScopeUnknown && network.TargetKind == NetworkTargetSingleHost {
+		if network.Scope == NetworkScopePublic {
 			return true
 		}
+		if network.Scope != NetworkScopeUnknown ||
+			network.TargetKind != NetworkTargetSingleHost {
+			continue
+		}
+		// Hostname destinations remain scope-unknown because ActionFacts never
+		// performs DNS. The normalized fact still distinguishes reserved local
+		// names and canonical numeric addresses from a literal external host.
+		host := strings.TrimSuffix(
+			strings.ToLower(strings.TrimSpace(network.NormalizedHost)), ".",
+		)
+		if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
+			continue
+		}
+		if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil && address.Unmap().IsLoopback() {
+			continue
+		}
+		return true
 	}
 	return false
 }

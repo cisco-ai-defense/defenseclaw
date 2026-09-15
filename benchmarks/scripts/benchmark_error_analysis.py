@@ -332,6 +332,8 @@ def main() -> int:
         include_contextual_candidates=args.include_contextual_candidates,
     )
     args.output_dir.mkdir(parents=True, exist_ok=False)
+    queue_path = args.output_dir / "adjudication-queue.jsonl"
+    write_jsonl(queue_path, queue)
     write_json(
         args.output_dir / "clusters.json",
         {
@@ -339,13 +341,13 @@ def main() -> int:
             "profile": args.profile,
             "corpus_sha256": sha256_file(args.corpus),
             "predictions_sha256": sha256_file(args.predictions),
+            "queue_sha256": sha256_file(queue_path),
             "case_count": len(cases),
             "prediction_count": len(prediction_rows),
             "queue_count": len(queue),
             "clusters": clusters,
         },
     )
-    write_jsonl(args.output_dir / "adjudication-queue.jsonl", queue)
     print(f"wrote {len(queue)} adjudication rows to {args.output_dir}")
     return 0
 
