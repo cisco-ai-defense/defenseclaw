@@ -331,6 +331,7 @@ _LOCAL_OBSERVABILITY_DASHBOARD_UIDS: tuple[str, ...] = (
     "defenseclaw-agent-identity",
     "defenseclaw-ai-discovery",
     "defenseclaw-ai-runtime",
+    "defenseclaw-blocked-events",
     "defenseclaw-connector-detail",
     "defenseclaw-connectors",
     "defenseclaw-findings",

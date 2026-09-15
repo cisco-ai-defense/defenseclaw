@@ -1,0 +1,1045 @@
+{
+  "annotations": {
+    "list": []
+  },
+  "description": "Focused SOC investigation for enforced and observe-mode blocked hook decisions: canonical verdicts, all exported rule IDs, safe projected tool context, repeated signatures, affected agents, and correlation pivots.",
+  "editable": true,
+  "fiscalYearStartMonth": 0,
+  "graphTooltip": 1,
+  "id": null,
+  "liveNow": false,
+  "links": [
+    {
+      "title": "Agent360",
+      "type": "link",
+      "url": "/d/defenseclaw-agent-360?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Agent Activity",
+      "type": "link",
+      "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Policy Decisions",
+      "type": "link",
+      "url": "/d/defenseclaw-policy-decisions?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
+      "title": "Findings",
+      "type": "link",
+      "url": "/d/defenseclaw-findings?${__url_time_range}&${connector:queryparam}&${severity:queryparam}&${rule_id:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "Blocked-event overview",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 2,
+      "type": "stat",
+      "title": "Enforced blocks",
+      "description": "Final hook decisions actually returned as block.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Would-block decisions",
+      "description": "Observe-mode or unsupported-surface decisions that were not enforced.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 4,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Blocked prompt hooks",
+      "description": "Blocked prompt-submission surfaces. Prompt text is not copied into decision records.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 5,
+      "type": "stat",
+      "title": "Blocked tool hooks",
+      "description": "Blocked non-prompt hook surfaces. See projected blocked tool calls below.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event!~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" [$__range])) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "red",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 6,
+      "type": "stat",
+      "title": "Affected agents",
+      "description": "Distinct reported agent IDs. Missing identity is not invented.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 16,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (agent_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_gen_ai_agent_id!=\"\" | label_format agent_id=\"{{.body_gen_ai_agent_id}}\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 7,
+      "type": "stat",
+      "title": "Primary rules",
+      "description": "Distinct first-listed rule IDs. Detail shows all eight possible rule slots.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 1,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "count(sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range]))) or vector(0)",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "decimals": 0,
+          "noValue": "0",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      }
+    },
+    {
+      "id": 8,
+      "type": "row",
+      "title": "Trends and recurring signatures",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 9,
+      "type": "timeseries",
+      "title": "Blocked decisions over time",
+      "description": "Enforced and would-block decisions remain separate.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_enforced=\"true\" [$__interval])) or vector(0)",
+          "refId": "A",
+          "legendFormat": "enforced"
+        },
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "sum(count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_guardrail_would_block=\"true\" [$__interval])) or vector(0)",
+          "refId": "B",
+          "legendFormat": "would block"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "custom": {
+            "drawStyle": "bars",
+            "fillOpacity": 40,
+            "lineWidth": 1,
+            "stacking": {
+              "mode": "normal",
+              "group": "A"
+            }
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "table",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      }
+    },
+    {
+      "id": 10,
+      "type": "bargauge",
+      "title": "Top primary rules",
+      "description": "First verdict rule ID on attributed decisions. Decisions without exported rule IDs remain in the overview and raw log details.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 8
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(15, sum by (rule_id) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<rule_id>[^\\\\\\\"]+)\\\\\\\".*\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant",
+          "legendFormat": "{{rule_id}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "red",
+                "value": 10
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "displayMode": "gradient",
+        "orientation": "horizontal",
+        "showUnfilled": true
+      }
+    },
+    {
+      "id": 11,
+      "type": "table",
+      "title": "Similar block signatures",
+      "description": "Exact grouping of attributed decisions by connector, decision, hook, severity, target/app, and primary rule—not semantic or AI-generated similarity. Unattributed decisions remain in the overview and raw log details.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 14,
+        "w": 24,
+        "h": 9
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "topk(50, sum by (connector, decision, hook_event, severity, target, primary_rule) (count_over_time({service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[\\\\\\\"(?P<primary_rule>[^\\\\\\\"]+)\\\\\\\".*\" | label_format hook_event=\"{{if .body_defenseclaw_hook_event}}{{.body_defenseclaw_hook_event}}{{else}}unreported{{end}}\", severity=\"{{if .body_defenseclaw_security_severity}}{{.body_defenseclaw_security_severity}}{{else}}unreported{{end}}\", target=\"{{if .body_defenseclaw_destination_app}}{{.body_defenseclaw_destination_app}}{{else}}unreported{{end}}\" [$__range])))",
+          "refId": "A",
+          "instant": true,
+          "queryType": "instant"
+        }
+      ],
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "excludeByName": {
+              "Time": true
+            },
+            "renameByName": {
+              "Value": "Occurrences",
+              "Value #A": "Occurrences",
+              "connector": "Connector",
+              "decision": "Decision",
+              "hook_event": "Hook surface",
+              "severity": "Severity",
+              "target": "Target / app",
+              "primary_rule": "Primary rule"
+            }
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No block signatures in range",
+          "custom": {
+            "align": "left"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "Occurrences"
+            },
+            "properties": [
+              {
+                "id": "custom.cellOptions",
+                "value": {
+                  "type": "color-background"
+                }
+              },
+              {
+                "id": "thresholds",
+                "value": {
+                  "mode": "absolute",
+                  "steps": [
+                    {
+                      "color": "transparent",
+                      "value": null
+                    },
+                    {
+                      "color": "orange",
+                      "value": 2
+                    },
+                    {
+                      "color": "red",
+                      "value": 10
+                    }
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "sortBy": [
+          {
+            "displayName": "Occurrences",
+            "desc": true
+          }
+        ]
+      }
+    },
+    {
+      "id": 12,
+      "type": "row",
+      "title": "Blocked decision detail",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 23,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 13,
+      "type": "logs",
+      "title": "Blocked event records — rules, reason, agent, and correlation",
+      "description": "Canonical hook decisions. Rules are verdict-ordered. Reason and target follow post-redaction projection. Expand for all fields; pivot by agent/evaluation/operation/trace without treating adjacency as causality.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 24,
+        "w": 24,
+        "h": 13
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}ENFORCED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · target={{.body_defenseclaw_destination_app}} · rules={{.rule_ids}} · reason={{.body_defenseclaw_guardrail_reason}} · evaluation={{.body_defenseclaw_evaluation_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 14,
+      "type": "row",
+      "title": "Projected prompt/tool evidence and pivots",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 37,
+        "w": 24,
+        "h": 1
+      }
+    },
+    {
+      "id": 15,
+      "type": "logs",
+      "title": "Projected blocked tool calls",
+      "description": "Canonical tool.invocation.blocked records. Arguments are already projected for this destination and reflect its redaction profile; this panel never reverses redaction.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 38,
+        "w": 12,
+        "h": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"tool.invocation.blocked\" | connector=~\"$connector\" | body_gen_ai_agent_id=~\"$agent\" | line_format \"{{.connector}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · tool={{.body_gen_ai_tool_name}} · args={{.body_gen_ai_tool_call_arguments}} · content_state={{.body_defenseclaw_content_input_state}} · call={{.body_gen_ai_tool_call_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 16,
+      "type": "logs",
+      "title": "Prompt-surface decisions",
+      "description": "Blocked prompt decisions with rules and post-redaction reason. Prompt bodies are not duplicated here; use Agent360 when the route permits projected content.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 38,
+        "w": 12,
+        "h": 11
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          },
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}ENFORCED{{else}}WOULD BLOCK{{end}} · {{.connector}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · rules={{.rule_ids}} · reason={{.body_defenseclaw_guardrail_reason}} · evaluation={{.body_defenseclaw_evaluation_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
+          "refId": "A"
+        }
+      ],
+      "options": {
+        "showTime": true,
+        "wrapLogMessage": true,
+        "prettifyLogMessage": false,
+        "dedupStrategy": "none",
+        "enableLogDetails": true,
+        "sortOrder": "Descending"
+      }
+    },
+    {
+      "id": 17,
+      "type": "text",
+      "title": "Investigation workflow",
+      "description": "Truthful correlation guidance",
+      "gridPos": {
+        "x": 0,
+        "y": 49,
+        "w": 24,
+        "h": 5
+      },
+      "options": {
+        "mode": "markdown",
+        "content": "### Investigate a block\n\n1. Filter by connector, decision, severity, hook surface, rule, or agent ID.\n2. Expand a decision and copy its agent, evaluation, operation, or trace ID.\n3. Open Agent360 for chronology/recovery, Findings for rule recurrence, or Policy Decisions for fleet trends.\n\nA verdict can carry eight rule IDs. “Similar” means the same telemetry signature, not semantic similarity. Missing content was not reported or was removed by destination redaction."
+      }
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 39,
+  "style": "dark",
+  "tags": [
+    "defenseclaw",
+    "security",
+    "blocks",
+    "guardrail",
+    "soc"
+  ],
+  "templating": {
+    "list": [
+      {
+        "name": "connector",
+        "label": "Connector",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_invocations_total, connector)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "decision",
+        "label": "Decision",
+        "type": "custom",
+        "query": "enforced,would_block",
+        "multi": true,
+        "includeAll": true,
+        "allValue": "enforced|would_block",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "enforced",
+            "value": "enforced",
+            "selected": false
+          },
+          {
+            "text": "would_block",
+            "value": "would_block",
+            "selected": false
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "severity",
+        "label": "Severity",
+        "type": "custom",
+        "query": "CRITICAL,HIGH,MEDIUM,LOW,INFO",
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          },
+          {
+            "text": "CRITICAL",
+            "value": "CRITICAL"
+          },
+          {
+            "text": "HIGH",
+            "value": "HIGH"
+          },
+          {
+            "text": "MEDIUM",
+            "value": "MEDIUM"
+          },
+          {
+            "text": "LOW",
+            "value": "LOW"
+          },
+          {
+            "text": "INFO",
+            "value": "INFO"
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "hook_event",
+        "label": "Hook surface",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}, event_type)",
+        "query": {
+          "query": "label_values(defenseclaw_connector_hook_outcome_total{connector=~\"$connector\"}, event_type)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".+",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "rule_id",
+        "label": "Rule",
+        "description": "Matches any canonical rule-ID slot; All retains unattributed blocks.",
+        "type": "query",
+        "datasource": {
+          "type": "prometheus",
+          "uid": "defenseclaw-prometheus"
+        },
+        "definition": "label_values(defenseclaw_scan_findings_by_rule_total{connector=~\"$connector\", severity=~\"$severity\"}, rule_id)",
+        "query": {
+          "query": "label_values(defenseclaw_scan_findings_by_rule_total{connector=~\"$connector\", severity=~\"$severity\"}, rule_id)",
+          "refId": "PrometheusVariableQueryEditor-VariableQuery"
+        },
+        "refresh": 2,
+        "sort": 1,
+        "multi": true,
+        "includeAll": true,
+        "allValue": ".*",
+        "current": {
+          "text": [
+            "All"
+          ],
+          "value": [
+            "$__all"
+          ],
+          "selected": true
+        },
+        "options": [
+          {
+            "text": "All",
+            "value": "$__all",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      },
+      {
+        "name": "agent",
+        "label": "Agent ID regex",
+        "description": "Optional reported gen_ai.agent.id regex.",
+        "type": "textbox",
+        "query": ".*",
+        "current": {
+          "text": ".*",
+          "value": ".*",
+          "selected": true
+        },
+        "options": [
+          {
+            "text": ".*",
+            "value": ".*",
+            "selected": true
+          }
+        ],
+        "skipUrlSync": false,
+        "hide": 0
+      }
+    ]
+  },
+  "time": {
+    "from": "now-24h",
+    "to": "now"
+  },
+  "timepicker": {
+    "refresh_intervals": [
+      "5s",
+      "10s",
+      "30s",
+      "1m",
+      "5m",
+      "15m",
+      "30m",
+      "1h"
+    ],
+    "time_options": [
+      "5m",
+      "15m",
+      "1h",
+      "6h",
+      "12h",
+      "24h",
+      "2d",
+      "7d",
+      "30d"
+    ]
+  },
+  "timezone": "browser",
+  "title": "DefenseClaw — Blocked Events & Analysis",
+  "uid": "defenseclaw-blocked-events",
+  "version": 1,
+  "weekStart": ""
+}

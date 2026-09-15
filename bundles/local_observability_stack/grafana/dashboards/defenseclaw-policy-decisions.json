@@ -9,6 +9,13 @@
   "liveNow": false,
   "links": [
     {
+      "title": "Blocked Events & Analysis",
+      "type": "link",
+      "url": "/d/defenseclaw-blocked-events?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
       "title": "Agent Activity (Live)",
       "type": "link",
       "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
