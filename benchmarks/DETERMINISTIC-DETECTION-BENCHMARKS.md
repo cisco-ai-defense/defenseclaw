@@ -102,6 +102,8 @@ are not redistributed.
 | [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | Paired structured attack/benign sequences | Detect-only contextual truth |
 | [HF Agentic Red Team](https://huggingface.co/datasets/sh111111111111111/agentic_red_team) | Argument-bearing synthetic trajectories | Detector coverage and rule discovery |
 | [Terminal Wrench trajectories](https://huggingface.co/datasets/few-sh/terminal-wrench-trajectories) | Reward-hacking and legitimate terminal trajectories with literal actions | Exact atomic attack positives, benign FPR, and contextual abstention |
+| [Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) | Software-engineering agent trajectories with literal tool calls | Benign finding FPR and bounded ActionFacts mining |
+| [Orchard](https://huggingface.co/datasets/microsoft/Orchard) | Verified software-engineering trajectories with literal tool calls | Benign finding FPR and bounded ActionFacts mining |
 | [Nemotron Agentic Terminal Pivot](https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1) | Large English terminal-agent action and sequence corpus | Benign action/stateful FPR and block rate |
 | [Cochise](https://github.com/andreashappe/cochise) | Result-backed autonomous penetration-test trajectories | Executed remote endpoint-defense tampering with real arguments |
 | [ATBench](https://huggingface.co/datasets/AI45Research/ATBench), [ATBench-Codex](https://huggingface.co/datasets/AI45Research/ATBench-Codex), [ATBench-Claw](https://huggingface.co/datasets/AI45Research/ATBench-Claw) | Agent-trajectory safety stress | Benign atomic FPR and contextual chain abstention |

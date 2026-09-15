@@ -61,3 +61,25 @@ func TestSourceArchiveUploadLoopbackAliasesDoNotProjectExternalFlow(t *testing.T
 		})
 	}
 }
+
+func TestSourceArchiveUploadUnknownScopeOnlyExcludesNumericLoopback(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		host string
+		want bool
+	}{
+		{name: "loopback", host: "127.0.0.1", want: false},
+		{name: "public_numeric", host: "198.51.100.7", want: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Facts{Network: []NetworkFact{{
+				CommandID: 7, Action: NetworkUpload, Scheme: "https",
+				NormalizedHost: test.host, Scope: NetworkScopeUnknown,
+				TargetKind: NetworkTargetSingleHost,
+			}}}
+			if got := hasSourceArchiveExternalUpload(facts, 7); got != test.want {
+				t.Fatalf("host %q external=%t, want %t", test.host, got, test.want)
+			}
+		})
+	}
+}
