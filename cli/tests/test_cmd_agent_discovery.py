@@ -1075,6 +1075,40 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
         self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(FULL_RUNTIME_PLANES))
         self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
 
+    def test_enable_without_host_flag_preserves_existing_opt_in(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        app.cfg.ai_discovery.runtime.enabled = True
+        app.cfg.ai_discovery.runtime.planes = list(FULL_RUNTIME_PLANES)
+        app.cfg.ai_discovery.runtime.enable_host_plane = True
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock:
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(FULL_RUNTIME_PLANES))
+        self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
+        app.cfg.save.assert_not_called()
+        restart_mock.assert_not_called()
+
+    def test_explicit_no_host_plane_disables_existing_opt_in(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        app.cfg.ai_discovery.runtime.enabled = True
+        app.cfg.ai_discovery.runtime.planes = list(FULL_RUNTIME_PLANES)
+        app.cfg.ai_discovery.runtime.enable_host_plane = True
+        with patch("defenseclaw.commands.cmd_setup._restart_services"):
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan", "--no-enable-host-plane"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(USER_RUNTIME_PLANES))
+        self.assertFalse(app.cfg.ai_discovery.runtime.enable_host_plane)
+
 
 class DiscoverySetupTests(unittest.TestCase):
     """Coverage for the interactive ``discovery setup`` wizard.

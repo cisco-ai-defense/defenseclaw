@@ -403,7 +403,7 @@ PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
-proto-tools:
+proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)

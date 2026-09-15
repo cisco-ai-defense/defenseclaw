@@ -24,6 +24,9 @@ func validateFreshIdentityDirectoryPlatform(path string, info os.FileInfo) error
 	if !runtimeowner.Trusted(stat.Uid) {
 		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
 	}
+	if stat.Uid == 0 && os.Geteuid() != 0 {
+		return fmt.Errorf("gateway: device identity directory is root-owned from a sudo-started gateway: %s", path)
+	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {
 		return fmt.Errorf("gateway: resolve device identity directory %s: %w", path, err)

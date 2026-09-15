@@ -458,6 +458,7 @@ func (j *JudgeStore) flushBatch(parent context.Context, jobs []judgePersistJob) 
 		j.recordPersistDropsV8(jobs, reason)
 		return
 	}
+	j.clearHealthDegraded("judge_persist.begin_batch")
 
 	// Track successful body inserts for body-persistence telemetry only.
 	committed := make([]judgePersistJob, 0, len(jobs))
@@ -497,10 +498,9 @@ func (j *JudgeStore) flushBatch(parent context.Context, jobs []judgePersistJob) 
 		j.recordPersistDropsV8(jobs, reason)
 		return
 	}
+	j.clearHealthDegraded("judge_persist.commit")
 	if len(committed) == len(jobs) {
-		j.clearHealthDegraded("judge_persist.begin_batch")
 		j.clearHealthDegraded("judge_persist.insert")
-		j.clearHealthDegraded("judge_persist.commit")
 	}
 	j.recordPersistBatchSizeV8(firstJudgeJobContext(jobs), int64(len(committed)))
 }

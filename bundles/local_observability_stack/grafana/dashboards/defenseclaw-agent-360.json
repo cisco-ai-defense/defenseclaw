@@ -355,7 +355,6 @@
       ],
       "fieldConfig": {
         "defaults": {
-          "noValue": "No completed tool calls in scope",
           "decimals": 0
         },
         "overrides": []

@@ -826,6 +826,7 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
     assert "_bundle-data: _checkout-write-preflight" in makefile
     assert "gateway: _checkout-write-preflight sync-openclaw-extension" in makefile
+    assert "proto-tools: _checkout-write-preflight" in makefile
     assert (
         '_checkout-write-preflight:\n'
         '\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"' in makefile

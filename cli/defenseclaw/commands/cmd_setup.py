@@ -1286,6 +1286,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
     from defenseclaw.guardrail import detect_api_key_env  # noqa: PLC0415
 
     llm = _target_llm_block(cfg, target_path)
+    previous_provider = (llm.provider or "").strip().lower()
 
     default_provider = llm.provider if llm.provider in _WIZARD_LLM_PROVIDERS else "anthropic"
     instances = list_custom_instances(data_dir)
@@ -1298,11 +1299,12 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
         # can list the models actually installed on that runtime.
-        default_base = llm.base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
+        current_base_url = llm.base_url if llm.provider == previous_provider else ""
+        default_base = current_base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
         llm.model, llm.base_url = pick_local_runtime(
             provider=llm.provider,
             current_model=llm.model or "",
-            current_base_url=llm.base_url or "",
+            current_base_url=current_base_url,
             default_base_url=default_base,
             flag_model=None,
             flag_base_url=None,

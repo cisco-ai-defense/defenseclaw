@@ -559,9 +559,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		}
 		if !selected[string(plane)] {
 			entry.Running = false
-			if entry.Reason == "" {
-				entry.Reason = s.deselectedReason(plane)
-			}
+			entry.Reason = s.deselectedReason(plane)
 			health = append(health, entry)
 			continue
 		}

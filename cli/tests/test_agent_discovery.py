@@ -383,7 +383,7 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     (data_dir / ad.CACHE_FILENAME).write_text(
         json.dumps(
             {
-                "version": 999,
+                "version": ad.CACHE_SCHEMA_VERSION - 1,
                 "scanned_at": "2026-05-04T18:21:00Z",
                 "ttl_seconds": ad.CACHE_TTL_SECONDS,
                 "agents": {},

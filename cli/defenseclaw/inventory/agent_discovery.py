@@ -79,7 +79,7 @@ UNTRUSTED_PREFIX_ERROR = "binary path is not in a trusted install prefix"
 # separates a connector's on-disk configuration from a verified application
 # installation; older caches therefore cannot represent every current install
 # signal faithfully.
-CACHE_SCHEMA_VERSION = 5
+CACHE_SCHEMA_VERSION = 6
 CACHE_TTL_SECONDS = 86_400
 CACHE_FILENAME = "agent_discovery.json"
 VERSION_TIMEOUT_SECONDS = 2.0

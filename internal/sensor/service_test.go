@@ -126,6 +126,28 @@ func TestPlaneHealthIsReportedEvenWhenAPlaneIsNotRunning(t *testing.T) {
 	}
 }
 
+func TestDeselectedUnavailablePlaneUsesDeselectionReason(t *testing.T) {
+	service := &Service{options: Options{
+		Config: config.AIRuntimeConfig{Enabled: true, Planes: []string{"a"}},
+		Platform: stubPlatform{capabilities: map[platform.Plane]platform.Capability{
+			platform.PlaneA: {Plane: platform.PlaneA, Available: true, Mechanism: "stub"},
+			platform.PlaneB: {Plane: platform.PlaneB, Available: true, Mechanism: "stub"},
+			platform.PlaneC: {
+				Plane: platform.PlaneC, Available: false, Mechanism: "eslogger",
+				Reason: "eslogger not found",
+			},
+		}},
+	}}
+
+	health := service.planeHealth(time.Now(), true, false)
+	if got := health[2].Reason; !strings.Contains(got, "not selected") {
+		t.Fatalf("deselected plane reason=%q, want explicit selection state", got)
+	}
+	if reasons := degradedReasonsFor(Snapshot{Planes: health}); len(reasons) != 0 {
+		t.Fatalf("deselected unavailable planes degraded health: %v", reasons)
+	}
+}
+
 // TestCorrelationDisabledIsNotTheSameAsDisagreement pins the distinction the
 // join is built on, at the service level.
 func TestCorrelationDisabledIsNotTheSameAsDisagreement(t *testing.T) {

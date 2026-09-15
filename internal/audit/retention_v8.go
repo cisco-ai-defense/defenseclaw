@@ -26,10 +26,10 @@ const (
 	// correlation ledger cannot starve the 7-day history window. The next
 	// scheduled run resumes in registry order.
 	RetentionCorrelationRunBudget = 30 * time.Second
-	// RetentionIncrementalVacuumPages reclaims at most 64 MiB of free pages
-	// per successful run when auto_vacuum=INCREMENTAL. Existing NONE
-	// databases ignore this until an operator VACUUM enables incremental mode.
-	RetentionIncrementalVacuumPages = 16_384
+	// RetentionIncrementalVacuumBytes bounds page reclamation per successful
+	// run when auto_vacuum=INCREMENTAL. SQLite page sizes are configurable, so
+	// the page count is derived at runtime rather than assuming 4 KiB pages.
+	RetentionIncrementalVacuumBytes = 64 << 20
 	sqliteAutoVacuumIncremental     = 2
 )
 
@@ -1938,12 +1938,15 @@ func (reaper *RetentionReaper) reclaimFreedPages(ctx context.Context) error {
 		return err
 	}
 	defer release()
-	var mode, freelist int
+	var mode, freelist, pageSize int
 	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA auto_vacuum`).Scan(&mode); err != nil {
 		return err
 	}
 	if mode != sqliteAutoVacuumIncremental {
 		return nil
+	}
+	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA page_size`).Scan(&pageSize); err != nil {
+		return err
 	}
 	if err := reaper.store.db.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&freelist); err != nil {
 		return err
@@ -1951,12 +1954,23 @@ func (reaper *RetentionReaper) reclaimFreedPages(ctx context.Context) error {
 	if freelist <= 0 {
 		return nil
 	}
-	pages := RetentionIncrementalVacuumPages
+	pages := retentionVacuumPageLimit(pageSize)
 	if freelist < pages {
 		pages = freelist
 	}
 	_, err = reaper.store.db.ExecContext(ctx, "PRAGMA incremental_vacuum("+strconv.Itoa(pages)+")")
 	return err
+}
+
+func retentionVacuumPageLimit(pageSize int) int {
+	if pageSize <= 0 {
+		return 1
+	}
+	pages := RetentionIncrementalVacuumBytes / pageSize
+	if pages < 1 {
+		return 1
+	}
+	return pages
 }
 
 func passiveRetentionCheckpoint(ctx context.Context, store *Store, judge *JudgeBodyStore) error {

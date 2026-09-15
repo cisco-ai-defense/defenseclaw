@@ -357,6 +357,34 @@ func TestJudgeStore_RepeatedAuditEmitFailureAlertsOnce(t *testing.T) {
 	}
 }
 
+func TestJudgeStorePersistenceHealthClearsAtEachSuccessfulBoundary(t *testing.T) {
+	fi := &fakeInserter{failEveryNthInsert: 1}
+	js := &JudgeStore{store: fi}
+	for _, operation := range []string{
+		"judge_persist.begin_batch",
+		"judge_persist.insert",
+		"judge_persist.commit",
+	} {
+		js.markHealthDegraded(operation)
+	}
+	payload, direction := makeJob(t)
+	js.flushBatch(context.Background(), []judgePersistJob{{
+		ctx: context.Background(), dir: direction, payload: payload,
+	}})
+
+	js.healthMu.Lock()
+	defer js.healthMu.Unlock()
+	if _, open := js.openHealthOps["judge_persist.begin_batch"]; open {
+		t.Fatal("successful BeginJudgeBatch did not clear its degraded state")
+	}
+	if _, open := js.openHealthOps["judge_persist.commit"]; open {
+		t.Fatal("successful Commit did not clear its degraded state")
+	}
+	if _, open := js.openHealthOps["judge_persist.insert"]; !open {
+		t.Fatal("failed insert cleared before every row succeeded")
+	}
+}
+
 func TestJudgeStore_AlertWriteFailureRemainsRetryable(t *testing.T) {
 	auditStore, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
 	if err != nil {

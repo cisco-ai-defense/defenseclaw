@@ -1043,8 +1043,11 @@ def discovery() -> None:
 )
 @click.option(
     "--enable-host-plane/--no-enable-host-plane",
-    default=False,
-    help="Opt into privileged kernel process, file, and identity telemetry (default: off).",
+    default=None,
+    help=(
+        "Opt into privileged kernel process, file, and identity telemetry "
+        "(new configurations default off; omitted preserves existing state)."
+    ),
 )
 @click.option("--restart/--no-restart", default=True,
               help="Restart the gateway after enabling so the sidecar wires the discovery service (default: on).")
@@ -1074,7 +1077,7 @@ def discovery_enable(
     lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
-    enable_host_plane: bool,
+    enable_host_plane: bool | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1190,7 +1193,7 @@ def discovery_enable(
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
             f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
-            f"runtime planes {'a/b/c' if enable_host_plane else 'a/b'} on)",
+            f"runtime planes {'a/b/c' if _discovery_runtime(ad).enable_host_plane else 'a/b'} on)",
             indent="  ",
         )
     except OSError as exc:
@@ -2873,11 +2876,14 @@ def _apply_runtime_settings(
 
     stage("enabled", enabled)
     if enabled:
-        if enable_host_plane is None:
-            enable_host_plane = False
-        desired_planes = list(FULL_RUNTIME_PLANES) if enable_host_plane else list(USER_RUNTIME_PLANES)
+        host_plane_requested = _runtime_host_plane_requested(runtime, enable_host_plane)
+        desired_planes = (
+            list(FULL_RUNTIME_PLANES)
+            if host_plane_requested
+            else list(USER_RUNTIME_PLANES)
+        )
         stage("planes", desired_planes)
-    stage("enable_host_plane", enable_host_plane)
+        stage("enable_host_plane", host_plane_requested)
     stage("dns_capture", dns_capture)
     stage("poll_interval_s", poll_interval_s)
     stage("min_risk_to_report", min_risk_to_report)
@@ -3046,36 +3052,48 @@ def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
 
 
 def _preview_runtime_planes(
-    ad: Any, *, enable_host_plane: bool
+    ad: Any, *, enable_host_plane: bool | None
 ) -> list[tuple[str, object, object]]:
     """Diff the requested runtime planes without mutating the live config."""
 
     runtime = getattr(ad, "runtime", None)
+    host_plane_requested = _runtime_host_plane_requested(runtime, enable_host_plane)
     if runtime is None:
         return [
             ("enabled", False, True),
-            ("planes", [], list(FULL_RUNTIME_PLANES if enable_host_plane else USER_RUNTIME_PLANES)),
-            ("enable_host_plane", False, enable_host_plane),
+            ("planes", [], list(FULL_RUNTIME_PLANES if host_plane_requested else USER_RUNTIME_PLANES)),
+            ("enable_host_plane", False, host_plane_requested),
         ]
     probe = AIRuntimeConfig(
         enabled=bool(getattr(runtime, "enabled", False)),
         planes=list(getattr(runtime, "planes", []) or []),
         enable_host_plane=bool(getattr(runtime, "enable_host_plane", False)),
     )
-    if enable_host_plane:
+    if host_plane_requested:
         return enable_all_runtime_planes(probe)
     return enable_user_runtime_planes(probe)
 
 
 def _apply_runtime_planes(
-    ad: Any, *, enable_host_plane: bool
+    ad: Any, *, enable_host_plane: bool | None
 ) -> list[tuple[str, object, object]]:
     """Turn on the requested runtime planes on the live config and return the diff."""
 
     runtime = _discovery_runtime(ad)
-    if enable_host_plane:
+    if _runtime_host_plane_requested(runtime, enable_host_plane):
         return enable_all_runtime_planes(runtime)
     return enable_user_runtime_planes(runtime)
+
+
+def _runtime_host_plane_requested(runtime: Any, requested: bool | None) -> bool:
+    """Resolve an explicit Plane C flag or preserve a complete prior opt-in."""
+
+    if requested is not None:
+        return requested
+    if runtime is None:
+        return False
+    planes = {str(plane).strip().lower() for plane in (getattr(runtime, "planes", None) or [])}
+    return bool(getattr(runtime, "enable_host_plane", False) and "c" in planes)
 
 
 def _preview_discovery_changes(

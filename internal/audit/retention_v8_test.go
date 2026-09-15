@@ -1792,3 +1792,18 @@ func stringsOf(value string, count int) string {
 	}
 	return result
 }
+
+func TestRetentionVacuumPageLimitUsesByteBudget(t *testing.T) {
+	for _, test := range []struct {
+		pageSize int
+		want     int
+	}{
+		{pageSize: 4 << 10, want: 16_384},
+		{pageSize: 64 << 10, want: 1_024},
+		{pageSize: 0, want: 1},
+	} {
+		if got := retentionVacuumPageLimit(test.pageSize); got != test.want {
+			t.Fatalf("retentionVacuumPageLimit(%d)=%d, want %d", test.pageSize, got, test.want)
+		}
+	}
+}

@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import json
 import os
+import socket
 import tempfile
 import threading
 import unittest
@@ -50,7 +51,7 @@ from click.testing import CliRunner
 pytestmark = pytest.mark.supported_connector_host
 from defenseclaw import config as _cfgmod
 from defenseclaw import credentials as creds
-from defenseclaw.commands import _llm_picker
+from defenseclaw.commands import _llm_picker, cmd_setup
 from defenseclaw.commands.cmd_setup import setup
 from defenseclaw.commands.cmd_setup_provider import OVERLAY_ENV, provider
 from defenseclaw.config import (
@@ -786,6 +787,40 @@ class TestLocalModelListing(unittest.TestCase):
         self.assertEqual(models, [])
         self.assertIn("credential", error.lower())
 
+    def test_loopback_poll_tries_each_vetted_resolver_address(self) -> None:
+        first = mock.Mock()
+        first.request.side_effect = ConnectionRefusedError("ipv6 listener unavailable")
+        second = mock.Mock()
+        response = mock.Mock(status=200)
+        response.read.return_value = b'{"models": []}'
+        second.getresponse.return_value = response
+        infos = [
+            (socket.AF_INET6, socket.SOCK_STREAM, 6, "", ("::1", 11434, 0, 0)),
+            (socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 11434)),
+        ]
+
+        with (
+            mock.patch.object(_llm_picker.socket, "getaddrinfo", return_value=infos),
+            mock.patch.object(
+                _llm_picker.http.client,
+                "HTTPConnection",
+                side_effect=[first, second],
+            ) as connection,
+        ):
+            payload = _llm_picker._loopback_get_json(
+                "http://localhost:11434/api/tags",
+                timeout=1.0,
+                max_bytes=4096,
+            )
+
+        self.assertEqual(payload, {"models": []})
+        self.assertEqual(
+            [call.args[0] for call in connection.call_args_list],
+            ["::1", "127.0.0.1"],
+        )
+        first.close.assert_called_once()
+        second.close.assert_called_once()
+
     def test_redirect_is_not_followed(self) -> None:
         base = self._start({"/api/tags": (302, b""), "/v1/models": (302, b"")})
         models, error = _llm_picker.list_local_provider_models("ollama", base)
@@ -827,6 +862,30 @@ class TestLocalModelListing(unittest.TestCase):
         self.assertEqual(model, "qwen3.5:9b-mlx")
         self.assertEqual(base_url, "http://127.0.0.1:11434")
         poll.assert_not_called()
+
+    def test_interactive_provider_change_drops_stale_base_url(self) -> None:
+        with tempfile.TemporaryDirectory() as data_dir:
+            cfg = _make_cfg(data_dir)
+            cfg.llm.provider = "openai"
+            cfg.llm.base_url = "https://old-provider.example/v1"
+            with (
+                mock.patch.object(_llm_picker, "pick_provider", return_value="ollama"),
+                mock.patch.object(_llm_picker, "list_custom_instances", return_value=[]),
+                mock.patch.object(
+                    _llm_picker,
+                    "pick_local_runtime",
+                    return_value=("qwen3.5:9b-mlx", "http://127.0.0.1:11434"),
+                ) as local_runtime,
+                mock.patch.object(_llm_picker, "summary_panel"),
+                mock.patch.object(cmd_setup.click, "prompt", side_effect=[30, 2]),
+            ):
+                cmd_setup._configure_llm(cfg, data_dir)
+
+        self.assertEqual(local_runtime.call_args.kwargs["current_base_url"], "")
+        self.assertEqual(
+            local_runtime.call_args.kwargs["default_base_url"],
+            "http://127.0.0.1:11434",
+        )
 
 
 if __name__ == "__main__":  # pragma: no cover

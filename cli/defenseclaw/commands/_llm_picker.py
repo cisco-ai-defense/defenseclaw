@@ -487,16 +487,16 @@ def _loopback_get_json(url: str, *, timeout: float, max_bytes: int) -> Any:
             raise ValueError("refusing non-loopback local LLM endpoint")
     port = parsed.port or (443 if parsed.scheme == "https" else 80)
     infos = socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
-    loopback_ip: ipaddress.IPv4Address | ipaddress.IPv6Address | None = None
+    loopback_ips: list[ipaddress.IPv4Address | ipaddress.IPv6Address] = []
     for info in infos:
         ip = ipaddress.ip_address(info[4][0])
         if isinstance(ip, ipaddress.IPv6Address) and ip.ipv4_mapped:
             ip = ip.ipv4_mapped
         if not ip.is_loopback:
             raise ValueError("refusing non-loopback local LLM endpoint")
-        if loopback_ip is None:
-            loopback_ip = ip
-    if loopback_ip is None:
+        if ip not in loopback_ips:
+            loopback_ips.append(ip)
+    if not loopback_ips:
         raise ValueError("could not resolve local LLM endpoint")
 
     path = parsed.path or "/"
@@ -510,27 +510,36 @@ def _loopback_get_json(url: str, *, timeout: float, max_bytes: int) -> Any:
         "Accept": "application/json",
         "User-Agent": "defenseclaw-local-model-list",
     }
-    connect_host = str(loopback_ip)
-    if parsed.scheme == "https":
-        conn = _pinned_https_connection(
-            connect_host=connect_host,
-            server_hostname=host,
-            port=port,
-            timeout=timeout,
-        )
-    else:
-        conn = http.client.HTTPConnection(connect_host, port, timeout=timeout)
-    try:
-        conn.request("GET", path, headers=headers)
-        resp = conn.getresponse()
-        if resp.status != 200:
-            raise ValueError(f"HTTP {resp.status}")
-        body = resp.read(max_bytes + 1)
-        if len(body) > max_bytes:
-            raise ValueError("local model list response is too large")
-        return _json.loads(body.decode("utf-8"))
-    finally:
-        conn.close()
+    last_connection_error: OSError | http.client.HTTPException | None = None
+    for loopback_ip in loopback_ips:
+        conn: http.client.HTTPConnection | None = None
+        try:
+            connect_host = str(loopback_ip)
+            if parsed.scheme == "https":
+                conn = _pinned_https_connection(
+                    connect_host=connect_host,
+                    server_hostname=host,
+                    port=port,
+                    timeout=timeout,
+                )
+            else:
+                conn = http.client.HTTPConnection(connect_host, port, timeout=timeout)
+            conn.request("GET", path, headers=headers)
+            resp = conn.getresponse()
+            if resp.status != 200:
+                raise ValueError(f"HTTP {resp.status}")
+            body = resp.read(max_bytes + 1)
+            if len(body) > max_bytes:
+                raise ValueError("local model list response is too large")
+            return _json.loads(body.decode("utf-8"))
+        except (OSError, http.client.HTTPException) as exc:
+            last_connection_error = exc
+        finally:
+            if conn is not None:
+                conn.close()
+    if last_connection_error is not None:
+        raise last_connection_error
+    raise ValueError("could not connect to local LLM endpoint")
 
 
 def _pinned_https_connection(

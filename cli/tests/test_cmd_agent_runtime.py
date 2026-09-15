@@ -256,6 +256,25 @@ def test_runtime_enable_defaults_to_user_level_planes(
     assert not restart_spy.calls
 
 
+def test_runtime_enable_preserves_existing_host_plane_when_flag_is_omitted(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    restart_spy: _RestartSpy,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    cfg = _config_with_runtime(tmp_path, monkeypatch)
+    cfg.ai_discovery.runtime.enabled = True
+    cfg.ai_discovery.runtime.planes = ["a", "b", "c"]
+    cfg.ai_discovery.runtime.enable_host_plane = True
+
+    result = _invoke("enable", "--yes", "--no-restart")
+
+    assert result.exit_code == 0, result.output
+    assert cfg.ai_discovery.runtime.planes == ["a", "b", "c"]
+    assert cfg.ai_discovery.runtime.enable_host_plane is True
+    assert not restart_spy.calls
+
+
 def test_runtime_no_restart_says_the_change_is_not_live(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
