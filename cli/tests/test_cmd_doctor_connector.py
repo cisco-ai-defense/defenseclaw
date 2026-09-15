@@ -1119,7 +1119,7 @@ class TestCheckHookContractLock(unittest.TestCase):
         self.assertEqual(check["status"], "fail")
         self.assertEqual(check["label"], "Hook contract")
         self.assertIn("root-owned from a sudo-started gateway", check["detail"])
-        self.assertIn("sudo chown", check["detail"])
+        self.assertIn("verified descriptor-bound ownership repair", check["detail"])
         self.assertTrue(
             check["detail"].startswith(
                 "hook_contract_lock.json is root-owned from a sudo-started gateway"

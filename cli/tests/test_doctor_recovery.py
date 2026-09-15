@@ -190,7 +190,8 @@ def test_audit_db_inspection_skips_full_quick_check_on_large_files(
 
     health = inspect_audit_db(target, data_dir=data_dir)
 
-    assert health.status is AuditDBHealthStatus.VALID
+    assert health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED
+    assert health.reason_code == "audit-db-integrity-unverified"
     assert health.integrity_scanned is False
     assert health.file_bytes > 0
 

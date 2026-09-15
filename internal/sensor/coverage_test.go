@@ -80,20 +80,20 @@ func TestPartialPlaneCoverageIsDegraded(t *testing.T) {
 			wantNoEntry: true,
 		},
 		{
-			name: "unprivileged egress limit is not degraded",
+			name: "unprivileged egress limit remains degraded",
 			health: PlaneHealth{
 				Plane: platform.PlaneB, Available: true, Running: true, Mechanism: "lsof(8)",
 				Reason: unprivilegedEgressLimit,
 			},
-			wantNoEntry: true,
+			wantReason: "partially covered",
 		},
 		{
-			name: "endpoint security needs root is not degraded",
+			name: "selected endpoint security needing root is degraded",
 			health: PlaneHealth{
 				Plane: platform.PlaneC, Available: true, Running: false,
 				Reason: "plane: Endpoint Security needs root; re-run the gateway elevated",
 			},
-			wantNoEntry: true,
+			wantReason: "available but not running",
 		},
 	} {
 		t.Run(test.name, func(t *testing.T) {

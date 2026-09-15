@@ -45,12 +45,8 @@ cat >&2 <<'EOF'
 error: do not run this as root/sudo against a user-owned checkout.
 Run 'make all' as the checkout owner.
 
-If a previous sudo make left root-owned files, reclaim them first:
-  sudo chown -R "$(id -un):$(id -gn)" -- \
-    cli/defenseclaw/_data \
-    cli/defenseclaw/__pycache__ \
-    internal/gateway/connector/openclaw_extension \
-    defenseclaw-gateway
-  sudo chown "$(id -un):$(id -gn)" -- "$HOME/.local/bin/defenseclaw-gateway"
+If an earlier sudo build left root-owned artifacts, preserve a backup and use
+the guided source-install repair. Do not recursively chown checkout paths by
+name: a path can be swapped between validation and mutation.
 EOF
 exit 1

@@ -995,7 +995,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{error_subsystem}} / {{error_code}}",
           "refId": "A"
         }

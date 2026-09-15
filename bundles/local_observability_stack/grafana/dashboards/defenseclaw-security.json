@@ -704,6 +704,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No guardrail evaluations in range",
           "unit": "ms"
         }
       }
@@ -1074,6 +1075,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No AI Defense attempts in range",
           "unit": "ms"
         }
       }

@@ -251,7 +251,7 @@ def test_health_badge_explains_degraded_versus_healthy() -> None:
     assert "watching" in healthy.health_explanation()
 
 
-def test_user_level_planes_are_healthy_without_endpoint_security() -> None:
+def test_selected_plane_gaps_are_degraded() -> None:
     model = RuntimePanelModel()
     model.set_snapshot({
         "enabled": True,
@@ -293,9 +293,9 @@ def test_user_level_planes_are_healthy_without_endpoint_security() -> None:
             },
         ],
     })
-    assert model.health_title() == "HEALTHY"
+    assert model.health_title() == "DEGRADED"
     assert model.needs_enable() is False
-    assert "optional" in model.health_explanation().lower()
+    assert "partial" in model.health_explanation().lower()
 
 
 def test_needs_enable_when_plane_c_is_not_selected() -> None:

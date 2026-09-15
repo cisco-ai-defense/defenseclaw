@@ -223,6 +223,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No HTTP requests in range",
           "unit": "ms"
         }
       },
@@ -377,7 +378,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{error_subsystem}} / {{error_code}}",
           "refId": "A"
         }
@@ -471,6 +472,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No completed streams in range",
           "unit": "ms"
         }
       }
@@ -503,6 +505,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No completed streams in range",
           "unit": "bytes"
         }
       }

@@ -236,7 +236,7 @@ def test_runtime_restart_actually_restarts_the_gateway(
     assert cfg.ai_discovery.runtime.enabled is expected_state
 
 
-def test_runtime_enable_defaults_all_three_planes(
+def test_runtime_enable_defaults_to_user_level_planes(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
     restart_spy: _RestartSpy,
@@ -251,8 +251,8 @@ def test_runtime_enable_defaults_all_three_planes(
 
     assert result.exit_code == 0, result.output
     assert cfg.ai_discovery.runtime.enabled is True
-    assert cfg.ai_discovery.runtime.planes == ["a", "b", "c"]
-    assert cfg.ai_discovery.runtime.enable_host_plane is True
+    assert cfg.ai_discovery.runtime.planes == ["a", "b"]
+    assert cfg.ai_discovery.runtime.enable_host_plane is False
     assert not restart_spy.calls
 
 

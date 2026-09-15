@@ -122,7 +122,6 @@ from defenseclaw.file_permissions import (
     dotenv_key_is_valid,
     read_regular_file_no_follow,
     root_owned_private_regular_file,
-    sudo_runtime_leftover_reclaim_command,
     sudo_runtime_leftover_relpaths,
     trusted_system_subprocess_env,
     windows_acl_confidentiality_error,
@@ -896,17 +895,20 @@ def _check_sudo_runtime_leftovers(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.sudo-leftovers",
         )
         return
-    command = sudo_runtime_leftover_reclaim_command(data_dir, leftovers)
+    remediation = (
+        "stop the gateway, preserve a backup, then rerun the gateway once with sudo "
+        "from the owning account so verified descriptor-bound ownership repair can run"
+    )
     _emit(
         "fail",
         "Sudo leftovers",
         "root-owned from a sudo-started gateway: "
         + ", ".join(leftovers)
-        + f"; reclaim with `{command}`",
+        + "; use the guided ownership repair",
         r=r,
         check_id="doctor.state.sudo-leftovers",
         reason_code="sudo-runtime-leftovers",
-        remediation=command,
+        remediation=remediation,
     )
 
 
@@ -1383,14 +1385,19 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
             remediation=remediation,
         )
         return
-    if health.integrity_scanned:
-        detail = f"{db_path}; SQLite quick_check=ok; required schema present"
-    else:
+    if health.status is AuditDBHealthStatus.INTEGRITY_UNVERIFIED:
         size_mib = max(health.file_bytes, 0) // (1024 * 1024)
-        detail = (
-            f"{db_path}; required schema present; full integrity scan skipped "
-            f"for {size_mib} MiB file"
+        _emit(
+            "warn",
+            "Audit database",
+            f"{db_path}; required schema present, but integrity is unverified for {size_mib} MiB file",
+            r=r,
+            check_id="doctor.state.audit-db",
+            reason_code=health.reason_code,
+            remediation="stop the gateway and run an offline SQLite integrity check",
         )
+        return
+    detail = f"{db_path}; SQLite quick_check=ok; required schema present"
     _emit(
         "pass",
         "Audit database",
@@ -1398,6 +1405,7 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
         r=r,
         check_id="doctor.state.audit-db",
     )
+    retention_days = _configured_local_retention_days(cfg)
     if health.file_bytes >= 1024 * 1024 * 1024:
         reclaim_mib = max(health.freelist_bytes, 0) // (1024 * 1024)
         _emit(
@@ -1410,11 +1418,10 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
             check_id="doctor.state.audit-storage-size",
             reason_code="audit-storage-unreclaimed",
             remediation=(
-                "let the gateway finish the 7-day retention pass, then compact "
+                f"let the gateway finish the {retention_days}-day retention pass, then compact "
                 "with a one-time VACUUM after stopping the gateway"
             ),
         )
-    retention_days = _configured_local_retention_days(cfg)
     if (
         retention_days > 0
         and health.oldest_retention_unix_nano is not None
@@ -1428,7 +1435,9 @@ def _check_audit_db(cfg, r: _DoctorResult) -> None:
             r=r,
             check_id="doctor.state.audit-retention-lag",
             reason_code="audit-retention-lag",
-            remediation="keep the gateway running so the 7-day reaper can finish draining history",
+            remediation=(
+                f"keep the gateway running so the {retention_days}-day reaper can finish draining history"
+            ),
         )
 
     try:
@@ -7830,7 +7839,10 @@ def _plan_audit_db_recovery(cfg) -> RepairDecision:
             "audit database passed private-custody, integrity, and schema checks",
             effects=effects,
         )
-    if health.status is AuditDBHealthStatus.INVALID:
+    if health.status in {
+        AuditDBHealthStatus.INVALID,
+        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
+    }:
         remediation = (
             "run `defenseclaw migrations apply` after a trusted backup review"
             if health.reason_code == "audit-db-schema-incomplete"
@@ -7881,7 +7893,10 @@ def _fix_audit_db_recovery(cfg, *, assume_yes: bool) -> tuple[str, str]:
     health = inspect_audit_db(target, data_dir=data_dir)
     if health.status is AuditDBHealthStatus.VALID:
         return ("skip", "audit database already passed integrity and schema checks")
-    if health.status is AuditDBHealthStatus.INVALID:
+    if health.status in {
+        AuditDBHealthStatus.INVALID,
+        AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
+    }:
         return (
             "fail",
             f"existing audit database is invalid ({health.reason_code}); refusing to replace it",
@@ -9540,15 +9555,12 @@ def _check_hook_contract_lock(
         return
     except PermissionError:
         if root_owned_private_regular_file(lock_path):
-            command = sudo_runtime_leftover_reclaim_command(
-                data_dir,
-                ["hook_contract_lock.json"],
-            )
             _emit(
                 "fail",
                 "Hook contract",
                 "hook_contract_lock.json is root-owned from a sudo-started gateway; "
-                f"reclaim with `{command}`",
+                "stop the gateway and rerun it once with sudo from the owning account "
+                "so verified descriptor-bound ownership repair can run",
                 r=r,
             )
             return

@@ -16,6 +16,7 @@ import (
 	"os"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 	"golang.org/x/sys/unix"
 )
 
@@ -155,7 +156,7 @@ func validateSecureFileInfo(info os.FileInfo) error {
 	if !ok || status.Nlink != 1 {
 		return unsafeFailure()
 	}
-	if os.Geteuid() != 0 && status.Uid != 0 && status.Uid != uint32(os.Geteuid()) {
+	if !runtimeowner.Trusted(status.Uid) {
 		return unsafeFailure()
 	}
 	return nil
@@ -180,7 +181,7 @@ func validateSecureDirectory(_ string, info os.FileInfo) error {
 	if !ok {
 		return unsafeFailure()
 	}
-	if os.Geteuid() != 0 && status.Uid != 0 && status.Uid != uint32(os.Geteuid()) {
+	if !runtimeowner.Trusted(status.Uid) {
 		return unsafeFailure()
 	}
 	return nil

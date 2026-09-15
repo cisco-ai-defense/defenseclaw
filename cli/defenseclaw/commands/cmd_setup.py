@@ -76,6 +76,7 @@ from defenseclaw.config import (
     PerConnectorGuardrailConfig,
     config_path_for_data_dir,
     enable_all_runtime_planes,
+    enable_user_runtime_planes,
     locked_config_yaml,
     locked_file_update,
 )
@@ -4714,10 +4715,57 @@ def _connector_contract_upgrade_guidance(
     """Give range-aware remediation without calling every mismatch an upgrade."""
 
     contracts = HOOK_CONTRACTS.get(normalize_connector(connector), ())
-    if len(contracts) != 1:
+    if not contracts:
         return f"Use a {label} version covered by a DefenseClaw hook contract, then rerun setup."
 
     contract = contracts[0]
+    if len(contracts) > 1 and normalized_version:
+        # A connector may carry consecutive reviewed contracts. For a version
+        # below or above the entire covered span, point at the nearest exact
+        # contract so remediation names a useful boundary instead of falling
+        # back to a generic "covered version" message.
+        ranged = [
+            candidate
+            for candidate in contracts
+            if candidate.min_agent_version or candidate.max_agent_version
+        ]
+        if ranged:
+            first = ranged[0]
+            last = ranged[0]
+            for candidate in ranged[1:]:
+                if candidate.min_agent_version and (
+                    not first.min_agent_version
+                    or compare_agent_versions(
+                        candidate.min_agent_version,
+                        first.min_agent_version,
+                    )
+                    < 0
+                ):
+                    first = candidate
+                if candidate.max_agent_version and (
+                    not last.max_agent_version
+                    or compare_agent_versions(
+                        candidate.max_agent_version,
+                        last.max_agent_version,
+                    )
+                    > 0
+                ):
+                    last = candidate
+            if first.min_agent_version and compare_agent_versions(
+                normalized_version,
+                first.min_agent_version,
+            ) < 0:
+                contract = first
+            elif last.max_agent_version and compare_agent_versions(
+                normalized_version,
+                last.max_agent_version,
+            ) >= 0:
+                contract = last
+            else:
+                return (
+                    f"Use a {label} version covered by a DefenseClaw hook contract, "
+                    "then rerun setup."
+                )
     requirement_parts: list[str] = []
     if contract.exact_agent_versions:
         requirement_parts.append("one of " + ", ".join(contract.exact_agent_versions))
@@ -8759,7 +8807,15 @@ def _apply_hook_connector_setup(
         cfg.ai_discovery.include_package_manifests = True
         cfg.ai_discovery.include_env_var_names = True
         cfg.ai_discovery.include_network_domains = True
-        enable_all_runtime_planes(cfg.ai_discovery.runtime)
+        runtime = cfg.ai_discovery.runtime
+        host_plane_already_enabled = bool(
+            runtime.enable_host_plane
+            and "c" in {str(plane).strip().lower() for plane in (runtime.planes or [])}
+        )
+        if host_plane_already_enabled:
+            enable_all_runtime_planes(runtime)
+        else:
+            enable_user_runtime_planes(runtime)
 
     try:
         cfg.save()

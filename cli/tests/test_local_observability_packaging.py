@@ -61,6 +61,7 @@ def _copy_make_bundle_inputs(destination: Path) -> None:
         Path("Makefile"),
         Path("scripts/gen_envvars_docs.py"),
         Path("scripts/install-openshell-sandbox.sh"),
+        Path("scripts/refuse-sudo-user-checkout.sh"),
         Path("scripts/telemetry_runtime_assets.py"),
         Path("internal/envvars/registry.json"),
         Path("cli/defenseclaw/__init__.py"),
@@ -103,7 +104,7 @@ def test_make_bundle_data_purges_generated_grafana_credentials(
             pytest.skip("the native Windows make path already has no rsync")
         command_dir = tmp_path / "commands-without-rsync"
         command_dir.mkdir()
-        for command in ("cp", "mkdir", "python3", "rm"):
+        for command in ("bash", "cp", "id", "mkdir", "python3", "rm", "stat"):
             executable = shutil.which(command)
             assert executable is not None
             (command_dir / command).symlink_to(executable)

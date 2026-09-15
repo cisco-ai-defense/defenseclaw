@@ -1665,7 +1665,12 @@ def _prompt_first_run(
 
 
 def _prompt_first_run_judge_connectors(connectors: list[str], *, default_all: bool) -> list[str]:
-    """Ask which first-run action connectors should get the optional LLM judge."""
+    """Ask which requested-action connectors should get the optional LLM judge.
+
+    ``connectors`` intentionally includes candidates downgraded to observe by
+    hook-contract admission. The operator's requested mode, rather than the
+    effective fallback mode, controls whether the optional judge is offered.
+    """
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is already enabled for every active connector selected above.")
     ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")

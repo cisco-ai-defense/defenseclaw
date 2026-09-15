@@ -33,7 +33,13 @@ from typing import Any
 import click
 import requests
 
-from defenseclaw.config import FULL_RUNTIME_PLANES, AIRuntimeConfig, enable_all_runtime_planes
+from defenseclaw.config import (
+    FULL_RUNTIME_PLANES,
+    USER_RUNTIME_PLANES,
+    AIRuntimeConfig,
+    enable_all_runtime_planes,
+    enable_user_runtime_planes,
+)
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
@@ -1035,6 +1041,11 @@ def discovery() -> None:
         "machine."
     ),
 )
+@click.option(
+    "--enable-host-plane/--no-enable-host-plane",
+    default=False,
+    help="Opt into privileged kernel process, file, and identity telemetry (default: off).",
+)
 @click.option("--restart/--no-restart", default=True,
               help="Restart the gateway after enabling so the sidecar wires the discovery service (default: on).")
 @click.option("--scan/--no-scan", default=True,
@@ -1063,6 +1074,7 @@ def discovery_enable(
     lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
+    enable_host_plane: bool,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1106,7 +1118,7 @@ def discovery_enable(
     from defenseclaw import ux
 
     diff = _preview_discovery_changes(ad, pending)
-    runtime_diff = _preview_runtime_all_planes(ad)
+    runtime_diff = _preview_runtime_planes(ad, enable_host_plane=enable_host_plane)
     if ad.enabled and not diff and not runtime_diff:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
@@ -1164,7 +1176,7 @@ def discovery_enable(
     ad.enabled = True
     if not ad.mode:
         ad.mode = "enhanced"
-    runtime_changes = _apply_runtime_all_planes(ad)
+    runtime_changes = _apply_runtime_planes(ad, enable_host_plane=enable_host_plane)
     if any(field == "enable_host_plane" and after is True for field, _before, after in runtime_changes):
         ux.warn(
             "runtime plane C (agent actions) reads kernel process, file, and "
@@ -1178,7 +1190,7 @@ def discovery_enable(
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
             f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
-            "runtime planes a/b/c on)",
+            f"runtime planes {'a/b/c' if enable_host_plane else 'a/b'} on)",
             indent="  ",
         )
     except OSError as exc:
@@ -1640,7 +1652,19 @@ def discovery_setup(
     )
     diff = _preview_discovery_changes(ad, pending)
     enabled_changed = bool(ad.enabled) != bool(enable_pref)
-    runtime_diff = _preview_runtime_all_planes(ad) if enable_pref else []
+    runtime = _discovery_runtime(ad)
+    host_plane_requested = bool(
+        getattr(runtime, "enable_host_plane", False)
+        and "c" in {
+            str(plane).strip().lower()
+            for plane in (getattr(runtime, "planes", []) or [])
+        }
+    )
+    runtime_diff = (
+        _preview_runtime_planes(ad, enable_host_plane=host_plane_requested)
+        if enable_pref
+        else []
+    )
 
     click.echo()
     ux.section("Summary")
@@ -1688,7 +1712,7 @@ def discovery_setup(
     if not ad.mode:
         ad.mode = "enhanced"
     if enable_pref:
-        _apply_runtime_all_planes(ad)
+        _apply_runtime_planes(ad, enable_host_plane=host_plane_requested)
 
     try:
         cfg.save()
@@ -1696,7 +1720,13 @@ def discovery_setup(
             "Config saved (ai_discovery.enabled = "
             f"{str(ad.enabled).lower()}, mode={ad.mode}, "
             f"scan_interval_min={ad.scan_interval_min}"
-            + (", runtime planes a/b/c on" if enable_pref else "")
+            + (
+                ", runtime planes a/b/c on"
+                if enable_pref and host_plane_requested
+                else ", runtime planes a/b on"
+                if enable_pref
+                else ""
+            )
             + ")",
             indent="  ",
         )
@@ -1948,9 +1978,16 @@ def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
     skipped = int(payload.get("processes_skipped") or 0)
     connections = int(payload.get("connections_observed") or 0)
     unattributed = int(payload.get("connections_unattributed") or 0)
+    host_observations = int(payload.get("host_plane_observations") or 0)
+    host_gated = int(payload.get("host_plane_gated") or 0)
     ux.subhead(
         f"processes: {observed} read, {skipped} not fully readable | "
         f"connections: {connections} seen, {unattributed} with no owner",
+        indent=indent,
+    )
+    ux.subhead(
+        f"host plane: {host_observations} kernel events classified, "
+        f"{host_gated} excluded outside AI-agent lineage",
         indent=indent,
     )
     if unattributed and connections:
@@ -2121,6 +2158,8 @@ def runtime_selftest(
                 "processes_skipped": payload.get("processes_skipped") or 0,
                 "connections_observed": payload.get("connections_observed") or 0,
                 "connections_unattributed": payload.get("connections_unattributed") or 0,
+                "host_plane_observations": payload.get("host_plane_observations") or 0,
+                "host_plane_gated": payload.get("host_plane_gated") or 0,
             },
             indent=2,
             sort_keys=True,
@@ -2835,8 +2874,8 @@ def _apply_runtime_settings(
     stage("enabled", enabled)
     if enabled:
         if enable_host_plane is None:
-            enable_host_plane = True
-        desired_planes = list(FULL_RUNTIME_PLANES) if enable_host_plane else ["a", "b"]
+            enable_host_plane = False
+        desired_planes = list(FULL_RUNTIME_PLANES) if enable_host_plane else list(USER_RUNTIME_PLANES)
         stage("planes", desired_planes)
     stage("enable_host_plane", enable_host_plane)
     stage("dns_capture", dns_capture)
@@ -3006,28 +3045,37 @@ def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
     return created
 
 
-def _preview_runtime_all_planes(ad: Any) -> list[tuple[str, object, object]]:
-    """Diff turning on planes A/B/C without mutating the live config."""
+def _preview_runtime_planes(
+    ad: Any, *, enable_host_plane: bool
+) -> list[tuple[str, object, object]]:
+    """Diff the requested runtime planes without mutating the live config."""
 
     runtime = getattr(ad, "runtime", None)
     if runtime is None:
         return [
             ("enabled", False, True),
-            ("planes", [], list(FULL_RUNTIME_PLANES)),
-            ("enable_host_plane", False, True),
+            ("planes", [], list(FULL_RUNTIME_PLANES if enable_host_plane else USER_RUNTIME_PLANES)),
+            ("enable_host_plane", False, enable_host_plane),
         ]
     probe = AIRuntimeConfig(
         enabled=bool(getattr(runtime, "enabled", False)),
         planes=list(getattr(runtime, "planes", []) or []),
         enable_host_plane=bool(getattr(runtime, "enable_host_plane", False)),
     )
-    return enable_all_runtime_planes(probe)
+    if enable_host_plane:
+        return enable_all_runtime_planes(probe)
+    return enable_user_runtime_planes(probe)
 
 
-def _apply_runtime_all_planes(ad: Any) -> list[tuple[str, object, object]]:
-    """Turn on every runtime plane on the live config and return the diff."""
+def _apply_runtime_planes(
+    ad: Any, *, enable_host_plane: bool
+) -> list[tuple[str, object, object]]:
+    """Turn on the requested runtime planes on the live config and return the diff."""
 
-    return enable_all_runtime_planes(_discovery_runtime(ad))
+    runtime = _discovery_runtime(ad)
+    if enable_host_plane:
+        return enable_all_runtime_planes(runtime)
+    return enable_user_runtime_planes(runtime)
 
 
 def _preview_discovery_changes(

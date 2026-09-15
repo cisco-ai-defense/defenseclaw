@@ -535,7 +535,15 @@ func (j *JudgeStore) logErrorEvent(ctx context.Context, action string, err error
 		for k, v := range details {
 			fields[boundedJudgeHealthValue(k, 128)] = boundedJudgeHealthValue(v, 256)
 		}
-		_ = j.logger.LogAlertCtx(judgePersistContext(ctx), "judge_store", "HIGH", action, fields)
+		if alertErr := j.logger.LogAlertCtx(
+			judgePersistContext(ctx), "judge_store", "HIGH", action, fields,
+		); alertErr != nil {
+			// The degraded marker is a delivery receipt, not merely an attempt.
+			// Roll it back so the continuing outage retries the health alert.
+			j.clearHealthDegraded(action)
+			fmt.Fprintf(os.Stderr, "[judge_store] health alert write failed for %s: %s\n",
+				boundedJudgeHealthValue(action, 128), boundedJudgeHealthValue(alertErr.Error(), 4096))
+		}
 		return
 	}
 	fmt.Fprintf(os.Stderr, "[judge_store] %s: %s\n", boundedJudgeHealthValue(action, 128),

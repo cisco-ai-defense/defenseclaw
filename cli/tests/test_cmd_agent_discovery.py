@@ -42,6 +42,7 @@ sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")
 from defenseclaw.commands import cmd_agent
 from defenseclaw.config import (
     FULL_RUNTIME_PLANES,
+    USER_RUNTIME_PLANES,
     AIDiscoveryConfig,
     AIRuntimeConfig,
     ClawConfig,
@@ -68,8 +69,8 @@ def _make_ctx(*, enabled: bool = False, connector: str = "openclaw",
     if runtime_complete:
         runtime = AIRuntimeConfig(
             enabled=True,
-            planes=list(FULL_RUNTIME_PLANES),
-            enable_host_plane=True,
+            planes=list(USER_RUNTIME_PLANES),
+            enable_host_plane=False,
         )
     else:
         runtime = AIRuntimeConfig(enabled=False, planes=[], enable_host_plane=False)
@@ -211,8 +212,8 @@ class DiscoveryEnableTests(unittest.TestCase):
         self.assertTrue(app.cfg.ai_discovery.enabled)
         self.assertFalse(app.cfg.ai_discovery.lookup_model_provenance_online)
         self.assertTrue(app.cfg.ai_discovery.runtime.enabled)
-        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(FULL_RUNTIME_PLANES))
-        self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(USER_RUNTIME_PLANES))
+        self.assertFalse(app.cfg.ai_discovery.runtime.enable_host_plane)
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         # Restart MUST propagate the active connector — otherwise the
@@ -1053,12 +1054,26 @@ class DiscoveryEnableFlagsTests(unittest.TestCase):
             )
         self.assertEqual(result.exit_code, 0, msg=result.output)
         self.assertTrue(app.cfg.ai_discovery.runtime.enabled)
-        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(FULL_RUNTIME_PLANES))
-        self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(USER_RUNTIME_PLANES))
+        self.assertFalse(app.cfg.ai_discovery.runtime.enable_host_plane)
         app.cfg.save.assert_called_once()
         restart_mock.assert_called_once()
         scan_mock.assert_not_called()
         self.assertEqual(app.logger.log_action.call_args.args[0], "ai_discovery-update")
+
+    def test_host_plane_requires_explicit_opt_in(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=False)
+        with patch("defenseclaw.commands.cmd_setup._restart_services"), \
+                patch.object(cmd_agent, "_trigger_post_enable_scan"):
+            result = runner.invoke(
+                cmd_agent.discovery_enable,
+                ["--yes", "--no-scan", "--enable-host-plane"],
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertEqual(app.cfg.ai_discovery.runtime.planes, list(FULL_RUNTIME_PLANES))
+        self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
 
 
 class DiscoverySetupTests(unittest.TestCase):
@@ -1108,6 +1123,26 @@ class DiscoverySetupTests(unittest.TestCase):
         self.assertIn("vetted loopback model metadata APIs", result.output)
         self.assertFalse(app.cfg.ai_discovery.lookup_model_provenance_online)
         # No save/restart when nothing actually changed.
+        app.cfg.save.assert_not_called()
+        restart_mock.assert_not_called()
+        scan_mock.assert_not_called()
+
+    def test_all_defaults_preserves_existing_host_plane_opt_in(self):
+        runner = CliRunner()
+        app = _make_ctx(enabled=True)
+        app.cfg.ai_discovery.runtime.planes = list(FULL_RUNTIME_PLANES)
+        app.cfg.ai_discovery.runtime.enable_host_plane = True
+        with patch("defenseclaw.commands.cmd_setup._restart_services") as restart_mock, \
+                patch.object(cmd_agent, "_trigger_post_enable_scan") as scan_mock:
+            result = runner.invoke(
+                cmd_agent.discovery_setup,
+                ["--yes"],
+                input=self._all_defaults(),
+                obj=app,
+            )
+        self.assertEqual(result.exit_code, 0, msg=result.output)
+        self.assertIn("No changes", result.output)
+        self.assertTrue(app.cfg.ai_discovery.runtime.enable_host_plane)
         app.cfg.save.assert_not_called()
         restart_mock.assert_not_called()
         scan_mock.assert_not_called()

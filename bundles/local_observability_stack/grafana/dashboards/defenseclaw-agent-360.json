@@ -355,6 +355,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No completed tool calls in scope",
           "decimals": 0
         },
         "overrides": []
@@ -620,6 +621,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No execution phase events in scope",
           "mappings": [
             {
               "type": "value",

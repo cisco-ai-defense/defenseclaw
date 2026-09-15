@@ -2182,6 +2182,29 @@ class AIRuntimeConfig:
 
 
 FULL_RUNTIME_PLANES: tuple[str, ...] = ("a", "b", "c")
+USER_RUNTIME_PLANES: tuple[str, ...] = ("a", "b")
+
+
+def enable_user_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, object, object]]:
+    """Turn on the unprivileged runtime planes without opting into Plane C."""
+
+    desired: tuple[tuple[str, object], ...] = (
+        ("enabled", True),
+        ("planes", list(USER_RUNTIME_PLANES)),
+        ("enable_host_plane", False),
+    )
+    changes: list[tuple[str, object, object]] = []
+    for field_name, value in desired:
+        current = getattr(runtime, field_name)
+        if field_name == "planes":
+            current_planes = [str(item).strip().lower() for item in (current or [])]
+            if current_planes == list(USER_RUNTIME_PLANES):
+                continue
+        elif current == value:
+            continue
+        changes.append((field_name, current, value))
+        setattr(runtime, field_name, value)
+    return changes
 
 
 def enable_all_runtime_planes(runtime: AIRuntimeConfig) -> list[tuple[str, object, object]]:
@@ -5234,14 +5257,12 @@ def default_config() -> Config:
         ai_discovery=AIDiscoveryConfig(
             enabled=True,
             confidence_policy_path=os.path.join(data_dir, "confidence.yaml"),
-            # Enabling AI discovery also enables every runtime plane. Plane C
-            # reports idle or blind when the host lacks privilege instead of
-            # staying unselected. DNS capture stays off: it is a separate
-            # elevated capture, not one of the three planes.
+            # New installs enable the user-level runtime planes. Plane C reads
+            # privileged host telemetry and remains an explicit opt-in.
             runtime=AIRuntimeConfig(
                 enabled=True,
-                planes=list(FULL_RUNTIME_PLANES),
-                enable_host_plane=True,
+                planes=list(USER_RUNTIME_PLANES),
+                enable_host_plane=False,
             ),
         ),
         gateway=GatewayConfig(

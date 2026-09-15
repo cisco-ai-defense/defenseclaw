@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import contextlib
 import os
-import shlex
 import stat
 import subprocess
 import sys
@@ -68,15 +67,49 @@ MAX_DOTENV_BYTES = 1024 * 1024
 def trusted_runtime_owner(st_uid: int, *, current_uid: int | None = None) -> bool:
     """True when *st_uid* may hold a self-managed ~/.defenseclaw runtime file.
 
-    Root is a trusted accessor (``sudo`` opening a user tree) and a trusted
-    writer (a sudo-started gateway leaving 0600 files). A foreign non-root
-    owner stays untrusted. Group/other-writable bits are a separate check.
+    Root may access root-owned files and files owned by the validated sudo
+    invoker. Merely running as root never makes an arbitrary UID trusted.
+    Group/other-writable bits are a separate check.
     """
 
     if current_uid is None:
         geteuid = getattr(os, "geteuid", None)
         current_uid = geteuid() if callable(geteuid) else st_uid
-    return current_uid == 0 or st_uid in {0, current_uid}
+    if st_uid in {0, current_uid}:
+        return True
+    if current_uid != 0:
+        return False
+    getuid = getattr(os, "getuid", None)
+    real_uid = getuid() if callable(getuid) else 0
+    if real_uid > 0 and st_uid == real_uid:
+        return True
+    sudo_uid = _validated_sudo_uid()
+    return sudo_uid is not None and st_uid == sudo_uid
+
+
+def _validated_sudo_uid() -> int | None:
+    """Return the sudo invoker UID only when account identity agrees."""
+
+    if os.name != "posix" or not hasattr(os, "geteuid") or os.geteuid() != 0:
+        return None
+    raw_uid = os.environ.get("SUDO_UID", "")
+    raw_gid = os.environ.get("SUDO_GID", "")
+    sudo_user = os.environ.get("SUDO_USER", "")
+    if not raw_uid.isdecimal() or not raw_gid.isdecimal() or not sudo_user:
+        return None
+    uid = int(raw_uid)
+    gid = int(raw_gid)
+    if str(uid) != raw_uid or str(gid) != raw_gid or uid == 0:
+        return None
+    try:
+        import pwd
+
+        account = pwd.getpwnam(sudo_user)
+    except (ImportError, KeyError, OSError):
+        return None
+    if account.pw_uid != uid or account.pw_gid != gid:
+        return None
+    return uid
 
 
 def root_owned_private_regular_file(path: str | os.PathLike[str]) -> bool:
@@ -150,16 +183,6 @@ def sudo_runtime_leftover_relpaths(data_dir: str | os.PathLike[str]) -> list[str
             leftovers.append(rel)
     return leftovers
 
-
-def sudo_runtime_leftover_reclaim_command(
-    data_dir: str | os.PathLike[str],
-    relpaths: list[str],
-) -> str:
-    """Return a copy-pasteable ``chown`` that returns leftovers to the operator."""
-
-    root = os.fspath(data_dir)
-    quoted = " ".join(shlex.quote(os.path.join(root, rel)) for rel in relpaths)
-    return f'sudo chown "$(id -un):$(id -gn)" -- {quoted}'
 
 _WINDOWS_TRUSTED_SYSTEM_CONTROLLER_SIDS = frozenset(
     {

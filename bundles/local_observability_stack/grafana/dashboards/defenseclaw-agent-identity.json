@@ -190,7 +190,13 @@
             "uid": "defenseclaw-loki"
           }
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "Not reported by active connectors"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "stat",

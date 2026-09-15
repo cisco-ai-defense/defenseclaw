@@ -3320,3 +3320,48 @@ def test_runtime_fd_history_excludes_unavailable_sentinel() -> None:
     assert current["fieldConfig"]["defaults"]["mappings"][0]["options"]["-1"]["text"] == ("Not supported")
     assert history["targets"][0]["expr"] == "max(defenseclaw_runtime_fd_in_use >= 0)"
     assert "-1" in history["description"]
+    assert history["fieldConfig"]["defaults"]["noValue"] == "Not supported on this platform"
+
+
+def test_runtime_dashboard_counts_cycles_and_planes_instead_of_log_samples() -> None:
+    dashboard = _dashboard("defenseclaw-ai-runtime.json")
+    missing = _panel(dashboard, "Planes not running")["targets"][0]["expr"]
+    partial = _panel(dashboard, "Partial poll cycles")["targets"][0]["expr"]
+    classified = _panel(dashboard, "Plane C events classified")
+    gated = _panel(dashboard, "Plane C events gated")
+
+    assert "count(sum by (body_defenseclaw_ai_runtime_plane)" in missing
+    assert "sum(count_over_time" not in missing
+    assert "max(count_over_time" in partial
+    assert "sum(count_over_time" not in partial
+    assert "body_defenseclaw_ai_runtime_host_plane_observations" in classified["targets"][0]["expr"]
+    assert "body_defenseclaw_ai_runtime_host_plane_gated" in gated["targets"][0]["expr"]
+    assert classified["fieldConfig"]["defaults"]["noValue"] == "No Plane C poll data"
+    assert gated["fieldConfig"]["defaults"]["noValue"] == "No Plane C poll data"
+
+
+def test_dashboards_distinguish_zero_from_unreported_and_empty_states() -> None:
+    discovery = _dashboard("defenseclaw-ai-discovery.json")
+    for title in ("Detector errors / min", "Files scanned / min"):
+        assert "or vector(0)" in _panel(discovery, title)["targets"][0]["expr"]
+
+    runtime = _dashboard("defenseclaw-ai-runtime.json")
+    expected_runtime_empty_states = {
+        "Findings by severity": "No runtime findings in range",
+        "Inventory agreement": "No runtime findings to correlate",
+        "Runtime findings": "No runtime findings in range",
+        "Tactics by stage": "No Plane C tactics in range",
+        "Tactics by responsible agent": "No Plane C tactics in range",
+        "Agent activity — one record per tactic": "No Plane C tactics in range",
+    }
+    for title, expected in expected_runtime_empty_states.items():
+        assert _panel(runtime, title)["fieldConfig"]["defaults"]["noValue"] == expected
+
+    findings = _dashboard("defenseclaw-findings.json")
+    for title in (
+        "Top rule (1h)",
+        "Top 20 rules with sparklines (1h)",
+        "Findings rate for $rule_id by severity",
+        "Heatmap — rule_id (rows) × time (cols)",
+    ):
+        assert _panel(findings, title)["fieldConfig"]["defaults"]["noValue"].startswith("No findings")

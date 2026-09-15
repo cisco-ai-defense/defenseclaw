@@ -74,12 +74,12 @@
       "gridPos": {
         "x": 0,
         "y": 1,
-        "w": 5,
+        "w": 3,
         "h": 5
       },
       "targets": [
         {
-          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane_running=\"false\")[$__interval]))",
+          "expr": "count(sum by (body_defenseclaw_ai_runtime_plane) (count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | body_defenseclaw_ai_runtime_plane_running=\"false\")[$__interval]))) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -122,6 +122,92 @@
     },
     {
       "type": "stat",
+      "title": "Processes observed",
+      "description": "Processes inspected in the latest runtime poll. This remains useful evidence when no process crosses the finding threshold.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 3,
+        "y": 1,
+        "w": 3,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_processes_observed)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "orange", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Connections observed",
+      "description": "Network connections inspected in the latest runtime poll, including ordinary traffic that did not produce a finding.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 6,
+        "y": 1,
+        "w": 3,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_connections_observed)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": { "calcs": ["lastNotNull"] },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "orange", "value": null },
+              { "color": "green", "value": 1 }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
       "title": "Unattributable connections",
       "description": "Outbound connections observed with no owning process. On an unprivileged POSIX host this is how much of the machine's egress cannot be named \u2014 the difference between a quiet host and a blind sensor. Windows reports the owning pid in every row, so a non-zero value there means something else.",
       "datasource": {
@@ -129,9 +215,9 @@
         "uid": "defenseclaw-loki"
       },
       "gridPos": {
-        "x": 5,
+        "x": 9,
         "y": 1,
-        "w": 5,
+        "w": 3,
         "h": 5
       },
       "targets": [
@@ -182,9 +268,9 @@
         "uid": "defenseclaw-loki"
       },
       "gridPos": {
-        "x": 10,
+        "x": 12,
         "y": 1,
-        "w": 5,
+        "w": 3,
         "h": 5
       },
       "targets": [
@@ -237,12 +323,12 @@
       "gridPos": {
         "x": 15,
         "y": 1,
-        "w": 9,
+        "w": 3,
         "h": 5
       },
       "targets": [
         {
-          "expr": "sum(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | outcome=\"partial\")[$__interval]))",
+          "expr": "max(count_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | outcome=\"partial\")[$__interval])) or vector(0)",
           "refId": "A",
           "instant": true,
           "datasource": {
@@ -262,6 +348,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No partial polls",
           "unit": "short",
           "thresholds": {
             "mode": "absolute",
@@ -273,6 +360,110 @@
               {
                 "color": "orange",
                 "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Plane C events classified",
+      "description": "Kernel observations classified into an AI-agent tactic during the latest Plane C poll. This is useful positive evidence even when no observation becomes a finding.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 1,
+        "w": 3,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_observations)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No Plane C poll data",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "orange",
+                "value": null
+              },
+              {
+                "color": "green",
+                "value": 1
+              }
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Plane C events gated",
+      "description": "Kernel observations excluded because they were outside a discovered AI-agent process lineage. This shows how much host noise Plane C filtered without exporting process or payload content.",
+      "datasource": {
+        "type": "loki",
+        "uid": "defenseclaw-loki"
+      },
+      "gridPos": {
+        "x": 21,
+        "y": 1,
+        "w": 3,
+        "h": 5
+      },
+      "targets": [
+        {
+          "expr": "max_over_time(({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"ai.runtime.plane_health\" | unwrap body_defenseclaw_ai_runtime_host_plane_gated)[$__interval])",
+          "refId": "A",
+          "instant": true,
+          "datasource": {
+            "type": "loki",
+            "uid": "defenseclaw-loki"
+          }
+        }
+      ],
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ]
+        },
+        "colorMode": "value",
+        "graphMode": "area"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No Plane C poll data",
+          "unit": "short",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "green",
+                "value": null
               }
             ]
           }
@@ -309,6 +500,12 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No plane health samples in range"
+        },
+        "overrides": []
       }
     },
     {
@@ -349,6 +546,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No runtime findings in range",
           "unit": "short",
           "custom": {
             "drawStyle": "line",
@@ -395,6 +593,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No runtime findings to correlate",
           "unit": "short",
           "custom": {
             "drawStyle": "line",
@@ -444,6 +643,12 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No runtime findings in range"
+        },
+        "overrides": []
       }
     },
     {
@@ -484,6 +689,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No Plane C tactics in range",
           "unit": "short",
           "custom": {
             "drawStyle": "line",
@@ -530,6 +736,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No Plane C tactics in range",
           "unit": "short",
           "custom": {
             "drawStyle": "line",
@@ -579,6 +786,12 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No Plane C tactics in range"
+        },
+        "overrides": []
       }
     }
   ]

@@ -449,7 +449,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval]))",
+          "expr": "sum by (policy_status) (rate(defenseclaw_policy_reloads_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{policy_status}}",
           "refId": "A",
           "datasource": {
@@ -652,7 +652,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (action, severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{action}} · {{severity}}",
           "refId": "A"
         }

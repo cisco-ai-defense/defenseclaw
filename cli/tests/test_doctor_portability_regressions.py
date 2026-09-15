@@ -491,8 +491,12 @@ def test_windows_process_evidence_treats_unknown_open_error_as_unavailable(monke
     assert "could not" in evidence.reason
 
 
-def test_trusted_runtime_owner_accepts_root_and_self_only() -> None:
-    assert file_permissions.trusted_runtime_owner(501, current_uid=0) is True
+def test_trusted_runtime_owner_accepts_root_and_self_only(monkeypatch) -> None:
+    monkeypatch.delenv("SUDO_UID", raising=False)
+    monkeypatch.delenv("SUDO_GID", raising=False)
+    monkeypatch.delenv("SUDO_USER", raising=False)
+    monkeypatch.setattr(file_permissions.os, "getuid", lambda: 0)
+    assert file_permissions.trusted_runtime_owner(501, current_uid=0) is False
     assert file_permissions.trusted_runtime_owner(0, current_uid=501) is True
     assert file_permissions.trusted_runtime_owner(501, current_uid=501) is True
     assert file_permissions.trusted_runtime_owner(502, current_uid=501) is False
@@ -551,9 +555,6 @@ def test_sudo_runtime_leftover_relpaths_names_root_owned_runtime_files(
     leftovers = file_permissions.sudo_runtime_leftover_relpaths(tmp_path)
 
     assert leftovers == ["hook_contract_lock.json", "hooks/.hook-codex.token"]
-    command = file_permissions.sudo_runtime_leftover_reclaim_command(tmp_path, leftovers)
-    assert "sudo chown" in command
-    assert "hook_contract_lock.json" in command
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX sudo leftover naming")
@@ -574,7 +575,8 @@ def test_doctor_names_sudo_runtime_leftovers(monkeypatch, tmp_path) -> None:
     assert check["status"] == "fail"
     assert check["label"] == "Sudo leftovers"
     assert "hook_contract_lock.json" in check["detail"]
-    assert "sudo chown" in check["detail"]
+    assert "guided ownership repair" in check["detail"]
+    assert "descriptor-bound" in check["remediation"]
     assert check["reason_code"] == "sudo-runtime-leftovers"
 
 

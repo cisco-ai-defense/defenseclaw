@@ -212,7 +212,10 @@ class TestInitFirstRunBackend(unittest.TestCase):
     """Tests for the new canonical first-run backend behind init."""
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-first-run-")
+        # macOS exposes /var through /private/var. Device-identity setup
+        # intentionally rejects an indirect data-dir path, so tests must pass
+        # the canonical path just as the CLI persists it.
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-first-run-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
@@ -3210,7 +3213,7 @@ class TestInitFailModeFlag(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-failmode-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-failmode-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",
@@ -3342,7 +3345,7 @@ class TestInitHITLFlags(unittest.TestCase):
     """
 
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-init-hilt-")
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-init-hilt-"))
         self.runner = CliRunner()
         self.selection_patcher = patch(
             "defenseclaw.agent_selection.record_setup_agent_selections",

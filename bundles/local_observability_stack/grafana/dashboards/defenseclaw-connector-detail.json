@@ -221,6 +221,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No native OTLP traffic from this connector",
           "unit": "s",
           "thresholds": {
             "mode": "absolute",

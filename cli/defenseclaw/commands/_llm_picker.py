@@ -403,7 +403,8 @@ def list_local_provider_models(
         try:
             payload = _loopback_get_json(url, timeout=timeout, max_bytes=_LOCAL_LIST_MAX_BYTES)
         except Exception as exc:
-            last_error = str(exc).strip().splitlines()[0][:160] or type(exc).__name__
+            message_lines = str(exc).strip().splitlines()
+            last_error = message_lines[0][:160] if message_lines else type(exc).__name__
             continue
         models = _parse_local_model_payload(payload)
         return models, ""

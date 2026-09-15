@@ -38,10 +38,6 @@ def _selected_plane_gap(plane: PlaneRow) -> bool:
     reason = plane.reason.lower()
     if "not selected" in reason or "enable_host_plane" in reason:
         return False
-    if plane.plane == "c" and (
-        "needs root" in reason or "gateway elevated" in reason
-    ):
-        return False
     return True
 
 
@@ -167,6 +163,8 @@ class RuntimeSnapshot:
     processes_skipped: int = 0
     connections_observed: int = 0
     connections_unattributed: int = 0
+    host_plane_observations: int = 0
+    host_plane_gated: int = 0
     degraded: bool = False
     degraded_reasons: tuple[str, ...] = field(default_factory=tuple)
 
@@ -182,6 +180,8 @@ class RuntimeOverview:
     unobserved: int = 0
     processes: int = 0
     connections: int = 0
+    host_observations: int = 0
+    host_gated: int = 0
     plane_summary: str = ""
     context: str = ""
     top_findings: tuple[str, ...] = ()
@@ -251,6 +251,8 @@ def decode_runtime_snapshot(payload: Any) -> RuntimeSnapshot:
         processes_skipped=int(payload.get("processes_skipped") or 0),
         connections_observed=int(payload.get("connections_observed") or 0),
         connections_unattributed=int(payload.get("connections_unattributed") or 0),
+        host_plane_observations=int(payload.get("host_plane_observations") or 0),
+        host_plane_gated=int(payload.get("host_plane_gated") or 0),
         degraded=bool(payload.get("degraded")),
         degraded_reasons=tuple(str(reason) for reason in (payload.get("degraded_reasons") or [])),
     )
@@ -261,6 +263,7 @@ class RuntimePanelModel:
 
     def __init__(self) -> None:
         self.snapshot = RuntimeSnapshot()
+        self._inventory_unobserved = 0
         self.filtered: tuple[RuntimeRow, ...] = ()
         self.cursor = 0
         self.filter_text = ""
@@ -274,6 +277,11 @@ class RuntimePanelModel:
 
     def set_snapshot(self, payload: Any) -> None:
         self.snapshot = decode_runtime_snapshot(payload)
+        self._inventory_unobserved = sum(
+            1
+            for row in self.snapshot.rows
+            if (row.correlation_verdict or "").strip().lower() == "unobserved"
+        )
         self._apply_filter()
 
     def set_filter(self, text: str) -> None:
@@ -329,11 +337,7 @@ class RuntimePanelModel:
         )
 
     def inventory_unobserved_count(self) -> int:
-        return sum(
-            1
-            for row in self.snapshot.rows
-            if (row.correlation_verdict or "").strip().lower() == "unobserved"
-        )
+        return self._inventory_unobserved
 
     def findings_context(self) -> str:
         """What a sparse or uncorrelated table actually means."""
@@ -384,7 +388,7 @@ class RuntimePanelModel:
                 next_action=self.next_action(),
             )
         top: list[str] = []
-        for row in self.filtered[:3]:
+        for row in self.snapshot.rows[:3]:
             agent = f"  {row.agent_name}" if row.agent_name else ""
             providers = f"  {row.provider_summary}" if row.provider_summary != "-" else ""
             inventory = row.correlation_verdict or "-"
@@ -400,6 +404,8 @@ class RuntimePanelModel:
             unobserved=self.inventory_unobserved_count(),
             processes=self.snapshot.processes_observed,
             connections=self.snapshot.connections_observed,
+            host_observations=self.snapshot.host_plane_observations,
+            host_gated=self.snapshot.host_plane_gated,
             plane_summary="  ".join(f"{plane.name}: {plane.badge}" for plane in self.snapshot.planes),
             context=self.findings_context(),
             top_findings=tuple(top),
@@ -413,19 +419,9 @@ class RuntimePanelModel:
             return "off"
         if not self.snapshot.scanned_at:
             return "waiting"
-        if self.snapshot.degraded and not self._only_expected_user_level_gaps():
+        if self.snapshot.degraded:
             return "degraded"
         return "healthy"
-
-    def _only_expected_user_level_gaps(self) -> bool:
-        """True when every down plane is an opt-in or unprivileged limit."""
-
-        if not self.snapshot.planes:
-            return False
-        return not any(
-            plane.badge != "up" and _selected_plane_gap(plane)
-            for plane in self.snapshot.planes
-        )
 
     def health_title(self) -> str:
         return {

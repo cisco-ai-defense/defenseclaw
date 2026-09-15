@@ -824,10 +824,11 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert main.index("source_install_ownership check") < main.index("setup_python_venv")
     assert "all: _source-install-dev-preflight" in makefile
     assert "$(MAKE) --no-print-directory _source-dev-install" in makefile
-    assert '_bundle-data:\n\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"' in makefile
+    assert "_bundle-data: _checkout-write-preflight" in makefile
+    assert "gateway: _checkout-write-preflight sync-openclaw-extension" in makefile
     assert (
-        'gateway: sync-openclaw-extension\n\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"'
-        in makefile
+        '_checkout-write-preflight:\n'
+        '\t@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"' in makefile
     )
     assert "sudo/root source-install is not supported" in (
         ROOT / "scripts/source-install-preflight.sh"
@@ -946,6 +947,7 @@ def test_refuse_sudo_user_checkout_blocks_root_against_user_tree(tmp_path: Path)
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    _write_executable(fake_bin / "stat", b"#!/bin/sh\necho 501\n")
     environment = {
         **os.environ,
         "PATH": f"{fake_bin}:/usr/bin:/bin",
@@ -971,6 +973,7 @@ def test_source_preflight_refuses_root_against_user_checkout(tmp_path: Path) -> 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     _write_executable(fake_bin / "id", b"#!/bin/sh\necho 0\n")
+    _write_executable(fake_bin / "stat", b"#!/bin/sh\necho 501\n")
     environment = {
         **os.environ,
         "HOME": str(tmp_path / "home"),

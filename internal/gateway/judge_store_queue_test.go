@@ -357,6 +357,36 @@ func TestJudgeStore_RepeatedAuditEmitFailureAlertsOnce(t *testing.T) {
 	}
 }
 
+func TestJudgeStore_AlertWriteFailureRemainsRetryable(t *testing.T) {
+	auditStore, err := audit.NewStore(filepath.Join(t.TempDir(), "audit.db"))
+	if err != nil {
+		t.Fatalf("audit.NewStore: %v", err)
+	}
+	if err := auditStore.Init(); err != nil {
+		t.Fatalf("audit.Init: %v", err)
+	}
+	logger := audit.NewLogger(auditStore)
+	if err := auditStore.Close(); err != nil {
+		t.Fatalf("audit.Close: %v", err)
+	}
+
+	js := &JudgeStore{logger: logger}
+	for attempt := 1; attempt <= 2; attempt++ {
+		js.logErrorEvent(
+			context.Background(),
+			"judge_audit.emit",
+			errors.New("continuing judge failure"),
+			nil,
+		)
+		js.healthMu.Lock()
+		_, suppressed := js.openHealthOps["judge_audit.emit"]
+		js.healthMu.Unlock()
+		if suppressed {
+			t.Fatalf("attempt %d left the failed alert marked delivered", attempt)
+		}
+	}
+}
+
 func judgeCanonicalAttributes(t *testing.T, record observability.Record) map[string]any {
 	t.Helper()
 	body, ok := record.Body()

@@ -1471,6 +1471,58 @@ func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) 
 	}})
 }
 
+func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-91 * 24 * time.Hour)
+	seedRetentionCorrelationHistory(t, store, old)
+
+	budgetExpired := false
+	committed := make([]RetentionTableClass, 0, 7)
+	reaper, err := newRetentionReaperWithHooks(store, judge, 90, RetentionOptions{}, retentionHooks{
+		now: func() time.Time {
+			if budgetExpired {
+				return now.Add(RetentionCorrelationRunBudget)
+			}
+			return now
+		},
+		yield: func(ctx context.Context) error {
+			budgetExpired = true
+			return ctx.Err()
+		},
+		beforeAuditBatchCommit: func(class RetentionTableClass) error {
+			committed = append(committed, class)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 7 {
+		budgetExpired = false
+		result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
+		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []RetentionTableClass{
+		RetentionGuardrailChainReceipts,
+		RetentionGuardrailChainEvents,
+		RetentionGuardrailChainPartitions,
+		RetentionCorrelationReceipts,
+		RetentionCorrelationCursors,
+		RetentionCorrelationPending,
+		RetentionCorrelationRelationships,
+	}
+	if !reflect.DeepEqual(committed, want) {
+		t.Fatalf("rotating correlation stages=%v want %v", committed, want)
+	}
+	if got := countRetentionRows(t, store.db, "correlation_relationships"); got != 0 {
+		t.Fatalf("later relationship stage starved across runs: rows=%d", got)
+	}
+}
+
 func seedSimpleRetentionBoundary(
 	t *testing.T,
 	store *Store,

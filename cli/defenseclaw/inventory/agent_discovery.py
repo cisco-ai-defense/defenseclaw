@@ -817,6 +817,9 @@ class _AgentSpec(NamedTuple):
     config_candidates: tuple[str, ...]
     binary_name: str
     version_args: tuple[str, ...]
+    binary_names: tuple[str, ...] = ()
+    windows_binary_names: tuple[str, ...] = ()
+    macos_bundle_binaries: tuple[str, ...] = ()
 
 
 _SPECS: dict[str, _AgentSpec] = {
@@ -836,7 +839,14 @@ _SPECS: dict[str, _AgentSpec] = {
     # Hermes' path is resolved dynamically in _scan_agent so HERMES_HOME and
     # the native Windows %LOCALAPPDATA% default are honored.
     "hermes": _AgentSpec((), "hermes", ("--version",)),
-    "cursor": _AgentSpec(("~/.cursor/hooks.json", "~/.cursor/mcp.json"), "agent", ("--version",)),
+    "cursor": _AgentSpec(
+        ("~/.cursor/hooks.json", "~/.cursor/mcp.json"),
+        "agent",
+        ("--version",),
+        ("cursor", "agent", "cursor-agent"),
+        ("agent", "cursor-agent"),
+        ("Cursor.app/Contents/Resources/app/bin/cursor",),
+    ),
     # Devin configuration candidates are resolved dynamically so native
     # Windows uses %APPDATA% while macOS/Linux use ~/.config/devin.
     "devin": _AgentSpec((), "devin", ("--version",)),
@@ -1051,10 +1061,11 @@ def _scan_agent(
     if name == "codex":
         config_candidates = (connector_config_files("codex")[0],)
     elif name == "claudecode":
-        # MCP state is inventory, not generic configuration evidence. Use the
-        # current workspace for project scopes and apply Anthropic's effective
-        # settings precedence: local, project, then user.
-        config_candidates = tuple(reversed(claude_settings_paths(os.getcwd())))
+        # MCP and workspace state are inventory, not generic user-level
+        # configuration evidence. Keeping this probe on the explicit Claude
+        # config home also prevents an unrelated current checkout from making
+        # every Claude installation look configured.
+        config_candidates = (claude_settings_paths()[0],)
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
     elif name == "antigravity":
@@ -2050,29 +2061,23 @@ def _binary_candidates_for_agent(name: str, spec: _AgentSpec) -> tuple[str, ...]
     # Cursor Desktop is the hook host for the 21-event hooks.json surface.
     # Prefer its PATH shim and macOS app bundle over Agent CLI fallbacks.
     # Windows certification remains the official Agent CLI install root.
-    binary_names = (spec.binary_name,)
-    if name == "cursor":
-        if _is_windows_host():
-            # Cursor renamed the primary Agent CLI entrypoint to ``agent``;
-            # ``cursor-agent`` remains the compatibility alias.
-            binary_names = ("agent", "cursor-agent")
-        else:
-            binary_names = ("cursor", "agent", "cursor-agent")
+    binary_names = spec.binary_names or (spec.binary_name,)
+    if _is_windows_host() and spec.windows_binary_names:
+        binary_names = spec.windows_binary_names
     # Windows Devin discovery is deliberately not PATH-based. The native
     # product exposes one canonical CLI under token-bound LocalAppData.
     if not (name == "devin" and _is_windows_host()):
-        for binary_name in dict.fromkeys(binary_names):
+        for index, binary_name in enumerate(dict.fromkeys(binary_names)):
             path = _which(binary_name)
             if path:
                 candidates.append(path)
-            if name == "cursor" and binary_name == "cursor" and _is_macos_host():
-                for candidate in _macos_binary_candidates(name):
+            # Cursor Desktop is the hook host. Put its app-bundle binary after
+            # the primary `cursor` shim but before Agent CLI compatibility
+            # aliases, preserving the documented launch preference.
+            if index == 0 and not _is_windows_host() and _is_macos_host():
+                for candidate in _macos_binary_candidates(spec):
                     if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
                         candidates.append(os.path.abspath(candidate))
-    if not _is_windows_host() and _is_macos_host() and name != "cursor":
-        for candidate in _macos_binary_candidates(name):
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                candidates.append(os.path.abspath(candidate))
     if not _is_windows_host():
         return _deduplicate_paths(candidates)
 
@@ -2120,13 +2125,14 @@ def _macos_application_roots() -> tuple[Path, ...]:
     return (Path("/Applications"), Path(os.path.expanduser("~/Applications")))
 
 
-def _macos_binary_candidates(connector: str) -> tuple[str, ...]:
+def _macos_binary_candidates(spec: _AgentSpec) -> tuple[str, ...]:
     """Return embedded CLIs from documented macOS application bundles."""
 
-    if connector != "cursor":
-        return ()
-    relative = Path("Cursor.app") / "Contents" / "Resources" / "app" / "bin" / "cursor"
-    return tuple(os.fspath(root / relative) for root in _macos_application_roots())
+    return tuple(
+        os.fspath(root / Path(relative))
+        for root in _macos_application_roots()
+        for relative in spec.macos_bundle_binaries
+    )
 
 
 def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:

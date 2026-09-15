@@ -9,7 +9,6 @@ import os
 import re
 import shutil
 import sqlite3
-import stat
 import subprocess
 import time
 from collections.abc import Iterable, Iterator
@@ -37,7 +36,6 @@ from textual.widgets import Button, DataTable, Input, RichLog, Static, Tab, Tabs
 
 from defenseclaw import __version__, connector_paths
 from defenseclaw import config as config_module
-from defenseclaw.doctor_gateway import paths_same
 from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.hook_metrics import connector_hook_decision
 from defenseclaw.tui.command_line import (
@@ -4269,6 +4267,8 @@ class DefenseClawTUI(App[None]):
                 f"[bold {TOKENS.text_primary}]COVERAGE[/]",
                 f"  [{TOKENS.accent_cyan}]{snap.processes_observed}[/] processes watched{skipped}",
                 f"  [{TOKENS.accent_cyan}]{snap.connections_observed}[/] connections seen{unattrib}",
+                f"  [{TOKENS.accent_cyan}]{snap.host_plane_observations}[/] Plane C kernel events classified; "
+                f"[{TOKENS.text_muted}]{snap.host_plane_gated} excluded outside AI-agent lineage[/]",
                 f"  [{TOKENS.text_secondary}]{rich_escape(context)}[/]",
             ]
         )
@@ -8329,6 +8329,14 @@ class DefenseClawTUI(App[None]):
             table.add_row(header)
         if runtime.plane_summary:
             table.add_row(Text(runtime.plane_summary, style=TOKENS.text_secondary))
+        if runtime.host_observations or runtime.host_gated:
+            table.add_row(
+                Text(
+                    f"Plane C: {runtime.host_observations} classified kernel events; "
+                    f"{runtime.host_gated} excluded outside AI-agent lineage",
+                    style=TOKENS.text_secondary,
+                )
+            )
         if runtime.context:
             table.add_row(Text(runtime.context, style=TOKENS.text_primary))
         for line in runtime.top_findings:
@@ -8794,17 +8802,22 @@ class DefenseClawTUI(App[None]):
         runtime_lines = []
         if runtime.health_title:
             runtime_lines.append(
-                f"  {runtime.health_title}  {runtime.findings} findings  "
+                f"  {rich_escape(runtime.health_title)}  {runtime.findings} findings  "
                 f"{runtime.processes} processes  {runtime.connections} connections"
             )
         if runtime.plane_summary:
-            runtime_lines.append(f"  {runtime.plane_summary}")
+            runtime_lines.append(f"  {rich_escape(runtime.plane_summary)}")
+        if runtime.host_observations or runtime.host_gated:
+            runtime_lines.append(
+                f"  Plane C: {runtime.host_observations} classified kernel events; "
+                f"{runtime.host_gated} excluded outside AI-agent lineage"
+            )
         if runtime.context:
-            runtime_lines.append(f"  {runtime.context}")
+            runtime_lines.append(f"  {rich_escape(runtime.context)}")
         for line in runtime.top_findings:
-            runtime_lines.append(f"  {line}")
+            runtime_lines.append(f"  {rich_escape(line)}")
         if runtime.next_action:
-            runtime_lines.append(f"  -> {runtime.next_action}")
+            runtime_lines.append(f"  -> {rich_escape(runtime.next_action)}")
         if not runtime_lines:
             runtime_lines.append("  Runtime snapshot pending")
         runtime_text = "\n".join(runtime_lines)
@@ -12671,11 +12684,8 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
         trust = _trusted_gateway_listener(config)
     except Exception:  # noqa: BLE001 - trust discovery failures remain probe errors.
         return GatewayHealthResult("error", "managed sidecar listener identity is unavailable")
-    elevated = False
     if not trust.trusted:
-        elevated = _elevated_sidecar_pid_in_home(config)
-        if not elevated:
-            return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
+        return GatewayHealthResult("error", f"managed sidecar listener identity is unverified: {trust.detail}")
 
     try:
         document = client.status()
@@ -12701,17 +12711,11 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     if not isinstance(payload, dict):
         return GatewayHealthResult("error", "authenticated sidecar status is invalid")
     try:
-        if elevated:
-            runtime_ok, runtime_detail = _authenticated_runtime_home_matches(
-                config,
-                json.dumps(document),
-            )
-        else:
-            runtime_ok, runtime_detail = _authenticated_runtime_matches(
-                config,
-                trust.pid,
-                json.dumps(document),
-            )
+        runtime_ok, runtime_detail = _authenticated_runtime_matches(
+            config,
+            trust.pid,
+            json.dumps(document),
+        )
     except (TypeError, ValueError):
         runtime_ok, runtime_detail = False, "authenticated runtime metadata is malformed"
     if not runtime_ok:
@@ -12723,59 +12727,7 @@ def _fetch_gateway_health(config: object | None) -> GatewayHealthResult:
     snapshot = _project_omnigent_effective_readiness(config, snapshot)
     state = _gateway_state_from_snapshot(snapshot)
     detail = _gateway_snapshot_detail(snapshot, state)
-    if elevated:
-        detail = (
-            "elevated sidecar: PID file is root-owned; TUI is using the authenticated API"
-            + (f" ({detail})" if detail else "")
-        )
     return GatewayHealthResult(state, detail, snapshot)
-
-
-def _elevated_sidecar_pid_in_home(config: object) -> bool:
-    """True when this home's gateway.pid is a private root-owned leaf.
-
-    ``sudo defenseclaw-gateway`` writes 0600 root files the operator cannot
-    read. lstat still proves the file is this install's elevated sidecar
-    rather than a foreign listener, so Overview can use the same
-    authenticated API the Runtime tab already uses.
-    """
-
-    data_dir = str(getattr(config, "data_dir", "") or "").strip()
-    if not data_dir:
-        return False
-    path = os.path.join(data_dir, "gateway.pid")
-    try:
-        info = os.lstat(path)
-    except OSError:
-        return False
-    if not stat.S_ISREG(info.st_mode):
-        return False
-    geteuid = getattr(os, "geteuid", None)
-    current_uid = geteuid() if callable(geteuid) else None
-    if current_uid is None or current_uid == 0:
-        return False
-    if info.st_uid != 0:
-        return False
-    return not bool(stat.S_IMODE(info.st_mode) & 0o022)
-
-
-def _authenticated_runtime_home_matches(config: object, body: str) -> tuple[bool, str]:
-    """Bind an elevated sidecar to this data home without a readable PID record."""
-
-    try:
-        payload = json.loads(body)
-        runtime = payload.get("runtime", {}) if isinstance(payload, dict) else {}
-    except (json.JSONDecodeError, TypeError):
-        return False, "authenticated runtime metadata is malformed"
-    if not isinstance(runtime, dict):
-        return False, "authenticated runtime metadata is unavailable"
-    runtime_home = runtime.get("data_dir", "")
-    if not isinstance(runtime_home, str) or not runtime_home.strip():
-        return False, "authenticated runtime data home is unavailable"
-    configured = str(getattr(config, "data_dir", "") or "").strip()
-    if not configured or not paths_same(runtime_home, configured):
-        return False, "authenticated runtime uses a different canonical data home"
-    return True, ""
 
 
 def _fetch_v8_operator_status(

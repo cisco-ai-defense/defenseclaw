@@ -18,6 +18,7 @@ import (
 	"io"
 	"os"
 
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 	"golang.org/x/sys/unix"
 )
 
@@ -132,7 +133,7 @@ func validateCorrelationKeyStat(stat *unix.Stat_t) error {
 	if stat.Mode&unix.S_IFMT != unix.S_IFREG {
 		return keyStoreError(KeyStoreErrorUnsafeType)
 	}
-	if os.Geteuid() != 0 && int(stat.Uid) != 0 && int(stat.Uid) != os.Geteuid() {
+	if !runtimeowner.Trusted(stat.Uid) {
 		return keyStoreError(KeyStoreErrorUnsafeOwner)
 	}
 	if stat.Mode&0o077 != 0 {

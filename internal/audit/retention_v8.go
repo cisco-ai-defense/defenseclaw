@@ -196,6 +196,7 @@ type RetentionReaper struct {
 	running           atomic.Bool
 	reload            chan struct{}
 	promptRun         atomic.Bool
+	correlationStart  atomic.Uint32
 	healthMu          sync.Mutex
 	lastHealthFailure RetentionFailureClass
 }
@@ -762,8 +763,14 @@ func (reaper *RetentionReaper) drainCorrelationState(
 		{RetentionCorrelationEvents, []any{unixNano(now), unixNano(cutoff)}},
 	}
 	deadline := reaper.hooks.now().Add(RetentionCorrelationRunBudget)
-	for _, stage := range stages {
-		for {
+	// Rotate the first stage on every run. A busy early stage can consume the
+	// whole time budget after one batch, so registry order alone does not
+	// guarantee that later relationship/event cleanup will ever run.
+	start := int(reaper.correlationStart.Add(1)-1) % len(stages)
+	for {
+		madeProgress := false
+		for offset := range stages {
+			stage := stages[(start+offset)%len(stages)]
 			if err := ctx.Err(); err != nil {
 				return err
 			}
@@ -775,19 +782,19 @@ func (reaper *RetentionReaper) drainCorrelationState(
 				return err
 			}
 			if deleted == 0 {
-				break
+				continue
 			}
+			madeProgress = true
 			result.RowsDeleted[stage.class] += deleted
 			result.BatchCount++
 			if err := reaper.hooks.yield(ctx); err != nil {
 				return err
 			}
-			if deleted < RetentionBatchSize {
-				break
-			}
+		}
+		if !madeProgress {
+			return nil
 		}
 	}
-	return nil
 }
 
 func (reaper *RetentionReaper) deleteCorrelationBatch(

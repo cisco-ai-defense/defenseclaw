@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"syscall"
 
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 	"golang.org/x/sys/unix"
 )
 
@@ -51,6 +52,9 @@ func ReclaimToDirectoryOwner(path string) error {
 	}
 	ownerUID := int(dirStat.Uid)
 	ownerGID := int(dirStat.Gid)
+	if !runtimeowner.Trusted(dirStat.Uid) {
+		return fmt.Errorf("safefile: private directory has an untrusted owner: %s", dir)
+	}
 	if ownerUID == 0 {
 		return nil
 	}

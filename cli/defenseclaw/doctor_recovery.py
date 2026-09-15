@@ -71,6 +71,7 @@ class DeviceKeyHealthStatus(str, Enum):
 
 class AuditDBHealthStatus(str, Enum):
     VALID = "valid"
+    INTEGRITY_UNVERIFIED = "integrity-unverified"
     MISSING = "missing"
     INVALID = "invalid"
 
@@ -221,6 +222,15 @@ def inspect_audit_db(
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-corrupt")
     if tables != _AUDIT_REQUIRED_TABLES:
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-schema-incomplete")
+    if not integrity_scanned:
+        return AuditDBHealth(
+            AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
+            "audit-db-integrity-unverified",
+            integrity_scanned=False,
+            file_bytes=file_bytes,
+            freelist_bytes=freelist_bytes,
+            oldest_retention_unix_nano=oldest_retention,
+        )
     return AuditDBHealth(
         AuditDBHealthStatus.VALID,
         "audit-db-valid",
