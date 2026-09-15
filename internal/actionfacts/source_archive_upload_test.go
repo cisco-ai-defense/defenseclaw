@@ -44,3 +44,20 @@ func TestSourceArchiveUploadHardNegatives(t *testing.T) {
 		}
 	}
 }
+
+func TestSourceArchiveUploadLoopbackAliasesDoNotProjectExternalFlow(t *testing.T) {
+	for _, target := range []string{
+		"http://localhost/repo",
+		"https://collector.localhost/repo",
+		"http://127.1/repo",
+		"http://0x7f000001/repo",
+	} {
+		t.Run(target, func(t *testing.T) {
+			command := "git archive HEAD | base64 | curl --data-binary @- " + target
+			facts := Analyze(Input{Tool: "shell", Command: command, CWD: "/repo"})
+			if got := ExactSourceArchiveUploads(facts); len(got) != 0 {
+				t.Fatalf("loopback target %q projected external archive flow: %+v", target, got)
+			}
+		})
+	}
+}
