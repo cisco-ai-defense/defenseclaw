@@ -365,6 +365,116 @@ func TestRetentionACKMaterializationUsesTheSameBoundedCandidateBatch(t *testing.
 	}
 }
 
+func TestRetentionDeletesExpiredAuditHistoryBeforeCorrelationDrain(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events
+		(id, timestamp, action, actor, details, severity)
+		VALUES ('expired-audit', ?, 'scan', 'operator', 'old', 'LOW')`, old); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`
+		INSERT INTO correlation_connector_instances (
+			connector_instance_id, connector, export_custody, profile_version,
+			managed_config_digest, is_default, created_time_unix_nano, updated_time_unix_nano
+		) VALUES (
+			'11111111-1111-4111-8111-111111111111', 'splunk', 'external', 'v1',
+			NULL, 0, 1000000000, 1000000000
+		);
+		INSERT INTO correlation_cursors (
+			connector_instance_id, session_id, agent_id, phase, sequence,
+			profile_version, active, updated_time_unix_nano
+		) VALUES (
+			'11111111-1111-4111-8111-111111111111', 'sess', 'agent', 'idle', 0,
+			'v1', 0, 1000000000
+		);
+	`); err != nil {
+		t.Fatal(err)
+	}
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{
+		beforeAuditBatchCommit: func(class RetentionTableClass) error {
+			if class == RetentionCorrelationCursors {
+				return errors.New("correlation drain blocked")
+			}
+			return nil
+		},
+	})
+	result, err := reaper.Run(t.Context())
+	if err == nil {
+		t.Fatal("expected correlation drain failure")
+	}
+	if result.RowsDeleted[RetentionAuditEvents] != 1 {
+		t.Fatalf("expired audit rows deleted=%d want 1", result.RowsDeleted[RetentionAuditEvents])
+	}
+	if got := countRetentionRows(t, store.db, "audit_events"); got != 0 {
+		t.Fatalf("audit_events remaining=%d want 0", got)
+	}
+}
+
+func TestNewStoreEnablesIncrementalAutoVacuum(t *testing.T) {
+	store, _ := newRetentionStores(t)
+	var mode int
+	if err := store.db.QueryRow(`PRAGMA auto_vacuum`).Scan(&mode); err != nil {
+		t.Fatal(err)
+	}
+	if mode != sqliteAutoVacuumIncremental {
+		t.Fatalf("auto_vacuum=%d want %d (incremental)", mode, sqliteAutoVacuumIncremental)
+	}
+}
+
+func TestRetentionReclaimsFreedPagesWhenIncrementalAutoVacuumIsEnabled(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 11, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-10 * 24 * time.Hour).Format(time.RFC3339Nano)
+	tx, err := store.db.Begin()
+	if err != nil {
+		t.Fatal(err)
+	}
+	statement, err := tx.Prepare(`INSERT INTO activity_events
+		(id, timestamp, actor, action, target_type, target_id)
+		VALUES (?, ?, 'operator', 'config-update', 'config', 'old')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < 4000; index++ {
+		if _, err := statement.Exec(fmt.Sprintf("reclaim-%04d", index), old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = statement.Close()
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	var pagesBefore int
+	if err := store.db.QueryRow(`PRAGMA page_count`).Scan(&pagesBefore); err != nil {
+		t.Fatal(err)
+	}
+	reaper := newRetentionReaperAt(t, store, judge, 7, now, RetentionOptions{}, retentionHooks{})
+	if _, err := reaper.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.db.Exec(`PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {
+		t.Fatal(err)
+	}
+	var pagesAfter, freelist int
+	if err := store.db.QueryRow(`PRAGMA page_count`).Scan(&pagesAfter); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.db.QueryRow(`PRAGMA freelist_count`).Scan(&freelist); err != nil {
+		t.Fatal(err)
+	}
+	if pagesAfter >= pagesBefore {
+		t.Fatalf("page_count after reclaim=%d before=%d freelist=%d", pagesAfter, pagesBefore, freelist)
+	}
+	if got := countRetentionRows(t, store.db, "activity_events"); got != 0 {
+		t.Fatalf("activity_events remaining=%d want 0", got)
+	}
+}
+
 func TestRetentionActiveDeleteTransactionAllowsReaderAndSerializesWriter(t *testing.T) {
 	store, judge := newRetentionStores(t)
 	now := time.Date(2026, 7, 3, 12, 0, 0, 0, time.UTC)
@@ -1361,6 +1471,58 @@ func seedRetentionCorrelationHistory(t *testing.T, store *Store, old time.Time) 
 	}})
 }
 
+func TestCorrelationRetentionRotatesFirstStageAcrossBudgetedRuns(t *testing.T) {
+	store, judge := newRetentionStores(t)
+	now := time.Date(2026, 9, 14, 12, 0, 0, 0, time.UTC)
+	old := now.Add(-91 * 24 * time.Hour)
+	seedRetentionCorrelationHistory(t, store, old)
+
+	budgetExpired := false
+	committed := make([]RetentionTableClass, 0, 7)
+	reaper, err := newRetentionReaperWithHooks(store, judge, 90, RetentionOptions{}, retentionHooks{
+		now: func() time.Time {
+			if budgetExpired {
+				return now.Add(RetentionCorrelationRunBudget)
+			}
+			return now
+		},
+		yield: func(ctx context.Context) error {
+			budgetExpired = true
+			return ctx.Err()
+		},
+		beforeAuditBatchCommit: func(class RetentionTableClass) error {
+			committed = append(committed, class)
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for range 7 {
+		budgetExpired = false
+		result := RetentionRunResult{RowsDeleted: newRetentionCounts()}
+		if err := reaper.drainCorrelationState(t.Context(), old.Add(24*time.Hour), now, &result); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := []RetentionTableClass{
+		RetentionGuardrailChainReceipts,
+		RetentionGuardrailChainEvents,
+		RetentionGuardrailChainPartitions,
+		RetentionCorrelationReceipts,
+		RetentionCorrelationCursors,
+		RetentionCorrelationPending,
+		RetentionCorrelationRelationships,
+	}
+	if !reflect.DeepEqual(committed, want) {
+		t.Fatalf("rotating correlation stages=%v want %v", committed, want)
+	}
+	if got := countRetentionRows(t, store.db, "correlation_relationships"); got != 0 {
+		t.Fatalf("later relationship stage starved across runs: rows=%d", got)
+	}
+}
+
 func seedSimpleRetentionBoundary(
 	t *testing.T,
 	store *Store,
@@ -1629,4 +1791,19 @@ func stringsOf(value string, count int) string {
 		result += value
 	}
 	return result
+}
+
+func TestRetentionVacuumPageLimitUsesByteBudget(t *testing.T) {
+	for _, test := range []struct {
+		pageSize int
+		want     int
+	}{
+		{pageSize: 4 << 10, want: 16_384},
+		{pageSize: 64 << 10, want: 1_024},
+		{pageSize: 0, want: 1},
+	} {
+		if got := retentionVacuumPageLimit(test.pageSize); got != test.want {
+			t.Fatalf("retentionVacuumPageLimit(%d)=%d, want %d", test.pageSize, got, test.want)
+		}
+	}
 }

@@ -1419,6 +1419,15 @@ func HookContractLockDrifted(previous, current HookContractLockEntry) bool {
 	return HookContractCompatibilityDrifted(previous, current)
 }
 
+func cursorHookContractUnchanged(previous, current HookContractLockEntry) bool {
+	if normalizeConnectorName(previous.Connector) != "cursor" || normalizeConnectorName(current.Connector) != "cursor" {
+		return false
+	}
+	previousID := strings.TrimSpace(previous.ContractID)
+	currentID := strings.TrimSpace(current.ContractID)
+	return previousID != "" && previousID == currentID
+}
+
 // HookContractCompatibilityDrifted reports only upstream compatibility
 // changes: the installed agent version or the selected hook contract changed.
 // It deliberately excludes generated hook-script digests.
@@ -1432,15 +1441,21 @@ func HookContractCompatibilityDrifted(previous, current HookContractLockEntry) b
 	if strings.TrimSpace(previous.Connector) == "" {
 		return false
 	}
+	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
+		return true
+	}
+	if cursorHookContractUnchanged(previous, current) {
+		// Cursor Desktop (3.x) and Agent CLI (YYYY.MM.DD-hash) share
+		// cursor-hooks-v1. Discovery flipping between those binaries is not
+		// an upstream contract change and must not block or tear down hooks.
+		return false
+	}
 	previousRaw := stableRawAgentVersionForContract(previous)
 	currentRaw := stableRawAgentVersionForContract(current)
 	if previousRaw != "" && currentRaw != "" && previousRaw != currentRaw {
 		return true
 	}
 	if previous.NormalizedAgentVersion != "" && current.NormalizedAgentVersion != "" && previous.NormalizedAgentVersion != current.NormalizedAgentVersion {
-		return true
-	}
-	if previous.ContractID != "" && current.ContractID != "" && previous.ContractID != current.ContractID {
 		return true
 	}
 	// Hook script digests are intentionally not a boot/reconcile drift gate:

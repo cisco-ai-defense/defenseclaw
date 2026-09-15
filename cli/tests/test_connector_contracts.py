@@ -425,10 +425,13 @@ class TestConnectorContractManifest(unittest.TestCase):
                 ("copilot-hooks-v1", "1.0.18", "1.0.76", False, "v7", 13),
                 ("copilot-hooks-v2", "1.0.76", "", True, "v7", 14),
             ),
-            "hermes": (("hermes-hooks-v1", "0.19.0", "0.21.0", True, "v6", 23),),
+            "hermes": (
+                ("hermes-hooks-v1", "0.19.0", "0.21.0", False, "v6", 23),
+                ("hermes-hooks-v2", "0.21.0", "0.22.0", True, "v6", 23),
+            ),
             "antigravity": (("antigravity-hooks-v2", "1.1.8", "", True, "v8", 5),),
             "openhands": (("openhands-hooks-v1", "1.12.0", "", True, "v6", 6),),
-            "opencode": (("opencode-hooks-v1", "1.18.10", "1.18.20", False, "v7", 10),),
+            "opencode": (("opencode-hooks-v1", "1.18.10", "1.19.0", False, "v7", 10),),
             "amp": (("amp-plugin-v1", "0.0.1785334225", "", True, "v2", 5),),
             "geminicli": (("geminicli-hooks-v1", "0.26.0", "", True, "v6", 11),),
         }
@@ -506,8 +509,22 @@ class TestConnectorContractManifest(unittest.TestCase):
                 self.assertFalse(compat.contract.capabilities["can_ask_native"])
 
         for raw_version in (
-            "cursor-agent 2026.07.23-deadbee",
             "cursor 3.13.21",
+            "cursor 3.19.13",
+            "3.19.13",
+        ):
+            with self.subTest(raw_version=raw_version):
+                compat = resolve_connector_contract("cursor", raw_version)
+                self.assertEqual(compat.status, STATUS_KNOWN)
+                self.assertEqual(compat.contract.contract_id, "cursor-hooks-v1")
+                self.assertTrue(compat.supported)
+
+        for raw_version in (
+            "cursor-agent 2026.07.23-deadbee",
+            "2026.08.31-4057e58",
+            "agent v2026.08.31-4057e58",
+            "cursor 2.3.99",
+            "cursor 4.0.0",
             "Cursor Agent 2026.07.23-e383d2b",
         ):
             with self.subTest(raw_version=raw_version):
@@ -531,7 +548,7 @@ class TestConnectorContractManifest(unittest.TestCase):
 
         self.assertEqual(compat.status, STATUS_UNVERSIONED)
         self.assertEqual(compat.contract.min_agent_version, "0.7.0")
-        self.assertEqual(compat.contract.max_agent_version, "0.8.0")
+        self.assertEqual(compat.contract.max_agent_version, "0.14.0")
         self.assertIn("$OMNIGENT_CONFIG", templates)
         self.assertIn("$OMNIGENT_CONFIG_HOME/config.yaml", templates)
         self.assertIn("~/.omnigent/config.yaml", templates)
@@ -549,7 +566,15 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(proven.status, STATUS_KNOWN)
         self.assertEqual(proven.contract.contract_id, "omnigent-custom-policy-v1")
 
-        after_reviewed_range = resolve_connector_contract("omnigent", "omnigent 0.8.0")
+        mid_range = resolve_connector_contract("omnigent", "omnigent 0.8.0")
+        self.assertTrue(mid_range.supported)
+        self.assertEqual(mid_range.status, STATUS_KNOWN)
+
+        current = resolve_connector_contract("omnigent", "omnigent 0.13.0")
+        self.assertTrue(current.supported)
+        self.assertEqual(current.status, STATUS_KNOWN)
+
+        after_reviewed_range = resolve_connector_contract("omnigent", "omnigent 0.14.0")
         self.assertFalse(after_reviewed_range.supported)
         self.assertEqual(after_reviewed_range.status, STATUS_UNKNOWN)
 
@@ -588,7 +613,16 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertTrue(v020.supported)
         self.assertEqual(v020.contract.contract_id, "hermes-hooks-v1")
 
-        unreviewed = resolve_connector_contract("hermes", "Hermes Agent v0.21.0")
+        v021 = resolve_connector_contract("hermes", "Hermes Agent v0.21.0")
+        self.assertEqual(v021.status, STATUS_KNOWN)
+        self.assertTrue(v021.supported)
+        self.assertEqual(v021.contract.contract_id, "hermes-hooks-v2")
+
+        current = resolve_connector_contract("hermes", "Hermes Agent v0.21.3 (2026.9.14)")
+        self.assertEqual(current.status, STATUS_KNOWN)
+        self.assertEqual(current.contract.contract_id, "hermes-hooks-v2")
+
+        unreviewed = resolve_connector_contract("hermes", "Hermes Agent v0.22.0")
         self.assertEqual(unreviewed.status, STATUS_UNKNOWN)
         self.assertFalse(unreviewed.supported)
 
@@ -877,18 +911,18 @@ class TestSetupConnectorVersionGate(unittest.TestCase):
 
     def test_opencode_version_guidance_distinguishes_old_from_new(self) -> None:
         old = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.18.9")
-        current = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.18.20")
+        current = _connector_contract_upgrade_guidance("opencode", "OpenCode", "1.19.0")
 
         self.assertIn("Upgrade OpenCode", old)
         self.assertIn("older than the validated minimum", old)
         self.assertNotIn("Upgrade OpenCode", current)
         self.assertIn("newer than DefenseClaw's validated range", current)
 
-    def test_opencode_11820_is_refused_before_save_and_roster_mutation(self) -> None:
+    def test_opencode_11900_is_refused_before_save_and_roster_mutation(self) -> None:
         with (
             patch(
                 "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
-                return_value=_discovery("opencode", installed=True, version="opencode 1.18.20"),
+                return_value=_discovery("opencode", installed=True, version="opencode 1.19.0"),
             ),
             patch(
                 "defenseclaw.commands.cmd_setup.platform_support.host_os",

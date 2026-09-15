@@ -414,7 +414,7 @@ func TestSetupOneConnector_ObserveModeUnsupportedVersionSkipsBeforeSetup(t *test
 	s.cfg.Guardrail.Mode = "observe"
 	conn := &bootStubConnector{stubConnector: stubConnector{name: "opencode"}}
 	opts := mustConnectorSetupOpts(t, s, conn, "tok", "127.0.0.1:0", "127.0.0.1:0")
-	opts.AgentVersion = "opencode 1.18.20"
+	opts.AgentVersion = "opencode 1.19.0"
 
 	err := s.setupOneConnector(
 		context.Background(), conn, opts, "master", guardrail.NewRulePackCache(),

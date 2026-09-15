@@ -843,6 +843,12 @@
         "dedupStrategy": "none",
         "enableLogDetails": true,
         "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No approval requests or resolutions in range"
+        },
+        "overrides": []
       }
     }
   ],

@@ -440,13 +440,18 @@ def _contract_matches_agent_version(
     raw_version: str,
     normalized_version: str,
 ) -> bool:
-    if contract.exact_agent_versions:
-        return _exact_agent_version_match(raw_version, contract.exact_agent_versions)
-    return _version_in_range(
-        normalized_version,
-        contract.min_agent_version,
-        contract.max_agent_version,
-    )
+    if contract.exact_agent_versions and _exact_agent_version_match(
+        raw_version, contract.exact_agent_versions
+    ):
+        return True
+    # Empty min/max would otherwise accept any normalized version.
+    if contract.min_agent_version or contract.max_agent_version:
+        return _version_in_range(
+            normalized_version,
+            contract.min_agent_version,
+            contract.max_agent_version,
+        )
+    return False
 
 
 def _exact_agent_version_match(raw: str, expected: tuple[str, ...]) -> bool:

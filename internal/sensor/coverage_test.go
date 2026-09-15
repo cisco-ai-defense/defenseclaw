@@ -71,6 +71,30 @@ func TestPartialPlaneCoverageIsDegraded(t *testing.T) {
 			},
 			wantReason: "unavailable",
 		},
+		{
+			name: "deselected plane is not degraded",
+			health: PlaneHealth{
+				Plane: platform.PlaneC, Available: true, Running: false,
+				Reason: "not selected in ai_discovery.runtime.planes",
+			},
+			wantNoEntry: true,
+		},
+		{
+			name: "unprivileged egress limit remains degraded",
+			health: PlaneHealth{
+				Plane: platform.PlaneB, Available: true, Running: true, Mechanism: "lsof(8)",
+				Reason: unprivilegedEgressLimit,
+			},
+			wantReason: "partially covered",
+		},
+		{
+			name: "selected endpoint security needing root is degraded",
+			health: PlaneHealth{
+				Plane: platform.PlaneC, Available: true, Running: false,
+				Reason: "plane: Endpoint Security needs root; re-run the gateway elevated",
+			},
+			wantReason: "available but not running",
+		},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()

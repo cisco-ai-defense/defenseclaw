@@ -41,6 +41,9 @@ from pathlib import Path
 _DEVICE_PROVENANCE_PREFIX = b"defenseclaw-device-provenance-v1:"
 _DEVICE_PROVENANCE_SECRET = "device.provenance.secret"
 _AUDIT_REQUIRED_TABLES = frozenset({"audit_events", "scan_results", "findings"})
+# PRAGMA quick_check(N) still walks the whole file; N is only the error limit.
+# Skip that btree walk once the database is larger than a local diagnostic.
+_AUDIT_FULL_INTEGRITY_MAX_BYTES = 64 * 1024 * 1024
 
 
 class RecoveryKind(str, Enum):
@@ -68,6 +71,7 @@ class DeviceKeyHealthStatus(str, Enum):
 
 class AuditDBHealthStatus(str, Enum):
     VALID = "valid"
+    INTEGRITY_UNVERIFIED = "integrity-unverified"
     MISSING = "missing"
     INVALID = "invalid"
 
@@ -76,6 +80,10 @@ class AuditDBHealthStatus(str, Enum):
 class AuditDBHealth:
     status: AuditDBHealthStatus
     reason_code: str
+    integrity_scanned: bool = False
+    file_bytes: int = 0
+    freelist_bytes: int = 0
+    oldest_retention_unix_nano: int | None = None
 
 
 @dataclass(frozen=True)
@@ -175,7 +183,15 @@ def inspect_audit_db(
         connection = sqlite3.connect(uri, uri=True, timeout=0.1)
         try:
             connection.execute("PRAGMA query_only=ON")
-            quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
+            page_count = int(connection.execute("PRAGMA page_count").fetchone()[0] or 0)
+            page_size = int(connection.execute("PRAGMA page_size").fetchone()[0] or 0)
+            freelist = int(connection.execute("PRAGMA freelist_count").fetchone()[0] or 0)
+            file_bytes = page_count * page_size
+            freelist_bytes = freelist * page_size
+            integrity_scanned = file_bytes <= _AUDIT_FULL_INTEGRITY_MAX_BYTES
+            quick_check = ("ok",)
+            if integrity_scanned:
+                quick_check = connection.execute("PRAGMA quick_check(1)").fetchone()
             tables = {
                 str(row[0])
                 for row in connection.execute(
@@ -183,18 +199,46 @@ def inspect_audit_db(
                     "WHERE type='table' AND name IN ('audit_events', 'scan_results', 'findings')"
                 )
             }
+            oldest_retention: int | None = None
+            if "audit_events" in tables:
+                columns = {
+                    str(row[1])
+                    for row in connection.execute("PRAGMA table_info(audit_events)")
+                }
+                if "retention_timestamp_unix_nano" in columns:
+                    oldest = connection.execute(
+                        "SELECT MIN(retention_timestamp_unix_nano) FROM audit_events"
+                    ).fetchone()[0]
+                    if oldest is not None:
+                        oldest_retention = int(oldest)
         finally:
             connection.close()
         if not os.path.samestat(inspected, os.lstat(plan.target)):
             return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-changed-during-inspection")
-    except (OSError, sqlite3.Error, ValueError):
+    except (OSError, sqlite3.Error, ValueError, TypeError):
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-integrity-unavailable")
 
     if quick_check != ("ok",):
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-corrupt")
     if tables != _AUDIT_REQUIRED_TABLES:
         return AuditDBHealth(AuditDBHealthStatus.INVALID, "audit-db-schema-incomplete")
-    return AuditDBHealth(AuditDBHealthStatus.VALID, "audit-db-valid")
+    if not integrity_scanned:
+        return AuditDBHealth(
+            AuditDBHealthStatus.INTEGRITY_UNVERIFIED,
+            "audit-db-integrity-unverified",
+            integrity_scanned=False,
+            file_bytes=file_bytes,
+            freelist_bytes=freelist_bytes,
+            oldest_retention_unix_nano=oldest_retention,
+        )
+    return AuditDBHealth(
+        AuditDBHealthStatus.VALID,
+        "audit-db-valid",
+        integrity_scanned=integrity_scanned,
+        file_bytes=file_bytes,
+        freelist_bytes=freelist_bytes,
+        oldest_retention_unix_nano=oldest_retention,
+    )
 
 
 def inspect_device_key(

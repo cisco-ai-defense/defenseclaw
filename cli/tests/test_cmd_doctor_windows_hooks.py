@@ -493,6 +493,7 @@ class WindowsHookDoctorTests(unittest.TestCase):
             "claudecode-hooks-v2": "2.1.219",
             "devin-hooks-v1": "3000.4.25",
             "hermes-hooks-v1": "0.19.0",
+            "hermes-hooks-v2": "0.21.0",
             "antigravity-hooks-v2": "1.1.8",
         }[contract]
         locations = {"hook_config_paths": [str(config)]}

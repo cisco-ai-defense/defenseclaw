@@ -378,6 +378,12 @@
         "colorMode": "value",
         "graphMode": "none",
         "textMode": "name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No findings in the last hour"
+        },
+        "overrides": []
       }
     },
     {
@@ -410,6 +416,12 @@
         },
         "colorMode": "value",
         "textMode": "name"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No finding targets in the last hour"
+        },
+        "overrides": []
       }
     },
     {
@@ -470,6 +482,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No findings in the last hour",
           "custom": {
             "align": "left"
           }
@@ -564,6 +577,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No findings in the selected range",
           "unit": "cps"
         }
       }
@@ -592,6 +606,12 @@
       ],
       "options": {
         "calculate": false
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No findings in the selected range"
+        },
+        "overrides": []
       }
     },
     {
@@ -645,6 +665,9 @@
         }
       ],
       "fieldConfig": {
+        "defaults": {
+          "noValue": "No findings in the last 24 hours"
+        },
         "overrides": [
           {
             "matcher": {
@@ -701,6 +724,9 @@
         }
       ],
       "fieldConfig": {
+        "defaults": {
+          "noValue": "No findings in the last 24 hours"
+        },
         "overrides": [
           {
             "matcher": {
@@ -770,6 +796,12 @@
       ],
       "options": {
         "showHeader": true
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No finding targets in the last hour"
+        },
+        "overrides": []
       }
     },
     {

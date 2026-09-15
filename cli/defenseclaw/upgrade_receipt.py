@@ -22,6 +22,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
+from defenseclaw.file_permissions import trusted_runtime_owner
+
 UPGRADE_RECEIPT_DIRECTORY: Final[str] = ".upgrade-receipts"
 UPGRADE_RECEIPT_SCHEMA_VERSION: Final[int] = 1
 MAX_UPGRADE_RECEIPTS: Final[int] = 64
@@ -616,9 +618,8 @@ def _read_verified_receipt_queue(data_dir: str) -> list[tuple[Path, UpgradeRecei
 def _require_private_posix_receipt_path(info: os.stat_result, *, kind: str) -> None:
     if os.name != "posix":
         return
-    geteuid = getattr(os, "geteuid", None)
-    if geteuid is not None and info.st_uid != geteuid():
-        raise OSError(f"upgrade receipt {kind} is not owned by the current account")
+    if not trusted_runtime_owner(info.st_uid):
+        raise OSError(f"upgrade receipt {kind} is not owned by a trusted principal")
     if stat.S_IMODE(info.st_mode) & 0o077:
         raise OSError(f"upgrade receipt {kind} is accessible to other accounts")
 

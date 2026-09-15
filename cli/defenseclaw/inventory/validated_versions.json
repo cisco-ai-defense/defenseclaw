@@ -53,7 +53,7 @@
       "os": {
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "contract-only (Layer A); the identical exact 23-event shell-hook set and pre_tool_call response semantics were source-verified at official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0), bounded to <0.21.0. Packaged and real-client Windows validation remains pending."
+      "notes": "contract-only (Layer A); hermes-hooks-v1 covers official Hermes tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). hermes-hooks-v2 rechecked the same 23 claimed events at v0.21.3 (v2026.9.14), bounded to <0.22.0. Packaged and real-client Windows validation remains pending."
     },
     "devin": {
       "version_probe": "devin --version",
@@ -71,7 +71,7 @@
       "os": {
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.19 (reviewed range >=1.18.10,<1.18.20); the relevant 1.18.19 plugin/runtime files are byte-identical to 1.18.11, and the reviewed config-parser delta does not alter plugin loading or hook dispatch. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
+      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.31 (reviewed range >=1.18.10,<1.19.0); the v1.18.31 Hooks entries used by this contract match the v1.18.19 signatures and a thrown Error from tool.execute.before remains the block surface. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",

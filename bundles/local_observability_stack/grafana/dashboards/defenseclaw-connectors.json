@@ -876,7 +876,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval]))",
+          "expr": "sum by (severity) (rate(defenseclaw_inspect_evaluations_total{action!~\"allow|none\", connector=~\"$connector\"}[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{severity}}",
           "refId": "A"
         }
@@ -953,7 +953,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__rate_interval]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }
@@ -1055,7 +1055,13 @@
             }
           }
         }
-      ]
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No Codex notify events in the last 5 minutes"
+        },
+        "overrides": []
+      }
     },
     {
       "type": "table",

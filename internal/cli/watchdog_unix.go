@@ -25,6 +25,8 @@ import (
 	"strconv"
 	"syscall"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // watchdogShutdownSignals returns the OS signals that stop the foreground
@@ -117,6 +119,10 @@ func acquireWatchdogPIDFile(path string, info watchdogPIDInfo) (*os.File, error)
 		return nil, err
 	}
 	if err := writeWatchdogPIDInfo(f, info); err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	if err := managed.ReclaimWrittenFileToDirectoryOwner(path); err != nil {
 		_ = f.Close()
 		return nil, err
 	}

@@ -226,6 +226,25 @@ func TestClaudeCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T
 	}
 }
 
+func TestHermesCorrelationProfileSupportsExactReviewedHookContracts(t *testing.T) {
+	for _, contractID := range []string{"hermes-hooks-v1", "hermes-hooks-v2"} {
+		spec, ok := CorrelationSpecForConnector("hermes", contractID)
+		if !ok {
+			t.Fatalf("reviewed Hermes contract %q rejected", contractID)
+		}
+		if spec.HookContractID != contractID {
+			t.Fatalf("correlation contract=%q want %q", spec.HookContractID, contractID)
+		}
+		if err := spec.Validate(); err != nil {
+			t.Fatalf("Validate %q: %v", contractID, err)
+		}
+	}
+
+	if _, ok := CorrelationSpecForConnector("hermes", "hermes-hooks-v999"); ok {
+		t.Fatal("unreviewed future Hermes contract accepted")
+	}
+}
+
 func TestUnknownCorrelationProfileDoesNotGuessVendorAliases(t *testing.T) {
 	spec := ExplicitCanonicalCorrelationSpec("plugin-example")
 	if !spec.AllowsReceiptTarget(CorrelationTargetSourceEvent) {

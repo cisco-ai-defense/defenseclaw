@@ -137,12 +137,18 @@ func runtimeOutcome(snapshot sensor.Snapshot) observability.Outcome {
 	return observability.OutcomeCompleted
 }
 
-func (adapter *aiRuntimeV8Adapter) metadata(eventName observability.EventName) (router.Metadata, error) {
+func (adapter *aiRuntimeV8Adapter) metadata(
+	eventName observability.EventName,
+	rawSeverity string,
+) (router.Metadata, error) {
+	if strings.TrimSpace(rawSeverity) == "" {
+		rawSeverity = "INFO"
+	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		observability.ProducerKey("ai_discovery"),
 		observability.ClassificationContext{
-			Bucket: observability.BucketAIDiscovery, EventName: eventName, RawSeverity: "INFO",
+			Bucket: observability.BucketAIDiscovery, EventName: eventName, RawSeverity: rawSeverity,
 		},
 		observability.SourceSystem,
 		"",
@@ -157,7 +163,7 @@ func (adapter *aiRuntimeV8Adapter) metadata(eventName observability.EventName) (
 func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 	ctx context.Context, snapshot sensor.Snapshot, health sensor.PlaneHealth,
 ) error {
-	metadata, err := adapter.metadata("ai.runtime.plane_health")
+	metadata, err := adapter.metadata("ai.runtime.plane_health", "INFO")
 	if err != nil {
 		return err
 	}
@@ -180,6 +186,8 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 			DefenseClawAIRuntimeProcessesSkipped:    int64(snapshot.ProcessesSkipped),
 			DefenseClawAIRuntimeConnectionsObserved: int64(snapshot.ConnectionsObserved),
 			DefenseClawAIRuntimeConnectionsUnattributed: int64(snapshot.ConnectionsUnattributed),
+			DefenseClawAIRuntimeHostPlaneObservations:   snapshot.HostPlaneObservations,
+			DefenseClawAIRuntimeHostPlaneGated:          snapshot.HostPlaneGated,
 			DefenseClawAIRuntimePlane:                   string(health.Plane),
 			DefenseClawAIRuntimePlaneAvailable:          health.Available,
 			DefenseClawAIRuntimePlaneRunning:            health.Running,
@@ -192,7 +200,7 @@ func (adapter *aiRuntimeV8Adapter) emitPlaneHealth(
 func (adapter *aiRuntimeV8Adapter) emitFinding(
 	ctx context.Context, snapshot sensor.Snapshot, finding sensor.Finding,
 ) error {
-	metadata, err := adapter.metadata("ai.runtime.finding")
+	metadata, err := adapter.metadata("ai.runtime.finding", string(finding.Severity))
 	if err != nil {
 		return err
 	}
@@ -215,6 +223,8 @@ func (adapter *aiRuntimeV8Adapter) emitFinding(
 			DefenseClawAIRuntimeProcessesSkipped:    int64(snapshot.ProcessesSkipped),
 			DefenseClawAIRuntimeConnectionsObserved: int64(snapshot.ConnectionsObserved),
 			DefenseClawAIRuntimeConnectionsUnattributed: int64(snapshot.ConnectionsUnattributed),
+			DefenseClawAIRuntimeHostPlaneObservations:   snapshot.HostPlaneObservations,
+			DefenseClawAIRuntimeHostPlaneGated:          snapshot.HostPlaneGated,
 			DefenseClawAIRuntimeFindingID:               finding.FindingID,
 			DefenseClawAIRuntimeScore:                   int64(finding.Score),
 			DefenseClawAIRuntimeSeverity:                string(finding.Severity),
@@ -238,7 +248,7 @@ func (adapter *aiRuntimeV8Adapter) emitFinding(
 func (adapter *aiRuntimeV8Adapter) emitActivity(
 	ctx context.Context, snapshot sensor.Snapshot, finding sensor.Finding, tactic tactics.Tactic,
 ) error {
-	metadata, err := adapter.metadata("ai.runtime.activity")
+	metadata, err := adapter.metadata("ai.runtime.activity", string(finding.Severity))
 	if err != nil {
 		return err
 	}

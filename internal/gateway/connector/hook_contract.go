@@ -55,8 +55,8 @@ type HookContract struct {
 	Connector  string
 	ContractID string
 	// ExactAgentVersions pins date-hash or other non-semver upstream builds
-	// without inventing a compatible range. When populated, exact-token
-	// matching takes precedence over MinAgentVersion/MaxAgentVersion.
+	// without inventing a compatible range. When both exact pins and a
+	// min/max range are set, a version matches if either clause matches.
 	ExactAgentVersions      []string
 	MinAgentVersion         string
 	MaxAgentVersion         string
@@ -506,76 +506,131 @@ var builtinHookContracts = map[string][]HookContract{
 			"ConfigChange is blockable except when source=policy_settings, where Claude Code ignores blocking decisions.",
 		},
 	}},
-	"hermes": {{
-		Connector:               "hermes",
-		ContractID:              "hermes-hooks-v1",
-		MinAgentVersion:         "0.19.0",
-		MaxAgentVersion:         "0.21.0",
-		DefaultForUnversioned:   true,
-		HookScriptVersion:       "v6",
-		HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
-		ResponseFieldName:       "hook_output",
-		// Hermes' source-verified v0.19-v0.20 shell-hook surface
-		// (config.yaml `hooks:` block).
-		// VALID_HOOKS membership alone does not grant response authority:
-		// the shell bridge parses a block only at pre_tool_call, context
-		// at pre_llm_call, and continue-at-stop at pre_verify. Transform,
-		// gateway, approval, API, Kanban, and ordinary lifecycle events
-		// are registered for attributed audit but cannot be changed by
-		// DefenseClaw's shell-hook JSON response.
-		Events: []string{
-			"pre_tool_call",
-			"post_tool_call",
-			"transform_terminal_output",
-			"transform_tool_result",
-			"transform_llm_output",
-			"pre_llm_call",
-			"post_llm_call",
-			"pre_verify",
-			"pre_api_request",
-			"post_api_request",
-			"api_request_error",
-			"on_session_start",
-			"on_session_end",
-			"on_session_finalize",
-			"on_session_reset",
-			"subagent_start",
-			"subagent_stop",
-			"pre_gateway_dispatch",
-			"pre_approval_request",
-			"post_approval_response",
-			"kanban_task_claimed",
-			"kanban_task_completed",
-			"kanban_task_blocked",
+	"hermes": {
+		{
+			Connector:               "hermes",
+			ContractID:              "hermes-hooks-v1",
+			MinAgentVersion:         "0.19.0",
+			MaxAgentVersion:         "0.21.0",
+			DefaultForUnversioned:   false,
+			HookScriptVersion:       "v6",
+			HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
+			ResponseFieldName:       "hook_output",
+			// Hermes' source-verified v0.19-v0.20 shell-hook surface
+			// (config.yaml `hooks:` block).
+			// VALID_HOOKS membership alone does not grant response authority:
+			// the shell bridge parses a block only at pre_tool_call, context
+			// at pre_llm_call, and continue-at-stop at pre_verify. Transform,
+			// gateway, approval, API, Kanban, and ordinary lifecycle events
+			// are registered for attributed audit but cannot be changed by
+			// DefenseClaw's shell-hook JSON response.
+			Events: []string{
+				"pre_tool_call",
+				"post_tool_call",
+				"transform_terminal_output",
+				"transform_tool_result",
+				"transform_llm_output",
+				"pre_llm_call",
+				"post_llm_call",
+				"pre_verify",
+				"pre_api_request",
+				"post_api_request",
+				"api_request_error",
+				"on_session_start",
+				"on_session_end",
+				"on_session_finalize",
+				"on_session_reset",
+				"subagent_start",
+				"subagent_stop",
+				"pre_gateway_dispatch",
+				"pre_approval_request",
+				"post_approval_response",
+				"kanban_task_claimed",
+				"kanban_task_completed",
+				"kanban_task_blocked",
+			},
+			// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
+			// session + subagent lifecycle → event_content (audit envelope).
+			AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+			Capabilities: HookCapability{
+				CanBlock:     true,
+				CanAskNative: false,
+				// Only pre_tool_call honors a blocking stdout response.
+				// pre_llm_call injects context and pre_verify can continue a
+				// bounded verification loop, but neither is a tool veto.
+				// Hermes never blocks on exit code or hook timeout, so
+				// SupportsFailClosed stays false.
+				BlockEvents:        []string{"pre_tool_call"},
+				SupportsFailClosed: false,
+				Scope:              "user",
+			},
+			SupportsTraceparent: true,
+			ToolCallLifecycle:   hermesToolCallLifecycle(),
+			Notes: []string{
+				"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Official hook payload fields remain top-level; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
+				"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects {\"context\":...}; pre_verify accepts {\"action\":\"continue\",\"message\"} to keep the bounded verification loop going. Transform hooks require Python string returns, pre_gateway_dispatch requires skip/rewrite/allow plugin results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output. Non-zero exit codes and hook timeouts only warn upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
+				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
+				"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
+			},
 		},
-		// pre_llm_call → prompt; pre/post_tool_call → tool_call/tool_result;
-		// session + subagent lifecycle → event_content (audit envelope).
-		AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
-		Capabilities: HookCapability{
-			CanBlock:     true,
-			CanAskNative: false,
-			// Only pre_tool_call honors a blocking stdout response.
-			// pre_llm_call injects context and pre_verify can continue a
-			// bounded verification loop, but neither is a tool veto.
-			// Hermes never blocks on exit code or hook timeout, so
-			// SupportsFailClosed stays false.
-			BlockEvents:        []string{"pre_tool_call"},
-			SupportsFailClosed: false,
-			Scope:              "user",
+		{
+			Connector:               "hermes",
+			ContractID:              "hermes-hooks-v2",
+			MinAgentVersion:         "0.21.0",
+			MaxAgentVersion:         "0.22.0",
+			DefaultForUnversioned:   true,
+			HookScriptVersion:       "v6",
+			HookConfigPathTemplates: []string{"$HERMES_HOME/config.yaml", "%LOCALAPPDATA%/hermes/config.yaml", "~/.hermes/config.yaml"},
+			ResponseFieldName:       "hook_output",
+			Events: []string{
+				"pre_tool_call",
+				"post_tool_call",
+				"transform_terminal_output",
+				"transform_tool_result",
+				"transform_llm_output",
+				"pre_llm_call",
+				"post_llm_call",
+				"pre_verify",
+				"pre_api_request",
+				"post_api_request",
+				"api_request_error",
+				"on_session_start",
+				"on_session_end",
+				"on_session_finalize",
+				"on_session_reset",
+				"subagent_start",
+				"subagent_stop",
+				"pre_gateway_dispatch",
+				"pre_approval_request",
+				"post_approval_response",
+				"kanban_task_claimed",
+				"kanban_task_completed",
+				"kanban_task_blocked",
+			},
+			AIDSurfaces: []string{"prompt", "tool_call", "tool_result", "event_content"},
+			Capabilities: HookCapability{
+				CanBlock:           true,
+				CanAskNative:       false,
+				BlockEvents:        []string{"pre_tool_call"},
+				SupportsFailClosed: false,
+				Scope:              "user",
+			},
+			SupportsTraceparent: true,
+			ToolCallLifecycle:   hermesToolCallLifecycleV2(),
+			Notes: []string{
+				"Same 23 claimed shell-hook events as hermes-hooks-v1. Official Hermes 0.21.x, rechecked at v0.21.3 (v2026.9.14, commit 345cd2b057a452236de401d3534b8502a7465e8d), added observer-only VALID_HOOKS that DefenseClaw does not register or claim. Official hook payload fields remain top-level.",
+				"pre_tool_call remains the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. Exit code 2 now blocks pre_tool_call. Timeouts and spawn errors still fail open unless the hook spec sets fail_closed, so SupportsFailClosed stays false. Bounded to >=0.21.0,<0.22.0.",
+				"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
+				"The v2 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
+			},
 		},
-		SupportsTraceparent: true,
-		ToolCallLifecycle:   hermesToolCallLifecycle(),
-		Notes: []string{
-			"Covers the identical exact 23-event VALID_HOOKS set verified from official Hermes Agent tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). The reviewed range is bounded to >=0.19.0,<0.21.0; later versions require new source evidence. Official hook payload fields remain top-level; events whose official schema is not documented remain partial, attributed audit rather than inferred enforcement.",
-			"pre_tool_call is the only blockable event: Hermes accepts both {\"action\":\"block\",\"message\"} (canonical) and {\"decision\":\"block\",\"reason\"} (Claude-Code style) and normalizes internally. pre_llm_call injects {\"context\":...}; pre_verify accepts {\"action\":\"continue\",\"message\"} to keep the bounded verification loop going. Transform hooks require Python string returns, pre_gateway_dispatch requires skip/rewrite/allow plugin results, and approval/API/Kanban/lifecycle return values are ignored or undocumented by the shell lane, so DefenseClaw audits them without claiming mutation. Confirm verdicts are recorded and alerted without hook output. Non-zero exit codes and hook timeouts only warn upstream, so there is no fail-closed surface; Hermes remains live-smoke pending (https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/hermes/).",
-			"Setup preserves the operator's hooks_auto_accept value and owns only the exact DefenseClaw (event, command) approvals in shell-hooks-allowlist.json. Running Hermes processes cache callbacks, so registration and revocation remain live=false/pending-reload until every affected CLI, gateway, desktop, or service host is reloaded or restarted; Windows teardown leaves an exact direct-native disabled tombstone for stale callbacks.",
-			"The v1 connector covers only the resolved default HERMES_HOME profile. Named-profile homes and multiplex gateways are unsupported. Default-profile inventory includes skills.external_dirs, SOUL.md, built-in memory plus memory.provider provenance, and bundled/Nix, user, and pip plugins; named-profile and project-conditional sources remain explicitly unverified.",
-		},
-	}},
+	},
 	"cursor": {{
 		Connector:               "cursor",
 		ContractID:              "cursor-hooks-v1",
 		ExactAgentVersions:      []string{"2026.07.23-e383d2b"},
+		MinAgentVersion:         "2.4.0",
+		MaxAgentVersion:         "4.0.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v8",
 		HookConfigPathTemplates: []string{"~/.cursor/hooks.json"},
@@ -618,7 +673,7 @@ var builtinHookContracts = map[string][]HookContract{
 		SupportsTraceparent: true,
 		ToolCallLifecycle:   cursorToolCallLifecycle(),
 		Notes: []string{
-			"Cursor 1.7 introduced beta hooks for the agent loop, but Cursor does not publish per-event introduction versions for the current 21-event reference. This supported contract remains pinned only to Cursor Agent build 2026.07.23-e383d2b; the event payload cursor_version field is the Cursor application/Desktop version and is not accepted as Agent CLI version evidence.",
+			"Cursor Desktop is the hook host for the 21-event user hooks.json surface. This contract accepts Desktop application versions >=2.4.0 and <4.0.0, plus the reviewed Agent CLI exact build 2026.07.23-e383d2b. Later Agent CLI date-hash builds are not accepted without a matching hook-surface review. The event payload cursor_version field is the Cursor application/Desktop version.",
 			"Cursor Agent uses agent as its primary CLI command; cursor-agent remains a compatibility alias.",
 			"Cursor runs all matching hooks and merges conflicting responses in Enterprise > Team > Project > User priority. DefenseClaw owns the ordinary user hook and Cursor exposes no safe API for detecting an actual higher-priority conflict, so setup does not infer one. Doctor and status report that detection limitation rather than claiming enterprise authority.",
 			"Action mode emits the documented native deny response on supported pre-action events and registers failClosed=true; observe maps policy blocks to would-block and registers failClosed=false. DefenseClaw does not emit Cursor's native ask response or claim human-approval support.",
@@ -836,14 +891,14 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "opencode",
 		ContractID:              "opencode-hooks-v1",
 		MinAgentVersion:         "1.18.10",
-		MaxAgentVersion:         "1.18.20",
+		MaxAgentVersion:         "1.19.0",
 		DefaultForUnversioned:   false,
 		HookScriptVersion:       "v7",
 		HookConfigPathTemplates: []string{"~/.config/opencode/plugins/defenseclaw.js"},
 		ResponseFieldName:       "hook_output",
 		// opencode exposes plugin hooks (not shell hooks). DefenseClaw's
 		// bridge plugin wires tool.execute.before (block) and
-		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.19 also exposes
+		// tool.execute.after (observe). OpenCode v1.18.10-v1.18.31 also exposes
 		// permission.ask and chat/context mutation hooks; this focused bridge
 		// intentionally does not implement those surfaces.
 		Events: []string{
@@ -869,8 +924,8 @@ var builtinHookContracts = map[string][]HookContract{
 		ToolCallLifecycle:   openCodeToolCallLifecycle(),
 		Notes: []string{
 			"opencode (https://opencode.ai) auto-loads JS/TS plugins from ~/.config/opencode/plugins/ — there is no command-hook config file to patch. DefenseClaw writes a dependency-free bridge plugin (defenseclaw.js) whose tool.execute.before POSTs to /api/v1/opencode/hook and throws new Error(reason) on a block decision, aborting the tool.",
-			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.19 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
-			"Source-reviewed range is >=1.18.10,<1.18.20 with current pin 1.18.19. The v1.18.19 plugin types, plugin loader/config origins, MCP catalog sanitizer, and tool execution call sites are byte-identical to v1.18.11; its only reviewed config-parser delta ignores unknown top-level keys and does not alter plugin loading or hook dispatch. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
+			"DefenseClaw intentionally implements block plus observe-only tool/lifecycle telemetry. OpenCode v1.18.10-v1.18.31 exposes permission.ask and chat/context mutation hooks, but this connector does not implement or claim them. The bridge honors fail-closed by throwing when the gateway is unreachable and FAIL_MODE=closed.",
+			"Source-reviewed range is >=1.18.10,<1.19.0 with current pin 1.18.31. The v1.18.31 Hooks entries used by this contract (config, event, tool.execute.before, tool.execute.after) match the v1.18.19 signatures; a thrown Error from tool.execute.before remains the block surface. The bridge refuses ambiguous MCP identity and action-mode allow claims when a later plugin can mutate args.",
 		},
 	}},
 	"amp": {{
@@ -915,7 +970,7 @@ var builtinHookContracts = map[string][]HookContract{
 		Connector:               "omnigent",
 		ContractID:              "omnigent-custom-policy-v1",
 		MinAgentVersion:         "0.7.0",
-		MaxAgentVersion:         "0.8.0",
+		MaxAgentVersion:         "0.14.0",
 		DefaultForUnversioned:   true,
 		HookScriptVersion:       "v1",
 		HookConfigPathTemplates: []string{"$OMNIGENT_CONFIG", "$OMNIGENT_CONFIG_HOME/config.yaml", "~/.omnigent/config.yaml"},
@@ -947,7 +1002,7 @@ var builtinHookContracts = map[string][]HookContract{
 			"ASK is native only for OmniGent's pre-action request, tool_call, and llm_request phases; post-phase confirm findings remain attributed audit and continue without an approval pause.",
 			"The in-process Python bridge forwards an active OpenTelemetry W3C trace context when present; otherwise DefenseClaw starts a new trace.",
 			"Optional native OTLP is inactive until the OmniGent launch process exports OMNIGENT_TELEMETRY_ENABLED=true and the standard OTLP variables; content capture remains disabled.",
-			"The v0.7 PolicyEvent context exposes bounded usage, cost, model, harness, actor, and labels but no session identifier; the bridge marks that correlation gap and marks partial label projections.",
+			"The v0.7-v0.13 PolicyEvent context exposes bounded usage, cost, model, harness, actor, and labels but no session identifier; v0.13 adds optional subtree_usage. The bridge marks that correlation gap and marks partial label projections.",
 		},
 	}},
 }
@@ -1068,10 +1123,14 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 }
 
 func contractMatchesAgentVersion(contract HookContract, raw, normalized string) bool {
-	if len(contract.ExactAgentVersions) != 0 {
-		return exactAgentVersionMatch(raw, contract.ExactAgentVersions)
+	if len(contract.ExactAgentVersions) != 0 && exactAgentVersionMatch(raw, contract.ExactAgentVersions) {
+		return true
 	}
-	return versionInRange(normalized, contract.MinAgentVersion, contract.MaxAgentVersion)
+	// Empty min/max would otherwise accept any normalized version.
+	if contract.MinAgentVersion != "" || contract.MaxAgentVersion != "" {
+		return versionInRange(normalized, contract.MinAgentVersion, contract.MaxAgentVersion)
+	}
+	return false
 }
 
 func exactAgentVersionMatch(raw string, expected []string) bool {

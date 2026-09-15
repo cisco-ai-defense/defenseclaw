@@ -229,7 +229,7 @@ func TestJudgeBodyStoreRejectsPermissionChangeDuringOpen(t *testing.T) {
 	}
 }
 
-func TestJudgeBodyStoreRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
+func TestJudgeBodyStoreRejectsForeignOwnerEvenWhenRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("changing file ownership requires root")
 	}
@@ -240,7 +240,16 @@ func TestJudgeBodyStoreRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
 	if err := os.Chown(path, 65534, -1); err != nil {
 		t.Skipf("chown is unavailable: %v", err)
 	}
-	assertJudgeBodyStorePathError(t, path, "untrusted owner")
+	t.Setenv("SUDO_UID", "")
+	t.Setenv("SUDO_GID", "")
+	t.Setenv("SUDO_USER", "")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateJudgeBodyPlatformTrust(path, info, false, true); err == nil {
+		t.Fatal("root trusted a judge-body file owned by an unrelated UID")
+	}
 }
 
 func TestJudgeBodyUnixTrustRejectsSyntheticUntrustedOwner(t *testing.T) {

@@ -721,6 +721,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No hook events in range",
           "unit": "cps",
           "custom": {
             "fillOpacity": 18,
@@ -856,6 +857,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No hook events in range",
           "unit": "short",
           "color": {
             "mode": "palette-classic"
@@ -915,6 +917,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No connector events in range",
           "unit": "short",
           "color": {
             "mode": "palette-classic"
@@ -1013,6 +1016,7 @@
       ],
       "fieldConfig": {
         "defaults": {
+          "noValue": "No shadow blocks in range",
           "unit": "cps",
           "custom": {
             "fillOpacity": 18,
@@ -1092,6 +1096,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No shadow blocks in range",
           "unit": "short",
           "color": {
             "mode": "palette-classic"
@@ -1242,6 +1247,7 @@
       },
       "fieldConfig": {
         "defaults": {
+          "noValue": "No shadow blocks in range",
           "unit": "short",
           "color": {
             "mode": "palette-classic"
@@ -1330,6 +1336,12 @@
         "enableLogDetails": true,
         "dedupStrategy": "none",
         "sortOrder": "Descending"
+      },
+      "fieldConfig": {
+        "defaults": {
+          "noValue": "No shadow-block decisions in range"
+        },
+        "overrides": []
       }
     },
     {

@@ -10,14 +10,22 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
 func validateDeviceIdentityPathSyntax(_, _ string) error { return nil }
 
 func validateFreshIdentityDirectoryPlatform(path string, info os.FileInfo) error {
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok {
 		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
+	}
+	if !runtimeowner.Trusted(stat.Uid) {
+		return fmt.Errorf("gateway: device identity directory is not owned by the current user: %s", path)
+	}
+	if stat.Uid == 0 && os.Geteuid() != 0 {
+		return fmt.Errorf("gateway: device identity directory is root-owned from a sudo-started gateway: %s", path)
 	}
 	resolved, err := filepath.EvalSymlinks(path)
 	if err != nil {

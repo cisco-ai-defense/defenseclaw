@@ -478,10 +478,14 @@ func (s *Service) Poll(ctx context.Context) Snapshot {
 // Three states are distinguished because they need three different fixes:
 // unavailable is a platform or grant problem, stopped is a runtime failure,
 // and partially covered is a privilege gap that leaves the plane useful but
-// incomplete.
+// incomplete. A deselected plane is the only expected gap; once an operator
+// selects Plane C, a missing root grant must remain visible as degradation.
 func degradedReasonsFor(snapshot Snapshot) []string {
 	reasons := make([]string, 0, len(snapshot.Planes))
 	for _, health := range snapshot.Planes {
+		if planeIsDeselected(health) {
+			continue
+		}
 		switch {
 		case !health.Available:
 			reasons = append(reasons, health.Plane.Name()+" unavailable: "+planeIdleReason(health))
@@ -498,6 +502,15 @@ func degradedReasonsFor(snapshot Snapshot) []string {
 	}
 	return reasons
 }
+
+func planeIsDeselected(health PlaneHealth) bool {
+	reason := strings.ToLower(health.Reason)
+	return strings.Contains(reason, "not selected") ||
+		strings.Contains(reason, "enable_host_plane")
+}
+
+const unprivilegedEgressLimit = "egress attribution is limited to this process's own sockets; " +
+	"run the gateway elevated for machine-wide coverage"
 
 // namingBudget caps how long one poll may spend naming peers.
 //
@@ -546,9 +559,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 		}
 		if !selected[string(plane)] {
 			entry.Running = false
-			if entry.Reason == "" {
-				entry.Reason = s.deselectedReason(plane)
-			}
+			entry.Reason = s.deselectedReason(plane)
 			health = append(health, entry)
 			continue
 		}
@@ -566,9 +577,7 @@ func (s *Service) planeHealth(now time.Time, processOK, connectionOK bool) []Pla
 				// the unattributed count stays near zero and a blinded plane
 				// is indistinguishable from a host with no egress. Coverage
 				// is reported, never implied.
-				limits = append(limits,
-					"egress attribution is limited to this process's own sockets; "+
-						"run the gateway elevated for machine-wide coverage")
+				limits = append(limits, unprivilegedEgressLimit)
 			}
 			if reason := s.dnsCaptureStatus(); reason != "" {
 				// The plane still runs on reverse DNS; naming is just less

@@ -103,7 +103,7 @@ endef
         upgrade-smoke upgrade-smoke-matrix upgrade-refusal-contract-matrix upgrade-developer-activation \
         upgrade-legacy-smoke upgrade-legacy-smoke-matrix upgrade-signed-protocol upgrade-signed-protocol-matrix \
         set-version \
-        _bundle-data _stage-extension-fingerprint _source-install-preflight _source-install-dev-preflight _source-dev-install \
+        _bundle-data _stage-extension-fingerprint _checkout-write-preflight _source-install-preflight _source-install-dev-preflight _source-dev-install \
         proto proto-check proto-tools \
         dist dist-cli dist-gateway dist-plugin dist-extension-contract dist-sandbox dist-test dist-upgrade-manifest dist-checksums dist-clean
 
@@ -403,7 +403,7 @@ PROTO_TOOLS_BIN := $(PROTO_TOOLS_DIR)/bin
 PROTOC_GEN_GO_VERSION      := v1.36.6
 PROTOC_GEN_GO_GRPC_VERSION := v1.5.1
 
-proto-tools:
+proto-tools: _checkout-write-preflight
 	@mkdir -p $(PROTO_TOOLS_BIN)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	@GOBIN=$(PROTO_TOOLS_BIN) go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
@@ -429,7 +429,7 @@ proto-check: proto
 		proto/defenseclaw/secureclient/v1/secureclient_grpc.pb.go \
 		internal/guardrail/semanticpb/facts.pb.go
 
-gateway: sync-openclaw-extension
+gateway: _checkout-write-preflight sync-openclaw-extension
 	go build $(GOFLAGS) -o $(GATEWAY)$(EXE) ./cmd/defenseclaw
 	$(if $(filter Windows_NT,$(OS)),go run ./internal/tools/windowsresources -target windows_amd64 -executable $(GATEWAY)$(EXE) -component gateway -version $(VERSION) -icon "$(CURDIR)/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png",)
 	@echo "Built $(GATEWAY)$(EXE)"
@@ -459,7 +459,7 @@ endif
 # detects the placeholder at runtime and returns a clear error when
 # `Setup` is called for OpenClaw without a built plugin. Operators who
 # actually want OpenClaw run `make extensions` (or `make plugin`) first.
-sync-openclaw-extension:
+sync-openclaw-extension: _checkout-write-preflight
 	@set -e; \
 	embed_dir=internal/gateway/connector/openclaw_extension; \
 	plugin_dist=$(PLUGIN_DIR)/dist; \
@@ -533,7 +533,7 @@ gateway-run: gateway
 start: gateway
 	@./scripts/start.sh $(ARGS)
 
-plugin:
+plugin: _checkout-write-preflight
 	@command -v npm >/dev/null 2>&1 || { echo "npm not found — install Node.js from https://nodejs.org/"; exit 1; }
 	cp internal/configs/providers.json $(PLUGIN_DIR)/src/providers.json
 	cd $(PLUGIN_DIR) && NODE_ENV=development npm ci --include=dev && npm run build
@@ -541,7 +541,7 @@ plugin:
 	@echo "Built OpenClaw plugin → $(PLUGIN_DIR)/dist/"
 	@echo "  Install with: make plugin-install"
 
-amp-plugin-typecheck:
+amp-plugin-typecheck: _checkout-write-preflight
 	cd scripts/amp-plugin-typecheck && npm ci --ignore-scripts --no-audit --no-fund
 	cd scripts/amp-plugin-typecheck && npm test
 
@@ -554,6 +554,9 @@ amp-plugin-typecheck:
 # installed entry point or gateway can be replaced.  A marker makes subsequent
 # rebuilds from this exact checkout idempotent; the legacy exact CLI symlink
 # check admits same-checkout installs made before the marker existed.
+_checkout-write-preflight:
+	@./scripts/refuse-sudo-user-checkout.sh "$(CURDIR)"
+
 _source-install-preflight:
 	@./scripts/source-install-preflight.sh check \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
@@ -1178,7 +1181,7 @@ dist-cli: _bundle-data _stage-extension-fingerprint
 	@find cli/ -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	uv build --wheel --out-dir $(DIST_DIR)
 
-_bundle-data:
+_bundle-data: _checkout-write-preflight
 	@mkdir -p cli/defenseclaw/_data/policies/rego
 	@mkdir -p cli/defenseclaw/_data/policies/openshell
 	@mkdir -p cli/defenseclaw/_data/policies/guardrail
@@ -1264,7 +1267,7 @@ _bundle-data:
 	cp -r bundles/splunk_o11y_dashboards cli/defenseclaw/_data/
 	cp -r policies/openshell cli/defenseclaw/_data/policies/openshell
 
-dist-gateway:
+dist-gateway: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)
 	@for pair in linux/amd64 linux/arm64 darwin/arm64; do \
 		goos=$${pair%%/*}; goarch=$${pair##*/}; \
@@ -1297,7 +1300,7 @@ dist-extension-contract:
 		--archive $(DIST_DIR)/defenseclaw-plugin-$(VERSION).tar.gz \
 		--wheel $(DIST_DIR)/defenseclaw-$(VERSION)-py3-none-any.whl
 
-dist-sandbox:
+dist-sandbox: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/sandbox/policies $(DIST_DIR)/sandbox/scripts
 	cp policies/openshell/*.rego $(DIST_DIR)/sandbox/policies/
 	cp policies/openshell/*.yaml $(DIST_DIR)/sandbox/policies/
@@ -1305,7 +1308,7 @@ dist-sandbox:
 	chmod +x $(DIST_DIR)/sandbox/scripts/install-openshell-sandbox.sh
 	@echo "Sandbox artifacts copied to $(DIST_DIR)/sandbox/"
 
-dist-test:
+dist-test: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)/test
 	cp scripts/test-proxy-sandbox.py $(DIST_DIR)/test/
 	cp scripts/test-e2e-tool-block.sh $(DIST_DIR)/test/
@@ -1317,16 +1320,16 @@ dist-test:
 	chmod +x $(DIST_DIR)/test/*.sh 2>/dev/null || true
 	@echo "Test scripts copied to $(DIST_DIR)/test/"
 
-dist-upgrade-manifest:
+dist-upgrade-manifest: _checkout-write-preflight
 	@mkdir -p $(DIST_DIR)
 	python3 scripts/generate-upgrade-manifest.py --out $(DIST_DIR)/upgrade-manifest.json
 
-dist-checksums:
+dist-checksums: _checkout-write-preflight
 	@test -d $(DIST_DIR) || { echo "Run 'make dist' first"; exit 1; }
 	cd $(DIST_DIR) && find . -type f ! -name checksums.txt ! -name checksums.txt.sig ! -name checksums.txt.pem | sed 's#^\./##' | sort | xargs shasum -a 256 > checksums.txt
 	@echo "Checksums written to $(DIST_DIR)/checksums.txt"
 
-dist-clean:
+dist-clean: _checkout-write-preflight
 	rm -rf $(DIST_DIR)
 	rm -rf cli/defenseclaw/_data
 	rm -rf sandbox-test-*

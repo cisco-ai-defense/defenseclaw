@@ -184,6 +184,36 @@ class TestAgentDiscoverCommand(unittest.TestCase):
         self.assertNotIn("/Users/alice", rendered)
         self.assertNotIn("/opt/homebrew", rendered)
 
+    def test_discovery_version_is_normalized_for_gateway_schema(self):
+        app, tmp_dir, db_path = make_app_context()
+        app.cfg.gateway.token = "secret-token-123"
+        discovery = _discovery()
+        discovery.agents["codex"].version = "Hermes Agent v0.21.3 (2026.9.14) · upstream 1ab32b21"
+        captured: list[dict] = []
+
+        class FakeClient:
+            def __init__(self, **_kwargs):
+                pass
+
+            def emit_agent_discovery(self, report):
+                captured.append(report)
+                return {"status": "ok"}
+
+        try:
+            with patch(
+                "defenseclaw.commands.cmd_agent.agent_discovery.discover_agents",
+                return_value=discovery,
+            ), patch("defenseclaw.commands.cmd_agent.OrchestratorClient", FakeClient):
+                result = self.runner.invoke(agent, ["discover"], obj=app, catch_exceptions=False)
+        finally:
+            cleanup_app(app, db_path, tmp_dir)
+
+        self.assertEqual(result.exit_code, 0, result.output + result.stderr)
+        self.assertEqual(
+            captured[0]["agents"]["codex"]["version"],
+            "Hermes Agent v0.21.3 (2026.9.14) upstream 1ab32b21",
+        )
+
     def test_emit_failure_is_fail_open_unless_required(self):
         app, tmp_dir, db_path = make_app_context()
         app.cfg.gateway.token = "secret-token-123"

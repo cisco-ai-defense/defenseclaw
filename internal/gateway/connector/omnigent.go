@@ -616,7 +616,7 @@ func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
 		return "", fmt.Errorf("omnigent connector: Python returned invalid OmniGent package version %q", lines[len(lines)-2])
 	}
 	if runtime.GOOS == "windows" && !omnigentVersionInReviewedRange(installedVersion) {
-		return "", fmt.Errorf("omnigent connector: native Windows degraded mode supports the reviewed OmniGent 0.7.x range, found %s", installedVersion)
+		return "", fmt.Errorf("omnigent connector: native Windows degraded mode supports the reviewed OmniGent >=0.7.0,<0.14.0 range, found %s", installedVersion)
 	}
 	if selectedVersion := NormalizeAgentVersion("omnigent", opts.AgentVersion); selectedVersion != "" && selectedVersion != installedVersion {
 		return "", fmt.Errorf("omnigent connector: selected executable version %s does not match its Python environment version %s", selectedVersion, installedVersion)
@@ -629,7 +629,7 @@ func omnigentSitePackages(ctx context.Context, opts SetupOpts) (string, error) {
 }
 
 func omnigentVersionInReviewedRange(version string) bool {
-	return compareVersion(version, "0.7.0") >= 0 && compareVersion(version, "0.8.0") < 0
+	return compareVersion(version, "0.7.0") >= 0 && compareVersion(version, "0.14.0") < 0
 }
 
 func resolveOmnigentExecutable(opts SetupOpts) (string, error) {

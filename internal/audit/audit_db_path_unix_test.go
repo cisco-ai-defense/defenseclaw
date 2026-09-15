@@ -194,7 +194,7 @@ func TestHardenedAuditSQLiteRejectsPermissionChangeDuringOpen(t *testing.T) {
 	}
 }
 
-func TestAuditDBRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
+func TestAuditDBRejectsForeignOwnerEvenWhenRoot(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("changing file ownership requires root")
 	}
@@ -205,7 +205,16 @@ func TestAuditDBRejectsUntrustedOwnerWhenChownAvailable(t *testing.T) {
 	if err := os.Chown(path, 65534, -1); err != nil {
 		t.Skipf("chown is unavailable: %v", err)
 	}
-	assertAuditDBPathError(t, path, "untrusted owner")
+	t.Setenv("SUDO_UID", "")
+	t.Setenv("SUDO_GID", "")
+	t.Setenv("SUDO_USER", "")
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateAuditDBPlatformTrust(path, info, false, true); err == nil {
+		t.Fatal("root trusted an audit file owned by an unrelated UID")
+	}
 }
 
 func TestAuditDBUnixTrustRejectsSyntheticUntrustedOwner(t *testing.T) {

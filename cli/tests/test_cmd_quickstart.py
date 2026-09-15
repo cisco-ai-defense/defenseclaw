@@ -36,7 +36,10 @@ from tests.permissions import set_known_windows_directory_acl
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-quickstart-")
+        # macOS exposes /var through /private/var. Device-identity setup
+        # intentionally rejects indirect custody paths, so pass its canonical
+        # spelling just as the CLI persists it.
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-quickstart-"))
         if os.name == "nt":
             set_known_windows_directory_acl(self.tmp_dir)
         self.home_dir = os.path.join(self.tmp_dir, "home")
