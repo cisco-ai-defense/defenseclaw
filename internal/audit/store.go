@@ -1801,6 +1801,46 @@ var migrations = []migration{
 		description: "guardrails: add staged reverse-shell persistence result slot eighteen",
 		apply:       migrateToolChainEighteenSlotWideMaskState,
 	},
+	{
+		description: "guardrails: add result slots nineteen and twenty with bounded exact-value lineage",
+		apply:       migrateToolChainTwentySlotValueLineageState,
+	},
+	{
+		description: "guardrails: reserve append-only bounded chain mask capacity",
+		apply:       migrateToolChainAppendOnlyMaskCapacity,
+	},
+	{
+		description: "guardrails: bind pending SQL value sources to authoritative results",
+		apply:       migrateToolChainSQLValueSourceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-one for bounded SQL value persistence",
+		apply:       migrateToolChainTwentyOneSlotSQLPersistenceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-two for compromised credential authentication",
+		apply:       migrateToolChainTwentyTwoSlotCredentialAuthenticationState,
+	},
+	{
+		description: "guardrails: bind pending credential sources to authoritative results",
+		apply:       migrateToolChainReturnedCredentialSourceState,
+	},
+	{
+		description: "guardrails: add result slot twenty-three for AD CS certificate impersonation",
+		apply:       migrateToolChainTwentyThreeSlotADCSState,
+	},
+	{
+		description: "guardrails: add result slot twenty-four for S4U ticket secretsdump",
+		apply:       migrateToolChainTwentyFourSlotS4UState,
+	},
+	{
+		description: "guardrails: add result slot twenty-five for policy-gated SQLite read-delete",
+		apply:       migrateToolChainTwentyFiveSlotSQLiteReadDeleteState,
+	},
+	{
+		description: "guardrails: add result slot twenty-six for exact file-email lineage",
+		apply:       migrateToolChainTwentySixSlotFileEmailState,
+	},
 }
 
 // tableExists reports whether the given SQLite table is present.

@@ -52,6 +52,7 @@ class MonitoringBenchNormalizerTest(unittest.TestCase):
         self.assertEqual(len(cases[1]["payload"]["events"]), 2)
         self.assertEqual(outcomes, {"succeeded": 2})
         self.assertEqual(cases[0]["truth"]["deterministic_truth"], "contextual_or_dual_use")
+        self.assertTrue(all(case["strata"]["language"] == "en" for case in cases))
 
     def test_parallel_attack_group_is_not_split_into_atomic_truth(self):
         sample = Sample([
@@ -75,6 +76,25 @@ class MonitoringBenchNormalizerTest(unittest.TestCase):
         self.assertEqual(outcome, "failed")
         self.assertEqual(event["outcome"], "failed")
         self.assertNotIn("result", event)
+
+    def test_source_inputs_are_value_free_validated_and_sorted(self):
+        inputs = normalizer.normalization_inputs({
+            "archive": {"bytes": 7, "sha256": "b" * 64},
+            "master": {"bytes": 3, "sha256": "a" * 64},
+        })
+        self.assertEqual([
+            {"bytes": 3, "sha256": "a" * 64},
+            {"bytes": 7, "sha256": "b" * 64},
+        ], inputs)
+        self.assertTrue(all(set(item) == {"bytes", "sha256"} for item in inputs))
+        with self.assertRaisesRegex(ValueError, "source file identity"):
+            normalizer.normalization_inputs({
+                "archive": {"bytes": -1, "sha256": "a" * 64},
+            })
+        with self.assertRaisesRegex(ValueError, "source file identity"):
+            normalizer.normalization_inputs({
+                "archive": {"bytes": 1, "sha256": "not-a-digest"},
+            })
 
 
 if __name__ == "__main__":

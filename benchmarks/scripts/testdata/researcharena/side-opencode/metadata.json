@@ -1,0 +1,13 @@
+{
+  "setting": "utility_finetuning",
+  "side_task": "embedded",
+  "redruntime_hours": 1,
+  "red_provider": "opencode",
+  "red_model": "glm-test",
+  "cluster_id": "1003",
+  "experiment": "fixture_side_opencode",
+  "task_config": "qwen2.5_0.5b",
+  "seed": null,
+  "baseline": false,
+  "timestamp": "20260912_120200"
+}

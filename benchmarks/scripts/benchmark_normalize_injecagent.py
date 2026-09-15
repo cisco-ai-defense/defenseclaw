@@ -17,13 +17,19 @@ from pathlib import Path
 from typing import Any
 
 SAFE_TOOL = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{0,159}$")
+SOURCE_REVISION = "f19c9f2c79a41046eb13c03c51a24c567a8ffa07"
+PRE_PARTITION_SPLIT = "smoke"
+EXPECTED_FILES = {
+    "test_cases_dh_base.json": "0a8186468d21389af432e8c7b399ae42264d1b93a07b65c7a489468508604305",
+    "test_cases_ds_base.json": "4daab35c62a3845e8b9400f4dca58b9c9f37e57cd33b2337552557fbb26282e9",
+}
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--input", type=Path, required=True)
+    parser.add_argument("--input", type=Path, action="append", required=True)
     parser.add_argument("--revision", required=True)
-    parser.add_argument("--split", choices=("development", "validation", "test"), default="development")
+    parser.add_argument("--split", choices=(PRE_PARTITION_SPLIT,), default=PRE_PARTITION_SPLIT)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     return parser.parse_args()
@@ -61,7 +67,7 @@ def load_source_rows(path: Path) -> list[dict[str, Any]]:
     return rows
 
 
-def normalize(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def _normalize_one(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     skipped: Counter[str] = Counter()
     for line_number, source in enumerate(load_source_rows(path), 1):
@@ -77,7 +83,12 @@ def normalize(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any
             skipped["invalid_tool_chain"] += 1
             continue
         material = json.dumps(
-            {"line": line_number, "tools": tools, "attack_type": source.get("Attack Type", "")},
+            {
+                "source_file": path.name,
+                "line": line_number,
+                "tools": tools,
+                "attack_type": source.get("Attack Type", ""),
+            },
             sort_keys=True,
             separators=(",", ":"),
         )
@@ -90,7 +101,7 @@ def normalize(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any
                 "source": {
                     "dataset": "injecagent",
                     "revision": revision,
-                    "original_id": str(line_number),
+                    "original_id": f"{path.name}:{line_number}",
                     "license": "MIT",
                     "redistribution": "download-only",
                 },
@@ -125,7 +136,72 @@ def normalize(path: Path, revision: str, split: str) -> tuple[list[dict[str, Any
         "split": split,
         "row_count": len(rows),
         "skipped": dict(sorted(skipped.items())),
-        "normalization": "user-tool plus attacker-tool names only; instructions, responses, and parameter values excluded",
+        "normalization": (
+            "user-tool plus attacker-tool names only; instructions, responses, and parameter values excluded"
+        ),
+    }
+    return rows, manifest
+
+
+def normalize(
+    paths: list[Path], revision: str, split: str, *, verify_source: bool = True
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    if revision != SOURCE_REVISION:
+        raise ValueError("InjecAgent revision differs from datasets.lock.json")
+    if split != PRE_PARTITION_SPLIT:
+        raise ValueError("InjecAgent rows must remain pre-partitioned")
+    if sorted(path.name for path in paths) != sorted(EXPECTED_FILES):
+        raise ValueError("InjecAgent pinned attacker source set is incomplete")
+    rows: list[dict[str, Any]] = []
+    skipped: Counter[str] = Counter()
+    source_files: list[dict[str, str]] = []
+    for path in sorted(paths, key=lambda candidate: candidate.name):
+        if not path.is_file() or path.is_symlink():
+            raise ValueError(f"invalid InjecAgent source file: {path.name}")
+        source_sha256 = sha256_file(path)
+        if verify_source and source_sha256 != EXPECTED_FILES[path.name]:
+            raise ValueError(f"InjecAgent source bytes differ from pinned identity: {path.name}")
+        source_files.append({"path": path.name, "sha256": source_sha256})
+        normalized, partial = _normalize_one(path, revision, split)
+        rows.extend(normalized)
+        skipped.update(partial["skipped"])
+    rows.sort(key=lambda row: str(row["id"]))
+    case_ids = [str(row["id"]) for row in rows]
+    if len(case_ids) != len(set(case_ids)):
+        raise ValueError("duplicate InjecAgent case ID")
+    source_files_sha256 = hashlib.sha256(
+        json.dumps(source_files, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+    manifest = {
+        "schema_version": "1",
+        "datasets": ["injecagent"],
+        "cases": len(rows),
+        "counts": {"injecagent": len(rows)},
+        "exact_payload_duplicates_removed": 0,
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {
+            "injecagent-tool-chain-v2": {
+                "malicious_cases": len(rows),
+                "source_file_count": len(source_files),
+                **dict(sorted(skipped.items())),
+            }
+        },
+        "trajectory_source": {
+            "source_id": "injecagent",
+            "source_revision": revision,
+            "source_license": "MIT",
+            "split": split,
+            "source_files_sha256": source_files_sha256,
+            "normalization": (
+                "user-tool plus attacker-tool names only; attacker instructions, expected achievements, "
+                "responses, and parameter values excluded"
+            ),
+            "label_authority": (
+                "The pinned README documents these 1,054 base test cases as syntheses across 17 user tools and "
+                "62 attacker tools; each row identifies its user tool, attacker tool chain, and attack type. "
+                "Labels remain contextual and detect-only."
+            ),
+        },
     }
     return rows, manifest
 

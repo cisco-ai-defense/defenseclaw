@@ -2,68 +2,96 @@ version: 1
 category: cognitive-file
 rules:
   - id: COG-SOUL
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)SOUL\.md'
-    title: "SOUL.md access (agent identity)"
+    title: "SOUL.md active-file mutation"
     severity: CRITICAL
     confidence: 0.95
     tags: [cognitive-tampering]
   - id: COG-IDENTITY
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)IDENTITY\.md'
-    title: "IDENTITY.md access"
+    title: "IDENTITY.md active-file mutation"
     severity: CRITICAL
     confidence: 0.95
     tags: [cognitive-tampering]
   - id: COG-MEMORY
     expression: >-
-      f.commands.exists(c,
-      f.paths.exists(p, p.command_id == c.id &&
+      f.paths.exists(p,
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)MEMORY\.md'
     title: "MEMORY.md mutation or reference"
     severity: HIGH
     confidence: 0.85
     tags: [cognitive-tampering]
   - id: COG-CLAUDE-MD
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)CLAUDE\.md'
-    title: "CLAUDE.md access"
+    title: "CLAUDE.md active-file mutation"
     severity: HIGH
     confidence: 0.85
     tags: [cognitive-tampering]
   - id: COG-TOOLS-MD
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)TOOLS\.md'
-    title: "TOOLS.md access"
+    title: "TOOLS.md active-file mutation"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]
   - id: COG-AGENTS-MD
+    tool_call_only: true
     expression: >-
-      f.commands.exists(c,
-      f.paths.exists(p, p.command_id == c.id &&
+      f.paths.exists(p,
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)AGENTS\.md'
-    title: "AGENTS.md mutation or reference"
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
+    pattern: 'a^'
+    title: "AGENTS.md active-file mutation"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]
   - id: COG-OPENCLAW-JSON
     expression: >-
-      f.commands.exists(c,
-      f.paths.exists(p, p.command_id == c.id &&
+      f.paths.exists(p,
       p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
       defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)openclaw\.json'
     title: "openclaw.json config access"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]
   - id: COG-GATEWAY-JSON
+    tool_call_only: true
+    expression: >-
+      f.paths.exists(p,
+      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
+      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE])
     pattern: '(?i)gateway\.json'
-    title: "gateway.json config access"
+    title: "gateway.json active-file mutation"
     severity: HIGH
     confidence: 0.80
     tags: [cognitive-tampering]

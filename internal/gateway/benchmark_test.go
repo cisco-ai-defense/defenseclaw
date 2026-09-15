@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 func TestEvaluateDeterministicActionUsesProductionProofBoundary(t *testing.T) {
@@ -60,6 +61,86 @@ func TestEvaluateDeterministicActionUsesProductionProofBoundary(t *testing.T) {
 				t.Fatalf("missing value-free parser state: %+v", got)
 			}
 		})
+	}
+}
+
+func TestEvaluateDeterministicActionKeepsProximityPrivilegeChainStrictOnly(t *testing.T) {
+	step1, _ := guardrail.ToolChainStepMask(
+		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+		1,
+	)
+	step2, _ := guardrail.ToolChainStepMask(
+		guardrail.ToolChainPrivilegeDiscoveryThenElevation,
+		2,
+	)
+	for _, profile := range []string{"default", "permissive", "strict"} {
+		discovery := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "shell", Command: "sudo -l", DialectHint: actionfacts.DialectPOSIX},
+			"sudo -l",
+			"",
+			profile,
+		)
+		elevation := EvaluateDeterministicAction(
+			t.Context(),
+			actionfacts.Input{Tool: "shell", Command: "sudo -u root /bin/bash", DialectHint: actionfacts.DialectPOSIX},
+			"sudo -u root /bin/bash",
+			"",
+			profile,
+		)
+		got := discovery.DetectionStepMask&step1 != 0 &&
+			elevation.DetectionStepMask&step2 != 0
+		if want := profile == "strict"; got != want {
+			t.Fatalf("profile=%s projects proximity chain projected=%t want=%t", profile, got, want)
+		}
+	}
+}
+
+func TestApplyDeterministicSuccessfulActionResultPromotesOnlyExactADCSRequest(t *testing.T) {
+	const request = "certipy-ad req -u operator@example.local -p supplied-secret" +
+		" -ca EXAMPLE-CA -template ESC1 -upn administrator@example.local" +
+		" -target ca.example.local -dc-ip 192.0.2.10"
+	evaluation := EvaluateDeterministicAction(
+		t.Context(),
+		actionfacts.Input{Tool: "execute_command", Command: request, DialectHint: actionfacts.DialectPOSIX},
+		request, "", "strict",
+	)
+	definition, _ := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainADCSCertificateRequestThenPFXAuth,
+	)
+	index, _ := guardrail.ToolChainIndexByID(definition.ID)
+	if evaluation.DetectionStepMask&definition.Step1Bit == 0 ||
+		evaluation.EnforcementStepMask&definition.Step1Bit != 0 {
+		t.Fatalf("pre-result evaluation=%+v", evaluation)
+	}
+	proof := []byte("[*] Wrote certificate and private key to 'administrator.pfx'\n" +
+		"[*] Successfully requested certificate\n" +
+		"[*] Saving certificate and private key to 'administrator.pfx'")
+	promoted := ApplyDeterministicSuccessfulActionResult(evaluation, proof)
+	if promoted.EnforcementStepMask&definition.Step1Bit == 0 ||
+		promoted.EnforcementJoinDigests[index] == "" {
+		t.Fatalf("promoted evaluation=%+v", promoted)
+	}
+
+	malformed := ApplyDeterministicSuccessfulActionResult(
+		evaluation,
+		[]byte("[*] Successfully requested certificate\n[*] Wrote certificate and private key to 'administrator.pfx'"),
+	)
+	if malformed.EnforcementStepMask != evaluation.EnforcementStepMask ||
+		malformed.EnforcementJoinDigests != evaluation.EnforcementJoinDigests {
+		t.Fatalf("malformed result promoted=%+v", malformed)
+	}
+
+	const unrelated = "printf '%s\\n' harmless"
+	unrelatedEvaluation := EvaluateDeterministicAction(
+		t.Context(),
+		actionfacts.Input{Tool: "execute_command", Command: unrelated, DialectHint: actionfacts.DialectPOSIX},
+		unrelated, "", "strict",
+	)
+	unrelatedPromoted := ApplyDeterministicSuccessfulActionResult(unrelatedEvaluation, proof)
+	if unrelatedPromoted.EnforcementStepMask != unrelatedEvaluation.EnforcementStepMask ||
+		unrelatedPromoted.EnforcementJoinDigests != unrelatedEvaluation.EnforcementJoinDigests {
+		t.Fatalf("unrelated action promoted=%+v", unrelatedPromoted)
 	}
 }
 

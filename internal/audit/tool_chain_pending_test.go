@@ -111,7 +111,7 @@ func TestToolChainPendingTableIsMandatoryForStoreReadiness(t *testing.T) {
 func TestToolChainPendingSuccessCommitsTerminalPredecessorAndReplays(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.db")
 	fixture := newToolChainFixture(t, path)
-	chainID := guardrail.ToolChainSecretReadThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	pre := fixture.seed(t, "pending-success", correlationDigest("pending-pre"))
 	prepare := ToolChainPreparePendingInput{
 		ConnectorInstanceID:  pre.ConnectorInstanceID,
@@ -178,6 +178,84 @@ func TestToolChainPendingSuccessCommitsTerminalPredecessorAndReplays(t *testing.
 	matched, err := fixture.chain.Observe(t.Context(), final)
 	if err != nil || matched.DeniedMask == 0 {
 		t.Fatalf("terminal predecessor match=%#v err=%v", matched, err)
+	}
+}
+
+func TestToolChainPendingSuccessfulReadAttachesOnlyPathBoundValueLineage(t *testing.T) {
+	fixture := newToolChainFixture(t, ":memory:")
+	definition, _ := guardrail.ToolChainDefinitionByID(
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	)
+	index, _ := guardrail.ToolChainIndexByID(
+		guardrail.ToolChainSensitiveReadValueExternalTransmit,
+	)
+	pathDigest := strings.Repeat("3", 64)
+	valueDigest := strings.Repeat("4", 64)
+	pre := fixture.seed(t, "value-lineage", correlationDigest("value-pre"))
+	projection := guardrail.ToolChainProjection{
+		ParseStatus:         actionfacts.StatusComplete,
+		DetectionStepMask:   definition.Step1Bit,
+		EnforcementStepMask: definition.Step1Bit,
+	}
+	projection.EnforcementJoinDigests[index] = pathDigest
+	prepare := ToolChainPreparePendingInput{
+		ConnectorInstanceID:  pre.ConnectorInstanceID,
+		ToolInvocationDigest: correlationDigest("value-invocation"),
+		PreSemanticEventID:   pre.SemanticEventID,
+		PreInputFingerprint:  pre.InputFingerprint,
+		RulesetFingerprint:   pre.RulesetFingerprint,
+		Projection:           projection,
+	}
+	if got, err := fixture.chain.PreparePending(t.Context(), prepare); err != nil ||
+		got.Status != ToolChainPendingPrepared {
+		t.Fatalf("prepare=%+v err=%v", got, err)
+	}
+
+	fixture.now = fixture.now.Add(time.Second)
+	terminal := fixture.seed(t, "value-lineage", correlationDigest("value-result"))
+	values := guardrail.ToolChainValueJoinDigests{valueDigest}
+	resolve := ToolChainResolvePendingInput{
+		ConnectorInstanceID:        terminal.ConnectorInstanceID,
+		ToolInvocationDigest:       prepare.ToolInvocationDigest,
+		Outcome:                    ToolChainPendingOutcomeSuccess,
+		RulesetFingerprint:         prepare.RulesetFingerprint,
+		TerminalSemanticEventID:    terminal.SemanticEventID,
+		TerminalInputFingerprint:   terminal.InputFingerprint,
+		SuccessfulReadPathDigest:   strings.Repeat("5", 64),
+		SuccessfulReadValueDigests: values,
+	}
+	if _, err := fixture.chain.ResolvePending(t.Context(), resolve); !errors.Is(err, ErrToolChainIntegrity) {
+		t.Fatalf("mismatched result path error=%v", err)
+	}
+	resolve.SuccessfulReadPathDigest = pathDigest
+	resolved, err := fixture.chain.ResolvePending(t.Context(), resolve)
+	if err != nil || resolved.Status != ToolChainPendingResolved ||
+		resolved.Observation.Status != ToolChainObserveFresh {
+		t.Fatalf("resolve=%+v err=%v", resolved, err)
+	}
+
+	fixture.now = fixture.now.Add(time.Second)
+	sink := fixture.seed(t, "value-lineage", correlationDigest("value-sink"))
+	sink.Projection = guardrail.ToolChainProjection{
+		ParseStatus:         actionfacts.StatusComplete,
+		DetectionStepMask:   definition.Step2Bit,
+		EnforcementStepMask: definition.Step2Bit,
+	}
+	sink.Projection.ValueJoinDigests[index] = values
+	matched, err := fixture.chain.Observe(t.Context(), sink)
+	if err != nil || matched.DetectedMask&definition.ResultBit == 0 ||
+		matched.EnforcementSafeMask&definition.ResultBit != 0 ||
+		matched.DeniedMask != 0 {
+		t.Fatalf("match=%+v err=%v", matched, err)
+	}
+	var encoded string
+	if err := fixture.store.db.QueryRow(`SELECT value_join_digests
+		FROM guardrail_chain_events WHERE semantic_event_id=?`,
+		string(terminal.SemanticEventID)).Scan(&encoded); err != nil {
+		t.Fatal(err)
+	}
+	if encoded == "" || strings.Contains(encoded, "lineage-value") {
+		t.Fatalf("persisted value lineage was empty or plaintext-bearing: %q", encoded)
 	}
 }
 
@@ -654,7 +732,7 @@ func TestToolChainDiscardPendingForEventSessionIsExactAndBounded(t *testing.T) {
 
 func TestToolChainTerminalResetIsExactAndSuppressesStaleReplay(t *testing.T) {
 	fixture := newToolChainFixture(t, ":memory:")
-	chainID := guardrail.ToolChainPrivilegeDiscoveryThenElevation
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	seedObserved := func(session, name string, step int, deny bool) ToolChainObserveInput {
 		t.Helper()
 		input := fixture.seed(t, session, correlationDigest(name))

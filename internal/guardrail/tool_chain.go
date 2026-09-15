@@ -22,18 +22,21 @@ const (
 	// ToolChainCount and the bounds below are deliberately fixed. This is a
 	// small policy primitive for the authenticated tool-call hook, not a
 	// user-configurable correlation engine.
-	ToolChainCount           = 18
-	ToolChainLegacyCount     = 13
-	ToolChainKnownStepMask   = uint64(1<<44 - 1)
-	ToolChainKnownResultMask = uint32(1<<ToolChainCount - 1)
+	ToolChainCount       = 26
+	ToolChainLegacyCount = 13
 	// ToolChainReservedSignBit is never allocated. SQLite INTEGER is signed,
 	// so persisted step masks must remain below this bit even though the in-
 	// process representation is uint64.
 	ToolChainReservedSignBit = uint64(1 << 63)
+	// ToolChainStorageStepMask is the full positive SQLite INTEGER capacity.
+	// Semantic validation remains restricted to ToolChainKnownStepMask, so
+	// reserving storage capacity does not make unknown projection bits valid.
+	ToolChainStorageStepMask = ToolChainReservedSignBit - 1
 	// ToolChainReservedResultSignBit is never allocated. Result masks use
 	// uint32 in process, but their SQLite INTEGER representation remains
 	// intentionally bounded below this bit.
 	ToolChainReservedResultSignBit = uint32(1 << 31)
+	ToolChainStorageResultMask     = ToolChainReservedResultSignBit - 1
 	// ToolChainArtifactMutationBarrier is a content-free invalidation marker.
 	// An intervening event that may change file bytes prevents path identity
 	// from being treated as continuity of the same artifact.
@@ -48,35 +51,45 @@ const (
 	ToolChainReceiptTTL    = 7 * 24 * time.Hour
 	ToolChainMaxHorizon    = 30 * time.Minute
 
-	ToolChainGuardrailsOffThenEgress            = "chain.guardrails_off_then_egress"
-	ToolChainPermissionDeniedThenBypass         = "chain.permission_denied_then_runtime_bypass"
-	ToolChainPrivilegeDiscoveryThenElevation    = "chain.privilege_discovery_then_elevation"
-	ToolChainSecretManagerReadThenEgress        = "chain.secret_manager_read_then_egress"
-	ToolChainSecretReadThenEgress               = "chain.secret_read_then_egress"
-	ToolChainWorkloadIdentityThenLateralExec    = "chain.workload_identity_then_lateral_execution"
-	ToolChainDownloadDecodeExecuteSameArtifact  = "chain.download_decode_execute_same_artifact"
-	ToolChainDownloadThenExecuteSameArtifact    = "chain.download_then_execute_same_artifact"
-	ToolChainSensitiveEgressArtifactThenExec    = "chain.sensitive_egress_artifact_then_execute"
-	ToolChainFirewallExpansionThenDestination   = "chain.firewall_trust_expansion_then_destination_use"
-	ToolChainSQLServerXPCommandShellExecution   = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
-	ToolChainPrivilegedKubernetesHostRootExec   = "chain.kubernetes_privileged_host_root_write_apply_exec"
-	ToolChainWirelessCaptureThenDeauthSameBSSID = "chain.wireless_capture_then_deauth_same_bssid"
-	ToolChainSecretsdumpThenPsExecSameIdentity  = "chain.secretsdump_then_psexec_same_target_principal"
-	ToolChainCloudIAMPrincipalAdmin             = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
-	ToolChainKubernetesPrivilegedCronJob        = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
-	ToolChainSQLCommandUDF                      = "chain.sql_command_udf_create_then_invoke_same_function"
-	ToolChainStagedReverseShellPersistence      = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
-	toolChainProjectionFingerprintDomain        = "defenseclaw.tool-chain.projection.v2"
-	toolChainWideProjectionFingerprintDomain    = "defenseclaw.tool-chain.projection.v3-wide"
-	toolChainRulesetFingerprintDomain           = "defenseclaw.tool-chain.ruleset.v1"
-	toolChainDefinitionFingerprintDomain        = "defenseclaw.tool-chain.definition.v1"
-	toolChainCatalogFingerprintDomain           = "defenseclaw.tool-chain.catalog.v1"
-	toolChainRelevantSemanticProjection         = "actionfacts-v10-staged-reverse-shell-persistence-lineage"
-	toolChainRelevantEnforcementProjection      = "enforcement-proof-v1"
-	toolChainRelevantFallbackProjection         = "owner-local-fallback-v1"
-	toolChainRelevantExternalEgressProjection   = "external-egress-v1"
-	toolChainRelevantN13Projection              = "n13-lateral-exec-proof-v1"
-	toolChainRelevantH18Projection              = "h18-system-root-proof-v1"
+	ToolChainGuardrailsOffThenEgress                = "chain.guardrails_off_then_egress"
+	ToolChainPermissionDeniedThenBypass             = "chain.permission_denied_then_runtime_bypass"
+	ToolChainPrivilegeDiscoveryThenElevation        = "chain.privilege_discovery_then_elevation"
+	ToolChainSecretManagerReadThenEgress            = "chain.secret_manager_read_then_egress"
+	ToolChainSecretReadThenEgress                   = "chain.secret_read_then_egress"
+	ToolChainWorkloadIdentityThenLateralExec        = "chain.workload_identity_then_lateral_execution"
+	ToolChainDownloadDecodeExecuteSameArtifact      = "chain.download_decode_execute_same_artifact"
+	ToolChainDownloadThenExecuteSameArtifact        = "chain.download_then_execute_same_artifact"
+	ToolChainSensitiveEgressArtifactThenExec        = "chain.sensitive_egress_artifact_then_execute"
+	ToolChainFirewallExpansionThenDestination       = "chain.firewall_trust_expansion_then_destination_use"
+	ToolChainSQLServerXPCommandShellExecution       = "chain.sqlserver_xp_cmdshell_enable_then_invoke"
+	ToolChainPrivilegedKubernetesHostRootExec       = "chain.kubernetes_privileged_host_root_write_apply_exec"
+	ToolChainWirelessCaptureThenDeauthSameBSSID     = "chain.wireless_capture_then_deauth_same_bssid"
+	ToolChainSecretsdumpThenPsExecSameIdentity      = "chain.secretsdump_then_psexec_same_target_principal"
+	ToolChainCloudIAMPrincipalAdmin                 = "chain.cloud_iam_principal_create_then_admin_attach_same_principal"
+	ToolChainKubernetesPrivilegedCronJob            = "chain.kubernetes_privileged_cronjob_patch_then_create_job"
+	ToolChainSQLCommandUDF                          = "chain.sql_command_udf_create_then_invoke_same_function"
+	ToolChainStagedReverseShellPersistence          = "chain.reverse_shell_payload_write_then_persistence_install_same_artifact"
+	ToolChainEndpointSecurityControlMutation        = "chain.endpoint_security_control_request_then_completed_same_process"
+	ToolChainSensitiveReadValueExternalTransmit     = "chain.sensitive_read_value_then_external_literal_transmit"
+	ToolChainSensitiveSQLValueCrossResourcePersist  = "chain.sensitive_sql_value_then_cross_resource_literal_persistence"
+	ToolChainCompromisedCredentialThenAuthenticate  = "chain.compromised_credential_then_successful_authentication"
+	ToolChainADCSCertificateRequestThenPFXAuth      = "chain.adcs_certificate_request_then_pfx_authentication"
+	ToolChainS4UTicketThenKerberosSecretsdump       = "chain.s4u_ticket_then_kerberos_secretsdump_same_cache"
+	ToolChainSensitiveSQLiteReadThenUnboundedDelete = "chain.sensitive_sql_read_then_unbounded_delete_same_table"
+	ToolChainFileReadThenEmailSameArtifact          = "chain.file_read_then_email_same_artifact"
+	ToolChainMaxValueJoinDigests                    = 16
+	toolChainProjectionFingerprintDomain            = "defenseclaw.tool-chain.projection.v2"
+	toolChainWideProjectionFingerprintDomain        = "defenseclaw.tool-chain.projection.v3-wide"
+	toolChainRulesetFingerprintDomain               = "defenseclaw.tool-chain.ruleset.v1"
+	toolChainDefinitionFingerprintDomain            = "defenseclaw.tool-chain.definition.v1"
+	toolChainCatalogFingerprintDomain               = "defenseclaw.tool-chain.catalog.v1"
+	toolChainDatabaseTableJoinDomain                = "defenseclaw.tool-chain.database-table-join.v1"
+	toolChainRelevantSemanticProjection             = "actionfacts-v15-sqlite-database-table-lineage"
+	toolChainRelevantEnforcementProjection          = "enforcement-proof-v1"
+	toolChainRelevantFallbackProjection             = "owner-local-fallback-v1"
+	toolChainRelevantExternalEgressProjection       = "external-egress-v1"
+	toolChainRelevantN13Projection                  = "n13-lateral-exec-proof-v1"
+	toolChainRelevantH18Projection                  = "h18-system-root-proof-v1"
 )
 
 // ToolChainDefinition is the immutable private catalog entry for one bounded
@@ -91,18 +104,32 @@ type ToolChainDefinition struct {
 	Step1Bit                uint64
 	Step2Bit                uint64
 	Step3Bit                uint64
+	Step4Bit                uint64
 	MutationBit             uint64
 	ResultBit               uint32
 	Revision                string
 	RequiresEnforcementJoin bool
 	RequiresExactJoin       bool
-	RequiresTerminalSuccess bool
-	ArtifactMutationBarrier bool
-	DetectionOnly           bool
+	RequiresValueJoin       bool
+	// ValueJoinOwnsParseProof permits a chain's closed ActionFacts projector to
+	// establish completeness for its own role even when the generic command
+	// classifier reports an otherwise harmless unknown-operand issue.
+	ValueJoinOwnsParseProof bool
+	// RequiresDistinctResourceJoin requires both roles to carry exact, non-empty
+	// trusted resource identities and rejects a same-resource pair. It is
+	// intentionally separate from value equality: the associated value HMACs
+	// must still intersect exactly.
+	RequiresDistinctResourceJoin bool
+	RequiresTerminalSuccess      bool
+	ArtifactMutationBarrier      bool
+	DetectionOnly                bool
 	// OutputJoinFromFirst selects a three-step proof whose source action knows
 	// the terminal identity while the middle action knows only the input
 	// artifact. This is used for manifest write -> apply -> named-pod exec.
 	OutputJoinFromFirst bool
+	// FourStep selects the append-only four-step matcher. It is infrastructure
+	// capability only until a catalog entry explicitly opts in.
+	FourStep bool
 }
 
 var toolChainDefinitions = [...]ToolChainDefinition{
@@ -110,21 +137,25 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		ID: ToolChainGuardrailsOffThenEgress, Version: "1.5",
 		Title:       "Guardrails disabled before external egress",
 		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "n20-to-data-external-egress-bounded8-v2",
+		DetectionOnly: true,
 	},
 	{
 		ID: ToolChainPermissionDeniedThenBypass, Version: "1.4",
 		Title:       "Permission denial followed by runtime bypass",
 		EventWindow: 8, TimeWindow: 5 * time.Minute, Revision: "permission-denial-to-n08-bounded8-v2",
+		DetectionOnly: true,
 	},
 	{
 		ID: ToolChainPrivilegeDiscoveryThenElevation, Version: "1.4",
 		Title:       "Privilege discovery followed by elevation",
 		EventWindow: 8, TimeWindow: 15 * time.Minute, Revision: "h18-system-root-to-h21-n12-n11-bounded8-v2",
+		DetectionOnly: true,
 	},
 	{
 		ID: ToolChainSecretManagerReadThenEgress, Version: "1.6",
 		Title:       "Secret-manager read followed by external egress",
 		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "n03-to-data-external-egress-bounded8-v2",
+		DetectionOnly: true,
 	},
 	{
 		ID: ToolChainSecretReadThenEgress, Version: "1.7",
@@ -133,11 +164,13 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		EventWindow: 8, TimeWindow: 30 * time.Minute, Revision: "h01-h07-n01-n02-n04-to-data-external-egress-bounded8-v2",
 		RequiresEnforcementJoin: true,
 		ArtifactMutationBarrier: true,
+		DetectionOnly:           true,
 	},
 	{
 		ID: ToolChainWorkloadIdentityThenLateralExec, Version: "1.7",
 		Title:       "Workload identity access followed by lateral execution",
 		EventWindow: 8, TimeWindow: 15 * time.Minute, Revision: "n04-to-n13-bounded8-v2",
+		DetectionOnly: true,
 	},
 	{
 		ID: ToolChainDownloadDecodeExecuteSameArtifact, Version: "1.0",
@@ -147,6 +180,7 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		Revision:                "public-remote-download-to-exact-decode-to-derived-execution-bounded8-v1",
 		RequiresEnforcementJoin: true,
 		ArtifactMutationBarrier: true,
+		DetectionOnly:           true,
 	},
 	{
 		ID: ToolChainDownloadThenExecuteSameArtifact, Version: "1.1",
@@ -284,42 +318,183 @@ var toolChainDefinitions = [...]ToolChainDefinition{
 		// enforcement-safe without deployment-specific resource policy.
 		DetectionOnly: false,
 	},
+	{
+		ID: ToolChainEndpointSecurityControlMutation, Version: "1.0",
+		Title:       "Endpoint security-control mutation requested and observed for the same process",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "exact-sysmon-process-request-to-security-control-consequence-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: true,
+		// This is post-action endpoint telemetry. It proves lineage and should
+		// alert, but it cannot retroactively authorize a synchronous deny.
+		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainSensitiveReadValueExternalTransmit, Version: "1.0",
+		Title:       "Sensitive read value transmitted literally to an external destination",
+		Severity:    "CRITICAL",
+		EventWindow: 5, TimeWindow: 10 * time.Minute,
+		Revision:                "authenticated-successful-sensitive-read-to-exact-external-literal-value-bounded4-v1",
+		RequiresValueJoin:       true,
+		RequiresTerminalSuccess: false,
+		// Exact value continuity proves the data flow but not whether an external
+		// destination is approved by deployment policy. Keep the first slice
+		// detection-only rather than turning profile severity into authorization.
+		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainSensitiveSQLValueCrossResourcePersist, Version: "1.0",
+		Title:       "Sensitive SQL value persisted literally to a distinct MCP resource",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                     "authenticated-successful-sensitive-sql-rowset-to-exact-cross-resource-literal-persistence-bounded8-v1",
+		RequiresValueJoin:            true,
+		RequiresDistinctResourceJoin: true,
+		RequiresTerminalSuccess:      true,
+		// Exact value and resource continuity proves a cross-resource persistence
+		// flow, but not whether that flow was authorized. Keep every built-in
+		// posture detection-only until benchmark and deployment policy evidence can
+		// justify enforcement.
+		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainCompromisedCredentialThenAuthenticate, Version: "1.0",
+		Title:       "Recorded compromised credential used for successful authentication",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "successful-compromised-credential-record-to-exact-account-value-authentication-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresValueJoin:       true,
+		ValueJoinOwnsParseProof: true,
+		RequiresTerminalSuccess: true,
+		// Exact account and credential continuity proves use of a credential that
+		// the tool explicitly classified as compromised. It remains non-blocking
+		// because an authorized assessment can intentionally perform this chain.
+		DetectionOnly: true,
+	},
+	{
+		ID: ToolChainADCSCertificateRequestThenPFXAuth, Version: "1.0",
+		Title:       "AD CS impersonation certificate requested and used for PFX authentication",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "public-cochise-certipy-identity-override-pfx-write-to-exact-artifact-authentication-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		DetectionOnly:           false,
+	},
+	{
+		ID: ToolChainS4UTicketThenKerberosSecretsdump, Version: "1.0",
+		Title:       "Result-backed S4U ticket used for Kerberos-only secretsdump",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "public-cochise-result-backed-s4u-ticket-to-exact-cache-kerberos-secretsdump-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		DetectionOnly:           false,
+	},
+	{
+		ID: ToolChainSensitiveSQLiteReadThenUnboundedDelete, Version: "1.0",
+		Title:       "Sensitive SQLite rowset read followed by unbounded delete of the same table",
+		Severity:    "CRITICAL",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "authenticated-successful-mcp-sqlite-sensitive-read-to-exact-same-database-table-unbounded-delete-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: false,
+		// Enforcement bits are projected only when strict or the explicit
+		// database-destruction policy admits this exact sink. Balanced/default
+		// retains the complete proof as an alert without treating a destructive
+		// but potentially authorized database operation as universally blockable.
+		DetectionOnly: false,
+	},
+	{
+		ID: ToolChainFileReadThenEmailSameArtifact, Version: "1.0",
+		Title:       "File read followed by email transfer of the same artifact",
+		Severity:    "HIGH",
+		EventWindow: 9, TimeWindow: 30 * time.Minute,
+		Revision:                "authenticated-successful-structured-file-read-to-exact-email-attachment-bounded8-v1",
+		RequiresExactJoin:       true,
+		RequiresTerminalSuccess: true,
+		// Exact file identity, success, order, and bounds prove the transfer but
+		// do not prove that the recipient is unapproved or the file is sensitive.
+		// Keep every built-in posture alert-only until trusted deployment policy
+		// can supply those authorization facts.
+		DetectionOnly: true,
+	},
 }
 
+var (
+	// These masks are derived from the immutable catalog after stable bit
+	// allocation. Storage has separately reserved all positive SQLite bits;
+	// runtime validation admits only bits belonging to actual definitions.
+	ToolChainKnownStepMask   uint64
+	ToolChainKnownResultMask uint32
+)
+
 func init() {
-	stepOffset := uint(0)
+	allocateToolChainBits(toolChainDefinitions[:], 0)
+	ToolChainKnownStepMask, ToolChainKnownResultMask = toolChainCatalogMasks(toolChainDefinitions[:])
+}
+
+func toolChainCatalogMasks(definitions []ToolChainDefinition) (uint64, uint32) {
+	steps := ToolChainArtifactMutationBarrier
+	var results uint32
+	for _, definition := range definitions {
+		steps |= definition.Step1Bit | definition.Step2Bit | definition.Step3Bit |
+			definition.Step4Bit | definition.MutationBit
+		results |= definition.ResultBit
+	}
+	return steps, results
+}
+
+func allocateToolChainBits(definitions []ToolChainDefinition, initialOffset uint) uint {
+	stepOffset := initialOffset
 	nextStepBit := func() uint64 {
 		// Bit 19 is a deployed storage ABI for the mutation barrier. Keep it
 		// stable while appending later chain steps above it.
 		if stepOffset == 19 {
 			stepOffset++
 		}
+		if stepOffset >= 63 {
+			panic("guardrail: tool-chain step sign bit is reserved")
+		}
 		bit := uint64(1 << stepOffset)
 		stepOffset++
 		return bit
 	}
-	for i := range toolChainDefinitions {
-		if toolChainDefinitions[i].Severity == "" {
-			toolChainDefinitions[i].Severity = "HIGH"
+	for i := range definitions {
+		if definitions[i].Severity == "" {
+			definitions[i].Severity = "HIGH"
 		}
-		toolChainDefinitions[i].Step1Bit = nextStepBit()
-		toolChainDefinitions[i].Step2Bit = nextStepBit()
-		if toolChainDefinitions[i].ID == ToolChainDownloadDecodeExecuteSameArtifact ||
-			toolChainDefinitions[i].ID == ToolChainPrivilegedKubernetesHostRootExec {
-			toolChainDefinitions[i].Step3Bit = nextStepBit()
+		definitions[i].Step1Bit = nextStepBit()
+		definitions[i].Step2Bit = nextStepBit()
+		if definitions[i].ID == ToolChainDownloadDecodeExecuteSameArtifact ||
+			definitions[i].ID == ToolChainPrivilegedKubernetesHostRootExec ||
+			definitions[i].FourStep {
+			definitions[i].Step3Bit = nextStepBit()
 		}
-		if toolChainDefinitions[i].ID == ToolChainSQLServerXPCommandShellExecution ||
-			toolChainDefinitions[i].ID == ToolChainPrivilegedKubernetesHostRootExec ||
-			toolChainDefinitions[i].ID == ToolChainKubernetesPrivilegedCronJob ||
-			toolChainDefinitions[i].ID == ToolChainSQLCommandUDF ||
-			toolChainDefinitions[i].ID == ToolChainStagedReverseShellPersistence {
-			toolChainDefinitions[i].MutationBit = nextStepBit()
+		if definitions[i].FourStep {
+			definitions[i].Step4Bit = nextStepBit()
+		}
+		if definitions[i].ID == ToolChainSQLServerXPCommandShellExecution ||
+			definitions[i].ID == ToolChainPrivilegedKubernetesHostRootExec ||
+			definitions[i].ID == ToolChainKubernetesPrivilegedCronJob ||
+			definitions[i].ID == ToolChainSQLCommandUDF ||
+			definitions[i].ID == ToolChainStagedReverseShellPersistence ||
+			definitions[i].ID == ToolChainCompromisedCredentialThenAuthenticate ||
+			definitions[i].FourStep {
+			definitions[i].MutationBit = nextStepBit()
 		}
 		if i >= 31 {
 			panic("guardrail: tool-chain result sign bit is reserved")
 		}
-		toolChainDefinitions[i].ResultBit = uint32(1) << i
+		definitions[i].ResultBit = uint32(1) << i
+		if definitions[i].Step4Bit&ToolChainReservedSignBit != 0 ||
+			definitions[i].MutationBit&ToolChainReservedSignBit != 0 {
+			panic("guardrail: tool-chain step sign bit is reserved")
+		}
 	}
+	return stepOffset
 }
 
 // ToolChainProjection is the bounded output of semantic evaluation for one
@@ -340,7 +515,15 @@ type ToolChainProjection struct {
 	// the terminal event carries the exact identity it consumes. Keeping this
 	// join separate prevents an archive input from being equated with a member.
 	EnforcementOutputJoinDigests [ToolChainCount]string
+	// ValueJoinDigests are keyed, domain-separated HMACs of bounded exact
+	// values. They are deliberately separate from path/artifact identities and
+	// contain no plaintext. Only chains marked RequiresValueJoin may use them.
+	ValueJoinDigests [ToolChainCount]ToolChainValueJoinDigests
 }
+
+// ToolChainValueJoinDigests is a fixed, canonical set. Empty trailing slots
+// preserve a bounded storage ABI and prevent unbounded result expansion.
+type ToolChainValueJoinDigests [ToolChainMaxValueJoinDigests]string
 
 // ToolChainWindowEvent is the content-free input to the pure matcher.
 type ToolChainWindowEvent struct {
@@ -401,6 +584,8 @@ func ToolChainStepMask(id string, step int) (uint64, bool) {
 		return definition.Step2Bit, true
 	case 3:
 		return definition.Step3Bit, definition.Step3Bit != 0
+	case 4:
+		return definition.Step4Bit, definition.Step4Bit != 0
 	default:
 		return 0, false
 	}
@@ -413,6 +598,37 @@ func ToolChainResultMask(id string) (uint32, bool) {
 		return 0, false
 	}
 	return definition.ResultBit, true
+}
+
+// ToolChainDatabaseTableJoinDigest binds two already-opaque ActionFacts
+// identities into one fixed chain join. Inputs must be canonical SHA-256
+// digests; malformed or missing identities fail closed. The function never
+// receives SQL, database names, table names, or result values.
+func ToolChainDatabaseTableJoinDigest(databaseDigest, tableDigest string) string {
+	if !validToolChainIdentityDigest(databaseDigest) ||
+		!validToolChainIdentityDigest(tableDigest) {
+		return ""
+	}
+	hash := sha256.New()
+	for _, value := range []string{
+		toolChainDatabaseTableJoinDomain,
+		databaseDigest,
+		tableDigest,
+	} {
+		var size [4]byte
+		binary.BigEndian.PutUint32(size[:], uint32(len(value)))
+		_, _ = hash.Write(size[:])
+		_, _ = hash.Write([]byte(value))
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+func validToolChainIdentityDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // ToolChainIDs expands a validated result mask in catalog order.
@@ -459,7 +675,8 @@ func ValidateToolChainProjection(projection ToolChainProjection) error {
 			return errors.New("guardrail: invalid tool-chain join digest")
 		}
 		definition := toolChainDefinitions[index]
-		if projection.DetectionStepMask&(definition.Step1Bit|definition.Step2Bit|definition.MutationBit) == 0 {
+		if projection.DetectionStepMask&(definition.Step1Bit|definition.Step2Bit|definition.Step3Bit|
+			definition.Step4Bit|definition.MutationBit) == 0 {
 			return errors.New("guardrail: orphan tool-chain join digest")
 		}
 	}
@@ -474,13 +691,34 @@ func ValidateToolChainProjection(projection ToolChainProjection) error {
 			return errors.New("guardrail: invalid tool-chain enforcement output join digest")
 		}
 		definition := toolChainDefinitions[index]
-		allowedSteps := definition.Step2Bit | definition.Step3Bit
-		if definition.OutputJoinFromFirst {
+		allowedSteps := definition.Step2Bit | definition.Step3Bit | definition.Step4Bit
+		if definition.OutputJoinFromFirst || definition.Step4Bit != 0 {
 			allowedSteps |= definition.Step1Bit
 		}
 		if definition.Step3Bit == 0 ||
 			projection.DetectionStepMask&allowedSteps == 0 {
 			return errors.New("guardrail: orphan tool-chain enforcement output join digest")
+		}
+	}
+	for index, digests := range projection.ValueJoinDigests {
+		definition := toolChainDefinitions[index]
+		seenEmpty := false
+		previous := ""
+		for _, digest := range digests {
+			if digest == "" {
+				seenEmpty = true
+				continue
+			}
+			if seenEmpty || !definition.RequiresValueJoin ||
+				projection.DetectionStepMask&(definition.Step1Bit|definition.Step2Bit) == 0 ||
+				len(digest) != sha256.Size*2 || digest != strings.ToLower(digest) {
+				return errors.New("guardrail: invalid tool-chain value join digest")
+			}
+			if _, err := hex.DecodeString(digest); err != nil ||
+				(previous != "" && digest <= previous) {
+				return errors.New("guardrail: invalid tool-chain value join digest")
+			}
+			previous = digest
 		}
 	}
 	return nil
@@ -531,7 +769,25 @@ func MatchToolChains(
 			predecessorDigest := event.Projection.EnforcementJoinDigests[i]
 			finalDigest := final.Projection.EnforcementJoinDigests[i]
 			detectionJoinPossible := true
-			if definition.RequiresExactJoin {
+			if definition.RequiresValueJoin {
+				detectionJoinPossible =
+					(definition.ValueJoinOwnsParseProof ||
+						event.Projection.ParseStatus == actionfacts.StatusComplete &&
+							final.Projection.ParseStatus == actionfacts.StatusComplete) &&
+						toolChainValueJoinIntersects(
+							event.Projection.ValueJoinDigests[i],
+							final.Projection.ValueJoinDigests[i],
+						)
+				if definition.RequiresDistinctResourceJoin {
+					detectionJoinPossible = detectionJoinPossible &&
+						predecessorDigest != "" && finalDigest != "" &&
+						predecessorDigest != finalDigest
+				}
+				if definition.RequiresExactJoin {
+					detectionJoinPossible = detectionJoinPossible &&
+						predecessorDigest != "" && predecessorDigest == finalDigest
+				}
+			} else if definition.RequiresExactJoin {
 				detectionJoinPossible = predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
@@ -565,7 +821,20 @@ func MatchToolChains(
 				(!definition.ArtifactMutationBarrier ||
 					!hasArtifactMutationBetween(window, event, final)) &&
 				!hasToolChainMutationBetween(window, event, final, i, definition)
-			if definition.RequiresExactJoin {
+			if definition.RequiresValueJoin {
+				joinSafe = joinSafe && toolChainValueJoinIntersects(
+					event.Projection.ValueJoinDigests[i],
+					final.Projection.ValueJoinDigests[i],
+				)
+				if definition.RequiresDistinctResourceJoin {
+					joinSafe = joinSafe && predecessorDigest != "" &&
+						finalDigest != "" && predecessorDigest != finalDigest
+				}
+				if definition.RequiresExactJoin {
+					joinSafe = joinSafe && predecessorDigest != "" &&
+						predecessorDigest == finalDigest
+				}
+			} else if definition.RequiresExactJoin {
 				joinSafe = joinSafe && predecessorDigest != "" &&
 					predecessorDigest == finalDigest
 			} else if definition.RequiresEnforcementJoin {
@@ -583,9 +852,143 @@ func MatchToolChains(
 		if definition.Step3Bit == 0 {
 			continue
 		}
-		matchThreeStepToolChain(window, final, i, definition, &matches)
+		if definition.Step4Bit != 0 {
+			matchFourStepToolChain(window, final, i, definition, &matches)
+		} else {
+			matchThreeStepToolChain(window, final, i, definition, &matches)
+		}
 	}
 	return matches, nil
+}
+
+func matchFourStepToolChain(
+	window []ToolChainWindowEvent,
+	final ToolChainWindowEvent,
+	index int,
+	definition ToolChainDefinition,
+	matches *ToolChainMatches,
+) {
+	if matches == nil || index < 0 || index >= ToolChainCount ||
+		definition.Step1Bit == 0 || definition.Step2Bit == 0 ||
+		definition.Step3Bit == 0 || definition.Step4Bit == 0 ||
+		final.Projection.DetectionStepMask&definition.Step4Bit == 0 {
+		return
+	}
+	for thirdIndex, third := range window {
+		if third.Sequence >= final.Sequence ||
+			final.Sequence-third.Sequence >= definition.EventWindow ||
+			final.ReceivedAt.Sub(third.ReceivedAt) > definition.TimeWindow ||
+			third.Projection.DetectionStepMask&definition.Step3Bit == 0 {
+			continue
+		}
+		for secondIndex := 0; secondIndex < thirdIndex; secondIndex++ {
+			second := window[secondIndex]
+			if second.Sequence >= third.Sequence ||
+				second.Projection.DetectionStepMask&definition.Step2Bit == 0 {
+				continue
+			}
+			for firstIndex := 0; firstIndex < secondIndex; firstIndex++ {
+				first := window[firstIndex]
+				if first.Sequence >= second.Sequence ||
+					final.Sequence-first.Sequence >= definition.EventWindow ||
+					final.ReceivedAt.Sub(first.ReceivedAt) > definition.TimeWindow ||
+					first.Projection.DetectionStepMask&definition.Step1Bit == 0 {
+					continue
+				}
+				firstOutput := first.Projection.EnforcementOutputJoinDigests[index]
+				secondInput := second.Projection.EnforcementJoinDigests[index]
+				secondOutput := second.Projection.EnforcementOutputJoinDigests[index]
+				thirdInput := third.Projection.EnforcementJoinDigests[index]
+				thirdOutput := third.Projection.EnforcementOutputJoinDigests[index]
+				finalInput := final.Projection.EnforcementJoinDigests[index]
+				if definition.RequiresExactJoin &&
+					(firstOutput == "" || firstOutput != secondInput ||
+						secondOutput == "" || secondOutput != thirdInput ||
+						thirdOutput == "" || thirdOutput != finalInput) {
+					continue
+				}
+				if !definition.RequiresExactJoin &&
+					((firstOutput != "" && secondInput != "" && firstOutput != secondInput) ||
+						(secondOutput != "" && thirdInput != "" && secondOutput != thirdInput) ||
+						(thirdOutput != "" && finalInput != "" && thirdOutput != finalInput)) {
+					continue
+				}
+				if hasFourStepMutationBetween(window, first, second, third, final, index, definition) {
+					continue
+				}
+				matches.DetectedMask |= definition.ResultBit
+				matches.DetectionPredecessors[index] = third.SemanticEventID
+				joinSafe := !definition.DetectionOnly &&
+					first.Projection.ParseStatus == actionfacts.StatusComplete &&
+					second.Projection.ParseStatus == actionfacts.StatusComplete &&
+					third.Projection.ParseStatus == actionfacts.StatusComplete &&
+					final.Projection.ParseStatus == actionfacts.StatusComplete &&
+					first.Projection.EnforcementStepMask&definition.Step1Bit != 0 &&
+					second.Projection.EnforcementStepMask&definition.Step2Bit != 0 &&
+					third.Projection.EnforcementStepMask&definition.Step3Bit != 0 &&
+					final.Projection.EnforcementStepMask&definition.Step4Bit != 0 &&
+					firstOutput != "" && firstOutput == secondInput &&
+					secondOutput != "" && secondOutput == thirdInput &&
+					thirdOutput != "" && thirdOutput == finalInput
+				if joinSafe {
+					matches.EnforcementSafeMask |= definition.ResultBit
+					matches.EnforcementPredecessors[index] = third.SemanticEventID
+				}
+				return
+			}
+		}
+	}
+}
+
+func hasFourStepMutationBetween(
+	window []ToolChainWindowEvent,
+	first, second, third, final ToolChainWindowEvent,
+	index int,
+	definition ToolChainDefinition,
+) bool {
+	if definition.ArtifactMutationBarrier &&
+		(hasArtifactMutationBetween(window, first, second) ||
+			hasArtifactMutationBetween(window, second, third) ||
+			hasArtifactMutationBetween(window, third, final)) {
+		return true
+	}
+	if definition.MutationBit == 0 {
+		return false
+	}
+	identities := [...]string{
+		first.Projection.EnforcementOutputJoinDigests[index],
+		second.Projection.EnforcementOutputJoinDigests[index],
+		third.Projection.EnforcementOutputJoinDigests[index],
+	}
+	for _, candidate := range window {
+		if candidate.Sequence <= first.Sequence || candidate.Sequence >= final.Sequence ||
+			candidate.Projection.DetectionStepMask&definition.MutationBit == 0 {
+			continue
+		}
+		candidateIdentity := candidate.Projection.EnforcementJoinDigests[index]
+		for _, identity := range identities {
+			if identity != "" && candidateIdentity == identity {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func toolChainValueJoinIntersects(first, second ToolChainValueJoinDigests) bool {
+	left, right := 0, 0
+	for left < len(first) && right < len(second) &&
+		first[left] != "" && second[right] != "" {
+		switch {
+		case first[left] < second[right]:
+			left++
+		case first[left] > second[right]:
+			right++
+		default:
+			return true
+		}
+	}
+	return false
 }
 
 func hasToolChainMutationBetween(
@@ -761,13 +1164,19 @@ func ToolChainProjectionFingerprint(projection ToolChainProjection) (string, err
 	}
 	parts = append(parts, projection.EnforcementJoinDigests[:lineageSlots]...)
 	parts = append(parts, projection.EnforcementOutputJoinDigests[:lineageSlots]...)
+	if !legacy {
+		for index := 0; index < lineageSlots; index++ {
+			parts = append(parts, projection.ValueJoinDigests[index][:]...)
+		}
+	}
 	return toolChainDigest(parts...), nil
 }
 
 func toolChainAppendedLineageEmpty(projection ToolChainProjection) bool {
 	for index := ToolChainLegacyCount; index < ToolChainCount; index++ {
 		if projection.EnforcementJoinDigests[index] != "" ||
-			projection.EnforcementOutputJoinDigests[index] != "" {
+			projection.EnforcementOutputJoinDigests[index] != "" ||
+			projection.ValueJoinDigests[index] != (ToolChainValueJoinDigests{}) {
 			return false
 		}
 	}
@@ -813,7 +1222,7 @@ func ToolChainFingerprint(chainID, rulesetFingerprint string) (string, error) {
 }
 
 func toolChainBaseFingerprint(definition ToolChainDefinition, relevantOwnerDigest string) string {
-	return toolChainDigest(
+	base := toolChainDigest(
 		toolChainCatalogFingerprintDomain,
 		toolChainRelevantSemanticProjection,
 		toolChainRelevantEnforcementProjection,
@@ -834,12 +1243,29 @@ func toolChainBaseFingerprint(definition ToolChainDefinition, relevantOwnerDiges
 		definition.TimeWindow.String(),
 		fmt.Sprintf("%t", definition.RequiresEnforcementJoin),
 		fmt.Sprintf("%t", definition.RequiresExactJoin),
+		fmt.Sprintf("%t", definition.RequiresValueJoin),
 		fmt.Sprintf("%t", definition.RequiresTerminalSuccess),
 		fmt.Sprintf("%t", definition.ArtifactMutationBarrier),
 		fmt.Sprintf("%t", definition.OutputJoinFromFirst),
 		fmt.Sprintf("%t", definition.DetectionOnly),
 		relevantOwnerDigest,
 	)
+	if definition.ValueJoinOwnsParseProof {
+		// Preserve deployed definition fingerprints. The opt-in chain appends its
+		// closed-projector ABI marker without changing existing receipts.
+		base = toolChainDigest(base, "value-join-owns-parse-proof")
+	}
+	if definition.RequiresDistinctResourceJoin {
+		// Preserve every deployed definition fingerprint byte-for-byte. Only the
+		// new cross-resource proof appends this ABI field.
+		base = toolChainDigest(base, "distinct-resource-join")
+	}
+	if definition.Step4Bit != 0 {
+		// Keep every deployed two- and three-step definition fingerprint
+		// byte-for-byte stable. Four-step definitions append their new ABI field.
+		return toolChainDigest(base, fmt.Sprintf("%d", definition.Step4Bit))
+	}
+	return base
 }
 
 func toolChainDigest(parts ...string) string {

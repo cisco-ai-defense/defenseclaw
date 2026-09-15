@@ -528,6 +528,12 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 		Connector:          req.Connector,
 		EnforcementCapable: true,
 	}
+	if trustedShimArgvTool(req.Tool) {
+		// Authenticated PATH shims have one closed argv envelope. If that
+		// envelope is malformed, extended, or names another executable, raw
+		// fallback findings remain useful telemetry but cannot authorize a deny.
+		action.EnforcementCapable = false
+	}
 	if argv, ok := parseTrustedShimArgv(req.Tool, req.Args); ok {
 		action.Input = actionfacts.Input{
 			Tool:       req.Tool,
@@ -535,6 +541,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 			ActiveHome: trustedSameHostHome(),
 		}
 		action.LegacyText = serializeArgvForLegacyScan(argv)
+		action.EnforcementCapable = true
 	}
 	return a.inspectTrustedToolPolicyCtx(ctx, req, action)
 }
@@ -544,9 +551,7 @@ func (a *APIServer) inspectToolPolicyCtx(ctx context.Context, req *ToolInspectRe
 // deliberately rejected so inspectToolPolicyCtx keeps its non-authoritative
 // Args projection and owner-local regex fallback.
 func parseTrustedShimArgv(tool string, raw json.RawMessage) ([]string, bool) {
-	switch tool {
-	case "curl", "wget", "ssh", "nc", "pip", "npm":
-	default:
+	if !trustedShimArgvTool(tool) {
 		return nil, false
 	}
 
@@ -579,6 +584,15 @@ func parseTrustedShimArgv(tool string, raw json.RawMessage) ([]string, bool) {
 		return nil, false
 	}
 	return argv, true
+}
+
+func trustedShimArgvTool(tool string) bool {
+	switch tool {
+	case "curl", "wget", "ssh", "nc", "pip", "npm":
+		return true
+	default:
+		return false
+	}
 }
 
 func (a *APIServer) inspectTrustedToolPolicyCtx(

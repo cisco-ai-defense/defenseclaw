@@ -115,7 +115,22 @@ func CompareRuns(cases []Case, baseline, candidate []Prediction, seed int64) (Ru
 	if err != nil {
 		return RunComparison{}, fmt.Errorf("candidate: %w", err)
 	}
-	for _, profile := range []string{"default", "permissive", "strict"} {
+	profiles := make([]string, 0, len(baselineByProfile))
+	for profile := range baselineByProfile {
+		profiles = append(profiles, profile)
+	}
+	sort.Strings(profiles)
+	if len(profiles) != len(candidateByProfile) {
+		return RunComparison{}, fmt.Errorf(
+			"profile count differs: baseline=%d candidate=%d",
+			len(profiles),
+			len(candidateByProfile),
+		)
+	}
+	for _, profile := range profiles {
+		if _, ok := candidateByProfile[profile]; !ok {
+			return RunComparison{}, fmt.Errorf("candidate is missing profile %q", profile)
+		}
 		if len(baselineByProfile[profile]) != len(candidateByProfile[profile]) {
 			return RunComparison{}, fmt.Errorf(
 				"profile %s prediction count differs: baseline=%d candidate=%d",
@@ -137,7 +152,7 @@ func CompareRuns(cases []Case, baseline, candidate []Prediction, seed int64) (Ru
 		CandidateRunID: candidateRunID,
 		Seed:           seed,
 	}
-	for _, profile := range []string{"default", "permissive", "strict"} {
+	for _, profile := range profiles {
 		if len(baselineByProfile[profile]) == 0 {
 			continue
 		}
@@ -215,28 +230,34 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 	a.comparable++
 	positiveTruth, detectionScorable := detectionTruth(benchmarkCase)
 	isBenign := benignTruth(benchmarkCase)
+	baselineDetected := detectionPrediction(benchmarkCase, baseline, positiveTruth)
+	candidateDetected := detectionPrediction(benchmarkCase, candidate, positiveTruth)
 	if detectionScorable {
 		if positiveTruth {
-			a.detectionPositive.add(baseline.Detected, candidate.Detected)
+			a.detectionPositive.add(baselineDetected, candidateDetected)
 		} else {
-			a.detectionNegative.add(baseline.Detected, candidate.Detected)
+			a.detectionNegative.add(baselineDetected, candidateDetected)
 		}
 	}
 	baselineBlocked := baseline.Action == "block"
 	candidateBlocked := candidate.Action == "block"
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionBlock {
-		a.enforcementPositive.add(baselineBlocked, candidateBlocked)
-	} else {
-		a.enforcementNegative.add(baselineBlocked, candidateBlocked)
+	blockTruth, enforcementScorable := enforcementTruth(benchmarkCase)
+	if enforcementScorable {
+		if blockTruth {
+			a.enforcementPositive.add(baselineBlocked, candidateBlocked)
+		} else {
+			a.enforcementNegative.add(baselineBlocked, candidateBlocked)
+		}
 	}
 	if isBenign {
 		a.benignBlock.add(baselineBlocked, candidateBlocked)
 	}
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionDetectOnly {
+	if benchmarkCase.Truth.ExpectedDisposition == DispositionDetectOnly &&
+		(benchmarkCase.Surface != "stateful" || benchmarkCase.Truth.StatefulLens != StatefulAtomicTerminal) {
 		a.detectOnlyBlock.add(baselineBlocked, candidateBlocked)
 	}
 
-	if !baseline.Detected && candidate.Detected {
+	if detectionScorable && !baselineDetected && candidateDetected {
 		if positiveTruth {
 			a.changes.PositiveDetectionGains++
 		}
@@ -244,7 +265,7 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 			a.changes.BenignFindingIntroduced++
 		}
 	}
-	if baseline.Detected && !candidate.Detected {
+	if detectionScorable && baselineDetected && !candidateDetected {
 		if positiveTruth {
 			a.changes.PositiveDetectionLosses++
 		}
@@ -252,7 +273,7 @@ func (a *pairedAccumulator) record(benchmarkCase Case, baseline, candidate Predi
 			a.changes.BenignFindingResolved++
 		}
 	}
-	if benchmarkCase.Truth.ExpectedDisposition == DispositionBlock {
+	if enforcementScorable && blockTruth {
 		if !baselineBlocked && candidateBlocked {
 			a.changes.ExpectedBlockGains++
 		}

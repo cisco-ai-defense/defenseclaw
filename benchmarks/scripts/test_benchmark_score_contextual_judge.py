@@ -84,7 +84,12 @@ class ContextualJudgeScorerTests(unittest.TestCase):
         case_path = self.write("cases.jsonl", self.cases)
         det_path = self.write(
             "det.jsonl",
-            [deterministic("benign"), deterministic("attack-a", True, True), deterministic("attack-b"), deterministic("diagnostic")],
+            [
+                deterministic("benign"),
+                deterministic("attack-a", True, True),
+                deterministic("attack-b"),
+                deterministic("diagnostic"),
+            ],
         )
         llm_path = self.write(
             "llm.jsonl",

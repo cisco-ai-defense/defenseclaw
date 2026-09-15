@@ -4,7 +4,7 @@
 # Licensed under the Apache License, Version 2.0 (the "License");
 # SPDX-License-Identifier: Apache-2.0
 
-"""Normalize the LinuxArena public sample into deterministic benchmark cases.
+"""Normalize supported LinuxArena sources into deterministic benchmark cases.
 
 Only tool function names and structured arguments enter detector payloads.
 Reasoning, prompts, messages, monitor judgments, tool output, and scorer prose
@@ -38,6 +38,9 @@ ADAPTER = "linuxarena-public-sample-v1"
 DATASET = "anonymouslinuxarena/linuxarena-public"
 LICENSE = "CC-BY-4.0"
 REDISTRIBUTION = "download-only"
+PROJECTION_DATASET = "eval-aware/linuxarena-trajectories"
+PROJECTION_LICENSE = "MIT"
+PROJECTION_SOURCE_PATH = "data/train-00000-of-00001.parquet"
 GROUPING_STRATEGY = "linuxarena-environment-main-task-family-v1"
 PARTITION_AUTHORITY = "benchmarks/scripts/benchmark_partition.py"
 PRE_PARTITION_SPLIT = "smoke"
@@ -87,6 +90,29 @@ ACTION_KEYS = frozenset(
         "substeps",
     }
 )
+PROJECTION_ROW_KEYS = frozenset(
+    {
+        "trajectory_id", "dataset", "source_file", "json_path", "run_id", "run_name", "model",
+        "model_short", "policy", "environment", "environment_display", "environment_description",
+        "main_task", "task_category", "task_description", "side_task", "side_task_description",
+        "main_task_success", "side_task_success", "has_side_task", "number_of_actions", "cost_usd",
+        "scorer_explanation", "first5_l1_pattern", "first5_l2_pattern", "first5_files_accessed",
+        "all_files_accessed", "action_functions", "action_arguments_json", "action_normalized",
+        "action_exact", "action_file_accessed", "action_output", "action_output_error",
+        "action_has_error", "action_reasoning",
+    }
+)
+PROJECTION_SELECTED_KEYS = frozenset(
+    {
+        "trajectory_id", "run_id", "policy", "environment", "main_task", "side_task",
+        "main_task_success", "side_task_success", "has_side_task", "number_of_actions",
+        "action_functions", "action_arguments_json", "action_output_error", "action_has_error",
+    }
+)
+SOURCE_SPECS = {
+    DATASET: {"license": LICENSE, "path": "data/sample.jsonl"},
+    PROJECTION_DATASET: {"license": PROJECTION_LICENSE, "path": PROJECTION_SOURCE_PATH},
+}
 MANIFEST_KEYS = frozenset(
     {
         "schema_version",
@@ -159,6 +185,7 @@ class ProjectedCall:
 
 @dataclass(frozen=True)
 class Trajectory:
+    dataset: str
     identity_digest: str
     group_digest: str
     source_identity_digest: str
@@ -268,6 +295,67 @@ def call_outcome(output_error: object) -> str:
     raise ValueError("output_error must be null or a non-empty string")
 
 
+def parse_argument_json(value: object, *, field: str) -> dict[str, Any]:
+    if not isinstance(value, str) or len(value.encode("utf-8")) > DEFAULT_MAX_ARGUMENT_BYTES:
+        raise ValueError(f"{field} must be bounded JSON text")
+
+    def reject_constant(constant: str) -> None:
+        raise ValueError(f"{field} contains a non-finite number: {constant}")
+
+    try:
+        parsed = json.loads(value, object_pairs_hook=strict_object, parse_constant=reject_constant)
+    except (json.JSONDecodeError, ValueError, RecursionError) as exc:
+        raise ValueError(f"{field} is not strict JSON") from exc
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{field} must decode to an object")
+    return parsed
+
+
+def project_parallel_calls(
+    source: Mapping[str, Any],
+    *,
+    max_tool_calls: int,
+    max_argument_bytes: int,
+) -> tuple[tuple[ProjectedCall, ...], int]:
+    number_of_actions = source["number_of_actions"]
+    if type(number_of_actions) is not int or number_of_actions < 0:
+        raise ValueError("number_of_actions must be a non-negative integer")
+    arrays = {
+        key: source[key]
+        for key in ("action_functions", "action_arguments_json", "action_output_error", "action_has_error")
+    }
+    if any(not isinstance(value, list) for value in arrays.values()):
+        raise ValueError("projected action columns must be arrays")
+    if any(len(value) != number_of_actions for value in arrays.values()):
+        raise ValueError("projected action columns do not match number_of_actions")
+
+    calls: list[ProjectedCall] = []
+    for sequence_index in range(min(number_of_actions, max_tool_calls)):
+        tool_name = required_text(arrays["action_functions"][sequence_index], field="action_functions[]")
+        arguments = parse_argument_json(
+            arrays["action_arguments_json"][sequence_index], field="action_arguments_json[]"
+        )
+        if len(canonical_json(arguments)) > max_argument_bytes:
+            raise ValueError("action.arguments exceeds the configured byte bound")
+        output_error = arrays["action_output_error"][sequence_index]
+        has_error = arrays["action_has_error"][sequence_index]
+        if not isinstance(output_error, str) or not isinstance(has_error, bool):
+            raise ValueError("projected action outcome columns have invalid values")
+        if bool(output_error) != has_error:
+            raise ValueError("action_has_error disagrees with action_output_error")
+        calls.append(
+            ProjectedCall(
+                tool_name=tool_name,
+                arguments=arguments,
+                sequence_index=sequence_index,
+                call_index=0,
+                outcome=call_outcome(output_error or None),
+                command=command_from_arguments(tool_name, arguments),
+            )
+        )
+    return tuple(calls), number_of_actions
+
+
 def project_calls(
     actions: object,
     *,
@@ -309,6 +397,7 @@ def trajectory_from_row(
     *,
     max_tool_calls: int,
     max_argument_bytes: int,
+    dataset: str = DATASET,
 ) -> Trajectory | None:
     source = require_exact_keys(row, SOURCE_ROW_KEYS, field="trajectory")
     trajectory_id = required_text(source["trajectory_id"], field="trajectory_id")
@@ -347,7 +436,7 @@ def trajectory_from_row(
     projected_digest = sha256_bytes(canonical_json(call_identity))
     identity_digest = stable_digest(
         "linuxarena-trajectory-v1",
-        DATASET,
+        dataset,
         environment_id,
         main_task_id,
         side_task_id or "honest",
@@ -357,12 +446,85 @@ def trajectory_from_row(
         projected_digest,
     )
     return Trajectory(
+        dataset=dataset,
         identity_digest=identity_digest,
-        group_digest=stable_digest("linuxarena-task-family-v1", DATASET, environment_id, main_task_id),
-        source_identity_digest=stable_digest("linuxarena-source-identity-v1", DATASET, trajectory_id, run_id),
+        group_digest=stable_digest("linuxarena-task-family-v1", dataset, environment_id, main_task_id),
+        source_identity_digest=stable_digest("linuxarena-source-identity-v1", dataset, trajectory_id, run_id),
         environment_category=normalized_category(environment_id, fallback="linux"),
         main_task_success=main_task_success,
         side_task_present=side_task is not None,
+        side_task_success=side_task_success,
+        calls=calls,
+        source_call_count=source_call_count,
+    )
+
+
+def trajectory_from_projection_row(
+    row: object,
+    *,
+    max_tool_calls: int,
+    max_argument_bytes: int,
+) -> Trajectory | None:
+    source = require_exact_keys(row, PROJECTION_SELECTED_KEYS, field="projection trajectory")
+    trajectory_id = required_text(source["trajectory_id"], field="trajectory_id")
+    run_id = required_text(source["run_id"], field="run_id")
+    policy = required_text(source["policy"], field="policy").casefold()
+    if policy not in {"honest", "attack", "claude-code"}:
+        raise ValueError("projection policy is not recognized")
+    environment_id = required_text(source["environment"], field="environment")
+    main_task_id = required_text(source["main_task"], field="main_task")
+    has_side_task = source["has_side_task"]
+    if not isinstance(has_side_task, bool) or has_side_task != (policy == "attack"):
+        raise ValueError("has_side_task is inconsistent with policy")
+    side_task = source["side_task"]
+    if not isinstance(side_task, str) or bool(side_task.strip()) != has_side_task:
+        raise ValueError("side_task is inconsistent with has_side_task")
+    side_task_id = side_task.strip()
+    main_task_success = optional_bool_field(source["main_task_success"], field="main_task_success")
+    side_task_success = optional_bool_field(source["side_task_success"], field="side_task_success")
+    if not has_side_task and side_task_success:
+        raise ValueError("side_task_success cannot be true when has_side_task is false")
+    calls, source_call_count = project_parallel_calls(
+        source,
+        max_tool_calls=max_tool_calls,
+        max_argument_bytes=max_argument_bytes,
+    )
+    if not calls:
+        return None
+    call_identity = [
+        {
+            "tool_name": call.tool_name,
+            "arguments": call.arguments,
+            "sequence_index": call.sequence_index,
+            "call_index": call.call_index,
+            "outcome": call.outcome,
+        }
+        for call in calls
+    ]
+    projected_digest = sha256_bytes(canonical_json(call_identity))
+    identity_digest = stable_digest(
+        "linuxarena-trajectory-v1",
+        PROJECTION_DATASET,
+        environment_id,
+        main_task_id,
+        side_task_id or "honest",
+        "unknown" if main_task_success is None else str(main_task_success).casefold(),
+        "unknown" if side_task_success is None else str(side_task_success).casefold(),
+        str(source_call_count),
+        projected_digest,
+    )
+    return Trajectory(
+        dataset=PROJECTION_DATASET,
+        identity_digest=identity_digest,
+        group_digest=stable_digest(
+            "linuxarena-task-family-v1", PROJECTION_DATASET, environment_id, main_task_id
+        ),
+        source_identity_digest=stable_digest(
+            "linuxarena-source-identity-v1", PROJECTION_DATASET, trajectory_id, run_id
+        ),
+        environment_category=normalized_category(environment_id, fallback="linux"),
+        main_task_success=main_task_success,
+        side_task_present=has_side_task,
         side_task_success=side_task_success,
         calls=calls,
         source_call_count=source_call_count,
@@ -381,6 +543,21 @@ def jsonl_rows(path: Path) -> Iterable[dict[str, Any]]:
             if not isinstance(row, dict):
                 raise ValueError(f"{path.name}:{line_number}: expected an object")
             yield row
+
+
+def parquet_projection_rows(path: Path) -> Iterable[dict[str, Any]]:
+    try:
+        import pyarrow.parquet as parquet
+    except ImportError as exc:  # pragma: no cover
+        raise RuntimeError("pyarrow is required to read the LinuxArena projection") from exc
+    parquet_file = parquet.ParquetFile(path)
+    if set(parquet_file.schema_arrow.names) != PROJECTION_ROW_KEYS:
+        raise ValueError("LinuxArena projection Parquet schema does not match the pinned strict schema")
+    selected = sorted(PROJECTION_SELECTED_KEYS)
+    for batch in parquet_file.iter_batches(columns=selected, batch_size=64):
+        columns = batch.to_pydict()
+        for index in range(batch.num_rows):
+            yield {key: columns[key][index] for key in selected}
 
 
 def action_truth(trajectory: Trajectory) -> dict[str, Any]:
@@ -498,13 +675,14 @@ def stateful_windows(calls: Sequence[ProjectedCall]) -> Iterable[Sequence[Projec
 
 
 def source_record(trajectory: Trajectory, revision: str, suffix: str) -> dict[str, str]:
+    source_spec = SOURCE_SPECS[trajectory.dataset]
     return {
-        "dataset": DATASET,
+        "dataset": trajectory.dataset,
         "revision": revision,
         "original_id": (
             f"trajectory-{trajectory.identity_digest[:24]}/source-{trajectory.source_identity_digest[:16]}/{suffix}"
         ),
-        "license": LICENSE,
+        "license": str(source_spec["license"]),
         "redistribution": REDISTRIBUTION,
     }
 
@@ -514,6 +692,7 @@ def make_cases(trajectory: Trajectory, *, revision: str) -> list[dict[str, Any]]
     common_strata = {
         "ecosystem": "coding_agent",
         "domain": trajectory.environment_category,
+        "language": "english",
         "hard_negative": not trajectory.side_task_present,
         "split_group": trajectory.group_digest[:24],
         "trajectory_id": trajectory.identity_digest,
@@ -569,6 +748,7 @@ def build_corpus(
     max_tool_calls: int = DEFAULT_MAX_TOOL_CALLS,
     max_argument_bytes: int = DEFAULT_MAX_ARGUMENT_BYTES,
     source_manifest: Mapping[str, Any] | None = None,
+    dataset: str = DATASET,
 ) -> tuple[list[dict[str, Any]], dict[str, Any], dict[str, Any]]:
     revision = required_text(revision, field="revision", max_length=40)
     if not HEX_40.fullmatch(revision):
@@ -577,16 +757,21 @@ def build_corpus(
         raise ValueError(f"max_tool_calls must be between 1 and {DEFAULT_MAX_TOOL_CALLS}")
     if not 1 <= max_argument_bytes <= 1024 * 1024:
         raise ValueError("max_argument_bytes must be between 1 and 1048576")
+    if dataset not in SOURCE_SPECS:
+        raise ValueError("unsupported LinuxArena source dataset")
 
     statistics: Counter[str] = Counter()
     unique: dict[str, Trajectory] = {}
     for row in source_rows:
         statistics["source_trajectories"] += 1
-        trajectory = trajectory_from_row(
-            row,
-            max_tool_calls=max_tool_calls,
-            max_argument_bytes=max_argument_bytes,
-        )
+        if dataset == PROJECTION_DATASET:
+            trajectory = trajectory_from_projection_row(
+                row, max_tool_calls=max_tool_calls, max_argument_bytes=max_argument_bytes
+            )
+        else:
+            trajectory = trajectory_from_row(
+                row, max_tool_calls=max_tool_calls, max_argument_bytes=max_argument_bytes, dataset=dataset
+            )
         if trajectory is None:
             statistics["trajectories_without_tool_calls"] += 1
             continue
@@ -638,12 +823,13 @@ def build_corpus(
     ]
     output_data = b"".join(canonical_json(row) for row in rows)
     if source_manifest is None:
+        source_spec = SOURCE_SPECS[dataset]
         source_manifest = {
-            "dataset": DATASET,
+            "dataset": dataset,
             "revision": revision,
-            "license": LICENSE,
+            "license": source_spec["license"],
             "redistribution": REDISTRIBUTION,
-            "path": "data/sample.jsonl",
+            "path": source_spec["path"],
             "bytes": 0,
             "sha256": "0" * 64,
         }
@@ -651,9 +837,9 @@ def build_corpus(
         raise ValueError("source manifest revision does not match the normalized revision")
     manifest = {
         "schema_version": SCHEMA_VERSION,
-        "datasets": [DATASET],
+        "datasets": [dataset],
         "cases": len(rows),
-        "counts": {DATASET: len(rows)},
+        "counts": {dataset: len(rows)},
         "exact_payload_duplicates_removed": statistics["exact_trajectory_duplicates_removed"],
         "label_conflicts_excluded": 0,
         "source": dict(source_manifest),
@@ -701,13 +887,14 @@ def resolve_revision(source: Path, override: str | None) -> str:
     return revision
 
 
-def make_source_manifest(source: Path, revision: str) -> dict[str, Any]:
+def make_source_manifest(source: Path, revision: str, *, dataset: str = DATASET) -> dict[str, Any]:
+    source_spec = SOURCE_SPECS[dataset]
     return {
-        "dataset": DATASET,
+        "dataset": dataset,
         "revision": revision,
-        "license": LICENSE,
+        "license": source_spec["license"],
         "redistribution": REDISTRIBUTION,
-        "path": "data/sample.jsonl",
+        "path": source_spec["path"],
         "bytes": source.stat().st_size,
         "sha256": sha256_file(source),
     }
@@ -763,14 +950,15 @@ def validate_manifests(manifest: object, group_manifest: object) -> None:
     manifest_map = require_exact_keys(manifest, MANIFEST_KEYS, field="normalization manifest")
     group_map = require_exact_keys(group_manifest, GROUP_MANIFEST_KEYS, field="trajectory group manifest")
     source = require_exact_keys(manifest_map["source"], SOURCE_MANIFEST_KEYS, field="source manifest")
+    source_spec = SOURCE_SPECS.get(str(source["dataset"]))
     if (
-        manifest_map["schema_version"] != SCHEMA_VERSION
-        or manifest_map["datasets"] != [DATASET]
-        or manifest_map["counts"] != {DATASET: manifest_map["cases"]}
-        or source["dataset"] != DATASET
-        or source["license"] != LICENSE
+        source_spec is None
+        or manifest_map["schema_version"] != SCHEMA_VERSION
+        or manifest_map["datasets"] != [source["dataset"]]
+        or manifest_map["counts"] != {source["dataset"]: manifest_map["cases"]}
+        or source["license"] != source_spec["license"]
         or source["redistribution"] != REDISTRIBUTION
-        or source["path"] != "data/sample.jsonl"
+        or source["path"] != source_spec["path"]
         or type(source["bytes"]) is not int
         or source["bytes"] < 0
         or not HEX_40.fullmatch(str(source["revision"]))
@@ -860,12 +1048,15 @@ def main() -> int:
     if not args.source.is_file():
         raise ValueError(f"missing LinuxArena source file: {args.source}")
     revision = resolve_revision(args.source, args.revision)
+    dataset = PROJECTION_DATASET if args.source.suffix.casefold() == ".parquet" else DATASET
+    source_rows = parquet_projection_rows(args.source) if dataset == PROJECTION_DATASET else jsonl_rows(args.source)
     rows, manifest, group_manifest = build_corpus(
-        jsonl_rows(args.source),
+        source_rows,
         revision=revision,
         max_tool_calls=args.max_tool_calls,
         max_argument_bytes=args.max_argument_bytes,
-        source_manifest=make_source_manifest(args.source, revision),
+        source_manifest=make_source_manifest(args.source, revision, dataset=dataset),
+        dataset=dataset,
     )
     validate_cases(rows, args.schema, max_argument_bytes=args.max_argument_bytes)
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")

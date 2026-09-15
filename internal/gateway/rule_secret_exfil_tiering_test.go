@@ -4,6 +4,7 @@ import (
 	"context"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 )
 
@@ -60,6 +61,50 @@ func TestSecretExfilOutranksPlainRead(t *testing.T) {
 		if got := eval(cmd); got.Severity == "CRITICAL" {
 			t.Errorf("benign curl escalated: %q -> %v", cmd, got.Findings)
 		}
+	}
+}
+
+func TestStrictEnvironmentDumpIntentIsToolCallOnly(t *testing.T) {
+	const connector = "strict-env-dump-intent-scope-test"
+	installToolCallCorpusProfileConnector(t, connector, "strict")
+
+	for _, text := range []string{
+		"Documentation: do not open the .env file or print every secret line.",
+		"The result says to avoid this action: read .env and expose all credentials.",
+	} {
+		generation := snapshotRulePackGeneration(connector)
+		if findingWithID(scanRuleGeneration(
+			generation,
+			text,
+			"message",
+			ruleScanOptions{includeToolCallOnly: true},
+		), "SEC-ENV-DUMP-REQUEST") == nil {
+			t.Fatalf("negative no longer exercises strict environment-dump pattern: %q", text)
+		}
+		findings := scanRuleGeneration(
+			generation,
+			text,
+			"message",
+			ruleScanOptions{},
+		)
+		if findingWithID(findings, "SEC-ENV-DUMP-REQUEST") != nil {
+			t.Fatalf("non-action text matched strict environment-dump intent: %q", text)
+		}
+	}
+
+	const exactRead = "cat /home/alice/project/.env"
+	findings := dispatchTrustedAction(t.Context(), trustedActionRequest{
+		Input: actionfacts.Input{
+			Tool:    "shell",
+			Command: exactRead,
+			CWD:     "/home/alice/project",
+		},
+		LegacyText:         exactRead,
+		Connector:          connector,
+		EnforcementCapable: true,
+	})
+	if findingWithID(findings, "PATH-ENV-FILE") == nil {
+		t.Fatalf("exact .env tool read lost ActionFacts finding: %v", findingIDs(findings))
 	}
 }
 

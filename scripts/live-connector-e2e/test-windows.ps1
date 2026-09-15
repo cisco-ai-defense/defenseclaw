@@ -2640,7 +2640,7 @@ connection.close()
         '(?m)^\s*run: \./scripts/initialize-windows-native-ci-paths\.ps1 '
     ).Count -eq 8) 'every native Windows job uses the shared isolated-path initializer'
     foreach ($leafContract in @(
-        '-Leaf go -DiagnosticsLeaf windows-native-diagnostics-go',
+        '-Leaf "go-${{ matrix.shard }}" -DiagnosticsLeaf "windows-native-diagnostics-go-${{ matrix.shard }}"',
         "-Leaf ('py-' + `$env:PYTHON_SHARD) -DiagnosticsLeaf ('windows-native-diagnostics-python-' + `$env:PYTHON_SHARD)",
         '-Leaf ps -DiagnosticsLeaf windows-native-diagnostics-powershell',
         '-Leaf pkg -DiagnosticsLeaf windows-native-diagnostics-package -ArtifactLeaf windows-native-dist',

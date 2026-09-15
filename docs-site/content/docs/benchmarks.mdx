@@ -65,8 +65,8 @@ suppression is the next improvement area.
 
 <Cards>
   <Card title="34 exact atomic rules" href="/docs/policies/deterministic-detection#exact-atomic-semantic-rules" description="Execution, persistence, privilege, credential access, impact, and security-control tampering proofs." />
-  <Card title="18 bounded chains" href="/docs/policies/deterministic-detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
-  <Card title="Five YARA signatures" href="/docs/policies/deterministic-detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
+  <Card title="26 bounded chains" href="/docs/policies/deterministic-detection#bounded-tool-call-chains" description="Exact identity and result joins over at most the current event plus eight predecessors." />
+  <Card title="Ten YARA signatures" href="/docs/policies/deterministic-detection#yara-mcp-description-scanning" description="High-precision MCP description-injection signals that remain alert-only." />
   <Card title="Five opt-in packs + one staged contract" href="/docs/policies/deterministic-detection#protection-packs-and-policy-provided-context" description="PII, cloud, database, infrastructure, and Kubernetes packs, plus a staged SSH integrity contract." />
 </Cards>
 
@@ -143,14 +143,23 @@ and never executes dataset content.
 ```bash
 go test ./benchmarks/...
 
-go run ./benchmarks/cmd/defenseclaw-benchmark run \
+test -z "$(git status --porcelain)"
+benchmark_commit="$(git rev-parse --verify HEAD)"
+go build -buildvcs=true -trimpath \
+  -ldflags "-X main.buildCommit=$benchmark_commit -X main.buildDirty=false" \
+  -o bin/defenseclaw-benchmark ./benchmarks/cmd/defenseclaw-benchmark
+
+./bin/defenseclaw-benchmark run \
   --corpus benchmarks/fixtures/smoke.jsonl \
   --dataset-lock benchmarks/datasets.lock.json \
   --profiles default,permissive,strict \
   --gate \
   --output outputs/benchmarks/smoke
 
-go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/smoke
+
+./bin/defenseclaw-benchmark verify --publication \
   --output outputs/benchmarks/smoke
 ```
 

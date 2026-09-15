@@ -214,7 +214,7 @@ func TestRetentionPreservesCorrelationAnchorUntilChainReceiptExpires(t *testing.
 		now: now.Add(-2 * 24 * time.Hour),
 	}
 	chain.now = func() time.Time { return fixture.now }
-	chainID := guardrail.ToolChainGuardrailsOffThenEgress
+	chainID := guardrail.ToolChainStagedReverseShellPersistence
 	first := fixture.seed(t, "retention-live-receipt", correlationDigest("retention-live-first"))
 	first.Projection = toolChainProjection(t, []string{chainID}, 1, true)
 	if _, err := chain.Observe(t.Context(), first); err != nil {

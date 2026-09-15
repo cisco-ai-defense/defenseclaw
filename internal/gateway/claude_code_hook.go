@@ -150,6 +150,9 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "PreToolUse", "PermissionRequest":
 		toolName := claudeCodeToolName(req)
 		toolArgs := claudeCodeToolArgs(req)
+		actionTool, resourceIdentity := trustedToolActionFromContext(
+			ctx, "claudecode", toolName, toolName,
+		)
 		toolRequest := &ToolInspectRequest{
 			Tool:          toolName,
 			Args:          toolArgs,
@@ -159,10 +162,12 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:                                     toolName,
+				Tool:                                     actionTool,
 				Args:                                     toolArgs,
 				CWD:                                      req.CWD,
 				ActiveHome:                               trustedSameHostHome(),
+				ToolResourceIdentity:                     resourceIdentity,
+				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
 				ActiveAgentFiles:                         activeAgentContext.files,
 				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
 				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,

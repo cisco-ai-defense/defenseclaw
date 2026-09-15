@@ -169,18 +169,24 @@ def normalize(data_root: Path, *, enforce_release: bool = True) -> tuple[list[di
             }
         )
     rows.sort(key=lambda row: row["id"])
+    statistics = dict(observed)
+    statistics["duplicate_occurrences_removed"] = valid_commands - len(rows)
+    statistics.update({f"command_type:{key}": value for key, value in sorted(command_type_counts.items())})
+    statistics.update({f"host_role:{key}": value for key, value in sorted(host_role_counts.items())})
+    statistics.update(
+        {
+            f"occurrences:{key}": value
+            for key, value in sorted(Counter(occurrence_counts.values()).items())
+        }
+    )
     manifest = {
         "schema_version": "1",
-        "dataset": SOURCE_ID,
-        "revision": SOURCE_REVISION,
-        "license": SOURCE_LICENSE,
+        "datasets": [SOURCE_ID],
         "cases": len(rows),
-        **observed,
-        "duplicate_occurrences_removed": valid_commands - len(rows),
-        "command_type_counts": dict(sorted(command_type_counts.items())),
-        "host_role_counts": dict(sorted(host_role_counts.items())),
-        "occurrence_count_histogram": dict(sorted(Counter(occurrence_counts.values()).items())),
-        "label_contract": "source context is not malicious truth; independent GPT-OSS plus literal proof gate required",
+        "counts": {SOURCE_ID: len(rows)},
+        "exact_payload_duplicates_removed": valid_commands - len(rows),
+        "label_conflicts_excluded": 0,
+        "adapter_statistics": {"zenodo-cyber-training-shell-v4": statistics},
     }
     return rows, manifest
 
@@ -199,12 +205,32 @@ def main() -> int:
     with args.output.open("x", encoding="utf-8", newline="\n") as handle:
         for row in rows:
             handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
-    manifest["source_archive_sha256"] = archive_digest
     manifest["output_sha256"] = sha256_file(args.output)
+    manifest["source"] = {
+        "dataset": SOURCE_ID,
+        "revision": SOURCE_REVISION,
+        "license": SOURCE_LICENSE,
+        "redistribution": "download-only",
+        "path": "record-8136017-v4 archive",
+        "bytes": args.archive.stat().st_size,
+        "files": 1,
+        "rows": EXPECTED_RECORDS,
+        "sha256": archive_digest,
+        "source_url": "https://zenodo.org/records/8136017",
+    }
     args.output.with_suffix(".manifest.json").write_text(
         json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
-    print(json.dumps({key: manifest[key] for key in ("cases", "records", "output_sha256")}, sort_keys=True))
+    print(
+        json.dumps(
+            {
+                "cases": manifest["cases"],
+                "records": manifest["adapter_statistics"]["zenodo-cyber-training-shell-v4"]["records"],
+                "output_sha256": manifest["output_sha256"],
+            },
+            sort_keys=True,
+        )
+    )
     return 0
 
 

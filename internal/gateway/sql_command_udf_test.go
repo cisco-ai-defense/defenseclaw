@@ -104,6 +104,8 @@ func TestSQLCommandUDFInvocationAndSafeNegativesDoNotAlert(t *testing.T) {
 	inputs := []actionfacts.Input{
 		sqlCommandUDFPostgreSQLInput(t, "SELECT exec_cmd('id');"),
 		sqlCommandUDFPostgreSQLInput(t,
+			"CREATE OR REPLACE FUNCTION exec_cmd(text) RETURNS text AS $$ import os; return os.popen(args[0]).read() $$ LANGUAGE plpythonu; SELECT exec_cmd('id');"),
+		sqlCommandUDFPostgreSQLInput(t,
 			"CREATE FUNCTION exec_cmd(value text) RETURNS text AS $$ return value.upper() $$ LANGUAGE plpython3u;"),
 		sqlCommandUDFPostgreSQLInput(t,
 			"CREATE FUNCTION exec_cmd(value text) RETURNS text AS $$ # import os; os.system(value) $$ LANGUAGE plpython3u;"),
@@ -111,8 +113,6 @@ func TestSQLCommandUDFInvocationAndSafeNegativesDoNotAlert(t *testing.T) {
 			`CREATE FUNCTION exec_cmd(value text) RETURNS text AS $$ note = 'import os and os.system('; return note $$ LANGUAGE plpython3u;`),
 		sqlCommandUDFPostgreSQLInput(t,
 			`CREATE FUNCTION exec_cmd(value text) RETURNS text AS $$ """import os; os.system(value)"""; return value $$ LANGUAGE plpython3u;`),
-		sqlCommandUDFPostgreSQLInput(t,
-			"CREATE OR REPLACE FUNCTION exec_cmd(text) RETURNS text AS $$ import os; return os.popen($1).read() $$ LANGUAGE plpythonu; SELECT exec_cmd('id');"),
 	}
 	for _, input := range inputs {
 		findings := dispatchTrustedAction(t.Context(), trustedActionRequest{

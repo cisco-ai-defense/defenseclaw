@@ -52,18 +52,27 @@ func migrateToolChainPendingState(ex dbExecer) error {
 			-- exact same-CronJob mutation barrier. Bits 38 through 40 are the SQL
 			-- command-UDF create/invoke roles and its exact-function barrier. Bits 41
 			-- through 43 are the staged reverse-shell write, persistence install, and
-			-- exact same-path rewrite barrier. Bit 63 is permanently reserved because
-			-- SQLite INTEGER is signed.
+			-- exact same-path rewrite barrier. Bits 44 and 45 are the endpoint-control
+			-- request/result roles, bit 46 is the sensitive-read value source, and
+			-- bits 47 and 48 are the SQL-value source and literal-persistence sink.
+			-- Bits 50 through 52 are the compromised-credential record,
+			-- authentication, and same-account replacement barrier. Bits 53 and 54
+			-- are the AD CS certificate request and same-PFX authentication roles.
+			-- Bits 55 and 56 are the S4U ticket issuance and exact-cache Kerberos
+			-- secretsdump roles. Bits 57 and 58 are the authenticated SQLite
+			-- sensitive-read result and exact same-table unbounded-delete roles.
+			-- Bit 63 is permanently reserved because SQLite INTEGER is signed.
 			detection_step_mask INTEGER NOT NULL
-				CHECK (detection_step_mask BETWEEN 0 AND 17592183600469 AND
-					(detection_step_mask & ~17592183600469) = 0),
+				CHECK (detection_step_mask BETWEEN 0 AND 9223372036854775807),
 			enforcement_step_mask INTEGER NOT NULL
-				CHECK (enforcement_step_mask BETWEEN 0 AND 17592183600469 AND
+				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 791),
+				CHECK (length(enforcement_join_digests) <= 1143),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 791),
+				CHECK (length(enforcement_output_join_digests) <= 1143),
+			value_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(value_join_digests) <= 18303),
 			prepared_time_unix_nano INTEGER NOT NULL
 				CHECK (prepared_time_unix_nano > 0),
 			expires_time_unix_nano INTEGER NOT NULL

@@ -328,7 +328,7 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 	}
 	expectedPairs := map[string]expectedPair{
 		"permission-turn-session-artifact": {
-			rule: guardrail.ToolChainPermissionDeniedThenBypass, disposition: toolCallStateDispositionBlock,
+			rule: guardrail.ToolChainPermissionDeniedThenBypass, disposition: toolCallStateDispositionDetect,
 			platforms: []string{"posix", "windows"},
 		},
 		"final-artifact-bytes": {
@@ -336,7 +336,7 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 			platforms: []string{"posix", "windows"},
 		},
 		"privilege-discovery-elevation": {
-			rule: guardrail.ToolChainPrivilegeDiscoveryThenElevation, disposition: toolCallStateDispositionBlock,
+			rule: guardrail.ToolChainPrivilegeDiscoveryThenElevation, disposition: toolCallStateDispositionDetect,
 			platforms: []string{"posix"},
 		},
 		"secret-manager-egress": {
@@ -344,11 +344,11 @@ func validateToolCallStateCorpus(t *testing.T, cases []toolCallStateCorpusCase) 
 			platforms: []string{"posix"},
 		},
 		"secret-read-egress": {
-			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionBlock,
+			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionDetect,
 			platforms: []string{"posix"},
 		},
 		"shadow-read-egress": {
-			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionBlock,
+			rule: guardrail.ToolChainSecretReadThenEgress, disposition: toolCallStateDispositionDetect,
 			platforms: []string{"posix"},
 		},
 		"workload-identity-lateral": {

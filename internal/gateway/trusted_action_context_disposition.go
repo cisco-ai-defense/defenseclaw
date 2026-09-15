@@ -53,6 +53,7 @@ func applyTrustedActionContextDisposition(
 						enforcementFacts,
 					),
 				)
+				finding.enforcement = findingEnforcementAlertOnly
 			} else {
 				// Merely reading, listing, stating, or lexically mentioning a
 				// runtime socket is useful local telemetry, but it does not prove
@@ -221,6 +222,10 @@ var trustedActionSensitivePathRuleMatchers = []trustedActionSensitivePathRuleMat
 	{
 		ruleIDs: []string{"PATH-AWS-CREDS", "PATH-WIN-AWS-CREDS"},
 		matcher: trustedActionPathValueMatcher(matchesAWSCredentials),
+	},
+	{
+		ruleIDs: []string{"PATH-PASSWORD-CRACKER-POTFILE"},
+		matcher: matchesPasswordCrackerPotfile,
 	},
 	{
 		ruleIDs: []string{"PATH-KUBE", "PATH-WIN-KUBE-CONFIG"},

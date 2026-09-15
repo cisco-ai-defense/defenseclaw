@@ -177,7 +177,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        shard: [0, 1, 2, 3]
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -194,7 +194,7 @@ jobs:
       - name: Run gateway race/coverage shard
         env:
           GO_TEST_SHARD: ${{ matrix.shard }}
-          GO_TEST_SHARDS: 4
+          GO_TEST_SHARDS: 8
         run: |
           set -euo pipefail
           test_regex="$(python3 scripts/go_test_shards.py \
@@ -211,10 +211,14 @@ jobs:
           path: coverage-go-gateway-${{ matrix.shard }}.out
           retention-days: 1
 
-  go-test-other:
-    name: Go Test (remaining packages)
+  go-test-audit:
+    name: Go Audit Test (shard ${{ matrix.shard }})
     runs-on: ubuntu-latest
     timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
@@ -228,35 +232,93 @@ jobs:
           cache: npm
           cache-dependency-path: extensions/defenseclaw/package-lock.json
       - run: make plugin
-      - name: Run remaining Go race/coverage suite once
+      - name: Run audit race/coverage shard
+        env:
+          GO_TEST_SHARD: ${{ matrix.shard }}
+          GO_TEST_SHARDS: 8
         run: |
           set -euo pipefail
-          mapfile -t packages < <(
-            go list ./... | grep -v '^github.com/defenseclaw/defenseclaw/internal/gateway$'
+          test_regex="$(python3 scripts/go_test_shards.py \
+            --package-dir internal/audit \
+            --shard-count "$GO_TEST_SHARDS" \
+            --shard-index "$GO_TEST_SHARD")"
+          go test -race -count=1 -timeout 45m \
+            -coverprofile="coverage-go-audit-$GO_TEST_SHARD.out" \
+            -run "$test_regex" \
+            ./internal/audit
+      - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
+        with:
+          name: go-coverage-audit-${{ matrix.shard }}
+          path: coverage-go-audit-${{ matrix.shard }}.out
+          retention-days: 1
+
+  go-test-other:
+    name: Go Test (remaining packages / shard ${{ matrix.shard }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3, 4, 5, 6, 7]
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@d35c59abb061a4a6fb18e82ac0862c26744d6ab5 # v5.5.0
+        with:
+          go-version-file: go.mod
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: extensions/defenseclaw/package-lock.json
+      - run: make plugin
+      - name: Run remaining Go race/coverage shard
+        env:
+          GO_PACKAGE_SHARD: ${{ matrix.shard }}
+          GO_PACKAGE_SHARDS: 8
+        run: |
+          set -euo pipefail
+          mapfile -t all_packages < <(
+            go list ./... |
+              grep -Ev '^github.com/defenseclaw/defenseclaw/internal/(audit|gateway)$' |
+              sort
           )
+          test "${#all_packages[@]}" -gt 0
+          packages=()
+          for index in "${!all_packages[@]}"; do
+            if (( index % GO_PACKAGE_SHARDS == GO_PACKAGE_SHARD )); then
+              packages+=("${all_packages[index]}")
+            fi
+          done
           test "${#packages[@]}" -gt 0
           go test -race -count=1 -timeout 45m \
-            -coverprofile=coverage-go-other.out \
+            -coverprofile="coverage-go-other-$GO_PACKAGE_SHARD.out" \
             "${packages[@]}"
       - uses: actions/upload-artifact@b4b15b8c7c6ac21ea08fcf65892d2ee8f75cf882 # v4.4.3
         with:
-          name: go-coverage-other
-          path: coverage-go-other.out
+          name: go-coverage-other-${{ matrix.shard }}
+          path: coverage-go-other-${{ matrix.shard }}.out
           retention-days: 1
 
   go-test:
     # Preserve the existing required-check name while combining the complete
-    # race/coverage suite from the gateway shards and all remaining packages.
+    # race/coverage suite from the gateway and audit shards plus all remaining
+    # packages.
     name: Go Test
-    needs: [go-test-gateway, go-test-other]
+    needs: [go-test-gateway, go-test-audit, go-test-other]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     steps:
       - name: Require every Go test partition
         env:
           GATEWAY_RESULT: ${{ needs.go-test-gateway.result }}
+          AUDIT_RESULT: ${{ needs.go-test-audit.result }}
           OTHER_RESULT: ${{ needs.go-test-other.result }}
-        run: test "$GATEWAY_RESULT" = success && test "$OTHER_RESULT" = success
+        run: |
+          test "$GATEWAY_RESULT" = success
+          test "$AUDIT_RESULT" = success
+          test "$OTHER_RESULT" = success
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           persist-credentials: false
@@ -274,7 +336,7 @@ jobs:
           mapfile -t coverage_parts < <(
             find coverage-parts -type f -name 'coverage-go-*.out' -print | sort
           )
-          test "${#coverage_parts[@]}" -eq 5
+          test "${#coverage_parts[@]}" -eq 24
           python3 scripts/merge_go_coverage.py \
             --output coverage.out \
             "${coverage_parts[@]}"

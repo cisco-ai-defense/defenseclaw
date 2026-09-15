@@ -384,6 +384,12 @@
       ]
     },
     {
+      "id": "chain.compromised_credential_then_successful_authentication",
+      "axes": [
+        "sensitive_access"
+      ]
+    },
+    {
       "id": "chain.guardrails_off_then_egress",
       "axes": [
         "egress_external"
@@ -444,6 +450,18 @@
     },
     {
       "id": "impact.mass_process_termination",
+      "axes": []
+    },
+    {
+      "id": "impact.protected_access_control_change",
+      "axes": []
+    },
+    {
+      "id": "impact.protected_device_wipe",
+      "axes": []
+    },
+    {
+      "id": "impact.protected_filesystem_format",
       "axes": []
     },
     {

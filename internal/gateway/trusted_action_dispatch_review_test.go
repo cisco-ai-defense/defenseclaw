@@ -172,9 +172,8 @@ func TestTrustedRawShellFallbackActionClonesActiveAgentContext(t *testing.T) {
 		EnforcementCapable: true,
 	})
 	matched := findingWithID(findings, "COG-AGENTS-MD")
-	if matched == nil || matched.contributesToEnforcement() ||
-		!hasTag(matched.Tags, trustedParserUncertaintyTag) {
-		t.Fatalf("raw active-file mutation finding = %+v", matched)
+	if matched != nil {
+		t.Fatalf("raw active-file mutation finding = %+v, want none without exact mutation proof", matched)
 	}
 
 	activeFiles[0] = "/mutated/source"

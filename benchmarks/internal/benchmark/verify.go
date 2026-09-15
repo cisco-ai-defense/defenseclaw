@@ -138,11 +138,8 @@ func VerifyOutput(dir string, requirePublicationEligible bool) error {
 		}
 	}
 	if requirePublicationEligible {
-		if environment.Dirty {
-			return fmt.Errorf("publication requires a clean DefenseClaw worktree")
-		}
-		if environment.DefenseClawCommit == "" || environment.DefenseClawCommit == "unknown" {
-			return fmt.Errorf("publication requires a resolved DefenseClaw commit")
+		if err := validatePublicationProvenance(environment); err != nil {
+			return err
 		}
 	}
 
@@ -161,6 +158,48 @@ func VerifyOutput(dir string, requirePublicationEligible bool) error {
 		return fmt.Errorf("results identity differs from environment")
 	}
 	return nil
+}
+
+func validatePublicationProvenance(environment Environment) error {
+	if environment.Dirty {
+		return fmt.Errorf("publication requires a clean DefenseClaw worktree")
+	}
+	if environment.DefenseClawCommit == "" || environment.DefenseClawCommit == "unknown" {
+		return fmt.Errorf("publication requires a resolved DefenseClaw commit")
+	}
+	hasBinaryProvenance := environment.BinaryProvenanceVersion != 0 ||
+		environment.BinaryVCSRevision != "" || environment.BinaryVCSModified != nil
+	if !hasBinaryProvenance {
+		return nil
+	}
+	if environment.BinaryProvenanceVersion != BinaryProvenanceSchemaVersion {
+		return fmt.Errorf("unsupported benchmark binary provenance version %d", environment.BinaryProvenanceVersion)
+	}
+	if environment.BinaryVCSRevision == "" || environment.BinaryVCSModified == nil {
+		return fmt.Errorf("publication requires complete benchmark binary provenance")
+	}
+	if !validGitCommit(environment.DefenseClawCommit) || !validGitCommit(environment.BinaryVCSRevision) {
+		return fmt.Errorf("publication requires full 40-hex repository and binary revisions")
+	}
+	if !strings.EqualFold(environment.BinaryVCSRevision, environment.DefenseClawCommit) {
+		return fmt.Errorf(
+			"benchmark binary revision %q differs from DefenseClaw commit %q",
+			environment.BinaryVCSRevision,
+			environment.DefenseClawCommit,
+		)
+	}
+	if *environment.BinaryVCSModified {
+		return fmt.Errorf("publication requires an unmodified benchmark binary")
+	}
+	return nil
+}
+
+func validGitCommit(value string) bool {
+	if len(value) != 40 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func parseChecksums(path string) (map[string]string, error) {

@@ -234,6 +234,13 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	}
 	setupStarted := make(chan struct{}, 1)
 	releaseSetup := make(chan struct{})
+	var releaseSetupOnce sync.Once
+	releaseBlockedSetup := func() {
+		releaseSetupOnce.Do(func() { close(releaseSetup) })
+	}
+	// Keep a failed scheduler/timing assertion from deadlocking guard.Stop on
+	// the deliberately blocked Setup call during package-wide parallel runs.
+	t.Cleanup(releaseBlockedSetup)
 	conn.mu.Lock()
 	conn.setupStarted = setupStarted
 	conn.releaseSetup = releaseSetup
@@ -244,7 +251,7 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 	}()
 	select {
 	case <-setupStarted:
-	case <-time.After(time.Second):
+	case <-time.After(5 * time.Second):
 		t.Fatal("stale-policy repair did not enter Setup")
 	}
 	publishStarted := make(chan struct{})
@@ -260,7 +267,7 @@ func TestHookConfigGuardRepairUsesCurrentRuntimePolicy(t *testing.T) {
 		t.Fatal("new runtime policy published before the old-policy repair lease completed")
 	case <-time.After(50 * time.Millisecond):
 	}
-	close(releaseSetup)
+	releaseBlockedSetup()
 	if err := <-repairDone; err != nil {
 		t.Fatalf("stale-policy repair: %v", err)
 	}

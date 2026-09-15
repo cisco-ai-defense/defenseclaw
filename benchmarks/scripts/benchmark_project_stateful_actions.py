@@ -23,6 +23,7 @@ EVENT_PAYLOAD_FIELDS = (
     "cwd",
     "active_home",
     "active_agent_files",
+    "tool_resource_identity",
 )
 
 
@@ -32,6 +33,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--schema", type=Path, default=Path("benchmarks/schema/case-v1.schema.json"))
+    parser.add_argument(
+        "--skip-non-stateful",
+        action="store_true",
+        help="skip non-stateful rows in a mixed normalized corpus",
+    )
+    parser.add_argument(
+        "--include-stateful",
+        action="store_true",
+        help="also emit each stateful parent with the projected trajectory identity",
+    )
     return parser.parse_args()
 
 
@@ -43,18 +54,28 @@ def digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
-def project(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+def project(
+    lines: Iterable[str], *, skip_non_stateful: bool = False, include_stateful: bool = False
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     output: list[dict[str, Any]] = []
     source_cases = 0
+    skipped_non_stateful = 0
     for line_number, line in enumerate(lines, 1):
         row = json.loads(line)
-        source_cases += 1
         if row.get("surface") != "stateful":
+            if skip_non_stateful:
+                skipped_non_stateful += 1
+                continue
             raise ValueError(f"line {line_number}: expected stateful surface")
+        source_cases += 1
         events = row.get("payload", {}).get("events")
         if not isinstance(events, list) or len(events) < 2:
             raise ValueError(f"line {line_number}: missing stateful events")
         trajectory_id = digest(str(row["id"]))[:24]
+        if include_stateful:
+            parent = copy.deepcopy(row)
+            parent.setdefault("strata", {})["trajectory_id"] = trajectory_id
+            output.append(parent)
         for index, event in enumerate(events):
             if not isinstance(event, dict):
                 raise ValueError(f"line {line_number}: event {index} is not an object")
@@ -95,7 +116,14 @@ def project(lines: Iterable[str]) -> tuple[list[dict[str, Any]], dict[str, Any]]
         "schema_version": "1",
         "source_cases": source_cases,
         "row_count": len(output),
-        "projection": "one action case per stateful event; outcomes and offsets excluded",
+        "skipped_non_stateful": skipped_non_stateful,
+        "projection": (
+            "stateful parent plus one action case per event; authenticated resource identity retained; "
+            "action outcomes and offsets excluded"
+            if include_stateful
+            else "one action case per stateful event; authenticated resource identity retained; "
+            "outcomes and offsets excluded"
+        ),
     }
     return output, manifest
 
@@ -115,7 +143,11 @@ def validate_cases(rows: Iterable[dict[str, Any]], schema_path: Path) -> None:
 def main() -> int:
     args = parse_args()
     with args.input.open(encoding="utf-8") as handle:
-        rows, manifest = project(handle)
+        rows, manifest = project(
+            handle,
+            skip_non_stateful=args.skip_non_stateful,
+            include_stateful=args.include_stateful,
+        )
     validate_cases(rows, args.schema)
     output = "".join(canonical_json(row) + "\n" for row in rows)
     args.output.parent.mkdir(parents=True, exist_ok=True)

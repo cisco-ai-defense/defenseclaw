@@ -107,7 +107,9 @@ def main() -> int:
         "task_revision": args.task_revision,
         "row_count": len(output),
         "context_field": "payload.content",
-        "context_source": "pinned public TerminalBench instruction.md" if args.task_root else "public TerminalBench task_name",
+        "context_source": (
+            "pinned public TerminalBench instruction.md" if args.task_root else "public TerminalBench task_name"
+        ),
         "output_sha256": hashlib.sha256(data.encode()).hexdigest(),
     }
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")

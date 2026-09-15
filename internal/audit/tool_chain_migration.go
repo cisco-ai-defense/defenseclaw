@@ -7,7 +7,7 @@ package audit
 
 import "fmt"
 
-// migrateToolChainState adds the bounded, content-free state used by the eighteen
+// migrateToolChainState adds the bounded, content-free state used by the twenty-six
 // fixed tool-call chain slots. Store.applyMigration owns the surrounding
 // transaction.
 func migrateToolChainState(ex dbExecer) error {
@@ -42,21 +42,23 @@ func migrateToolChainState(ex dbExecer) error {
 			parse_status TEXT NOT NULL CHECK (parse_status IN (
 				'not_applicable','complete','partial','unsupported','invalid','limit_exceeded','ambiguous')),
 			detection_step_mask INTEGER NOT NULL
-				CHECK (detection_step_mask BETWEEN 0 AND 17592186044415),
+				CHECK (detection_step_mask BETWEEN 0 AND 9223372036854775807),
 			enforcement_step_mask INTEGER NOT NULL
-				CHECK (enforcement_step_mask BETWEEN 0 AND 17592186044415 AND
+				CHECK (enforcement_step_mask BETWEEN 0 AND 9223372036854775807 AND
 					(enforcement_step_mask & ~detection_step_mask) = 0),
 			enforcement_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_join_digests) <= 791),
+				CHECK (length(enforcement_join_digests) <= 1143),
 			enforcement_output_join_digests TEXT NOT NULL DEFAULT ''
-				CHECK (length(enforcement_output_join_digests) <= 791),
+				CHECK (length(enforcement_output_join_digests) <= 1143),
+			value_join_digests TEXT NOT NULL DEFAULT ''
+				CHECK (length(value_join_digests) <= 18303),
 			detected_chain_mask INTEGER NOT NULL
-				CHECK (detected_chain_mask BETWEEN 0 AND 262143),
+				CHECK (detected_chain_mask BETWEEN 0 AND 2147483647),
 			enforcement_safe_chain_mask INTEGER NOT NULL
-				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 262143 AND
+				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 2147483647 AND
 					(enforcement_safe_chain_mask & ~detected_chain_mask) = 0),
 			denied_chain_mask INTEGER NOT NULL
-				CHECK (denied_chain_mask BETWEEN 0 AND 262143 AND
+				CHECK (denied_chain_mask BETWEEN 0 AND 2147483647 AND
 					(denied_chain_mask & ~enforcement_safe_chain_mask) = 0),
 			stable_action_id TEXT CHECK (
 				(denied_chain_mask = 0 AND stable_action_id IS NULL) OR
@@ -105,15 +107,22 @@ func migrateToolChainState(ex dbExecer) error {
 				'chain.cloud_iam_principal_create_then_admin_attach_same_principal',
 				'chain.kubernetes_privileged_cronjob_patch_then_create_job',
 				'chain.sql_command_udf_create_then_invoke_same_function',
-				'chain.reverse_shell_payload_write_then_persistence_install_same_artifact')),
+				'chain.reverse_shell_payload_write_then_persistence_install_same_artifact',
+				'chain.endpoint_security_control_request_then_completed_same_process',
+				'chain.sensitive_read_value_then_external_literal_transmit',
+				'chain.sensitive_sql_value_then_cross_resource_literal_persistence',
+				'chain.compromised_credential_then_successful_authentication',
+				'chain.adcs_certificate_request_then_pfx_authentication',
+				'chain.s4u_ticket_then_kerberos_secretsdump_same_cache',
+				'chain.sensitive_sql_read_then_unbounded_delete_same_table')),
 			chain_version TEXT NOT NULL CHECK (length(chain_version) BETWEEN 1 AND 16),
 			detected_chain_mask INTEGER NOT NULL
-				CHECK (detected_chain_mask BETWEEN 0 AND 262143),
+				CHECK (detected_chain_mask BETWEEN 0 AND 2147483647),
 			enforcement_safe_chain_mask INTEGER NOT NULL
-				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 262143 AND
+				CHECK (enforcement_safe_chain_mask BETWEEN 0 AND 2147483647 AND
 					(enforcement_safe_chain_mask & ~detected_chain_mask) = 0),
 			denied_chain_mask INTEGER NOT NULL
-				CHECK (denied_chain_mask BETWEEN 1 AND 262143 AND
+				CHECK (denied_chain_mask BETWEEN 1 AND 2147483647 AND
 					(denied_chain_mask & ~enforcement_safe_chain_mask) = 0),
 			stable_action_id TEXT NOT NULL CHECK (
 				length(stable_action_id) = 68 AND substr(stable_action_id, 1, 4) = 'gca_' AND

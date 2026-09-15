@@ -10,8 +10,9 @@ parser, and verdict mapping. It combines those predictions with the same
 datasets and deterministic engine used by this benchmark. Tool-risk training
 and protected corpora are outside this lane.
 
-All external sources are publicly accessible and revision-pinned in
-[`datasets.lock.json`](datasets.lock.json). Source records are downloaded into
+Sources used by the published public suite are publicly accessible and
+revision-pinned in [`datasets.lock.json`](datasets.lock.json). The lock may also
+track candidate sources that are not admitted to a published score. Source records are downloaded into
 an ignored local data directory and are not committed. The harness never
 executes commands or tool calls from a dataset.
 
@@ -31,7 +32,7 @@ alias, not a fourth experimental arm.
 
 ## Requirements
 
-- Go 1.24 or newer
+- Go 1.26.4 or the exact version declared by `go.mod`
 - Python 3.11 or newer
 - `git`
 - `pyarrow` and `jsonschema` for Parquet-backed datasets
@@ -41,19 +42,62 @@ alias, not a fourth experimental arm.
 ## Run the smoke suite
 
 ```bash
-go run ./benchmarks/cmd/defenseclaw-benchmark run \
+test -z "$(git status --porcelain)"
+benchmark_commit="$(git rev-parse --verify HEAD)"
+go build -buildvcs=true -trimpath \
+  -ldflags "-X main.buildCommit=$benchmark_commit -X main.buildDirty=false" \
+  -o bin/defenseclaw-benchmark ./benchmarks/cmd/defenseclaw-benchmark
+
+./bin/defenseclaw-benchmark run \
   --corpus benchmarks/fixtures/smoke.jsonl \
   --dataset-lock benchmarks/datasets.lock.json \
   --profiles default,permissive,strict \
   --gate \
   --output outputs/benchmarks/smoke
 
-go run ./benchmarks/cmd/defenseclaw-benchmark verify \
+./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/smoke
+
+./bin/defenseclaw-benchmark verify --publication \
   --output outputs/benchmarks/smoke
 ```
 
 The runner writes case-level predictions, environment and policy inventories,
 aggregate metrics, corpus and dataset manifests, and checksums.
+It refuses to evaluate a corpus unless the selected worktree is clean and the
+running binary contains clean, embedded VCS metadata matching its exact
+40-hex repository commit. The explicit linker values above support linked Git
+worktrees where Go omits `vcs.*` build settings even with `-buildvcs=true`;
+native Go build metadata takes precedence when present. Publication verification remains
+backward-compatible with older bundles that predate binary provenance fields.
+
+## Run an opt-in policy pack
+
+Opt-in policy packs are separate benchmark lanes, not additional runtime
+profiles. Select them by their repository name; each runs with the balanced
+(`default`) action posture and is reported under an `opt-in/<name>` label:
+
+```bash
+./bin/defenseclaw-benchmark run \
+  --corpus benchmarks/fixtures/cloud-production-conformance-v1.jsonl \
+  --dataset-lock benchmarks/datasets.lock.json \
+  --profiles default \
+  --opt-in-packs cloud-production-protection \
+  --output outputs/benchmarks/cloud-production-conformance
+
+./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/cloud-production-conformance
+
+./bin/defenseclaw-benchmark verify --publication \
+  --output outputs/benchmarks/cloud-production-conformance
+```
+
+Supported names are `cloud-production-protection`,
+`database-destruction-protection`, `infrastructure-destruction-protection`,
+`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+environment records each lane's policy digest, policy root, and action posture.
+Standard `default`, `permissive`, and `strict` runs are unchanged when
+`--opt-in-packs` is omitted.
 
 ## Prepare public sources
 

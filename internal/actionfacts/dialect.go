@@ -63,7 +63,7 @@ func chooseRawCommandDialect(
 func genericRawExecutionTool(name string) bool {
 	switch name {
 	case "shell", "shell_command", "terminal", "run_command",
-		"run_shell", "run_shell_command", "runshellcommand",
+		"run_shell", "run_shell_command", "runshellcommand", "shell_exec",
 		"run_terminal_cmd", "execute", "execute_command", "exec",
 		"exec_command", "command", "subprocess", "system.run":
 		return true

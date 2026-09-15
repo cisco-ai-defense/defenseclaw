@@ -17,8 +17,9 @@ import json
 import math
 import statistics
 from collections import Counter, defaultdict
+from collections.abc import Iterable
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 SCHEMA_VERSION = "1"
 REPORT_KIND = "contextual-judge-score-v1"
@@ -500,10 +501,16 @@ def score(args: argparse.Namespace) -> dict[str, Any]:
         "models": models,
         "claim_boundaries": {
             "coverage": "Measured only on the named, pinned, family-deduplicated corpus.",
-            "blocking": "LLM block is a recommendation; it is synchronous enforcement only on enabled pre-tool hook paths.",
-            "async_tool_events": "EventRouter tool judging is observational and cannot be claimed as prevented execution.",
+            "blocking": (
+                "LLM block is a recommendation; it is synchronous enforcement only on enabled pre-tool hook paths."
+            ),
+            "async_tool_events": (
+                "EventRouter tool judging is observational and cannot be claimed as prevented execution."
+            ),
             "low_confidence": "Low-confidence projected atomic events are diagnostic and excluded from F1.",
-            "local_cost": "Token and wall-clock cost are measured; electricity and hardware amortization are not estimated.",
+            "local_cost": (
+                "Token and wall-clock cost are measured; electricity and hardware amortization are not estimated."
+            ),
         },
     }
 

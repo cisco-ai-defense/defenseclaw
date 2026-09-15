@@ -1,0 +1,13 @@
+{
+  "setting": "safety_finetuning",
+  "side_task": "embedded_german",
+  "redruntime_hours": 1,
+  "red_provider": "codex_norepeat",
+  "red_model": "gpt-test",
+  "cluster_id": "1004",
+  "experiment": "fixture_german",
+  "task_config": "qwen3_1.7b",
+  "seed": null,
+  "baseline": false,
+  "timestamp": "20260912_120300"
+}

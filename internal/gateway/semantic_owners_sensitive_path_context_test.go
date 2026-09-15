@@ -93,7 +93,7 @@ func TestSSHPrivateKeyOwnerDistinguishesReadWriteAndReference(t *testing.T) {
 		t,
 		owner,
 		context("cat /home/bob/.ssh/id_ed25519"),
-		false,
+		true,
 		false,
 	)
 }

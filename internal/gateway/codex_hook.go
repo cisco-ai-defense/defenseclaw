@@ -221,6 +221,9 @@ func (a *APIServer) evaluateCodexHookForProfile(
 	case "PreToolUse", "PermissionRequest":
 		toolName := codexToolName(req)
 		toolArgs := codexToolArgs(req)
+		actionTool, resourceIdentity := trustedToolActionFromContext(
+			ctx, "codex", toolName, toolName,
+		)
 		toolRequest := &ToolInspectRequest{
 			Tool:          toolName,
 			Args:          toolArgs,
@@ -230,10 +233,12 @@ func (a *APIServer) evaluateCodexHookForProfile(
 		}
 		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
 			Input: actionfacts.Input{
-				Tool:       toolName,
-				Args:       toolArgs,
-				CWD:        req.CWD,
-				ActiveHome: trustedSameHostHome(),
+				Tool:                     actionTool,
+				Args:                     toolArgs,
+				CWD:                      req.CWD,
+				ActiveHome:               trustedSameHostHome(),
+				ToolResourceIdentity:     resourceIdentity,
+				CredentialLineageHMACKey: activeToolValueLineageProcessKey.material,
 			},
 			LegacyText:                string(toolArgs),
 			Connector:                 "codex",

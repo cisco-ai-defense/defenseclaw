@@ -62,12 +62,14 @@ func windowsCommandFindingsWithOptions(
 		args := tokens[1:]
 
 		if isPowerShellRemoveItem(name) && hasPowerShellSwitch(args, "force", "fo") {
-			if hasPowerShellSwitch(args, "recurse", "r") {
-				add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced deletion", "CRITICAL", 0.98, "destructive", "windows")
+			if hasPowerShellSwitch(args, "recurse", "r") &&
+				windowsRecursiveDeleteTargetsDriveRoot(name, args, dialect) {
+				add("CMD-WIN-REMOVE-ITEM-RF", "PowerShell recursive forced drive-root deletion", "CRITICAL", 0.98, "destructive", "windows")
 			}
 		}
-		if (name == "rmdir" || name == "rd") && hasWindowsSwitch(args, "s") && hasWindowsSwitch(args, "q") {
-			add("CMD-WIN-RMDIR-SQ", "cmd recursive quiet directory deletion", "CRITICAL", 0.98, "destructive", "windows")
+		if (name == "rmdir" || name == "rd") && hasWindowsSwitch(args, "s") &&
+			hasWindowsSwitch(args, "q") && windowsRecursiveDeleteTargetsDriveRoot(name, args, dialect) {
+			add("CMD-WIN-RMDIR-SQ", "cmd recursive quiet drive-root deletion", "CRITICAL", 0.98, "destructive", "windows")
 		}
 		if name == "reg" && windowsPersistenceRegistryKey(args) {
 			add("CMD-WIN-REG-PERSIST", "Windows registry persistence modification", "CRITICAL", 0.97, "persistence", "windows")
@@ -105,6 +107,62 @@ func windowsCommandFindingsWithOptions(
 	}
 
 	return findings
+}
+
+func windowsRecursiveDeleteTargetsDriveRoot(
+	_ string,
+	args []string,
+	dialect windowsShellDialect,
+) bool {
+	for index := 0; index < len(args); index++ {
+		argument := strings.TrimSpace(args[index])
+		if dialect == windowsDialectPowerShell {
+			key, joinedValue, joined := splitPowerShellOption(argument)
+			switch key {
+			case "-path", "-literalpath":
+				if joined {
+					if windowsDriveRootDeleteTarget(joinedValue) {
+						return true
+					}
+					continue
+				}
+				if index+1 < len(args) {
+					index++
+					if windowsDriveRootDeleteTarget(args[index]) {
+						return true
+					}
+				}
+				continue
+			}
+			if strings.HasPrefix(argument, "-") {
+				continue
+			}
+		} else if strings.HasPrefix(argument, "/") {
+			continue
+		}
+		if windowsDriveRootDeleteTarget(argument) {
+			return true
+		}
+	}
+	return false
+}
+
+func windowsDriveRootDeleteTarget(value string) bool {
+	value = strings.TrimSpace(strings.Trim(value, `"'`))
+	value = strings.ReplaceAll(value, "/", `\`)
+	for strings.HasSuffix(value, `\`) && len(value) > 3 {
+		value = strings.TrimSuffix(value, `\`)
+	}
+	if len(value) == 3 && value[1] == ':' && value[2] == '\\' &&
+		((value[0] >= 'A' && value[0] <= 'Z') || (value[0] >= 'a' && value[0] <= 'z')) {
+		return true
+	}
+	switch strings.ToLower(value) {
+	case `%systemdrive%`, `%systemdrive%\`, `$env:systemdrive`, `$env:systemdrive\`:
+		return true
+	default:
+		return false
+	}
 }
 
 type windowsShellDialect uint8

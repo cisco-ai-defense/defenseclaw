@@ -88,6 +88,25 @@ func TestSQLCommandUDFPostgreSQLSourceShapes(t *testing.T) {
 	}
 }
 
+func TestSQLCommandUDFPostgreSQLRejectsCreateInvokeBatch(t *testing.T) {
+	create := "CREATE OR REPLACE FUNCTION exec_cmd(text) RETURNS text AS $$ import os; return os.popen(args[0]).read() $$ LANGUAGE plpythonu;"
+	facts := Analyze(postgreSQLUDFInput(t, "production", create+" SELECT exec_cmd('id');"))
+	if _, _, _, _, ok := ExactSQLCommandUDFOperation(facts); ok {
+		t.Fatalf("two-statement batch was projected: %+v", facts.SQLCommandUDFOperations)
+	}
+
+	for _, query := range []string{
+		create + " SELECT other_exec('id');",
+		create + " SELECT exec_cmd(command_text);",
+		create + " SELECT exec_cmd('id'); SELECT 1;",
+	} {
+		candidate := Analyze(postgreSQLUDFInput(t, "production", query))
+		if _, _, _, _, matched := ExactSQLCommandUDFOperation(candidate); matched {
+			t.Fatalf("non-exact create/invoke batch matched: %q", query)
+		}
+	}
+}
+
 func TestSQLCommandUDFMySQLExactShellArguments(t *testing.T) {
 	create := Analyze(Input{
 		Tool: "execute_command",
@@ -177,11 +196,6 @@ func TestSQLCommandUDFHardNegatives(t *testing.T) {
 			input: postgreSQLUDFInput(t, "production",
 				"CREATE OR REPLACE FUNCTION shell_exec(cmd text) RETURNS text AS $$ BEGIN EXECUTE 'COPY (SELECT 1) TO PROGRAM ' || quote_literal(cmd); RETURN 'done'; END; $$ LANGUAGE plpgsql;"),
 			allowBarrier: true,
-		},
-		{
-			name: "create and invoke in one batch",
-			input: postgreSQLUDFInput(t, "production",
-				"CREATE OR REPLACE FUNCTION exec_cmd(text) RETURNS text AS $$ import os; return os.popen($1).read() $$ LANGUAGE plpythonu; SELECT exec_cmd('id');"),
 		},
 		{
 			name:  "dynamic invocation",

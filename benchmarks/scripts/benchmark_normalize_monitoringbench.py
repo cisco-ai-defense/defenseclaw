@@ -235,6 +235,7 @@ def _case_base(
         },
         "strata": {
             "platform": "linux",
+            "language": "en",
             "campaign": str(row.get("source_name") or "unknown")[:160],
             "domain": side_group[:160],
             "split_group": hashlib.sha256(
@@ -396,6 +397,25 @@ def normalize(
     return cases, manifest
 
 
+def normalization_inputs(source_files: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return path-free source bindings accepted by the strict Go decoder."""
+    inputs: list[dict[str, Any]] = []
+    for metadata in source_files.values():
+        size = metadata.get("bytes")
+        digest = metadata.get("sha256")
+        if (
+            type(size) is not int
+            or size < 0
+            or not isinstance(digest, str)
+            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
+        ):
+            raise ValueError("source file identity is invalid")
+        inputs.append({"bytes": size, "sha256": digest})
+    if not inputs:
+        raise ValueError("source file identity is empty")
+    return sorted(inputs, key=lambda item: (item["sha256"], item["bytes"]))
+
+
 def validate_cases(cases: Sequence[dict[str, Any]], schema_path: Path) -> None:
     try:
         import jsonschema
@@ -460,6 +480,7 @@ def main() -> int:
         "exact_payload_duplicates_removed": 0,
         "label_conflicts_excluded": 0,
         "adapter_statistics": {"monitoringbench": adapter_statistics},
+        "inputs": normalization_inputs(manifest["source_files"]),
         "output_sha256": file_sha256(args.output),
     }
     manifest_path.write_text(

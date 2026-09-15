@@ -67,6 +67,7 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 	}
 
 	pipelines := posixPipelineRelations(file)
+	representedFallbacks := exactStandalonePOSIXAbsoluteCDFallbacks(file)
 	statementIDs := make(map[*syntax.Stmt]int64)
 	var stack []syntax.Node
 	syntax.Walk(file, func(node syntax.Node) bool {
@@ -97,6 +98,9 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		case *syntax.BinaryCmd:
 			if typed.Op == syntax.AndStmt || typed.Op == syntax.OrStmt ||
 				typed.Op == syntax.PipeAll {
+				if _, represented := representedFallbacks[typed]; represented {
+					break
+				}
 				// Short-circuit reachability and stderr-inclusive pipelines
 				// cannot be represented by the current fact contract.
 				out.markPartial(IssueUnsupportedConstruct)
@@ -118,6 +122,54 @@ func parsePOSIX(source string, startID int64, wrapperDepth int) parseOutput {
 		out.markUnsupported(IssueUnsupportedConstruct)
 	}
 	return out
+}
+
+// exactStandalonePOSIXAbsoluteCDFallbacks returns every OR node in one closed
+// top-level fallback list such as `cd /tmp || cd /var/run || cd /`. The
+// individual attempts remain ControlFlowUncertain; this proof only establishes
+// that the complete static list is represented. Requiring the list to consume
+// the entire file prevents an unresolved selected directory from affecting the
+// interpretation of later relative paths.
+func exactStandalonePOSIXAbsoluteCDFallbacks(
+	file *syntax.File,
+) map[*syntax.BinaryCmd]struct{} {
+	represented := make(map[*syntax.BinaryCmd]struct{})
+	if file == nil || len(file.Stmts) != 1 ||
+		posixStatementHasUnsupportedControl(file.Stmts[0]) {
+		return represented
+	}
+	if _, ok := file.Stmts[0].Cmd.(*syntax.BinaryCmd); !ok ||
+		!collectExactPOSIXAbsoluteCDFallback(file.Stmts[0], represented) {
+		return map[*syntax.BinaryCmd]struct{}{}
+	}
+	return represented
+}
+
+func collectExactPOSIXAbsoluteCDFallback(
+	stmt *syntax.Stmt,
+	represented map[*syntax.BinaryCmd]struct{},
+) bool {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) ||
+		len(stmt.Redirs) != 0 {
+		return false
+	}
+	if binary, ok := stmt.Cmd.(*syntax.BinaryCmd); ok {
+		if binary.Op != syntax.OrStmt ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.X, represented) ||
+			!collectExactPOSIXAbsoluteCDFallback(binary.Y, represented) {
+			return false
+		}
+		represented[binary] = struct{}{}
+		return true
+	}
+	call, ok := stmt.Cmd.(*syntax.CallExpr)
+	if !ok || len(call.Assigns) != 0 || len(call.Args) != 2 {
+		return false
+	}
+	program := projectPOSIXWord(call.Args[0])
+	target := projectPOSIXWord(call.Args[1])
+	return !program.Expands && program.Value == "cd" &&
+		!target.Expands && strings.HasPrefix(target.Value, "/")
 }
 
 // normalizePOSIXNullAggregateRedirects recognizes the one Bash-only redirect
@@ -274,6 +326,8 @@ func projectPOSIXStatement(
 		ParentCommandID:      parentID,
 		PipelineID:           pipelineID,
 		ControlFlowUncertain: posixControlFlowUncertain(stmt, stack),
+		ControlFlowOperator:  posixControlFlowOperator(stmt, stack),
+		Background:           stmt.Background,
 		Dialect:              DialectPOSIX,
 		Effect:               EffectExecute,
 		ArgvComplete:         true,
@@ -386,6 +440,54 @@ func posixControlFlowUncertain(stmt *syntax.Stmt, stack []syntax.Node) bool {
 		}
 	}
 	return false
+}
+
+func posixControlFlowOperator(
+	stmt *syntax.Stmt,
+	stack []syntax.Node,
+) CommandControlFlowOperator {
+	if stmt == nil || posixStatementHasUnsupportedControl(stmt) {
+		return ControlFlowOperatorMixedOrUnsupported
+	}
+	operator := ControlFlowOperatorNone
+	merge := func(candidate CommandControlFlowOperator) {
+		if operator == ControlFlowOperatorMixedOrUnsupported ||
+			candidate == ControlFlowOperatorNone {
+			return
+		}
+		if candidate == ControlFlowOperatorMixedOrUnsupported ||
+			operator != ControlFlowOperatorNone && operator != candidate {
+			operator = ControlFlowOperatorMixedOrUnsupported
+			return
+		}
+		operator = candidate
+	}
+	for _, ancestor := range stack {
+		switch typed := ancestor.(type) {
+		case *syntax.Stmt:
+			if posixStatementHasUnsupportedControl(typed) {
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		case *syntax.FuncDecl, *syntax.ForClause, *syntax.CaseClause,
+			*syntax.IfClause, *syntax.WhileClause, *syntax.Subshell,
+			*syntax.Block:
+			merge(ControlFlowOperatorMixedOrUnsupported)
+		case *syntax.BinaryCmd:
+			switch typed.Op {
+			case syntax.AndStmt:
+				merge(ControlFlowOperatorAnd)
+			case syntax.OrStmt:
+				merge(ControlFlowOperatorOr)
+			case syntax.PipeAll:
+				merge(ControlFlowOperatorMixedOrUnsupported)
+			}
+		}
+	}
+	return operator
+}
+
+func posixStatementHasUnsupportedControl(stmt *syntax.Stmt) bool {
+	return stmt == nil || stmt.Negated || stmt.Background || stmt.Coprocess || stmt.Disown
 }
 
 func posixUnquotedExpansion(part syntax.WordPart, atWordStart bool) bool {
@@ -879,6 +981,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 				return
 			}
 			child = parsePOSIX(strings.Join(command.Argv[1:], " "), out.nextID, wrapperDepth+1)
+		case "su":
+			nested, ok := exactRootSuCommand(command)
+			if !ok {
+				continue
+			}
+			if wrapperDepth >= maxWrapperDepth {
+				out.markLimit(IssueWrapperLimit)
+				return
+			}
+			child = parsePOSIX(nested, out.nextID, wrapperDepth+1)
 		case "powershell", "powershell.exe", "pwsh", "pwsh.exe", "cmd", "cmd.exe":
 			nested, dialect, ok, unsafe := nestedCommand(command.Argv, program)
 			if unsafe {
@@ -936,6 +1048,16 @@ func expandStaticPOSIXWrappers(out *parseOutput, wrapperDepth int) {
 		}
 		out.mergeNested(child)
 	}
+}
+
+func exactRootSuCommand(command CommandFact) (string, bool) {
+	if command.Program != "su" || !command.ArgvComplete ||
+		len(command.Argv) != 3 || command.Argv[1] != "-c" ||
+		strings.TrimSpace(command.Argv[2]) == "" ||
+		!staticArguments(command.Arguments) {
+		return "", false
+	}
+	return command.Argv[2], true
 }
 
 var (

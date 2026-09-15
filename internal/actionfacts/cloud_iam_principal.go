@@ -39,7 +39,8 @@ func ExactCloudIAMPrincipalOperation(
 	fact := facts.CloudIAMPrincipalOperations[0]
 	switch fact.Operation {
 	case CloudIAMUserCreate, CloudIAMRoleCreate,
-		CloudIAMUserAdminAttach, CloudIAMRoleAdminAttach:
+		CloudIAMUserAdminAttach, CloudIAMRoleAdminAttach,
+		CloudIAMUserWildcardPolicy, CloudIAMRoleWildcardPolicy:
 	default:
 		return "", "", false
 	}
@@ -56,6 +57,14 @@ func ExactCloudIAMAdministratorAttachment(facts Facts) bool {
 	operation, _, ok := ExactCloudIAMPrincipalOperation(facts)
 	return ok && (operation == CloudIAMUserAdminAttach ||
 		operation == CloudIAMRoleAdminAttach)
+}
+
+// ExactCloudIAMWildcardInlinePolicy recognizes only an exact inline Allow
+// policy with Action "*" and Resource "*" for one static user or role.
+func ExactCloudIAMWildcardInlinePolicy(facts Facts) bool {
+	operation, _, ok := ExactCloudIAMPrincipalOperation(facts)
+	return ok && (operation == CloudIAMUserWildcardPolicy ||
+		operation == CloudIAMRoleWildcardPolicy)
 }
 
 func extractExactAWSCLIArgs(raw json.RawMessage) extractedInput {
@@ -85,7 +94,8 @@ func extractExactAWSCLIArgs(raw json.RawMessage) extractedInput {
 	}
 	service, serviceOK := object["service"].(string)
 	command, commandOK := object["command"].(string)
-	if !serviceOK || !commandOK || service != "iam" || command == "" ||
+	if !serviceOK || !commandOK ||
+		(service != "iam" && service != "s3" && service != "s3api") || command == "" ||
 		strings.TrimSpace(command) != command || strings.IndexByte(command, 0) >= 0 {
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
@@ -94,12 +104,14 @@ func extractExactAWSCLIArgs(raw json.RawMessage) extractedInput {
 			return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 		}
 	}
-	synthesized := "aws iam " + command
+	synthesized := "aws " + service + " " + command
 	parsed := parsePOSIX(synthesized, 1, 0)
 	if parsed.status != StatusComplete || len(parsed.commands) != 1 {
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
-	if _, _, _, ok := exactCloudIAMPrincipalArgv(parsed.commands[0].Argv); !ok {
+	_, _, _, iamOK := exactCloudIAMPrincipalArgv(parsed.commands[0].Argv)
+	_, resourceOK := exactAWSCloudResourceMutation(parsed.commands[0].Argv)
+	if !iamOK && !resourceOK {
 		return extractedInput{status: StatusPartial, issues: []IssueCode{IssueUnknownOperandGrammar}}
 	}
 	return extractedInput{
@@ -149,6 +161,10 @@ func classifyCloudIAMPrincipalAdministration(command *CommandFact) bool {
 		addOperation(command, OperationPermissionChange)
 		addOperation(command, OperationPrivilege)
 		addOperation(command, OperationConfigChange)
+	case CloudIAMUserWildcardPolicy, CloudIAMRoleWildcardPolicy:
+		addOperation(command, OperationPermissionChange)
+		addOperation(command, OperationPrivilege)
+		addOperation(command, OperationConfigChange)
 	default:
 		return false
 	}
@@ -195,9 +211,55 @@ func exactCloudIAMPrincipalArgv(
 			return "", "", "", false
 		}
 		return CloudIAMRoleAdminAttach, "role", argv[4], true
+	case "put-user-policy", "put-role-policy":
+		if len(argv) != 9 {
+			return "", "", "", false
+		}
+		kind, nameFlag, operation := "user", "--user-name", CloudIAMUserWildcardPolicy
+		if argv[2] == "put-role-policy" {
+			kind, nameFlag, operation = "role", "--role-name", CloudIAMRoleWildcardPolicy
+		}
+		if argv[3] != nameFlag || !exactAWSIAMPrincipalName(argv[4]) ||
+			argv[5] != "--policy-name" || !exactAWSIAMPolicyName(argv[6]) ||
+			argv[7] != "--policy-document" || !exactAWSWildcardAdminPolicy(argv[8]) {
+			return "", "", "", false
+		}
+		return operation, kind, argv[4], true
 	default:
 		return "", "", "", false
 	}
+}
+
+func exactAWSIAMPolicyName(name string) bool {
+	return len(name) <= 128 && awsIAMPrincipalNamePattern.MatchString(name) &&
+		!strings.ContainsAny(name, "$`*?[]{}<>'\"")
+}
+
+func exactAWSWildcardAdminPolicy(value string) bool {
+	if value == "" || len(value) > maxCommandBytes || strings.ContainsAny(value, "$`") ||
+		validateJSONWithStringLimit([]byte(value), maxCommandBytes) != "" {
+		return false
+	}
+	var policy struct {
+		Version   string `json:"Version"`
+		Statement []struct {
+			Effect   string `json:"Effect"`
+			Action   string `json:"Action"`
+			Resource string `json:"Resource"`
+		} `json:"Statement"`
+	}
+	decoder := json.NewDecoder(strings.NewReader(value))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&policy); err != nil || policy.Version != "2012-10-17" ||
+		len(policy.Statement) != 1 {
+		return false
+	}
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return false
+	}
+	statement := policy.Statement[0]
+	return statement.Effect == "Allow" && statement.Action == "*" &&
+		statement.Resource == "*"
 }
 
 func exactAWSIAMPrincipalName(name string) bool {

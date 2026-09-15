@@ -142,12 +142,16 @@ def atbench_row(identity: int, safe: bool) -> dict[str, object]:
                         {
                             "name": "database_query",
                             "arguments": {"query_id": identity, "read_only": True},
-                            "status": "succeeded",
                         }
                     ),
                     "thought": "PRIVATE_REASONING_MARKER",
                 },
-                {"role": "toolResult", "content": "PRIVATE_OBSERVATION_MARKER"},
+                {
+                    "role": "environment",
+                    "content": json.dumps(
+                        {"status": "success", "result": "PRIVATE_OBSERVATION_MARKER"}
+                    ),
+                },
                 {
                     "role": "assistant",
                     "tool_calls": [
@@ -204,8 +208,8 @@ class ATBenchNormalizerTests(unittest.TestCase):
 
     def test_extracts_calls_and_excludes_results_and_observations(self) -> None:
         rows, manifest, _ = self.build()
-        self.assertEqual(Counter(row["surface"] for row in rows), {"action": 60, "stateful": 30})
-        self.assertEqual(len(rows), 90)
+        self.assertEqual(Counter(row["surface"] for row in rows), {"action": 30, "stateful": 30})
+        self.assertEqual(len(rows), 60)
         for row in rows:
             payload = row["payload"]
             self.assertRegex(row["strata"]["trajectory_id"], r"^[0-9a-f]{24}$")
@@ -246,20 +250,10 @@ class ATBenchNormalizerTests(unittest.TestCase):
         self.assertEqual([call.sequence_index for call in calls], [0, 1, 2])
         self.assertEqual([call.call_index for call in calls], [0, 1, 0])
 
-    def test_unsafe_atomic_calls_are_unknown_and_proof_pending(self) -> None:
+    def test_unsafe_labels_exist_only_at_complete_trajectory_boundary(self) -> None:
         rows, _, _ = self.build()
-        unsafe_atomic = [
-            row
-            for row in rows
-            if row["surface"] == "action" and "source_trajectory_unsafe" in row["truth"]["categories"]
-        ]
-        self.assertTrue(unsafe_atomic)
-        for row in unsafe_atomic:
-            truth = row["truth"]
-            self.assertEqual(truth["source_truth"], "unknown")
-            self.assertEqual(truth["deterministic_truth"], "contextual_or_dual_use")
-            self.assertEqual(truth["applicability"], "out_of_scope")
-            self.assertIn("proof_pending", truth["categories"])
+        unsafe_atomic = [row for row in rows if row["surface"] == "action" and not row["strata"]["hard_negative"]]
+        self.assertEqual(unsafe_atomic, [])
         unsafe_sequences = [
             row
             for row in rows
@@ -267,6 +261,15 @@ class ATBenchNormalizerTests(unittest.TestCase):
         ]
         self.assertTrue(unsafe_sequences)
         self.assertTrue(all(row["truth"]["source_truth"] == "malicious" for row in unsafe_sequences))
+        self.assertTrue(
+            all(row["truth"]["applicability"] == "out_of_scope" for row in unsafe_sequences)
+        )
+        self.assertTrue(
+            all(row["truth"]["expected_disposition"] == "detect_only" for row in unsafe_sequences)
+        )
+        self.assertTrue(
+            all("complete_trajectory" in row["truth"]["categories"] for row in unsafe_sequences)
+        )
 
     def test_normalization_is_pre_partitioned_and_has_no_split_claims(self) -> None:
         first = self.build()
@@ -305,26 +308,50 @@ class ATBenchNormalizerTests(unittest.TestCase):
             taxonomy=(),
             calls=(adapter.ProjectedCall("tool", {}, 0, 0), adapter.ProjectedCall("tool", {}, 1, 0)),
         )
-        unsafe = adapter.Trajectory(**{**safe.__dict__, "source_safe": False})
-        for trajectory in (safe, unsafe):
-            stateful = [
-                row
-                for row in adapter.make_cases(trajectory, revision="c" * 40)
-                if row["surface"] == "stateful"
-            ]
-            self.assertEqual(
-                [event["outcome"] for event in stateful[0]["payload"]["events"]],
-                ["unknown", "unknown"],
-            )
+        stateful = [
+            row
+            for row in adapter.make_cases(safe, revision="c" * 40)
+            if row["surface"] == "stateful"
+        ]
+        self.assertEqual(
+            [event["outcome"] for event in stateful[0]["payload"]["events"]],
+            ["unknown", "unknown"],
+        )
 
     def test_stateful_windows_retain_order_and_eight_event_boundary(self) -> None:
         calls = tuple(
             adapter.ProjectedCall("tool", {"ordinal": index}, index, 0) for index in range(70)
         )
         windows = list(adapter.stateful_windows(calls))
-        self.assertEqual([start for start, _ in windows], [0, 57])
-        self.assertEqual([len(window) for _, window in windows], [64, 13])
+        self.assertEqual([start for start, _ in windows], list(range(63)))
+        self.assertEqual({len(window) for _, window in windows}, {8})
         self.assertEqual(windows[0][1][-7:], windows[1][1][:7])
+
+    def test_failed_safe_action_is_not_admitted_as_benign(self) -> None:
+        row = atbench_row(999, True)
+        row["contents"][0][2]["content"] = json.dumps({"status": "error", "result": "x"})
+        calls = adapter.content_calls(
+            row["contents"], max_argument_bytes=adapter.DEFAULT_MAX_ARGUMENT_BYTES
+        )
+        self.assertEqual(calls[0].outcome, "failed")
+        trajectory = adapter.Trajectory(
+            spec=adapter.DATASET_SPECS["atbench"],
+            config="ATBench",
+            identity_digest="a" * 64,
+            group_digest="b" * 64,
+            source_safe=True,
+            taxonomy=(),
+            calls=calls,
+        )
+        generated = adapter.make_cases(trajectory, revision="c" * 40)
+        self.assertNotIn(0, [r["strata"]["sequence_index"] for r in generated])
+
+    def test_malformed_action_json_is_rejected(self) -> None:
+        with self.assertRaisesRegex(ValueError, "malformed JSON"):
+            adapter.content_calls(
+                [{"role": "agent", "action": '{"name":"shell",'}],
+                max_argument_bytes=adapter.DEFAULT_MAX_ARGUMENT_BYTES,
+            )
 
     def test_schema_and_argument_bounds_are_enforced(self) -> None:
         rows, _, _ = self.build()

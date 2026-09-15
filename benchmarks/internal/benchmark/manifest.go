@@ -27,6 +27,37 @@ type NormalizationManifest struct {
 	AdapterStatistics      map[string]map[string]int `json:"adapter_statistics"`
 	OutputSHA256           string                    `json:"output_sha256"`
 	Partition              *PartitionMetadata        `json:"partition,omitempty"`
+	Source                 *NormalizationSource      `json:"source,omitempty"`
+	Inputs                 []NormalizationInput      `json:"inputs,omitempty"`
+	TrajectorySource       json.RawMessage           `json:"trajectory_source,omitempty"`
+}
+
+// NormalizationInput binds a merged corpus to the normalized corpora used to
+// construct it without exposing local paths or source payload values.
+type NormalizationInput struct {
+	Bytes  int64  `json:"bytes"`
+	SHA256 string `json:"sha256"`
+}
+
+// NormalizationSource binds a single-source adapter output to the exact local
+// public artifact that was normalized. It contains metadata only; source rows
+// and extracted values never enter the result bundle.
+type NormalizationSource struct {
+	Dataset        string   `json:"dataset"`
+	Revision       string   `json:"revision"`
+	License        string   `json:"license"`
+	Redistribution string   `json:"redistribution"`
+	Path           string   `json:"path"`
+	Paths          []string `json:"paths,omitempty"`
+	Bytes          int64    `json:"bytes"`
+	Files          int      `json:"files,omitempty"`
+	Rows           int      `json:"rows,omitempty"`
+	SHA256         string   `json:"sha256"`
+	Language       string   `json:"language,omitempty"`
+	// TrajectoryVerification records a closed adapter claim, never source text.
+	TrajectoryVerification string `json:"trajectory_verification,omitempty"`
+	SourceURL              string `json:"source_url,omitempty"`
+	URL                    string `json:"url,omitempty"`
 }
 
 type PartitionMetadata struct {
@@ -150,14 +181,9 @@ func buildCorpusManifest(
 	if len(normalizationData) == 0 {
 		return manifest, nil
 	}
-	var normalized NormalizationManifest
-	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(normalizationData), 4<<20))
-	decoder.DisallowUnknownFields()
-	if err := decoder.Decode(&normalized); err != nil {
-		return CorpusManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
-	}
-	if err := requireJSONEOF(decoder); err != nil {
-		return CorpusManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	normalized, err := decodeNormalizationManifest(normalizationData)
+	if err != nil {
+		return CorpusManifest{}, err
 	}
 	if normalized.SchemaVersion != SchemaVersion || normalized.OutputSHA256 != corpusSHA256 || normalized.Cases != len(sourceCases) {
 		return CorpusManifest{}, fmt.Errorf("normalization manifest identity differs from corpus")
@@ -172,6 +198,9 @@ func buildCorpusManifest(
 	}
 	if !equalCounts(manifest.DatasetCounts, normalized.Counts) {
 		return CorpusManifest{}, fmt.Errorf("normalization manifest counts differ from corpus")
+	}
+	if err := validateNormalizationManifestMetadata(normalized); err != nil {
+		return CorpusManifest{}, err
 	}
 	if normalized.Partition != nil {
 		partition := normalized.Partition
@@ -202,6 +231,39 @@ func buildCorpusManifest(
 	}
 	manifest.Normalization = &normalized
 	return manifest, nil
+}
+
+func decodeNormalizationManifest(data []byte) (NormalizationManifest, error) {
+	var normalized NormalizationManifest
+	decoder := json.NewDecoder(io.LimitReader(bytes.NewReader(data), 4<<20))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&normalized); err != nil {
+		return NormalizationManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	}
+	if err := requireJSONEOF(decoder); err != nil {
+		return NormalizationManifest{}, fmt.Errorf("decode normalization manifest: %w", err)
+	}
+	return normalized, nil
+}
+
+func validateNormalizationManifestMetadata(normalized NormalizationManifest) error {
+	if normalized.Source != nil {
+		source := normalized.Source
+		if source.Dataset == "" || normalized.Counts[source.Dataset] == 0 ||
+			source.Revision == "" || source.License == "" || source.Redistribution == "" ||
+			(source.Path == "" && len(source.Paths) == 0) || source.Bytes < 0 ||
+			source.Rows < 0 || len(source.Language) > 32 ||
+			len(source.TrajectoryVerification) > 160 ||
+			!validSHA256(source.SHA256) {
+			return fmt.Errorf("normalization source metadata is invalid")
+		}
+	}
+	for _, input := range normalized.Inputs {
+		if input.Bytes < 0 || !validSHA256(input.SHA256) {
+			return fmt.Errorf("normalization input metadata is invalid")
+		}
+	}
+	return nil
 }
 
 func validSHA256(value string) bool {

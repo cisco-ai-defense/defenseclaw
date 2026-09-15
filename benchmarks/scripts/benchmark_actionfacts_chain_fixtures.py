@@ -140,6 +140,7 @@ def benchmark_case(
         "truth": {
             "source_truth": "malicious" if positive else "benign",
             "deterministic_truth": "deterministic_malicious" if positive else "benign",
+            "stateful_lens": "bounded_completed",
             "label_confidence": "high",
             "label_source": "fixture:bounded-proof-v1",
             "applicability": "in_scope",

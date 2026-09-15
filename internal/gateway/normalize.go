@@ -507,6 +507,18 @@ func canonicalDottedRuleID(ruleID string) (string, bool) {
 		return "chain.secret_read_then_egress", true
 	case "chain.workload_identity_then_lateral_execution":
 		return "chain.workload_identity_then_lateral_execution", true
+	case "chain.compromised_credential_then_successful_authentication":
+		return "chain.compromised_credential_then_successful_authentication", true
+	case "chain.adcs_certificate_request_then_pfx_authentication":
+		return "chain.adcs_certificate_request_then_pfx_authentication", true
+	case "chain.s4u_ticket_then_kerberos_secretsdump_same_cache":
+		return "chain.s4u_ticket_then_kerberos_secretsdump_same_cache", true
+	case "chain.sensitive_sql_read_then_unbounded_delete_same_table":
+		return "chain.sensitive_sql_read_then_unbounded_delete_same_table", true
+	case "chain.file_read_then_email_same_artifact":
+		return "chain.file_read_then_email_same_artifact", true
+	case "exfiltration.recursive_model_artifact_external_multipart":
+		return "exfiltration.recursive_model_artifact_external_multipart", true
 	default:
 		return "", false
 	}

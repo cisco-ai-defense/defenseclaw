@@ -21,6 +21,7 @@ import json
 import re
 import sys
 from collections.abc import Iterable, Iterator
+from dataclasses import dataclass
 from pathlib import Path
 
 SCHEMA_VERSION = "1"
@@ -55,6 +56,16 @@ CMD_COMMAND = re.compile(
     r"takeown(?:\.exe)?\b|icacls(?:\.exe)?\b)"
 )
 ADAPTER_STATISTICS: dict[str, dict[str, int]] = {}
+
+
+@dataclass(frozen=True)
+class AtomicCommand:
+    line_number: int
+    command: str
+    technique: str
+    display_name: str
+    test_name: str
+    test_guid: str
 
 
 def parse_args() -> argparse.Namespace:
@@ -154,6 +165,9 @@ def make_case(
     hard_negative: bool = False,
     label_priority: int = 50,
     split_group: str = "",
+    deterministic_truth: str = "",
+    label_confidence: str = "",
+    label_source: str = "",
 ) -> dict[str, object]:
     dataset_id = str(locked["id"])
     group_material = split_group or original_id
@@ -162,6 +176,18 @@ def make_case(
         inferred_dialect = dialect
     cwd = r"C:\repo" if inferred_platform == "windows" else "/repo"
     active_home = r"C:\Users\alice" if inferred_platform == "windows" else "/home/alice"
+    truth: dict[str, object] = {
+        "source_truth": source_truth,
+        "applicability": "in_scope",
+        "expected_disposition": disposition,
+        "categories": categories,
+    }
+    if deterministic_truth:
+        truth["deterministic_truth"] = deterministic_truth
+    if label_confidence:
+        truth["label_confidence"] = label_confidence
+    if label_source:
+        truth["label_source"] = label_source
     return {
         "_label_priority": label_priority,
         "schema_version": SCHEMA_VERSION,
@@ -182,12 +208,7 @@ def make_case(
             "cwd": cwd,
             "active_home": active_home,
         },
-        "truth": {
-            "source_truth": source_truth,
-            "applicability": "in_scope",
-            "expected_disposition": disposition,
-            "categories": categories,
-        },
+        "truth": truth,
         "strata": {
             "platform": inferred_platform,
             "dialect": inferred_dialect,
@@ -370,11 +391,38 @@ def adapt_tldr(root: Path, locked: dict[str, object], split: str) -> Iterator[di
                     )
 
 
-def atomic_commands(path: Path) -> Iterator[tuple[int, str]]:
+def yaml_scalar(value: str) -> str:
+    value = value.strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        try:
+            parsed = ast.literal_eval(value)
+        except (SyntaxError, ValueError):
+            return value[1:-1]
+        return parsed if isinstance(parsed, str) else value[1:-1]
+    return value
+
+
+def atomic_commands(path: Path) -> Iterator[AtomicCommand]:
     """Extract command scalar values without loading or executing YAML tags."""
     lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    technique = ""
+    display_name = ""
+    test_name = ""
+    test_guid = ""
     index = 0
     while index < len(lines):
+        line = lines[index]
+        if line.startswith("attack_technique:"):
+            technique = yaml_scalar(line.split(":", 1)[1])
+        elif line.startswith("display_name:"):
+            display_name = yaml_scalar(line.split(":", 1)[1])
+        test_match = re.match(r"^- name:\s*(.*)$", line)
+        if test_match:
+            test_name = yaml_scalar(test_match.group(1))
+            test_guid = ""
+        guid_match = re.match(r"^  auto_generated_guid:\s*(.*)$", line)
+        if guid_match:
+            test_guid = yaml_scalar(guid_match.group(1))
         match = ATOMIC_COMMAND.match(lines[index])
         if not match:
             index += 1
@@ -410,25 +458,48 @@ def atomic_commands(path: Path) -> Iterator[tuple[int, str]]:
             index += 1
         command = normalize_command(command)
         if command:
-            yield start_line, command
+            yield AtomicCommand(
+                line_number=start_line,
+                command=command,
+                technique=technique,
+                display_name=display_name,
+                test_name=test_name,
+                test_guid=test_guid,
+            )
 
 
 def adapt_atomic(root: Path, locked: dict[str, object], split: str) -> Iterator[dict[str, object]]:
     atomics = root / "atomics"
     if not atomics.is_dir():
         raise ValueError("atomic-red-team: atomics directory is missing")
-    for path in sorted(atomics.glob("T*/T*.yaml")):
+    paths = sorted(atomics.glob("T*/T*.yaml"))
+    statistics = ADAPTER_STATISTICS.setdefault("atomic-red-team", {})
+    statistics["technique_files"] = len(paths)
+    for path in paths:
         relative = path.relative_to(root).as_posix()
-        technique = path.stem
-        for line_number, command in atomic_commands(path):
+        for atomic in atomic_commands(path):
+            technique = atomic.technique or path.stem
+            source_identity = atomic.test_guid or atomic.test_name or f"line-{atomic.line_number}"
+            categories = [
+                "attack-emulation",
+                "atomic-red-team",
+                "proof_pending",
+                f"attack-technique:{technique}",
+            ]
+            if atomic.test_guid:
+                categories.append(f"atomic-test-guid:{atomic.test_guid}")
+            statistics["command_cases"] = statistics.get("command_cases", 0) + 1
             yield make_case(
                 locked,
-                f"{relative}:{line_number}",
-                command,
+                f"{relative}#{source_identity}:{atomic.line_number}",
+                atomic.command,
                 split,
                 "malicious",
                 "detect_only",
-                ["attack-emulation", "atomic-red-team", technique],
+                categories,
+                deterministic_truth="contextual_or_dual_use",
+                label_confidence="high",
+                label_source="source:atomic_test_definition",
                 split_group=technique,
             )
 
@@ -445,33 +516,60 @@ def jsonl_rows(path: Path) -> Iterator[tuple[int, dict[str, object]]]:
 
 
 def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Iterator[dict[str, object]]:
-    # Prefer the independently annotated replay subset. The source's Vi harm
-    # index is mapped conservatively: only 3-4 is block truth; 0-2 remains a
-    # malicious detection-positive but blocking-negative example.
+    # The source identifies post-authentication honeypot attacker commands and
+    # supplies Vi harm labels, but neither establishes a DefenseClaw runtime
+    # success proof nor authorizes blocking. Preserve that provenance as
+    # malicious/contextual and keep every case detection-only.
     curated = root / "request_response" / "curated.jsonl"
+    statistics = ADAPTER_STATISTICS.setdefault("shell-attack-evolution", {})
     for line_number, row in jsonl_rows(curated):
+        statistics["curated_source_rows"] = statistics.get("curated_source_rows", 0) + 1
         command = normalize_command(str(row.get("command", "")))
         if not command:
+            statistics["empty_commands_excluded"] = statistics.get("empty_commands_excluded", 0) + 1
             continue
         severity = row.get("severity_vi")
-        disposition = "block" if isinstance(severity, int) and severity >= 3 else "detect_only"
-        period = str(row.get("period", "unknown"))
-        original_id = f"request_response/curated.jsonl:{line_number}"
+        if severity is not None and (not isinstance(severity, int) or not 0 <= severity <= 4):
+            statistics["curated_invalid_severity"] = statistics.get("curated_invalid_severity", 0) + 1
+            continue
         session_id = row.get("session_id")
         turn_index = row.get("turn_index")
-        if isinstance(session_id, str) and isinstance(turn_index, int):
-            original_id = f"curated:{session_id}:{turn_index}"
-        group_material = (
-            f"session:{session_id}" if isinstance(session_id, str) and session_id else command_family(command)
-        )
+        if not isinstance(session_id, str) or not isinstance(turn_index, int) or turn_index < 0:
+            statistics["curated_invalid_identity"] = statistics.get("curated_invalid_identity", 0) + 1
+            continue
+        if row.get("response_source") != "curated_ubuntu":
+            statistics["curated_non_english_excluded"] = statistics.get("curated_non_english_excluded", 0) + 1
+            continue
+        period = str(row.get("period", "unknown"))
+        original_id = f"curated:{session_id}:{turn_index}"
+        group_material = f"session:{session_id}"
+        statistics["curated_rows"] = statistics.get("curated_rows", 0) + 1
+        severity_key = f"curated_severity_vi_{severity if isinstance(severity, int) else 'missing'}"
+        statistics[severity_key] = statistics.get(severity_key, 0) + 1
+        statistics["curated_real_response_rows"] = statistics.get("curated_real_response_rows", 0) + 1
+        if isinstance(row.get("system_change"), str) and row["system_change"].strip():
+            statistics["curated_system_change_present"] = statistics.get("curated_system_change_present", 0) + 1
+        else:
+            statistics["curated_system_change_absent"] = statistics.get("curated_system_change_absent", 0) + 1
         yield make_case(
             locked,
             original_id,
             command,
             split,
             "malicious",
-            disposition,
-            ["honeypot-attack", "shell-attack", f"harm-vi-{severity}", f"period-{period}"],
+            "detect_only",
+            [
+                "honeypot-attack",
+                "provenance.silver",
+                "shell-attack",
+                "real-command-response",
+                "proof_pending",
+                f"harm-vi-{severity if severity is not None else 'missing'}",
+                f"period-{period}",
+            ],
+            deterministic_truth="contextual_or_dual_use",
+            label_confidence="high",
+            label_source="source:curated_honeypot_attack_and_vi",
             label_priority=100,
             split_group=group_material,
         )
@@ -479,11 +577,23 @@ def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Ite
     for path in sorted((root / "commands").glob("*.jsonl")):
         relative = path.relative_to(root).as_posix()
         for line_number, row in jsonl_rows(path):
+            statistics["command_source_rows"] = statistics.get("command_source_rows", 0) + 1
             command = normalize_command(str(row.get("command", "")))
             if not command:
+                statistics["empty_commands_excluded"] = (
+                    statistics.get("empty_commands_excluded", 0) + 1
+                )
                 continue
             period = str(row.get("period", path.stem))
+            frequency = row.get("frequency")
+            if not isinstance(frequency, int) or frequency < 1:
+                statistics["command_invalid_frequency"] = statistics.get("command_invalid_frequency", 0) + 1
+                continue
             command_pattern = row.get("command_pattern")
+            statistics["command_catalog_rows"] = statistics.get("command_catalog_rows", 0) + 1
+            statistics[f"command_catalog_period_{period}"] = statistics.get(
+                f"command_catalog_period_{period}", 0
+            ) + 1
             group_material = (
                 f"pattern:{command_pattern}"
                 if isinstance(command_pattern, str) and command_pattern.strip()
@@ -496,7 +606,20 @@ def adapt_shell_attack(root: Path, locked: dict[str, object], split: str) -> Ite
                 split,
                 "malicious",
                 "detect_only",
-                ["honeypot-attack", "shell-attack", f"period-{period}"],
+                [
+                    "honeypot-attack",
+                    "provenance.silver",
+                    "shell-attack",
+                    "real-attacker-command-catalog",
+                    "proof_pending",
+                    f"period-{period}",
+                    "complex-command" if row.get("is_complex") is True else "simple-command",
+                    "command-pattern-present" if isinstance(command_pattern, str) and command_pattern.strip()
+                    else "command-pattern-missing",
+                ],
+                deterministic_truth="contextual_or_dual_use",
+                label_confidence="medium",
+                label_source="source:honeypot_command_catalog",
                 label_priority=10,
                 split_group=group_material,
             )
@@ -739,7 +862,14 @@ def write_outputs(
         if not isinstance(payload, dict):
             raise ValueError(f"{case_id}: payload is not an object")
         if surface == "action":
-            identity = {"surface": surface, "command": payload.get("command", "")}
+            command = payload.get("command")
+            if isinstance(command, str) and command:
+                identity = {"surface": surface, "command": command}
+            else:
+                # Structured tool calls carry their executable identity in
+                # tool_name/args rather than command. Treating every missing
+                # command as the empty string collapses unrelated actions.
+                identity = {"surface": surface, "payload": payload}
         elif surface == "text":
             identity = {
                 "surface": surface,

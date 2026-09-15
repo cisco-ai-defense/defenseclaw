@@ -1,6 +1,17 @@
 version: 1
 category: kubernetes-production-protection
 rules:
+  - id: credential.protected_kubernetes_named_secret_content_read
+    expression: 'false'
+    # Code-owned ActionFacts prove a direct, exact named Secret content read;
+    # assigning this pack is the operator's protected-cluster authorization.
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Read a named Secret in a protected Kubernetes cluster"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, kubernetes, secret, protected-cluster, exact-actionfacts]
+
   - id: impact.kubernetes_namespace_delete
     expression: >-
       f.commands.exists(c, c.argv_complete &&

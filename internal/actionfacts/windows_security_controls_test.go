@@ -209,3 +209,114 @@ func TestExactWindowsDefenderMultiControlDisable(t *testing.T) {
 		})
 	}
 }
+
+func TestExactNetExecWindowsDefenderMultiControlDisable(t *testing.T) {
+	body := `powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableIOAVProtection $true; Set-MpPreference -DisableScriptScanning $true"`
+	for _, program := range []string{"nxc", "netexec", "crackmapexec"} {
+		t.Run(program, func(t *testing.T) {
+			command := program + ` smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x '` + body + `'`
+			facts := Analyze(Input{
+				Tool: "shell", Command: command, CWD: "/repo", DialectHint: DialectPOSIX,
+			})
+			if innerBody, ok := exactNetExecPowerShellCommand(facts.Commands[0]); !ok {
+				t.Fatalf("outer proof=false command=%#v", facts.Commands[0])
+			} else {
+				inner := Analyze(Input{Tool: "powershell", Command: innerBody, DialectHint: DialectPowerShell})
+				if !exactDirectWindowsDefenderMultiControlDisable(inner) {
+					t.Fatalf("inner proof=false body=%q facts=%#v", innerBody, inner)
+				}
+			}
+			if !ExactWindowsDefenderMultiControlDisable(facts) {
+				t.Fatalf("proof=false facts=%#v", facts)
+			}
+			if ExactWindowsDefenderMultiControlDisable(facts.EnforcementProjection()) != true {
+				t.Fatalf("enforcement projection lost proof: %#v", facts.EnforcementProjection())
+			}
+		})
+	}
+}
+
+func TestExactNetExecWindowsDefenderMultiControlDisableAcceptsStaticErrorAction(t *testing.T) {
+	command := `nxc smb 192.0.2.10 -u Administrator -H REDACTED_SECRET_0001 -d example.test --exec-method smbexec -x 'powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true -ErrorAction SilentlyContinue; Set-MpPreference -DisableIOAVProtection $true -ErrorAction SilentlyContinue; Set-MpPreference -DisableScriptScanning $true -ErrorAction SilentlyContinue"'`
+	facts := Analyze(Input{Tool: "shell", Command: command, DialectHint: DialectPOSIX})
+	if !ExactWindowsDefenderMultiControlDisable(facts) {
+		t.Fatalf("static result-backed NetExec arguments did not produce proof: %+v", facts)
+	}
+}
+
+func TestExactNetExecWindowsDefenderMultiControlDisableRejectsOtherCommonParameters(t *testing.T) {
+	for _, suffix := range []string{
+		"-ErrorAction Continue",
+		"-ErrorAction $preference",
+		"-WarningAction SilentlyContinue",
+		"-ErrorAction SilentlyContinue -Verbose",
+	} {
+		body := "Set-MpPreference -DisableRealtimeMonitoring $true " + suffix +
+			"; Set-MpPreference -DisableIOAVProtection $true " + suffix +
+			"; Set-MpPreference -DisableScriptScanning $true " + suffix
+		command := `nxc smb 192.0.2.10 -u Administrator -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "` + body + `"'`
+		if ExactWindowsDefenderMultiControlDisable(Analyze(Input{
+			Tool: "shell", Command: command, DialectHint: DialectPOSIX,
+		})) {
+			t.Fatalf("unsupported common-parameter suffix accepted: %s", suffix)
+		}
+	}
+}
+
+func TestExactNetExecWindowsDefenderMultiControlDisableRejectsOpenGrammar(t *testing.T) {
+	threeControls := `Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableIOAVProtection $true; Set-MpPreference -DisableScriptScanning $true`
+	for _, test := range []struct {
+		name    string
+		command string
+	}{
+		{
+			name:    "only two controls",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableScriptScanning $true"'`,
+		},
+		{
+			name:    "duplicate controls",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $true; Set-MpPreference -DisableRealtimeMonitoring true; Set-MpPreference -DisableRealtimeMonitoring 1"'`,
+		},
+		{
+			name:    "dynamic inner value",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "Set-MpPreference -DisableRealtimeMonitoring $disable; Set-MpPreference -DisableIOAVProtection $disable; Set-MpPreference -DisableScriptScanning $disable"'`,
+		},
+		{
+			name:    "encoded PowerShell",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -EncodedCommand REDACTED_ENCODED_PAYLOAD'`,
+		},
+		{
+			name:    "shell wrapper",
+			command: `sh -c "nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command \"` + threeControls + `\"'"`,
+		},
+		{
+			name:    "interpolated outer body",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x "powershell -Command '` + threeControls + `'"`,
+		},
+		{
+			name:    "unresolved target",
+			command: `nxc smb $target -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "` + threeControls + `"'`,
+		},
+		{
+			name:    "unreviewed execution method",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method wmiexec -x 'powershell -Command "` + threeControls + `"'`,
+		},
+		{
+			name:    "extra inner command",
+			command: `nxc smb 192.0.2.10 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "` + threeControls + `; Get-Process"'`,
+		},
+		{
+			name:    "multiple targets",
+			command: `nxc smb 192.0.2.10 192.0.2.11 -u fixture-user -H REDACTED_SECRET_0001 --exec-method smbexec -x 'powershell -Command "` + threeControls + `"'`,
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			facts := Analyze(Input{
+				Tool: "shell", Command: test.command, CWD: "/repo", DialectHint: DialectPOSIX,
+			})
+			if ExactWindowsDefenderMultiControlDisable(facts) {
+				t.Fatalf("proof=true facts=%#v", facts)
+			}
+		})
+	}
+}

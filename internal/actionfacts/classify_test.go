@@ -105,6 +105,39 @@ func TestClassifyPOSIXSedInPlaceLiteralMutation(t *testing.T) {
 	}
 }
 
+func TestClassifyPOSIXSedNumericPrintAsRead(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{name: "single line", argv: []string{"sed", "-n", "12p", "/repo/AGENTS.md"}, want: true},
+		{name: "bounded range", argv: []string{"sed", "--quiet", "1,320p", "/repo/AGENTS.md"}, want: true},
+		{name: "multiple files", argv: []string{"sed", "--silent", "1,20p", "README.md", "docs.md"}, want: true},
+		{name: "general substitution", argv: []string{"sed", "-n", "s/a/b/p", "/repo/AGENTS.md"}},
+		{name: "execute extension", argv: []string{"sed", "-n", "1e id", "/repo/AGENTS.md"}},
+		{name: "write extension", argv: []string{"sed", "-n", "1w/tmp/out", "/repo/AGENTS.md"}},
+		{name: "option after script", argv: []string{"sed", "-n", "1p", "--sandbox", "/repo/AGENTS.md"}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			out := classifyTestArgv(test.argv)
+			if test.want {
+				if out.status != StatusComplete ||
+					!commandHasOperation(out.commands[0], OperationRead) {
+					t.Fatalf("output = %#v, want authoritative read", out)
+				}
+				for _, target := range test.argv[3:] {
+					if !outputHasPath(out, PathAccessRead, target) {
+						t.Fatalf("paths = %#v, want read target %q", out.paths, target)
+					}
+				}
+			} else if out.status == StatusComplete {
+				t.Fatalf("unsupported sed grammar became authoritative: %#v", out)
+			}
+		})
+	}
+}
+
 func TestDDInputIsReadNotDiskWrite(t *testing.T) {
 	out := newParseOutput(DialectArgv, 1)
 	out.appendCommand(commandFromArgv(out.nextCommandID(), []string{"dd", "if=/dev/sda", "of=/tmp/image"}))

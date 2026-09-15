@@ -256,16 +256,19 @@ func (g *groupAccumulator) record(benchmarkCase Case, prediction Prediction) {
 	}
 
 	if truth, scorable := detectionTruth(benchmarkCase); scorable {
-		observe(&g.detection, truth, prediction.Detected)
-		observe(&g.alert, truth, predictionIsAlerted(prediction))
+		observe(&g.detection, truth, detectionPrediction(benchmarkCase, prediction, truth))
+		alerted := prediction
+		alerted.Detected = predictionIsAlerted(prediction)
+		observe(&g.alert, truth, detectionPrediction(benchmarkCase, alerted, truth))
 	}
 	if benchmarkCase.Surface == "text" {
 		g.recordSpans(benchmarkCase.Truth.Spans, prediction.Spans)
 	}
 
-	blockTruth := benchmarkCase.Truth.ExpectedDisposition == DispositionBlock
 	blocked := prediction.Action == "block"
-	observe(&g.enforcement, blockTruth, blocked)
+	if blockTruth, scorable := enforcementTruth(benchmarkCase); scorable {
+		observe(&g.enforcement, blockTruth, blocked)
+	}
 	if benignTruth(benchmarkCase) {
 		g.benign++
 		if blocked {
@@ -273,9 +276,12 @@ func (g *groupAccumulator) record(benchmarkCase Case, prediction Prediction) {
 		}
 	}
 	if benchmarkCase.Truth.ExpectedDisposition == DispositionDetectOnly {
-		g.detectOnly++
-		if blocked {
-			g.detectBlock++
+		if benchmarkCase.Surface != "stateful" ||
+			benchmarkCase.Truth.StatefulLens != StatefulAtomicTerminal {
+			g.detectOnly++
+			if blocked {
+				g.detectBlock++
+			}
 		}
 	}
 }
@@ -402,6 +408,7 @@ func scoreGroups(benchmarkCase Case, prediction Prediction) []scoreGrouping {
 	}
 	groups := []scoreGrouping{
 		{dimension: "overall", value: "all"},
+		{dimension: "split", value: benchmarkCase.Split},
 		{dimension: "surface", value: benchmarkCase.Surface},
 		{dimension: "dataset", value: benchmarkCase.Source.Dataset},
 		{dimension: "source_truth", value: benchmarkCase.Truth.SourceTruth},
@@ -418,6 +425,9 @@ func scoreGroups(benchmarkCase Case, prediction Prediction) []scoreGrouping {
 	if benchmarkCase.Truth.EnforcementLens != "" {
 		groups = append(groups, scoreGrouping{dimension: "enforcement_lens", value: benchmarkCase.Truth.EnforcementLens})
 	}
+	if benchmarkCase.Truth.StatefulLens != "" {
+		groups = append(groups, scoreGrouping{dimension: "stateful_lens", value: benchmarkCase.Truth.StatefulLens})
+	}
 	for _, issueCode := range prediction.IssueCodes {
 		groups = append(groups, scoreGrouping{dimension: "parse_issue", value: issueCode})
 	}
@@ -426,6 +436,7 @@ func scoreGroups(benchmarkCase Case, prediction Prediction) []scoreGrouping {
 	}
 	for _, item := range []scoreGrouping{
 		{dimension: "platform", value: benchmarkCase.Strata.Platform},
+		{dimension: "provider", value: benchmarkCase.Strata.Provider},
 		{dimension: "dialect", value: firstNonEmpty(benchmarkCase.Strata.Dialect, benchmarkCase.Payload.Dialect)},
 		{dimension: "language", value: benchmarkCase.Strata.Language},
 		{dimension: "ecosystem", value: benchmarkCase.Strata.Ecosystem},

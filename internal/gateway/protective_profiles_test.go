@@ -8,6 +8,7 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -56,13 +57,18 @@ func TestProtectiveProfileExpressionsCompile(t *testing.T) {
 		t.Fatal(err)
 	}
 	for ruleID, expression := range map[string]string{
-		"impact.cloud_bulk_data_delete":      semanticCloudBulkDataDeleteExpression,
-		"impact.cloud_resource_delete":       semanticCloudResourceDeleteExpression,
-		"impact.sql_unbounded_delete":        semanticSQLUnboundedDeleteExpression,
-		"impact.sql_schema_destroy":          semanticSQLSchemaDestroyExpression,
-		"impact.kubernetes_namespace_delete": semanticKubernetesNamespaceDeleteExpression,
-		"impact.kubernetes_bulk_delete":      semanticKubernetesBulkDeleteExpression,
-		"impact.iac_full_destroy":            semanticIaCFullDestroyExpression,
+		"impact.cloud_bulk_data_delete":                 semanticCloudBulkDataDeleteExpression,
+		"impact.cloud_resource_delete":                  semanticCloudResourceDeleteExpression,
+		"impact.cloud_observed_resource_delete":         semanticCloudObservedResourceDeleteExpression,
+		"impact.sql_unbounded_delete":                   semanticSQLUnboundedDeleteExpression,
+		"impact.sql_schema_destroy":                     semanticSQLSchemaDestroyExpression,
+		"impact.kubernetes_namespace_delete":            semanticKubernetesNamespaceDeleteExpression,
+		"impact.kubernetes_bulk_delete":                 semanticKubernetesBulkDeleteExpression,
+		"impact.iac_full_destroy":                       semanticIaCFullDestroyExpression,
+		"impact.protected_access_control_change":        semanticAccessControlExpression,
+		"impact.protected_filesystem_format":            semanticFilesystemWipeExpression,
+		"impact.protected_device_wipe":                  semanticDeviceWipeExpression,
+		"impact.protected_kernel_control_bind_override": `f.commands.exists(c, c.argv_complete && c.program == 'mount' && '--bind' in c.argv)`,
 	} {
 		if _, code := compiler.Compile(expression); code != semantic.CompileOK {
 			t.Errorf("%s compile code = %q", ruleID, code)
@@ -126,17 +132,22 @@ func TestDatabaseDestructionProtectionProfileBoundaries(t *testing.T) {
 		{"mysql unbounded delete", "mysql --execute='DELETE FROM audit_log' app", "impact.sql_unbounded_delete", true},
 		{"mysql ssl option with value", "mysql --ssl-mode REQUIRED -e 'DELETE FROM audit_log' app", "impact.sql_unbounded_delete", true},
 		{"sql server drop database", `sqlcmd -Q "DROP DATABASE production"`, "impact.sql_schema_destroy", true},
-		{"warehouse truncate", "snowsql -q 'TRUNCATE TABLE production.events'", "impact.sql_schema_destroy", true},
-		{"warehouse output option with value", "snowsql -o output_format=csv -q 'TRUNCATE TABLE production.events'", "impact.sql_schema_destroy", true},
 		{"postgres drop schema", "psql --command='DROP SCHEMA production CASCADE'", "impact.sql_schema_destroy", true},
+		{"literal quoted stdin", "psql <<'SQL'\nTRUNCATE TABLE scratch_events;\nSQL", "impact.sql_schema_destroy", true},
 		{"bounded delete", "psql -c 'DELETE FROM customers WHERE id = 7;'", "impact.sql_unbounded_delete", false},
 		{"delete in string", `psql -c "SELECT 'DELETE FROM customers';"`, "impact.sql_unbounded_delete", false},
 		{"delete in comment", "mysql -e '-- DELETE FROM customers\\nSELECT 1'", "impact.sql_unbounded_delete", false},
 		{"explain without analyze", "psql -c 'EXPLAIN DELETE FROM customers;'", "impact.sql_unbounded_delete", false},
+		{"postgres explain analyze executes delete", "psql -c 'EXPLAIN ANALYZE DELETE FROM customers;'", "impact.sql_unbounded_delete", true},
+		{"rolled back postgres explain analyze abstains", "psql -c 'BEGIN; EXPLAIN ANALYZE DELETE FROM customers; ROLLBACK;'", "impact.sql_unbounded_delete", false},
+		{"mysql explain analyze remains unsupported", "mysql -e 'EXPLAIN ANALYZE DELETE FROM customers;'", "impact.sql_unbounded_delete", false},
+		{"postgres explain analyze truncate is invalid", "psql -c 'EXPLAIN ANALYZE TRUNCATE TABLE customers;'", "impact.sql_schema_destroy", false},
 		{"explicit rollback", "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK;'", "impact.sql_unbounded_delete", false},
 		{"explicit commit", "psql -c 'BEGIN; DELETE FROM customers; COMMIT;'", "impact.sql_unbounded_delete", true},
 		{"delete after rollback", "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log;'", "impact.sql_unbounded_delete", true},
 		{"incomplete transaction abstains", "psql -c 'BEGIN; DELETE FROM customers;'", "impact.sql_unbounded_delete", false},
+		{"nested transaction abstains", "psql -c 'BEGIN; BEGIN; DELETE FROM customers; ROLLBACK; COMMIT;'", "impact.sql_unbounded_delete", false},
+		{"bounded delete after rollback abstains", "psql -c 'BEGIN; DELETE FROM customers; ROLLBACK; DELETE FROM audit_log WHERE id = 7;'", "impact.sql_unbounded_delete", false},
 		{"ordinary drop table migration", "psql -c 'DROP TABLE obsolete_records;'", "impact.sql_schema_destroy", false},
 		{"case-sensitive unrelated psql option", "psql -C title", "impact.sql_unbounded_delete", false},
 		{"unsupported input file remains non-authoritative", "psql --file migration.sql -c 'DELETE FROM customers;'", "impact.sql_unbounded_delete", false},
@@ -160,6 +171,27 @@ func TestDatabaseDestructionProtectionProfileBoundaries(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("structured sql_query", func(t *testing.T) {
+		raw, err := json.Marshal(map[string]string{
+			"connection": "postgresql://db.invalid/production",
+			"database":   "production",
+			"query":      "DELETE FROM customers",
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		got := EvaluateDeterministicAction(
+			context.Background(),
+			actionfacts.Input{Tool: "sql_query", Args: raw},
+			"",
+			connector,
+			"default",
+		)
+		if !slices.Contains(got.RuleIDs, "impact.sql_unbounded_delete") || got.Action != "block" {
+			t.Fatalf("result=%+v, want typed structured SQL protection block", got)
+		}
+	})
 }
 
 func TestPrivacyHighAssuranceProfileBlocksSelectedPIIOnly(t *testing.T) {
@@ -279,6 +311,20 @@ func TestInfrastructureDestructionProtectionProfileBoundaries(t *testing.T) {
 			}
 			if test.want && got.Action != "block" {
 				t.Fatalf("action=%q findings=%+v, want block", got.Action, got.Findings)
+			}
+		})
+	}
+	for _, test := range []struct {
+		name, command, ruleID string
+	}{
+		{"protected filesystem format", "mkfs.ext4 /dev/sda", "impact.protected_filesystem_format"},
+		{"protected device wipe", "blkdiscard /dev/sdb", "impact.protected_device_wipe"},
+		{"protected access control weakening", "chmod 0777 /etc/sudoers", "impact.protected_access_control_change"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			got := EvaluateDeterministicAction(context.Background(), actionfacts.Input{Tool: "shell", Command: test.command}, test.command, connector, "default")
+			if !slices.Contains(got.RuleIDs, test.ruleID) || got.Action != "block" {
+				t.Fatalf("rules=%v action=%q findings=%+v, want %s block", got.RuleIDs, got.Action, got.Findings, test.ruleID)
 			}
 		})
 	}

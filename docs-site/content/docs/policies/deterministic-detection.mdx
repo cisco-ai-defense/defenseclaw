@@ -21,8 +21,8 @@ explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/benchmarks).
 
 <Callout type="info" title="Repository snapshot">
-The balanced/default enabled rule catalog contains 184 local rules across seven
-families. The repository also contains 18 fixed bounded chains, five
+The balanced/default enabled rule catalog contains 237 local rules across seven
+families. The repository also contains 26 fixed bounded chains, ten
 MCP-description YARA signatures, two post-event correlator patterns, five
 selectable high-assurance packs, and one staged SSH integrity policy contract.
 The YAML and Go files linked below remain authoritative if these counts change.
@@ -63,24 +63,24 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 188 | 184 | 81 | 61 | 21 |
-| Permissive | 188 | 180 | 81 | 61 | 21 |
-| Strict | 187 | 187 | 81 | 61 | 6 |
+| Balanced/default | 241 | 237 | 133 | 120 | 65 |
+| Permissive | 241 | 233 | 133 | 120 | 65 |
+| Strict | 253 | 253 | 146 | 138 | 66 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
-effect. In balanced and permissive, nine CEL declarations are explicit `false`
+effect. In balanced and permissive, ten CEL declarations are explicit `false`
 placeholders for rules that remain lexical-only in those profiles; strict
 enables tighter variants of those candidates.
 
-The 184 enabled balanced/default rules are generated from
+The 237 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 77 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
-| `sensitive-path` | 23 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
-| `secret` | 22 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
+| `command` | 126 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
+| `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
 | `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
 | `c2` | 18 | Known exfiltration endpoints, cloud metadata SSRF forms, DNS tunneling, and DNS exfiltration indicators |
 | `enterprise-data` | 13 | Structured payment, banking, contact, medical, birth-date, CSV, and JSON PII shapes |
@@ -147,7 +147,8 @@ and enum reference.
 
 ## CEL selectors
 
-Each bundled profile declares 81 CEL expressions. CEL is deliberately limited
+Balanced/default and permissive each declare 133 CEL expressions; strict
+declares 146. CEL is deliberately limited
 to Boolean logic, field access, fixed enum constants, membership, bounded
 `exists` comprehensions, and literal RE2 matching. It cannot perform arbitrary
 history scans, dynamic regex construction, reflection, network access, file
@@ -176,7 +177,7 @@ uses regex in three distinct ways:
 
 On an authenticated tool action, a raw or custom regex match is not trusted
 blocking proof. The finding remains detection-only unless a complete exact
-validator for that same rule accepts the action. Twenty-one balanced/default
+validator for that same rule accepts the action. Sixty-five balanced/default
 rules intentionally use `a^` so there is no lexical fallback at all.
 
 Pattern-writing guidance and counterexamples are in the
@@ -205,7 +206,7 @@ structured arguments.
 
 ## Bounded tool-call chains
 
-The fixed chain catalog contains 18 ordered behaviors. A chain examines only
+The fixed chain catalog contains 26 ordered behaviors. A chain examines only
 the current authenticated event plus at most eight predecessors from the same
 canonical connector/session, never more than 30 minutes. Required steps must
 be ordered, successful where specified, and joined by exact value-minimized
@@ -214,13 +215,13 @@ mutated sequences cannot complete an enforcement proof.
 
 | Chain | Deterministic join | Runtime posture |
 | --- | --- | --- |
-| Guardrails disabled → external egress | Same session, bounded order | Enforcement-capable proof |
-| Permission denied → runtime bypass | Same session, five-minute window | Enforcement-capable proof |
-| Privilege discovery → elevation | Same session, system/root semantics | Enforcement-capable proof |
-| Secret-manager read → external egress | Same session, bounded result | Enforcement-capable proof |
-| Secret read → external egress | Exact artifact identity and mutation barrier | Enforcement-capable proof |
-| Workload identity read → lateral execution | Same workload identity context | Enforcement-capable proof |
-| Download → decode → execute | Exact derived artifact identity and mutation barrier | Enforcement-capable proof |
+| Guardrails disabled → external egress | Same session, bounded order | Alert-only |
+| Permission denied → runtime bypass | Same session, five-minute window | Alert-only |
+| Privilege discovery → elevation | Same session, system/root semantics | Alert-only |
+| Secret-manager read → external egress | Same session, bounded result | Alert-only |
+| Secret read → external egress | Exact artifact identity and mutation barrier | Alert-only |
+| Workload identity read → lateral execution | Same workload identity context | Alert-only |
+| Download → decode → execute | Exact derived artifact identity and mutation barrier | Alert-only |
 | Download → execute | Exact artifact identity and mutation barrier | Alert-only |
 | Sensitive-egress artifact write → execute | Exact artifact identity and mutation barrier | Alert-only |
 | Firewall trust expansion → destination use | Exact canonical IP identity | Alert-only until protected-firewall/approved-destination policy exists |
@@ -232,6 +233,14 @@ mutated sequences cannot complete an enforcement proof.
 | Privileged CronJob patch → job creation | Exact CronJob identity and successful terminal step | Alert-only until protected-cluster policy exists |
 | Command-capable SQL UDF create → invoke | Exact engine, connection, and function; successful terminal step | Alert-only until protected-database policy exists |
 | Reverse-shell payload write → persistence install | Exact path, closed payload grammar, success, and mutation barrier | Enforcement-capable proof |
+| Endpoint-security mutation request → completed process | Exact process identity and result-backed completion | Alert-only |
+| Sensitive read value → literal external transmission | Value-minimized result identity and literal external sink | Alert-only |
+| Sensitive SQL value → cross-resource persistence | Exact value identity and distinct destination resource | Alert-only |
+| Compromised credential → successful authentication | Exact credential identity and result-backed authentication | Alert-only |
+| AD CS certificate request → PFX authentication | Exact certificate/PFX identity and successful authentication | Enforcement-capable proof |
+| S4U ticket → Kerberos secrets dump | Exact result-backed ticket-cache identity | Enforcement-capable proof |
+| Sensitive SQLite read → unbounded delete | Exact database/table identity and ordered destructive mutation | Enforcement-capable proof |
+| File read → email transfer | Exact artifact identity and addressed transfer | Alert-only |
 
 “Enforcement-capable” means the chain can set the enforcement-safe result bit;
 the connector must still be synchronous and block-capable, the same-rule proof
@@ -256,9 +265,25 @@ native deny; unsupported surfaces retain the finding and audit action without
 claiming prevention. See [Defaults](/docs/defaults) for the complete operator
 configuration.
 
+### Low-noise rollout
+
+Start with the balanced/default pack and measure **findings** separately from
+**blocked actions** on representative benign tool traffic. A finding is not
+necessarily an interruption: detection-only regex, unsupported or partial
+ActionFacts, and alert-only chains remain observable without gaining deny
+authority. Move to strict only when the additional alert and interruption risk
+fits the protected environment.
+
+When extending a pack, prefer the narrowest typed ActionFacts operation and a
+bounded CEL selector. Keep ambiguous or dynamic inputs detection-only, and add
+hard negatives for previews, help/version commands, loopback traffic, failed
+results, mismatched identities, and incomplete chains. Evaluate attack recall
+on attack-positive data and evaluate finding FPR plus benign block rate on
+separate benign or mixed data; an attack-only corpus cannot establish FPR.
+
 ## YARA MCP-description scanning
 
-The MCP scanner adds five YARA signatures from
+The MCP scanner adds ten YARA signatures from
 `policies/yara/mcp-tools/description_injection.yara`:
 
 | Signature | Requires |
@@ -268,6 +293,11 @@ The MCP scanner adds five YARA signatures from
 | Exact destructive user-data action | A narrow delete/move/remove operation and an owned data object |
 | Security-control downgrade | A request to disable MFA/2FA on the user's account |
 | Multi-attribute profile change | One request changing email, location, and birthday together |
+| Addressed edit-access grant | A concrete edit permission granted to an addressed principal |
+| Sensitive health-data change | A genetic-data mutation or addressed health-application share |
+| Traffic-control override | A bounded emergency-priority or individual signal override |
+| Physical-access change | A concrete smart-lock guest grant or owned-door unlock request |
+| Network-security policy change | A concrete allowlist or business-service denylist change |
 
 These signatures are high-precision description-injection signals, not proof of
 authorization or tool execution. They remain alert-only. The scanner loads the
@@ -284,9 +314,9 @@ fact and use closed CEL/ActionFacts proofs instead of resource-name guesses.
 | --- | --- | --- |
 | `privacy-high-assurance` | Selectable | 13 structured PII rules for SSNs, payment cards, IBANs, labeled email/phone, medical IDs, dates of birth, and structured CSV/JSON records |
 | `cloud-production-protection` | Selectable | Bulk cloud-data deletion, cloud resource/service deletion, and audit-control destruction for production-scoped connectors |
-| `database-destruction-protection` | Selectable | Literal SQL `DELETE` without `WHERE` and schema/table-wide destructive statements for a closed client set |
-| `infrastructure-destruction-protection` | Selectable | Unscoped Terraform, OpenTofu, and Pulumi destruction while allowing plans, previews, and targeted operations |
-| `kubernetes-production-protection` | Selectable | Named namespace deletion and closed `delete --all` workload forms for protected clusters |
+| `database-destruction-protection` | Selectable | Literal SQL `DELETE` without `WHERE`, schema/table-wide destructive statements, and same-table sensitive SQLite read/delete proof |
+| `infrastructure-destruction-protection` | Selectable | Device format/wipe, protected access-control weakening, kernel-control bind override, and unscoped Terraform/OpenTofu/Pulumi destruction |
+| `kubernetes-production-protection` | Selectable | Exact named Secret content reads, named namespace deletion, and closed `delete --all` workload forms for protected clusters |
 | `ssh-authorized-keys-protection` | Staged contract; not activatable yet | Exact active-home `authorized_keys` write, OpenSSH fingerprint derivation, and comparison with trusted approved fingerprints |
 
 The SSH contract intentionally abstains today because the public CEL activation
@@ -294,6 +324,14 @@ does not expose file content or a trusted fingerprint allowlist parameter. It
 must not be selected as `policy_dir` until that binding exists. Dynamic paths,
 malformed keys, missing policy, failed writes, and unresolved homes already
 fail closed to abstention in its ActionFacts helper.
+
+“Selectable” means the pack can be layered into a custom pack in Policy Creator
+or copied into an operator-owned policy directory. It does not add another
+value to `defenseclaw setup guardrail --rule-pack`, which accepts only
+`default`, `permissive`, and `strict`. Validate the exported pack, review the
+declared trust boundary, then set `guardrail.rule_pack_dir`; assigning a
+production-protection pack asserts that the selected connector context is
+actually protected. See [Authoring custom rule packs](/docs/policies#authoring-custom-rule-packs).
 
 ## Other deterministic detection lanes
 

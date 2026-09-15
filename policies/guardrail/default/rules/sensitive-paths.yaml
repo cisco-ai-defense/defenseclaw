@@ -44,6 +44,17 @@ rules:
     severity: HIGH
     confidence: 0.85
     tags: [credential, file-sensitive]
+  - id: PATH-PASSWORD-CRACKER-POTFILE
+    tool_call_only: true
+    expression: >-
+      f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations &&
+      f.paths.exists(p, p.command_id == c.id &&
+      p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
+    pattern: '(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+)/(?:\.john/john\.pot|\.local/share/hashcat/hashcat\.potfile|\.hashcat/hashcat\.potfile)(?:$|["''\s|;&])'
+    title: "Password-cracker recovered credential store read"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [credential, password-cracking, file-sensitive, detection-only]
   - id: PATH-KUBE
     expression: >-
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
@@ -128,13 +139,8 @@ rules:
     confidence: 0.90
     tags: [system-file, credential]
   - id: PATH-ETC-SUDOERS
-    expression: >-
-      f.commands.exists(c,
-      f.paths.exists(p, p.command_id == c.id &&
-      p.access in [defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_WRITE,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_APPEND,
-      defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_DELETE]))
-    pattern: '(?i)(?:\betc[\s/\\]+(?:slash[\s]+)?sudoers\b|\betc%2Fsudoers\b)'
+    expression: 'false'
+    pattern: 'a^'
     title: "/etc/sudoers access"
     severity: HIGH
     confidence: 0.85
@@ -155,11 +161,27 @@ rules:
       f.commands.exists(c, defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_READ in c.operations &&
       f.paths.exists(p, p.command_id == c.id &&
       p.access == defenseclaw.guardrail.semantic.v1.PathAccess.PATH_ACCESS_READ))
-    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
+    pattern: '(?i)(?:~|\$HOME|\$\{HOME\}|/root|/(?:home|Users)/[^/\\"'']+|[a-z]:[/\\]Users[/\\][^/\\"'']+)[/\\](?:\.config[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|gh[/\\]hosts\.yml|anthropic[/\\]keys\.json)|AppData[/\\]Roaming[/\\](?:gcloud[/\\](?:application_default_credentials\.json|(?:access_tokens|credentials)\.db)|GitHub CLI[/\\]hosts\.yml)|\.azure[/\\](?:azureProfile\.json|TokenCache\.dat|msal_token_cache[^/\\]*\.(?:json|bin)))(?:$|["''\s])'
     title: "Cloud credential material read"
     severity: CRITICAL
     confidence: 0.92
     tags: [credential, cloud, file-sensitive]
+  - id: secrets.cloud_metadata_credential_read
+    tool_call_only: true
+    expression: "f.tool == 'cloud_metadata'"
+    pattern: 'a^'
+    title: "Cloud instance-metadata credential token read"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, cloud, metadata, bounded-lineage]
+  - id: secrets.structured_credential_extract
+    tool_call_only: true
+    expression: "f.tool == 'credential_extract'"
+    pattern: 'a^'
+    title: "Structured credential-store extraction"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, extraction, structured-tool, bounded-lineage]
   - id: secrets.browser_session_store_read
     tool_call_only: true
     expression: >-

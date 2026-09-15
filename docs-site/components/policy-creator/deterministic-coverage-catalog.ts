@@ -27,8 +27,8 @@ export interface BoundedChain {
   readonly id: string;
   readonly title: string;
   readonly severity: 'HIGH' | 'CRITICAL';
-  readonly eventWindow: 8 | 9;
-  readonly timeWindowMinutes: 5 | 15 | 30;
+  readonly eventWindow: 5 | 8 | 9;
+  readonly timeWindowMinutes: 5 | 10 | 15 | 30;
   readonly mode: 'enforcement-capable' | 'alert-only';
 }
 
@@ -116,7 +116,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.permission_denied_then_runtime_bypass',
@@ -124,7 +124,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 5,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.privilege_discovery_then_elevation',
@@ -132,7 +132,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 15,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.secret_manager_read_then_egress',
@@ -140,7 +140,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.secret_read_then_egress',
@@ -148,7 +148,7 @@ export const BOUNDED_CHAINS = [
     severity: 'CRITICAL',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.workload_identity_then_lateral_execution',
@@ -156,7 +156,7 @@ export const BOUNDED_CHAINS = [
     severity: 'HIGH',
     eventWindow: 8,
     timeWindowMinutes: 15,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.download_decode_execute_same_artifact',
@@ -164,7 +164,7 @@ export const BOUNDED_CHAINS = [
     severity: 'CRITICAL',
     eventWindow: 8,
     timeWindowMinutes: 30,
-    mode: 'enforcement-capable',
+    mode: 'alert-only',
   },
   {
     id: 'chain.download_then_execute_same_artifact',
@@ -254,6 +254,70 @@ export const BOUNDED_CHAINS = [
     timeWindowMinutes: 30,
     mode: 'enforcement-capable',
   },
+  {
+    id: 'chain.endpoint_security_control_request_then_completed_same_process',
+    title: 'Endpoint security-control mutation observed for the same process',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.sensitive_read_value_then_external_literal_transmit',
+    title: 'Sensitive read value transmitted literally to an external destination',
+    severity: 'CRITICAL',
+    eventWindow: 5,
+    timeWindowMinutes: 10,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.sensitive_sql_value_then_cross_resource_literal_persistence',
+    title: 'Sensitive SQL value persisted literally to a distinct MCP resource',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.compromised_credential_then_successful_authentication',
+    title: 'Recorded compromised credential used for successful authentication',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
+  {
+    id: 'chain.adcs_certificate_request_then_pfx_authentication',
+    title: 'AD CS certificate impersonation followed by PFX authentication',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.s4u_ticket_then_kerberos_secretsdump_same_cache',
+    title: 'Result-backed S4U ticket used for Kerberos-only secretsdump',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.sensitive_sql_read_then_unbounded_delete_same_table',
+    title: 'Sensitive SQLite rowset read followed by unbounded delete of the same table',
+    severity: 'CRITICAL',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'enforcement-capable',
+  },
+  {
+    id: 'chain.file_read_then_email_same_artifact',
+    title: 'File read followed by email transfer of the same artifact',
+    severity: 'HIGH',
+    eventWindow: 9,
+    timeWindowMinutes: 30,
+    mode: 'alert-only',
+  },
 ] as const satisfies readonly BoundedChain[];
 
 export const YARA_RULES = [
@@ -282,6 +346,31 @@ export const YARA_RULES = [
     description: 'Replacement of multiple sensitive profile attributes',
     category: 'Profile tampering',
   },
+  {
+    id: 'defenseclaw_addressed_edit_access_grant',
+    description: 'Concrete edit-access grant to an addressed principal',
+    category: 'Access control change',
+  },
+  {
+    id: 'defenseclaw_sensitive_health_data_change',
+    description: 'Concrete genetic-data tamper or addressed health-application share',
+    category: 'Sensitive health data change',
+  },
+  {
+    id: 'defenseclaw_traffic_control_override',
+    description: 'Bounded emergency-priority or individual traffic-light override',
+    category: 'Traffic control override',
+  },
+  {
+    id: 'defenseclaw_physical_access_change',
+    description: 'Concrete smart-lock guest grant or owned-door unlock request',
+    category: 'Physical access change',
+  },
+  {
+    id: 'defenseclaw_network_security_policy_change',
+    description: 'Concrete allowlist or business-service denylist policy change',
+    category: 'Network security policy change',
+  },
 ] as const satisfies readonly YaraRule[];
 
 export const HIGH_ASSURANCE_PACKS = [
@@ -296,29 +385,29 @@ export const HIGH_ASSURANCE_PACKS = [
     id: 'cloud-production-protection',
     title: 'Cloud production protection',
     status: 'selectable',
-    ruleCount: 3,
+    ruleCount: 4,
     coverage: 'Closed destructive AWS, Google Cloud, Azure, and cloud-audit-control operations.',
   },
   {
     id: 'database-destruction-protection',
     title: 'Database destruction protection',
     status: 'selectable',
-    ruleCount: 2,
-    coverage: 'Unbounded deletes plus schema, database, and table-wide destructive SQL.',
+    ruleCount: 3,
+    coverage: 'Unbounded deletes, schema/table-wide destructive SQL, and same-table sensitive SQLite read/delete proof.',
   },
   {
     id: 'infrastructure-destruction-protection',
     title: 'Infrastructure destruction protection',
     status: 'selectable',
-    ruleCount: 1,
-    coverage: 'Full Terraform, OpenTofu, and Pulumi destruction.',
+    ruleCount: 5,
+    coverage: 'Device format/wipe, protected access-control weakening, kernel-control bind override, and full Terraform, OpenTofu, or Pulumi destruction.',
   },
   {
     id: 'kubernetes-production-protection',
     title: 'Kubernetes production protection',
     status: 'selectable',
-    ruleCount: 2,
-    coverage: 'Namespace deletion and closed bulk workload deletion through kubectl or oc.',
+    ruleCount: 3,
+    coverage: 'Exact named Secret content reads, namespace deletion, and closed bulk workload deletion through kubectl or oc.',
   },
   {
     id: 'ssh-authorized-keys-protection',

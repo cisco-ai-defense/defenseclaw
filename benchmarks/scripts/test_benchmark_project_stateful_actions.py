@@ -39,6 +39,7 @@ def stateful_row() -> dict[str, object]:
                 {
                     "tool_name": "sql_query",
                     "args": {"connection": "fixture", "query": "SELECT 1"},
+                    "tool_resource_identity": "benchmark://database/opaque-fixture",
                     "dialect": "none",
                     "outcome": "succeeded",
                     "offset_seconds": 1,
@@ -72,6 +73,10 @@ class StatefulActionProjectionTests(unittest.TestCase):
         self.assertEqual(rows[0]["payload"]["args"], {"command": "echo ok"})
         self.assertNotIn("outcome", rows[0]["payload"])
         self.assertEqual(rows[1]["strata"]["sequence_index"], 1)
+        self.assertEqual(
+            rows[1]["payload"]["tool_resource_identity"],
+            "benchmark://database/opaque-fixture",
+        )
         self.assertEqual(rows[0]["split"], "validation")
         self.assertIn("projected_atomic_event", rows[0]["truth"]["categories"])
 
@@ -80,6 +85,37 @@ class StatefulActionProjectionTests(unittest.TestCase):
         row["surface"] = "action"
         with self.assertRaisesRegex(ValueError, "expected stateful"):
             projector.project([json.dumps(row)])
+
+    def test_can_skip_non_stateful_rows_in_mixed_corpus(self) -> None:
+        action = stateful_row()
+        action["surface"] = "action"
+        rows, manifest = projector.project(
+            [json.dumps(action), json.dumps(stateful_row())],
+            skip_non_stateful=True,
+        )
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(manifest["source_cases"], 1)
+        self.assertEqual(manifest["skipped_non_stateful"], 1)
+
+    def test_can_emit_complete_stateful_corpus_for_proof_finalization(self) -> None:
+        rows, manifest = projector.project(
+            [json.dumps(stateful_row())], include_stateful=True
+        )
+        self.assertEqual(len(rows), 3)
+        parent = next(row for row in rows if row["surface"] == "stateful")
+        actions = [row for row in rows if row["surface"] == "action"]
+        self.assertTrue(actions)
+        self.assertTrue(
+            all(
+                row["strata"]["trajectory_id"] == parent["strata"]["trajectory_id"]
+                for row in actions
+            )
+        )
+        self.assertEqual(
+            manifest["projection"],
+            "stateful parent plus one action case per event; authenticated resource identity retained; "
+            "action outcomes and offsets excluded",
+        )
 
     def test_rows_validate_against_case_schema(self) -> None:
         rows, _ = projector.project([json.dumps(stateful_row())])

@@ -23,6 +23,11 @@ const SchemaVersion = "1"
 const maxPredictionFindingCount = 1_000_000
 
 const (
+	maxToolResultArgsBytes    = 1 << 20
+	maxToolResultContentBytes = 256 << 10
+)
+
+const (
 	TruthBenign    = "benign"
 	TruthMalicious = "malicious"
 	TruthSensitive = "sensitive"
@@ -38,6 +43,10 @@ const (
 	DeterministicMalicious  = "deterministic_malicious"
 	DeterministicContextual = "contextual_or_dual_use"
 	DeterministicBenign     = "benign"
+
+	StatefulAtomicTerminal  = "atomic_terminal"
+	StatefulBoundedIntent   = "bounded_intent"
+	StatefulBoundedComplete = "bounded_completed"
 )
 
 var validProfiles = map[string]bool{
@@ -45,6 +54,16 @@ var validProfiles = map[string]bool{
 	"permissive": true,
 	"strict":     true,
 }
+
+var validOptInPolicyPacks = map[string]bool{
+	"cloud-production-protection":           true,
+	"database-destruction-protection":       true,
+	"infrastructure-destruction-protection": true,
+	"kubernetes-production-protection":      true,
+	"privacy-high-assurance":                true,
+}
+
+const optInPolicyLabelPrefix = "opt-in/"
 
 // Case is one normalized benchmark input and its independent source,
 // applicability, and enforcement labels.
@@ -68,32 +87,86 @@ type Source struct {
 }
 
 type Payload struct {
-	Direction        string          `json:"direction,omitempty"`
-	Content          string          `json:"content,omitempty"`
-	ToolName         string          `json:"tool_name,omitempty"`
-	Command          string          `json:"command,omitempty"`
-	Argv             []string        `json:"argv,omitempty"`
-	Args             json.RawMessage `json:"args,omitempty"`
-	Dialect          string          `json:"dialect,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	ActiveHome       string          `json:"active_home,omitempty"`
-	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
-	Filename         string          `json:"filename,omitempty"`
-	Target           string          `json:"target,omitempty"`
-	Events           []ActionEvent   `json:"events,omitempty"`
+	Direction string          `json:"direction,omitempty"`
+	Content   string          `json:"content,omitempty"`
+	ToolName  string          `json:"tool_name,omitempty"`
+	Command   string          `json:"command,omitempty"`
+	Argv      []string        `json:"argv,omitempty"`
+	Args      json.RawMessage `json:"args,omitempty"`
+	// ToolResourceIdentity is benchmark-authenticated connector context for an
+	// atomic structured action. It must be derived by the normalizer from source
+	// metadata, never copied from model-controlled arguments.
+	ToolResourceIdentity string          `json:"tool_resource_identity,omitempty"`
+	Dialect              string          `json:"dialect,omitempty"`
+	CWD                  string          `json:"cwd,omitempty"`
+	ActiveHome           string          `json:"active_home,omitempty"`
+	ActiveAgentFiles     []string        `json:"active_agent_files,omitempty"`
+	Filename             string          `json:"filename,omitempty"`
+	Target               string          `json:"target,omitempty"`
+	AnnotationSpans      []ActionSpan    `json:"annotation_spans,omitempty"`
+	Events               []ActionEvent   `json:"events,omitempty"`
+	ToolResult           *ToolResultCase `json:"tool_result,omitempty"`
+}
+
+// ToolResultCase models one normalized pre-tool proposal and terminal result
+// for the classifier-only benchmark lens. Identity is repeated intentionally
+// so malformed cross-call joins can be represented and rejected during loading.
+// Production lifecycle authority, pending-state, and replay behavior remain
+// integration-test concerns. ResultContent must never be copied to Prediction.
+type ToolResultCase struct {
+	Invocation ToolResultInvocation `json:"invocation"`
+	Result     ToolResultTerminal   `json:"result"`
+}
+
+type ToolResultInvocation struct {
+	Connector    string          `json:"connector"`
+	Event        string          `json:"event"`
+	SessionID    string          `json:"session_id"`
+	InvocationID string          `json:"invocation_id"`
+	ToolName     string          `json:"tool_name"`
+	Args         json.RawMessage `json:"args"`
+}
+
+type ToolResultTerminal struct {
+	Connector    string `json:"connector"`
+	Event        string `json:"event"`
+	SessionID    string `json:"session_id"`
+	InvocationID string `json:"invocation_id"`
+	Outcome      string `json:"outcome"`
+	Content      string `json:"content"`
+}
+
+// ActionSpan records source annotation offsets over an atomic command or one
+// stateful event command. It is benchmark evidence only and is never projected
+// into runtime ActionFacts.
+type ActionSpan struct {
+	Start      int    `json:"start"`
+	End        int    `json:"end"`
+	Label      string `json:"label"`
+	RuleID     string `json:"rule_id,omitempty"`
+	EventIndex *int   `json:"event_index,omitempty"`
 }
 
 type ActionEvent struct {
-	ToolName         string          `json:"tool_name,omitempty"`
-	Command          string          `json:"command,omitempty"`
-	Argv             []string        `json:"argv,omitempty"`
-	Args             json.RawMessage `json:"args,omitempty"`
-	Dialect          string          `json:"dialect,omitempty"`
-	CWD              string          `json:"cwd,omitempty"`
-	ActiveHome       string          `json:"active_home,omitempty"`
-	ActiveAgentFiles []string        `json:"active_agent_files,omitempty"`
-	Outcome          string          `json:"outcome,omitempty"`
-	OffsetSeconds    int             `json:"offset_seconds,omitempty"`
+	ToolName string          `json:"tool_name,omitempty"`
+	Command  string          `json:"command,omitempty"`
+	Argv     []string        `json:"argv,omitempty"`
+	Args     json.RawMessage `json:"args,omitempty"`
+	// ToolResourceIdentity is benchmark-authenticated connector context used
+	// only to replay exact same-resource joins. Normalizers must derive an
+	// opaque, stable value from source metadata; it must never be copied from
+	// model-controlled tool arguments.
+	ToolResourceIdentity string   `json:"tool_resource_identity,omitempty"`
+	Dialect              string   `json:"dialect,omitempty"`
+	CWD                  string   `json:"cwd,omitempty"`
+	ActiveHome           string   `json:"active_home,omitempty"`
+	ActiveAgentFiles     []string `json:"active_agent_files,omitempty"`
+	Outcome              string   `json:"outcome,omitempty"`
+	OffsetSeconds        int      `json:"offset_seconds,omitempty"`
+	// ResultProof is a bounded, value-safe synthetic proof used only to replay
+	// production result-backed state transitions. Normalizers must never copy a
+	// raw tool result into this field.
+	ResultProof string `json:"result_proof,omitempty"`
 }
 
 type Truth struct {
@@ -102,6 +175,7 @@ type Truth struct {
 	LabelConfidence        string            `json:"label_confidence,omitempty"`
 	LabelSource            string            `json:"label_source,omitempty"`
 	EnforcementLens        string            `json:"enforcement_lens,omitempty"`
+	StatefulLens           string            `json:"stateful_lens,omitempty"`
 	Applicability          string            `json:"applicability"`
 	ExpectedDisposition    string            `json:"expected_disposition"`
 	ExpectedProfileActions map[string]string `json:"expected_profile_actions,omitempty"`
@@ -120,6 +194,7 @@ type Span struct {
 
 type Strata struct {
 	Platform      string `json:"platform,omitempty"`
+	Provider      string `json:"provider,omitempty"`
 	Dialect       string `json:"dialect,omitempty"`
 	Language      string `json:"language,omitempty"`
 	Ecosystem     string `json:"ecosystem,omitempty"`
@@ -167,25 +242,33 @@ type Prediction struct {
 }
 
 type Environment struct {
-	RunID                string            `json:"run_id"`
-	CaseCount            int               `json:"case_count"`
-	PredictionCount      int               `json:"prediction_count"`
-	DefenseClawCommit    string            `json:"defenseclaw_commit"`
-	Dirty                bool              `json:"dirty"`
-	GOOS                 string            `json:"goos"`
-	GOARCH               string            `json:"goarch"`
-	GoVersion            string            `json:"go_version"`
-	PythonVersion        string            `json:"python_version"`
-	Profiles             []string          `json:"profiles"`
-	PolicyRoot           string            `json:"policy_root"`
-	CorpusSHA256         string            `json:"corpus_sha256"`
-	TruthCorpusSHA256    string            `json:"truth_corpus_sha256,omitempty"`
-	DatasetLockSHA256    string            `json:"dataset_lock_sha256"`
-	PolicyDigests        map[string]string `json:"policy_digests"`
-	ClassificationSHA256 string            `json:"classification_sha256"`
-	Command              []string          `json:"command"`
-	Seed                 int64             `json:"seed"`
+	RunID                   string            `json:"run_id"`
+	CaseCount               int               `json:"case_count"`
+	PredictionCount         int               `json:"prediction_count"`
+	DefenseClawCommit       string            `json:"defenseclaw_commit"`
+	Dirty                   bool              `json:"dirty"`
+	BinaryProvenanceVersion int               `json:"binary_provenance_version,omitempty"`
+	BinaryVCSRevision       string            `json:"binary_vcs_revision,omitempty"`
+	BinaryVCSModified       *bool             `json:"binary_vcs_modified,omitempty"`
+	GOOS                    string            `json:"goos"`
+	GOARCH                  string            `json:"goarch"`
+	GoVersion               string            `json:"go_version"`
+	PythonVersion           string            `json:"python_version"`
+	Profiles                []string          `json:"profiles"`
+	PolicyRoot              string            `json:"policy_root"`
+	OptInPolicyPacks        []string          `json:"opt_in_policy_packs,omitempty"`
+	OptInPolicyRoot         string            `json:"opt_in_policy_root,omitempty"`
+	PolicyPostures          map[string]string `json:"policy_postures,omitempty"`
+	CorpusSHA256            string            `json:"corpus_sha256"`
+	TruthCorpusSHA256       string            `json:"truth_corpus_sha256,omitempty"`
+	DatasetLockSHA256       string            `json:"dataset_lock_sha256"`
+	PolicyDigests           map[string]string `json:"policy_digests"`
+	ClassificationSHA256    string            `json:"classification_sha256"`
+	Command                 []string          `json:"command"`
+	Seed                    int64             `json:"seed"`
 }
+
+const BinaryProvenanceSchemaVersion = 1
 
 var boundedIdentifier = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:/-]*$`)
 
@@ -197,7 +280,7 @@ func (p Prediction) Validate() error {
 	if len(p.RunID) > 160 || len(p.CaseID) > 240 || len(p.Engine) > 120 {
 		return errors.New("prediction identity exceeds schema bounds")
 	}
-	if err := ValidateProfile(p.Profile); err != nil {
+	if err := ValidateBenchmarkProfile(p.Profile); err != nil {
 		return err
 	}
 	if p.DetectionStepMask&^guardrail.ToolChainKnownStepMask != 0 ||
@@ -361,6 +444,19 @@ func (c Case) Validate() error {
 	default:
 		return fmt.Errorf("unsupported enforcement_lens %q", c.Truth.EnforcementLens)
 	}
+	switch c.Truth.StatefulLens {
+	case "":
+	case StatefulAtomicTerminal, StatefulBoundedIntent, StatefulBoundedComplete:
+		if c.Surface != "stateful" {
+			return errors.New("stateful_lens is reserved for stateful cases")
+		}
+	default:
+		return fmt.Errorf("unsupported stateful_lens %q", c.Truth.StatefulLens)
+	}
+	if c.Truth.StatefulLens == StatefulBoundedIntent &&
+		c.Truth.ExpectedDisposition == DispositionBlock {
+		return errors.New("bounded_intent cannot have expected_disposition=block")
+	}
 	switch c.Truth.ExpectedDisposition {
 	case DispositionAllow, DispositionDetectOnly, DispositionBlock:
 	default:
@@ -380,6 +476,22 @@ func (c Case) Validate() error {
 			strings.TrimSpace(span.Label) == "" || len(span.Label) > 120 || len(span.RuleID) > 160 ||
 			(span.RuleID != "" && !boundedIdentifier.MatchString(span.RuleID)) {
 			return fmt.Errorf("invalid truth span %d", index)
+		}
+	}
+	for index, span := range c.Payload.AnnotationSpans {
+		command := c.Payload.Command
+		if span.EventIndex != nil {
+			if c.Surface != "stateful" || *span.EventIndex < 0 || *span.EventIndex >= len(c.Payload.Events) {
+				return fmt.Errorf("invalid action annotation span %d", index)
+			}
+			command = c.Payload.Events[*span.EventIndex].Command
+		} else if c.Surface != "action" {
+			return fmt.Errorf("invalid action annotation span %d", index)
+		}
+		if command == "" || span.Start < 0 || span.End <= span.Start || span.End > len(command) ||
+			strings.TrimSpace(span.Label) == "" || len(span.Label) > 120 || len(span.RuleID) > 160 ||
+			(span.RuleID != "" && !boundedIdentifier.MatchString(span.RuleID)) {
+			return fmt.Errorf("invalid action annotation span %d", index)
 		}
 	}
 	for profile, action := range c.Truth.ExpectedProfileActions {
@@ -403,6 +515,14 @@ func (c Case) Validate() error {
 	case "action":
 		if c.Payload.Command == "" && len(c.Payload.Argv) == 0 && len(c.Payload.Args) == 0 {
 			return errors.New("action case requires command, argv, or args")
+		}
+		if len(c.Payload.ToolResourceIdentity) > 1024 ||
+			strings.IndexByte(c.Payload.ToolResourceIdentity, 0) >= 0 {
+			return errors.New("action case has invalid tool_resource_identity")
+		}
+	case "tool_result":
+		if err := c.Payload.validateToolResult(); err != nil {
+			return err
 		}
 	case "code":
 		if c.Payload.Content == "" && c.Payload.Target == "" {
@@ -428,6 +548,27 @@ func (c Case) Validate() error {
 				if event.OffsetSeconds < priorOffset || event.OffsetSeconds > 1800 {
 					return fmt.Errorf("stateful event %d has invalid offset_seconds", index)
 				}
+				if len(event.ToolResourceIdentity) > 1024 || strings.IndexByte(event.ToolResourceIdentity, 0) >= 0 {
+					return fmt.Errorf("stateful event %d has invalid tool_resource_identity", index)
+				}
+				if c.Truth.StatefulLens != "" {
+					switch event.Outcome {
+					case "succeeded", "failed", "denied", "cancelled", "unknown":
+					default:
+						return fmt.Errorf("stateful event %d requires an explicit outcome for an adjudicated truth lens", index)
+					}
+				}
+				if c.Truth.StatefulLens == StatefulBoundedComplete && event.Outcome == "unknown" {
+					return fmt.Errorf("stateful event %d has unknown outcome under bounded_completed", index)
+				}
+				if event.ResultProof != "" {
+					if event.Outcome != "succeeded" {
+						return fmt.Errorf("stateful event %d result proof requires succeeded outcome", index)
+					}
+					if len(event.ResultProof) > 256*1024 || strings.IndexByte(event.ResultProof, 0) >= 0 {
+						return fmt.Errorf("stateful event %d has invalid result proof", index)
+					}
+				}
 				priorOffset = event.OffsetSeconds
 			}
 		} else if c.Payload.Content == "" || c.Payload.Direction == "" {
@@ -436,6 +577,94 @@ func (c Case) Validate() error {
 	default:
 		return fmt.Errorf("unsupported surface %q", c.Surface)
 	}
+	if c.Surface != "tool_result" && c.Payload.ToolResult != nil {
+		return errors.New("payload.tool_result is reserved for tool_result cases")
+	}
+	return nil
+}
+
+func (p Payload) validateToolResult() error {
+	if p.ToolResult == nil {
+		return errors.New("tool_result case requires payload.tool_result")
+	}
+	if p.Direction != "" || p.Content != "" || p.ToolName != "" || p.Command != "" ||
+		len(p.Argv) != 0 || len(p.Args) != 0 || p.Dialect != "" || p.CWD != "" ||
+		p.ActiveHome != "" || len(p.ActiveAgentFiles) != 0 || p.Filename != "" ||
+		p.Target != "" || len(p.AnnotationSpans) != 0 || len(p.Events) != 0 {
+		return errors.New("tool_result payload cannot mix legacy payload fields")
+	}
+
+	invocation := p.ToolResult.Invocation
+	result := p.ToolResult.Result
+	if invocation.Connector == "" || invocation.Event == "" || invocation.SessionID == "" ||
+		invocation.InvocationID == "" || invocation.ToolName == "" || len(invocation.Args) == 0 ||
+		result.Connector == "" || result.Event == "" || result.SessionID == "" ||
+		result.InvocationID == "" || result.Outcome == "" {
+		return errors.New("tool_result requires complete invocation and terminal result fields")
+	}
+	for name, value := range map[string]string{
+		"connector": invocation.Connector, "pre event": invocation.Event,
+		"session ID": invocation.SessionID, "invocation ID": invocation.InvocationID,
+		"tool name": invocation.ToolName, "result event": result.Event,
+	} {
+		if len(value) > 240 || !boundedIdentifier.MatchString(value) {
+			return fmt.Errorf("tool_result has invalid %s", name)
+		}
+	}
+	if invocation.Connector != strings.ToLower(invocation.Connector) ||
+		invocation.Connector != result.Connector {
+		return errors.New("tool_result connector identity must match exactly and be lowercase")
+	}
+	if invocation.SessionID != result.SessionID || invocation.InvocationID != result.InvocationID {
+		return errors.New("tool_result session and invocation identity must match exactly")
+	}
+	if len(invocation.Args) > maxToolResultArgsBytes || !json.Valid(invocation.Args) {
+		return errors.New("tool_result args must be bounded valid JSON")
+	}
+	var args map[string]json.RawMessage
+	if err := json.Unmarshal(invocation.Args, &args); err != nil || args == nil {
+		return errors.New("tool_result args must be a JSON object")
+	}
+	if len(result.Content) > maxToolResultContentBytes {
+		return errors.New("tool_result content exceeds the classifier input bound")
+	}
+	if err := validateToolResultLifecycle(invocation.Connector, invocation.Event, result.Event, result.Outcome); err != nil {
+		return err
+	}
+	return nil
+}
+
+func validateToolResultLifecycle(connector, preEvent, resultEvent, outcome string) error {
+	type lifecycle struct {
+		pre     string
+		success string
+		failure string
+	}
+	known := map[string]lifecycle{
+		"amp":        {pre: "tool.call", success: "tool.result", failure: "tool.result"},
+		"claudecode": {pre: "PreToolUse", success: "PostToolUse", failure: "PostToolUseFailure"},
+		"codex":      {pre: "PreToolUse", success: "PostToolUse", failure: "PostToolUseFailure"},
+		"opencode":   {pre: "tool.execute.before", success: "tool.execute.after", failure: "tool.execute.after"},
+	}
+	contract, ok := known[connector]
+	if !ok {
+		return fmt.Errorf("tool_result has unsupported connector %q", connector)
+	}
+	if preEvent != contract.pre {
+		return fmt.Errorf("tool_result has invalid pre event for connector %q", connector)
+	}
+	switch outcome {
+	case "succeeded":
+		if resultEvent != contract.success {
+			return fmt.Errorf("tool_result has invalid success event for connector %q", connector)
+		}
+	case "failed", "denied", "cancelled":
+		if resultEvent != contract.failure {
+			return fmt.Errorf("tool_result has invalid failure event for connector %q", connector)
+		}
+	default:
+		return fmt.Errorf("tool_result requires an authoritative terminal outcome, got %q", outcome)
+	}
 	return nil
 }
 
@@ -443,6 +672,24 @@ func (c Case) Validate() error {
 // available. Contextual/dual-use commands are excluded from binary scoring;
 // their source provenance remains available as a diagnostic dimension.
 func detectionTruth(benchmarkCase Case) (positive bool, scorable bool) {
+	if benchmarkCase.Surface == "stateful" {
+		switch benchmarkCase.Truth.StatefulLens {
+		case StatefulAtomicTerminal, "":
+			return false, false
+		case StatefulBoundedIntent, StatefulBoundedComplete:
+			if !hasTruthRulePrefix(benchmarkCase.Truth.RuleIDs, "chain.") {
+				return false, false
+			}
+			switch benchmarkCase.Truth.DeterministicTruth {
+			case DeterministicMalicious:
+				return true, true
+			case DeterministicBenign:
+				return false, true
+			default:
+				return false, false
+			}
+		}
+	}
 	switch benchmarkCase.Truth.DeterministicTruth {
 	case DeterministicMalicious:
 		return true, true
@@ -462,10 +709,63 @@ func detectionTruth(benchmarkCase Case) (positive bool, scorable bool) {
 }
 
 func benignTruth(benchmarkCase Case) bool {
+	if benchmarkCase.Surface == "stateful" &&
+		benchmarkCase.Truth.StatefulLens == StatefulAtomicTerminal {
+		return false
+	}
 	if benchmarkCase.Truth.DeterministicTruth != "" {
 		return benchmarkCase.Truth.DeterministicTruth == DeterministicBenign
 	}
 	return benchmarkCase.Truth.SourceTruth == TruthBenign
+}
+
+func detectionPrediction(benchmarkCase Case, prediction Prediction, positive bool) bool {
+	if benchmarkCase.Surface == "stateful" && benchmarkCase.Truth.StatefulLens != "" &&
+		benchmarkCase.Truth.StatefulLens != StatefulAtomicTerminal && len(benchmarkCase.Truth.RuleIDs) > 0 {
+		if !prediction.Detected {
+			return false
+		}
+		for _, expected := range benchmarkCase.Truth.RuleIDs {
+			for _, actual := range prediction.RuleIDs {
+				if actual == expected {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	if !prediction.Detected || !positive || len(benchmarkCase.Truth.RuleIDs) == 0 {
+		return prediction.Detected
+	}
+	for _, expected := range benchmarkCase.Truth.RuleIDs {
+		for _, actual := range prediction.RuleIDs {
+			if actual == expected {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func enforcementTruth(benchmarkCase Case) (positive bool, scorable bool) {
+	if benchmarkCase.Surface == "stateful" {
+		switch benchmarkCase.Truth.StatefulLens {
+		case StatefulAtomicTerminal, StatefulBoundedIntent, "":
+			return false, false
+		case StatefulBoundedComplete:
+			return benchmarkCase.Truth.ExpectedDisposition == DispositionBlock, true
+		}
+	}
+	return benchmarkCase.Truth.ExpectedDisposition == DispositionBlock, true
+}
+
+func hasTruthRulePrefix(ruleIDs []string, prefix string) bool {
+	for _, ruleID := range ruleIDs {
+		if strings.HasPrefix(ruleID, prefix) {
+			return true
+		}
+	}
+	return false
 }
 
 func ValidateProfile(profile string) error {
@@ -473,4 +773,36 @@ func ValidateProfile(profile string) error {
 		return fmt.Errorf("unsupported profile %q", profile)
 	}
 	return nil
+}
+
+// ValidateOptInPolicyPack restricts benchmark policy selection to the public,
+// repository-owned opt-in packs. Keeping this allowlist separate from runtime
+// profiles prevents a benchmark argument from becoming an arbitrary path.
+func ValidateOptInPolicyPack(name string) error {
+	if !validOptInPolicyPacks[name] {
+		return fmt.Errorf("unsupported opt-in policy pack %q", name)
+	}
+	return nil
+}
+
+// OptInPolicyLabel returns the distinct score/report dimension for a named
+// opt-in pack. Opt-in packs use the balanced/default action posture, but are
+// never reported as the default profile.
+func OptInPolicyLabel(name string) (string, error) {
+	if err := ValidateOptInPolicyPack(name); err != nil {
+		return "", err
+	}
+	return optInPolicyLabelPrefix + name, nil
+}
+
+// ValidateBenchmarkProfile accepts standard runtime profiles and the closed
+// set of benchmark-only opt-in labels emitted by Runner.
+func ValidateBenchmarkProfile(profile string) error {
+	if validProfiles[profile] {
+		return nil
+	}
+	if !strings.HasPrefix(profile, optInPolicyLabelPrefix) {
+		return fmt.Errorf("unsupported benchmark profile %q", profile)
+	}
+	return ValidateOptInPolicyPack(strings.TrimPrefix(profile, optInPolicyLabelPrefix))
 }

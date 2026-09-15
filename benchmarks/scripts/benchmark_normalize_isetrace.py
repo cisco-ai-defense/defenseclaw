@@ -13,7 +13,7 @@ content, intent text, personas, and tool descriptions are never projected.
 
 ISETrace does not publish a per-trajectory attack label, so this adapter treats
 the corpus as benign execution-grounded hard negatives and never infers labels
-from suspicious-looking arguments. Every row is emitted into the schema-valid
+from suspicious-looking arguments. Every projected row uses the schema-valid
 ``smoke`` staging split. ``benchmark_partition.py`` remains the sole authority
 for development, validation, and sealed-test assignments.
 """
@@ -80,6 +80,21 @@ GROUP_MANIFEST_KEYS = frozenset(
     }
 )
 GROUP_ENTRY_KEYS = frozenset({"group", "trajectories", "tool_calls", "cases", "action_cases", "stateful_cases"})
+ISETRACE_STATISTIC_KEYS = frozenset(
+    {
+        "source_rows",
+        "trajectories_emitted",
+        "trajectories_quarantined_no_tool_calls",
+        "trajectory_groups",
+        "tool_calls",
+        "outcome_succeeded",
+        "outcome_failed",
+        "outcome_unknown",
+        "orphan_tool_results_excluded",
+        "action_cases",
+        "stateful_cases",
+    }
+)
 ROW_KEYS = frozenset(
     {
         "enable_thinking",
@@ -153,6 +168,10 @@ class Trajectory:
     intent_tokens: tuple[str, ...]
     calls: tuple[ProjectedCall, ...]
     orphan_results: int
+
+
+class NoToolCallsError(ValueError):
+    """A valid source trajectory has no execution evidence to normalize."""
 
 
 class Components:
@@ -446,7 +465,7 @@ def project_messages(
             if len(projected) > max_tool_calls:
                 raise ValueError("trajectory exceeds the configured tool-call bound")
     if not projected:
-        raise ValueError("trajectory has no tool calls")
+        raise NoToolCallsError("trajectory has no tool calls")
 
     calls: list[ProjectedCall] = []
     for sequence_index, (
@@ -671,12 +690,19 @@ def build_corpus(
     trajectories: list[Trajectory] = []
     seen_sessions: set[str] = set()
     seen_trajectories: set[str] = set()
+    source_row_count = 0
+    quarantined_no_tool_calls = 0
     for row in source_rows:
-        trajectory = project_trajectory(
-            row,
-            max_argument_bytes=max_argument_bytes,
-            max_tool_calls=max_tool_calls_per_trajectory,
-        )
+        source_row_count += 1
+        try:
+            trajectory = project_trajectory(
+                row,
+                max_argument_bytes=max_argument_bytes,
+                max_tool_calls=max_tool_calls_per_trajectory,
+            )
+        except NoToolCallsError:
+            quarantined_no_tool_calls += 1
+            continue
         if trajectory.session_token in seen_sessions:
             raise ValueError("duplicate ISETrace source session identity")
         if trajectory.identity_digest in seen_trajectories:
@@ -684,7 +710,7 @@ def build_corpus(
         seen_sessions.add(trajectory.session_token)
         seen_trajectories.add(trajectory.identity_digest)
         trajectories.append(trajectory)
-    if not trajectories:
+    if source_row_count == 0:
         raise ValueError("no ISETrace trajectories were loaded")
     groups_by_trajectory = leakage_groups(trajectories)
 
@@ -739,7 +765,9 @@ def build_corpus(
         "corpus_sha256": sha256_bytes(output_data),
     }
     statistics = {
-        "source_rows": len(trajectories),
+        "source_rows": source_row_count,
+        "trajectories_emitted": len(trajectories),
+        "trajectories_quarantined_no_tool_calls": quarantined_no_tool_calls,
         "trajectory_groups": len(groups),
         "tool_calls": sum(len(trajectory.calls) for trajectory in trajectories),
         "outcome_succeeded": outcome_counts["succeeded"],
@@ -889,10 +917,18 @@ def validate_manifests(manifest: object, group_manifest: object) -> None:
     statistics = manifest_map["adapter_statistics"]
     if not isinstance(statistics, Mapping) or set(statistics) != {"isetrace"}:
         raise ValueError("normalization manifest statistics are invalid")
-    if not isinstance(statistics["isetrace"], Mapping) or any(
-        type(value) is not int for value in statistics["isetrace"].values()
-    ):
+    isetrace_statistics = statistics["isetrace"]
+    if not isinstance(isetrace_statistics, Mapping) or set(isetrace_statistics) != ISETRACE_STATISTIC_KEYS:
+        raise ValueError("normalization manifest ISETrace statistics are invalid")
+    if any(type(value) is not int or value < 0 for value in isetrace_statistics.values()):
         raise ValueError("normalization manifest statistics must be integer counters")
+    if isetrace_statistics["source_rows"] != (
+        isetrace_statistics["trajectories_emitted"]
+        + isetrace_statistics["trajectories_quarantined_no_tool_calls"]
+    ):
+        raise ValueError("normalization manifest trajectory statistics are inconsistent")
+    if isetrace_statistics["trajectories_emitted"] != group_map["trajectory_count"]:
+        raise ValueError("normalization manifest emitted trajectory count is inconsistent")
     if manifest_map["counts"] != {DATASET: manifest_map["cases"]}:
         raise ValueError("normalization manifest dataset counts are inconsistent")
     if not HEX_64.fullmatch(str(manifest_map["output_sha256"])):

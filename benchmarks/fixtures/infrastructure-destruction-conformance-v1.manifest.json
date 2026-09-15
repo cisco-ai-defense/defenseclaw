@@ -1,0 +1,29 @@
+{
+  "adapter_statistics": {
+    "defenseclaw-infrastructure-destruction-conformance-v1": {
+      "rows_emitted": 11,
+      "rows_read": 11
+    }
+  },
+  "cases": 11,
+  "counts": {
+    "defenseclaw-infrastructure-destruction-conformance-v1": 11
+  },
+  "datasets": [
+    "defenseclaw-infrastructure-destruction-conformance-v1"
+  ],
+  "exact_payload_duplicates_removed": 0,
+  "label_conflicts_excluded": 0,
+  "output_sha256": "ea33bad90fb6269960c4535d00ae42be548d2a924e9262e508cc50000065422d",
+  "schema_version": "1",
+  "source": {
+    "bytes": 6675,
+    "dataset": "defenseclaw-infrastructure-destruction-conformance-v1",
+    "license": "Apache-2.0",
+    "path": "benchmarks/fixtures/infrastructure-destruction-conformance-v1.jsonl",
+    "redistribution": "vendored",
+    "revision": "1",
+    "rows": 11,
+    "sha256": "ea33bad90fb6269960c4535d00ae42be548d2a924e9262e508cc50000065422d"
+  }
+}
