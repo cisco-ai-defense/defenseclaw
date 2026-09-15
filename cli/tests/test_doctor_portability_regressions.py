@@ -491,6 +491,7 @@ def test_windows_process_evidence_treats_unknown_open_error_as_unavailable(monke
     assert "could not" in evidence.reason
 
 
+@pytest.mark.skipif(os.name == "nt", reason="POSIX UID ownership semantics")
 def test_trusted_runtime_owner_accepts_root_and_self_only(monkeypatch) -> None:
     monkeypatch.delenv("SUDO_UID", raising=False)
     monkeypatch.delenv("SUDO_GID", raising=False)

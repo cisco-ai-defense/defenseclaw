@@ -1091,6 +1091,7 @@ class TestCheckHookContractLock(unittest.TestCase):
         self.assertEqual(check["status"], "skip")
         self.assertEqual(check["label"], "Hook contract")
 
+    @unittest.skipIf(os.name == "nt", "POSIX sudo leftover naming")
     def test_root_owned_lock_names_sudo_leftover(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             lock_path = os.path.join(tmp, "hook_contract_lock.json")
