@@ -137,6 +137,11 @@ def build_source(queue_path: Path, clusters_path: Path) -> tuple[dict[str, Any],
                 raise ValueError(f"{queue_path}:{line_number}: unsupported queue schema")
             queue_rows.append(value)
 
+    queue_sha256 = sha256_file(queue_path)
+    if clusters.get("queue_sha256") != queue_sha256:
+        raise ValueError(
+            f"{clusters_path}: queue_sha256 does not match {queue_path}"
+        )
     if clusters["queue_count"] != len(queue_rows):
         raise ValueError(
             f"{queue_path}: queue row count {len(queue_rows)} does not match "
@@ -173,7 +178,7 @@ def build_source(queue_path: Path, clusters_path: Path) -> tuple[dict[str, Any],
             )
 
     source = {
-        "queue_file_sha256": sha256_file(queue_path),
+        "queue_file_sha256": queue_sha256,
         "clusters_file_sha256": sha256_file(clusters_path),
         "corpus_sha256": clusters.get("corpus_sha256", ""),
         "predictions_sha256": clusters.get("predictions_sha256", ""),

@@ -546,8 +546,9 @@ literal destinations remain eligible, and dynamic, malformed, unsupported,
 ambiguous, mixed, or unresolved destinations abstain. Structured multipart
 ActionFacts from issue #873 was already present in the #872 base, so it was
 not broadened. On the paired OpenGuardrails regression, 12,480 base/candidate
-profile rows had zero key or semantic differences. The release binary is 104
-bytes smaller than the exact #872 build.
+profile rows had zero key or semantic differences. The reviewed release binary
+is 117,816,608 bytes versus 117,816,400 bytes for the exact #872 build
+(+208 bytes, +0.000177%), with no material package-size increase.
 
 The separate non-gating near-miss lane contains 383 metadata-only validation
 rows selected because the baseline already emitted a finding. Its 100%

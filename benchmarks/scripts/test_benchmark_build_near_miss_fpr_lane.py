@@ -97,6 +97,7 @@ class NearMissFPRLaneTests(unittest.TestCase):
                         "case_count": 1,
                         "prediction_count": 3,
                         "queue_count": 1,
+                        "queue_sha256": module.sha256_file(queue_path),
                         "corpus_sha256": "a" * 64,
                         "predictions_sha256": "b" * 64,
                     }
@@ -111,6 +112,12 @@ class NearMissFPRLaneTests(unittest.TestCase):
             stale["queue_count"] = 2
             clusters_path.write_text(json.dumps(stale), encoding="utf-8")
             with self.assertRaises(ValueError):
+                module.build_source(queue_path, clusters_path)
+
+            stale["queue_count"] = 1
+            stale["queue_sha256"] = "c" * 64
+            clusters_path.write_text(json.dumps(stale), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "queue_sha256"):
                 module.build_source(queue_path, clusters_path)
 
             other = Path(temporary) / "other"
@@ -141,6 +148,7 @@ class NearMissFPRLaneTests(unittest.TestCase):
                         "case_count": 1,
                         "prediction_count": 3,
                         "queue_count": 2,
+                        "queue_sha256": module.sha256_file(queue_path),
                     }
                 ),
                 encoding="utf-8",
@@ -160,6 +168,81 @@ class NearMissFPRLaneTests(unittest.TestCase):
             with mock.patch.object(sys, "argv", argv), self.assertRaises(SystemExit):
                 module.main()
             self.assertFalse(output_dir.exists())
+
+    def test_main_writes_payload_free_non_gating_output(self) -> None:
+        """The CLI writes a value-free lane with verifiable non-gating metadata."""
+
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "source"
+            root.mkdir()
+            queue_path = root / "adjudication-queue.jsonl"
+            clusters_path = root / "clusters.json"
+            queue_path.write_text(
+                json.dumps(
+                    queue_row(
+                        payload={
+                            "tool_name": "shell",
+                            "args": {
+                                "command": "private-value",
+                                "path": "private-path",
+                            },
+                        }
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            clusters_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "profile": "default",
+                        "case_count": 1,
+                        "prediction_count": 3,
+                        "queue_count": 1,
+                        "queue_sha256": module.sha256_file(queue_path),
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_dir = Path(temporary) / "out"
+            argv = [
+                "benchmark_build_near_miss_fpr_lane.py",
+                "--queue",
+                str(queue_path),
+                "--clusters",
+                str(clusters_path),
+                "--output-dir",
+                str(output_dir),
+                "--lane-id",
+                "test",
+            ]
+            with mock.patch.object(sys, "argv", argv):
+                self.assertEqual(module.main(), 0)
+
+            cases_path = output_dir / "cases.jsonl"
+            manifest_path = output_dir / "manifest.json"
+            cases_text = cases_path.read_text(encoding="utf-8")
+            self.assertNotIn("private-value", cases_text)
+            self.assertNotIn("private-path", cases_text)
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            for field in (
+                "gating",
+                "included_in_authoritative_scores",
+                "included_in_default_tuning_inputs",
+                "changes_runtime_authority",
+                "changes_thresholds",
+                "changes_authoritative_labels",
+                "payloads_committed",
+            ):
+                self.assertFalse(manifest[field])
+
+            checksums = dict(
+                reversed(line.split("  ", 1))
+                for line in (output_dir / "checksums.txt").read_text(encoding="utf-8").splitlines()
+            )
+            self.assertEqual(checksums["cases.jsonl"], module.sha256_file(cases_path))
+            self.assertEqual(checksums["manifest.json"], module.sha256_file(manifest_path))
 
 
 if __name__ == "__main__":
