@@ -33,14 +33,23 @@ type aiDiscoveryV8Runtime interface {
 	) (context.Context, *observabilityruntime.AIDiscoveryTrace, error)
 }
 
-type aiDiscoveryV8Adapter struct{ runtime aiDiscoveryV8Runtime }
+type aiDiscoveryV8Adapter struct {
+	runtime aiDiscoveryV8Runtime
+	// publishGate is the managed_enterprise change gate, nil in every other
+	// deployment mode. A nil gate never suppresses, so the lifecycle-delta
+	// contract for non-managed modes is unaffected.
+	publishGate *managedInventoryPublishState
+}
 
-func newAIDiscoveryV8Adapter(emitter sidecarRuntimeEmitter) inventory.AIDiscoveryObservabilityV8 {
+func newAIDiscoveryV8Adapter(
+	emitter sidecarRuntimeEmitter,
+	gate *managedInventoryPublishState,
+) inventory.AIDiscoveryObservabilityV8 {
 	runtime, ok := emitter.(aiDiscoveryV8Runtime)
 	if !ok || runtime == nil {
 		return nil
 	}
-	return &aiDiscoveryV8Adapter{runtime: runtime}
+	return &aiDiscoveryV8Adapter{runtime: runtime, publishGate: gate}
 }
 
 func (adapter *aiDiscoveryV8Adapter) StartScan(
@@ -179,20 +188,44 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 	if adapter == nil || adapter.runtime == nil || ctx == nil || !aiDiscoveryV8SummaryValid(report.Summary) {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
+	// The per-scan summary is the liveness signal ("device alive, inventory
+	// unchanged, total = N") and stays unconditional in every mode, including a
+	// fully suppressed managed cycle.
 	logErr := adapter.emitSummaryLog(ctx, report.Summary)
+	managedSnapshot := ManagedEnterpriseActive()
+	signalsPublish, signalsCycle, signalsDigest := adapter.resolveSignalsPublish(managedSnapshot, report)
+	signalsErr := false
 	for _, signal := range report.Signals {
-		// Managed enterprise receives a complete endpoint snapshot on every
-		// cadence, including steady-state `seen` observations. Other modes keep
-		// the historical lifecycle-delta contract.
+		// Managed enterprise receives a complete endpoint snapshot, including
+		// steady-state `seen` observations, but only on a cycle where the
+		// inventory actually changed or the daily full bundle is due. Other modes
+		// keep the historical lifecycle-delta contract.
 		isDelta := signal.State == inventory.AIStateNew ||
 			signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
-		if !isDelta && !(ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
+		if !isDelta && !(managedSnapshot && signal.State == inventory.AIStateSeen) {
 			continue
 		}
-		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
-			logErr = err
+		if managedSnapshot && !signalsPublish {
+			// Suppression is reachable only when this scan carried no
+			// new/changed/gone signal (see resolveSignalsPublish), so no
+			// lifecycle delta can be dropped here.
+			continue
+		}
+		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil {
+			signalsErr = true
+			if logErr == nil {
+				logErr = err
+			}
 		}
 	}
+	if signalsPublish && signalsCycle != nil {
+		if signalsErr {
+			signalsCycle.markDegraded()
+		} else {
+			signalsCycle.recordPublished(managedInventorySignalsKey, signalsDigest, len(report.Signals))
+		}
+	}
+	signalsCycle.commit()
 	for _, component := range components {
 		if !component.HasLifecycleChange {
 			continue
@@ -206,6 +239,41 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 		return logErr
 	}
 	return metricErr
+}
+
+// resolveSignalsPublish decides whether the per-signal snapshot ships this scan.
+//
+// Returns (true, nil, "") for every non-managed mode and whenever no gate is
+// bound, so the historical behavior is reproduced without computing a digest or
+// touching any state file.
+//
+// The lifecycle-count term is what makes a REMOVAL publish: `gone` signals are
+// excluded from the digest input (they would otherwise keep the digest moving
+// forever as the tombstone ages out), so without the count term a disappearance
+// would be invisible to the gate. It also guarantees the gate can never drop a
+// new / changed / gone record — the exact records non-managed modes emit.
+func (adapter *aiDiscoveryV8Adapter) resolveSignalsPublish(
+	managedSnapshot bool,
+	report inventory.AIDiscoveryReport,
+) (bool, *managedInventoryPublishCycle, string) {
+	if !managedSnapshot || adapter == nil || adapter.publishGate == nil {
+		return true, nil, ""
+	}
+	// bundleScope is false: this publisher covers only the signals snapshot, so
+	// it must never satisfy the daily complete-bundle guarantee. The endpoint
+	// inventory hook, which runs last in the same fanout and carries all six
+	// collections, owns that stamp.
+	cycle := adapter.publishGate.beginCycle(report.Summary.ScanID, time.Now().UTC(), false)
+	// The digest is computed either way: publishing a lifecycle change must also
+	// fingerprint the scan, or the cycle after the change would republish
+	// forever instead of settling into suppression.
+	digest := managedInventorySignalsDigest(managedInventorySignalsKey, report.Signals)
+	lifecycleChanged := report.Summary.NewSignals+
+		report.Summary.ChangedSignals+report.Summary.GoneSignals > 0
+	if lifecycleChanged {
+		return true, cycle, digest
+	}
+	return cycle.shouldPublish(managedInventorySignalsKey, digest), cycle, digest
 }
 
 func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
