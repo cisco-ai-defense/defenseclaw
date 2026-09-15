@@ -5205,7 +5205,7 @@ def _sanitized_discovery_report(disc: agent_discovery.AgentDiscovery, *, duratio
             "has_binary": bool(signal.binary_path),
             "binary_basename": _basename(signal.binary_path),
             "binary_path_hash": _path_hash(signal.binary_path),
-            "version": _bounded(signal.version, 160),
+            "version": _safe_version_label(signal.version, 160),
             "version_probe_status": _probe_status(signal),
             "error_class": _error_class(signal.error),
         }
@@ -5234,6 +5234,25 @@ def _bounded(value: str, max_len: int) -> str:
     if len(value) <= max_len:
         return value
     return value[: max_len - 3] + "..."
+
+
+def _safe_version_label(value: str, max_len: int) -> str:
+    """Return a bounded version accepted by the gateway inventory schema.
+
+    Version commands are third-party output and occasionally include Unicode
+    decoration (for example Hermes uses a middle dot).  The gateway correctly
+    rejects those characters from telemetry labels, so normalize them at the
+    CLI trust boundary instead of letting one connector reject the complete
+    discovery report.
+    """
+    allowed_punctuation = " .,_+@():-"
+    sanitized = "".join(
+        character if character.isascii() and (character.isalnum() or character in allowed_punctuation) else " "
+        for character in (value or "")
+    )
+    sanitized = " ".join(sanitized.split())
+    sanitized = sanitized.lstrip(allowed_punctuation)
+    return _bounded(sanitized, max_len)
 
 
 def _probe_status(signal: agent_discovery.AgentSignal) -> str:

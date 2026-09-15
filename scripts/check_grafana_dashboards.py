@@ -154,6 +154,7 @@ VARIABLES = {
     "$__rate_interval": "5m",
     "$__rate_interval_ms": "300000",
     "$__interval": "5m",
+    "$__auto": "5m",
     "$__range": "5m",
     "$scope_label": "gen_ai_agent_id",
     "$connector": "codex",
@@ -302,7 +303,23 @@ class GoldenAgent:
 def load_dashboards(path: Path) -> list[tuple[Path, dict[str, Any]]]:
     dashboards: list[tuple[Path, dict[str, Any]]] = []
     for dashboard_path in sorted(path.glob("*.json")):
-        dashboards.append((dashboard_path, json.loads(dashboard_path.read_text(encoding="utf-8"))))
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise AuditError(f"{dashboard_path}: duplicate JSON key {key!r}")
+                result[key] = value
+            return result
+
+        dashboards.append(
+            (
+                dashboard_path,
+                json.loads(
+                    dashboard_path.read_text(encoding="utf-8"),
+                    object_pairs_hook=reject_duplicate_keys,
+                ),
+            ),
+        )
     return dashboards
 
 
@@ -537,6 +554,10 @@ def static_audit(
                                 f"{uid}/{title}: high-cardinality identity {forbidden_identity!r} "
                                 "must use logs, traces, or correlation queries instead of metric labels",
                             )
+                if datasource == "loki" and "$__rate_interval" in expression:
+                    errors.append(
+                        f"{uid}/{title}: Loki does not interpolate $__rate_interval; use $__auto",
+                    )
                 if re.search(
                     r"\b(?:body_)?gen_ai_agent_name\s*(?:=~|!~|=|!=)\s*"
                     r'"\$(?:connector|\{connector:(?:regex|pipe)\})"',

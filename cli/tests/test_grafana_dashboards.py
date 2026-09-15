@@ -580,6 +580,17 @@ def test_source_audit_allows_missing_generated_mirror(
     assert any("packaged Grafana dashboard directory is missing" in error for error in ci_errors)
 
 
+def test_dashboard_loader_rejects_duplicate_json_keys(tmp_path: Path) -> None:
+    audit = _load_audit_module()
+    (tmp_path / "duplicate.json").write_text(
+        '{"uid":"first","uid":"second","title":"Duplicate"}',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(audit.AuditError, match="duplicate JSON key 'uid'"):
+        audit.load_dashboards(tmp_path)
+
+
 def test_static_audit_checks_variable_datasources_and_over_time_stats(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

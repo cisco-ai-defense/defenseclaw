@@ -486,7 +486,7 @@
     {
       "type": "timeseries",
       "title": "Discovery runs by source × cache_hit × result",
-      "description": "Per-minute rate of accepted on-demand discovery reports, broken down by report `source` (cli/api), whether the CLI hit its local cache, and the gateway's accept verdict (`ok`/`malformed`/`rejected`).",
+      "description": "Cumulative on-demand discovery runs since the current gateway started, broken down by report source, cache hit, and accept verdict. Reading the live counter directly keeps the first successful run visible instead of waiting for a second sample before rate() can be calculated.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -499,7 +499,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (source, cache_hit, result) (rate(defenseclaw_agent_discovery_runs_total[$__rate_interval]))",
+          "expr": "sum by (source, cache_hit, result) (defenseclaw_agent_discovery_runs_total)",
           "legendFormat": "{{source}} · cache={{cache_hit}} · {{result}}",
           "refId": "A"
         }
@@ -514,7 +514,7 @@
     {
       "type": "timeseries",
       "title": "Discovery duration p50/p95",
-      "description": "Wall-clock time per on-demand discovery scan, sourced from `defenseclaw_agent_discovery_duration_milliseconds`. Sustained p95 > 1s usually means a connector probe is timing out — cross-reference the errors table.",
+      "description": "Cumulative on-demand discovery latency distribution since the current gateway started, including the first completed run. Sustained p95 above one second usually means a connector probe is timing out; cross-reference the errors table.",
       "datasource": {
         "type": "prometheus",
         "uid": "defenseclaw-prometheus"
@@ -527,12 +527,12 @@
       },
       "targets": [
         {
-          "expr": "histogram_quantile(0.50, sum by (le) (rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.50, sum by (le) (defenseclaw_agent_discovery_duration_milliseconds_bucket))",
           "legendFormat": "p50",
           "refId": "p50"
         },
         {
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(defenseclaw_agent_discovery_duration_milliseconds_bucket[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (defenseclaw_agent_discovery_duration_milliseconds_bucket))",
           "legendFormat": "p95",
           "refId": "p95"
         }

@@ -953,7 +953,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__rate_interval]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }
