@@ -18,7 +18,6 @@ import json
 from pathlib import Path
 from typing import Any
 
-
 SCHEMA_VERSION = "defenseclaw/near-miss-fpr-lane/v1"
 SELECTOR_REASON = "deterministic_benign_finding"
 
