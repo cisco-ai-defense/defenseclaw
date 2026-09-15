@@ -504,21 +504,27 @@ func TestLocalLogPipelineSinkPolicyOverridesEveryProjectionWithoutChangingRoutes
 			},
 		},
 		{
-			name: "raw forces none",
+			// The runtime SinkPolicy override no longer applies to the
+			// LOCAL projection — that must stay plan-deterministic so the
+			// event-history writer's Reproject gate (which pins the
+			// profile fingerprint to writer.localProfiles[bucket] at
+			// boot) accepts it. Optional destinations still honor the
+			// runtime policy.
+			name: "raw forces none on optional, local stays compiled",
 			context: func() context.Context {
 				return legacyredaction.WithSinkPolicy(context.Background(), legacyredaction.SinkPolicyRaw)
 			},
-			wantLocal: redaction.ProfileNone,
+			wantLocal: redaction.ProfileStrict,
 			wantOptional: []redaction.ProfileName{
 				redaction.ProfileNone, redaction.ProfileNone, redaction.ProfileNone,
 			},
 		},
 		{
-			name: "redact forces sensitive",
+			name: "redact forces sensitive on optional, local stays compiled",
 			context: func() context.Context {
 				return legacyredaction.WithSinkPolicy(context.Background(), legacyredaction.SinkPolicyRedact)
 			},
-			wantLocal: redaction.ProfileSensitive,
+			wantLocal: redaction.ProfileStrict,
 			wantOptional: []redaction.ProfileName{
 				redaction.ProfileSensitive, redaction.ProfileSensitive, redaction.ProfileSensitive,
 			},
@@ -583,7 +589,11 @@ func TestLocalLogPipelineSinkPolicyOverridesEveryProjectionWithoutChangingRoutes
 func TestLocalLogPipelineSpecialPathsInheritSinkPolicyContext(t *testing.T) {
 	test := findCatalogLogCase(t, observability.BucketSecurityFinding)
 
-	t.Run("local only raw", func(t *testing.T) {
+	// Local durable projection now uses the plan-configured profile
+	// regardless of runtime sink-policy, so the event-history writer's
+	// Reproject gate (fixed to writer.localProfiles[bucket] at boot)
+	// accepts it. Runtime policy still governs optional destinations.
+	t.Run("local only raw keeps compiled local profile", func(t *testing.T) {
 		pipeline, appender := mustPipeline(
 			t, sinkPolicyProjectionSource(redaction.ProfileStrict), mustEngine(t),
 		)
@@ -606,11 +616,11 @@ func TestLocalLogPipelineSpecialPathsInheritSinkPolicyContext(t *testing.T) {
 				outcome.LocalPersisted(), len(calls), len(outcome.OptionalWork()), len(outcome.OptionalFailures()))
 		}
 		assertProjectionProfileAndContent(
-			t, calls[0].projection, redaction.ProfileNone, "local-only@example.test",
+			t, calls[0].projection, redaction.ProfileStrict, "local-only@example.test",
 		)
 	})
 
-	t.Run("imported redact", func(t *testing.T) {
+	t.Run("imported redact overrides optional not local", func(t *testing.T) {
 		pipeline, appender := mustPipeline(
 			t, sinkPolicyProjectionSource(redaction.ProfileNone), mustEngine(t),
 		)
@@ -633,7 +643,7 @@ func TestLocalLogPipelineSpecialPathsInheritSinkPolicyContext(t *testing.T) {
 				outcome.LocalPersisted(), len(calls), len(outcome.OptionalWork()), len(outcome.OptionalFailures()))
 		}
 		assertProjectionProfileAndContent(
-			t, calls[0].projection, redaction.ProfileSensitive, "imported@example.test",
+			t, calls[0].projection, redaction.ProfileNone, "imported@example.test",
 		)
 		for index, work := range outcome.OptionalWork() {
 			if work.Identity().OriginDestination() != "upstream" {
@@ -660,6 +670,9 @@ func TestLocalLogPipelineSinkPolicyIsPerRecordUnderConcurrentBatchUse(t *testing
 		policy legacyredaction.SinkPolicy
 		want   expected
 	}{
+		// Local durable projection is plan-deterministic (writer's binding
+		// pins the profile at boot); runtime policy still overrides
+		// optional destinations.
 		{legacyredaction.SinkPolicyDefault, expected{
 			local: redaction.ProfileStrict,
 			optional: []redaction.ProfileName{
@@ -667,13 +680,13 @@ func TestLocalLogPipelineSinkPolicyIsPerRecordUnderConcurrentBatchUse(t *testing
 			},
 		}},
 		{legacyredaction.SinkPolicyRaw, expected{
-			local: redaction.ProfileNone,
+			local: redaction.ProfileStrict,
 			optional: []redaction.ProfileName{
 				redaction.ProfileNone, redaction.ProfileNone, redaction.ProfileNone,
 			},
 		}},
 		{legacyredaction.SinkPolicyRedact, expected{
-			local: redaction.ProfileSensitive,
+			local: redaction.ProfileStrict,
 			optional: []redaction.ProfileName{
 				redaction.ProfileSensitive, redaction.ProfileSensitive, redaction.ProfileSensitive,
 			},

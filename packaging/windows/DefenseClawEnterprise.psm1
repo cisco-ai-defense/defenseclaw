@@ -25129,4 +25129,353 @@ function Invoke-DefenseClawEnterpriseLifecycle {
     }
 }
 
+
+function Restore-DefenseClawTransactionGatewayWithoutBroker {
+    param(
+        [Parameter(Mandatory)]$BrokerState,
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName
+    )
+    # Only Get-DefenseClawTransactionServiceStates output is accepted. Both a
+    # legacy synthesized row and an explicit absent row have this exact shape;
+    # a present/running Broker can never enter the compatibility lane.
+    if ($BrokerState.PSObject.Properties['existed'] -eq $null -or
+        $BrokerState.existed -isnot [bool] -or
+        [bool]$BrokerState.existed -or
+        $BrokerState.PSObject.Properties['running'] -eq $null -or
+        $BrokerState.running -isnot [bool] -or
+        [bool]$BrokerState.running -or
+        $BrokerState.PSObject.Properties['start_mode'] -eq $null -or
+        [Convert]::ToInt32($BrokerState.start_mode) -ne 0) {
+        throw 'transaction Gateway no-Broker restore requires an exact absent Broker preimage'
+    }
+    Assert-DefenseClawOwnedServiceOrAbsent `
+        -Name $GatewayServiceName `
+        -ExpectedGatewayPath $Layout.GatewayPath
+    if (-not (Test-DefenseClawServiceExists -Name $GatewayServiceName)) {
+        throw 'transaction Gateway disappeared before its Broker boundary could be restored'
+    }
+    [void](Invoke-DefenseClawNative -File $script:ScExe -Arguments @(
+        'config', $GatewayServiceName, 'depend=', '/'
+    ))
+    Set-DefenseClawServiceEnvironment `
+        -Name $GatewayServiceName `
+        -RuntimeDirectory $Layout.RuntimeDirectory `
+        -ConfigPath $Layout.ConfigPath `
+        -AuthorizationDirectory $Layout.AuthorizationDirectory `
+        -GatewayServiceName $GatewayServiceName `
+        -LogPath $Layout.GatewayLogPath `
+        -AgentApplicationControlAttested:$Layout.AgentApplicationControlAttested `
+        -ClaudeEffectivePolicyVerified:$Layout.ClaudeEffectivePolicyVerified
+}
+
+function Write-DefenseClawStatePurgeIntentAtomic {
+    param(
+        [Parameter(Mandatory)][string]$Value,
+        [Parameter(Mandatory)][hashtable]$Layout
+    )
+    $destination = Assert-DefenseClawDescendant `
+        -Path $Layout.PurgeIntentPath `
+        -Root $Layout.LifecycleLockDirectory `
+        -Label 'state purge intent'
+    Assert-DefenseClawNoReparsePath -Path $destination -AllowMissingLeaf
+    $temporary = "$destination.new.$([Guid]::NewGuid().ToString('N'))"
+    try {
+        [IO.File]::WriteAllText(
+            $temporary,
+            $Value,
+            [Text.UTF8Encoding]::new($false)
+        )
+        Set-DefenseClawPathAcl `
+            -Path $temporary `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+        if ([IO.File]::Exists($destination)) {
+            # FileSystemProvider's Move-Item -Force deletes the destination
+            # before moving the staged file on Windows. File.Replace keeps the
+            # prior or next authenticated phase continuously visible.
+            #
+            # File.Replace requires a non-empty backup path on both .NET
+            # Framework and modern .NET; passing $null throws
+            # "The path is not of a legal form." Stage a unique
+            # same-directory backup, run Replace, then retire the backup
+            # after the swap completes. This mirrors the atomic-replace
+            # pattern in the sibling helper above (~line 3851).
+            $backup = "$destination.backup.$([Guid]::NewGuid().ToString('N'))"
+            Assert-DefenseClawNoReparsePath -Path $backup -AllowMissingLeaf
+            if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                throw "state purge intent backup path unexpectedly exists: $backup"
+            }
+            try {
+                [IO.File]::Replace($temporary, $destination, $backup, $true)
+            }
+            finally {
+                if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $backup) {
+                    Microsoft.PowerShell.Management\Remove-Item `
+                        -LiteralPath $backup `
+                        -Force
+                }
+            }
+        }
+        else {
+            # File.Move is no-replace for the first publication.
+            [IO.File]::Move($temporary, $destination)
+        }
+        Set-DefenseClawPathAcl `
+            -Path $destination `
+            -Kind AdminFile `
+            -GatewayServiceSID $script:AdministratorsSID
+    }
+    finally {
+        if (Microsoft.PowerShell.Management\Test-Path -LiteralPath $temporary) {
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $temporary `
+                -Force
+        }
+    }
+}
+
+function Get-DefenseClawManagedHookContractCleanupReceipt {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        $Metadata,
+        [switch]$Required
+    )
+    $path = Assert-DefenseClawDescendant `
+        -Path $Layout.ManagedHookContractCleanupReceiptPath `
+        -Root $Layout.LifecycleLockDirectory `
+        -Label 'managed hook contract cleanup receipt'
+    if (-not (Microsoft.PowerShell.Management\Test-Path `
+            -LiteralPath $path `
+            -PathType Leaf)) {
+        if ($Required) {
+            throw 'protected managed hook contract cleanup receipt is missing'
+        }
+        return $null
+    }
+    $receipt = Get-DefenseClawTargetRuntimeExchangeValue `
+        -Path $path `
+        -TransactionDirectory $Layout.LifecycleLockDirectory
+    $schema = $receipt.PSObject.Properties['schema_version']
+    $claimsProperty = $receipt.PSObject.Properties['claims']
+    if ($null -eq $schema -or $schema.Value -is [bool] -or
+        [Convert]::ToInt64($schema.Value) -ne 1 -or
+        [string]$receipt.phase -cnotin @('prepared', 'finalized') -or
+        [string]$receipt.identity_sha256 -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+        [string]$receipt.scope_sha256 -cne [string]$Layout.PurgeScopeSHA256 -or
+        [string]$receipt.manifest_sha256 -cnotmatch '^[0-9a-f]{64}$' -or
+        [string]$receipt.manifest_fingerprint -cnotmatch '^sha256:[0-9a-f]{64}$' -or
+        [string]$receipt.deployment_generation_id -cnotmatch '^[0-9a-f]{32}$' -or
+        -not [string]::Equals(
+            [string]$receipt.gateway_service_name,
+            $GatewayServiceName,
+            [StringComparison]::OrdinalIgnoreCase
+        ) -or
+        $null -eq $claimsProperty -or
+        $null -eq $claimsProperty.Value -or
+        $claimsProperty.Value -isnot [Array] -or
+        @($claimsProperty.Value).Count -gt 384) {
+        throw 'protected managed hook contract cleanup receipt has an invalid schema or scope binding'
+    }
+    $seen = @{}
+    foreach ($claim in @($claimsProperty.Value)) {
+        $entryPresent = $claim.PSObject.Properties['entry_present']
+        $superseded = $claim.PSObject.Properties['superseded']
+        $started = $claim.PSObject.Properties['application_started']
+        $completed = $claim.PSObject.Properties['completed']
+        if ($null -eq $entryPresent -or $entryPresent.Value -isnot [bool] -or
+            ($null -ne $superseded -and $superseded.Value -isnot [bool]) -or
+            ($null -ne $started -and $started.Value -isnot [bool]) -or
+            ($null -ne $completed -and $completed.Value -isnot [bool]) -or
+            [string]$claim.connector -cnotin @('claudecode', 'codex', 'cursor') -or
+            [string]$claim.sid -cnotmatch '^S-\d-\d+(?:-\d+)+$' -or
+            [string]::IsNullOrWhiteSpace([string]$claim.data_dir) -or
+            -not [string]::Equals(
+                [string]$claim.gateway_service_name,
+                $GatewayServiceName,
+                [StringComparison]::OrdinalIgnoreCase
+            ) -or
+            ([bool]$entryPresent.Value -and
+                [string]$claim.entry_sha256 -cnotmatch '^sha256:[0-9a-f]{64}$') -or
+            (-not [bool]$entryPresent.Value -and
+                -not [string]::IsNullOrEmpty([string]$claim.entry_sha256)) -or
+            (-not [bool]$entryPresent.Value -and
+                $null -ne $started -and [bool]$started.Value) -or
+            ($null -ne $superseded -and [bool]$superseded.Value -and
+                ([bool]$entryPresent.Value -or
+                    ($null -ne $started -and [bool]$started.Value)))) {
+            throw 'protected managed hook contract cleanup receipt contains an invalid claim'
+        }
+        $key = ([string]$claim.connector + [char]0 +
+            ([string]$claim.sid).ToUpperInvariant())
+        if ($seen.ContainsKey($key)) {
+            throw 'protected managed hook contract cleanup receipt contains a duplicate claim'
+        }
+        $seen[$key] = $true
+    }
+    if ([string]$receipt.phase -ceq 'finalized') {
+        foreach ($claim in @($claimsProperty.Value)) {
+            $completed = $claim.PSObject.Properties['completed']
+            if ($null -eq $completed -or -not [bool]$completed.Value) {
+                throw 'finalized managed hook contract cleanup receipt contains an incomplete claim'
+            }
+        }
+    }
+    if ($null -ne $Metadata) {
+        Assert-DefenseClawMetadataIdentity `
+            -Metadata $Metadata `
+            -GatewayServiceName $GatewayServiceName `
+            -GuardianServiceName $GuardianServiceName
+        $activationProperty = $Metadata.PSObject.Properties[
+            'managed_hooks_activation'
+        ]
+        if ($null -eq $activationProperty -or
+            $null -eq $activationProperty.Value) {
+            throw 'contract cleanup receipt requires protected activation evidence'
+        }
+        $activation = Assert-DefenseClawManagedHooksActivationRecord `
+            -Record $activationProperty.Value
+        if ([string]$receipt.manifest_sha256 -cne
+                [string]$activation.manifest_sha256 -or
+            [string]$receipt.deployment_generation_id -cne
+                [string]$activation.deployment_generation_id -or
+            @($claimsProperty.Value).Count -ne [int]$activation.target_count) {
+            throw 'contract cleanup receipt does not match the inactive deployment tombstone'
+        }
+    }
+    return $receipt
+}
+
+function Remove-DefenseClawManagedHookContractCleanupReceipt {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        $Metadata,
+        [switch]$AllowPrepared
+    )
+    $receipt = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $Metadata
+    if ($null -eq $receipt) { return $false }
+    if (-not $AllowPrepared -and [string]$receipt.phase -cne 'finalized') {
+        throw 'refusing to retire an incomplete managed hook contract cleanup receipt'
+    }
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Layout.ManagedHookContractCleanupReceiptPath `
+        -Force
+    if (Microsoft.PowerShell.Management\Test-Path `
+        -LiteralPath $Layout.ManagedHookContractCleanupReceiptPath) {
+        throw 'managed hook contract cleanup receipt survived retirement'
+    }
+    return $true
+}
+
+function Invoke-DefenseClawManagedHookContractCleanup {
+    param(
+        [Parameter(Mandatory)][hashtable]$Layout,
+        [Parameter(Mandatory)][hashtable]$Source,
+        [Parameter(Mandatory)][string]$GatewayServiceName,
+        [Parameter(Mandatory)][string]$GuardianServiceName,
+        [Parameter(Mandatory)]$Metadata
+    )
+    $receipt = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $Metadata `
+        -Required
+    if ([string]$receipt.phase -ceq 'finalized') {
+        if (Microsoft.PowerShell.Management\Test-Path `
+                -LiteralPath $Layout.ManagedHookContractCleanupReportPath) {
+            # The finalized receipt is the authoritative durable result. A
+            # crash may truncate this disposable report after receipt commit,
+            # so authenticate its exact path/type/ACL but do not require its
+            # JSON to remain parseable before retirement.
+            $staleReportPath = Assert-DefenseClawDescendant `
+                -Path $Layout.ManagedHookContractCleanupReportPath `
+                -Root $Layout.LifecycleLockDirectory `
+                -Label 'managed hook contract cleanup report'
+            $nativeSecurity = Initialize-DefenseClawNativeSecurity
+            $staleReportSecurity =
+                $nativeSecurity::GetRegularFileSecuritySnapshotNoFollowIfExists(
+                    $staleReportPath
+                )
+            if ($null -eq $staleReportSecurity) {
+                throw 'stale managed hook contract cleanup report is not a regular no-follow file'
+            }
+            $expectedReportAcl = New-DefenseClawCanonicalPathAcl `
+                -IsDirectory:$false `
+                -Kind AdminFile `
+                -GatewayServiceSID $script:AdministratorsSID
+            Assert-DefenseClawCanonicalRawPathAcl `
+                -Path $staleReportPath `
+                -Actual ([Security.AccessControl.RawSecurityDescriptor]::new(
+                    [byte[]]$staleReportSecurity.SecurityDescriptor,
+                    0
+                )) `
+                -Expected $expectedReportAcl
+            Microsoft.PowerShell.Management\Remove-Item `
+                -LiteralPath $staleReportPath `
+                -Force
+        }
+        return $receipt
+    }
+    [void](Assert-DefenseClawSourceDescriptorCurrent -Source $Source)
+    [void](New-DefenseClawTargetRuntimeExchangeFile `
+        -Path $Layout.ManagedHookContractCleanupReportPath `
+        -TransactionDirectory $Layout.LifecycleLockDirectory)
+    $probe = Invoke-DefenseClawProcess `
+        -File ([string]$Source.path) `
+        -Arguments @(
+            'enterprise', 'windows', 'managed-hook-contract-cleanup',
+            '--receipt', [string]$Layout.ManagedHookContractCleanupReceiptPath,
+            '--output', [string]$Layout.ManagedHookContractCleanupReportPath,
+            '--scope-sha256', [string]$Layout.PurgeScopeSHA256,
+            '--manifest-sha256', [string]$receipt.manifest_sha256,
+            '--deployment-generation-id',
+                [string]$receipt.deployment_generation_id,
+            '--gateway-service-name', $GatewayServiceName
+        )
+    $report = Get-DefenseClawTargetRuntimeExchangeValue `
+        -Path $Layout.ManagedHookContractCleanupReportPath `
+        -TransactionDirectory $Layout.LifecycleLockDirectory
+    $ok = $report.PSObject.Properties['ok']
+    if ([int]$probe.exit_code -ne 0 -or $null -eq $ok -or
+        $ok.Value -isnot [bool] -or -not [bool]$ok.Value -or
+        [int64]$report.schema_version -ne 1 -or
+        [string]$report.scope_sha256 -cne [string]$Layout.PurgeScopeSHA256 -or
+        [string]$report.phase -cne 'finalized' -or
+        [int64]$report.target_count -ne @($receipt.claims).Count -or
+        [int64]$report.removed_count -lt 0 -or
+        [int64]$report.already_absent_count -lt 0 -or
+        [int64]$report.superseded_count -lt 0 -or
+        ([int64]$report.removed_count +
+            [int64]$report.already_absent_count +
+            [int64]$report.superseded_count) -ne
+                [int64]$report.target_count) {
+        $detail = ConvertTo-DefenseClawBoundedDiagnostic -Value @(
+            [string]$report.error,
+            $probe.output
+        )
+        throw "native managed hook contract cleanup failed: $detail"
+    }
+    $finalized = Get-DefenseClawManagedHookContractCleanupReceipt `
+        -Layout $Layout `
+        -GatewayServiceName $GatewayServiceName `
+        -GuardianServiceName $GuardianServiceName `
+        -Metadata $Metadata `
+        -Required
+    if ([string]$finalized.phase -cne 'finalized') {
+        throw 'native managed hook contract cleanup did not finalize its protected receipt'
+    }
+    Microsoft.PowerShell.Management\Remove-Item `
+        -LiteralPath $Layout.ManagedHookContractCleanupReportPath `
+        -Force
+    return $finalized
+}
 Microsoft.PowerShell.Core\Export-ModuleMember -Function Invoke-DefenseClawEnterpriseLifecycle

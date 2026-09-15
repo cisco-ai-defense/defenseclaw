@@ -27,6 +27,15 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 	if command.Use != "teardown-managed-hooks" {
 		t.Fatalf("Use = %q", command.Use)
 	}
+	// Flags whose scope is limited to specific teardown actions. If any of
+	// these were exposed on rollback/status by accident, the PowerShell
+	// teardown module could pass a receipt-scoped argument during rollback
+	// and silently apply cleanup semantics against a rolled-back journal.
+	scopedFlags := map[string]map[string]bool{
+		"purge-contract-locks":     {"finalize": true},
+		"contract-cleanup-receipt": {"prepare": true, "finalize": true},
+		"contract-cleanup-scope":   {"prepare": true, "finalize": true},
+	}
 	var actions []string
 	for _, child := range command.Commands() {
 		if !child.Hidden {
@@ -34,6 +43,15 @@ func TestWindowsManagedHooksTeardownCommandIsHiddenAndBounded(t *testing.T) {
 		}
 		if child.Flags().Lookup("json") == nil {
 			t.Fatalf("%s action is missing --json", child.Name())
+		}
+		for flag, allowed := range scopedFlags {
+			present := child.Flags().Lookup(flag) != nil
+			if allowed[child.Name()] && !present {
+				t.Fatalf("%s action is missing --%s", child.Name(), flag)
+			}
+			if !allowed[child.Name()] && present {
+				t.Fatalf("%s action unexpectedly accepts --%s", child.Name(), flag)
+			}
 		}
 		actions = append(actions, child.Name())
 	}
@@ -105,6 +123,34 @@ func TestWindowsManagedHooksTeardownTargetsCanonicalExactSet(t *testing.T) {
 	}
 	if !targets[2].Deferred {
 		t.Fatal("deferred manifest authorization was not preserved in teardown identity")
+	}
+}
+
+func TestWindowsManagedHooksTeardownTargetsAcceptEntraIDForAllConnectors(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	home := filepath.Clean(`C:\Users\entra-user`)
+	manifest := enterprisehooks.Manifest{Version: 1, Targets: []enterprisehooks.ManifestTarget{
+		{SID: entraSID, UserHome: home, Connector: "claudecode", AgentVersion: "2.1.152"},
+		{SID: entraSID, UserHome: home, Connector: "codex", AgentVersion: "0.131.0"},
+		{SID: entraSID, UserHome: home, Connector: "cursor", AgentVersion: "1.7.0"},
+	}}
+
+	targets, claude, codex, cursor, err := windowsManagedHooksTeardownTargets(manifest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 3 || len(claude) != 1 || claude[0] != entraSID ||
+		len(codex) != 1 || codex[0].SID != entraSID ||
+		len(cursor) != 1 || cursor[0].SID != entraSID {
+		t.Fatalf(
+			"Microsoft Entra ID teardown targets = all:%+v claude:%v codex:%+v cursor:%+v",
+			targets, claude, codex, cursor,
+		)
+	}
+	wantDataDir := filepath.Join(home, ".defenseclaw")
+	if !sameWindowsEnterprisePathCLI(codex[0].DataDir, wantDataDir) ||
+		!sameWindowsEnterprisePathCLI(cursor[0].DataDir, wantDataDir) {
+		t.Fatalf("Microsoft Entra ID teardown data dirs = codex:%q cursor:%q, want %q", codex[0].DataDir, cursor[0].DataDir, wantDataDir)
 	}
 }
 

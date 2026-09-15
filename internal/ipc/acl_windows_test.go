@@ -6,23 +6,152 @@
 package ipc
 
 import (
+	"os"
+	"path/filepath"
+	"runtime"
 	"testing"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
 
+func TestBaselineIPCDirectoryACLReappliesAfterRestart(t *testing.T) {
+	// PowerShell's canonical ManagedIPCDirectory ReadAndExecute ACE serializes
+	// to this exact mask. The gateway must preserve it on every restart rather
+	// than publishing a second, semantically similar DACL shape.
+	const wantAuthenticatedUsersMask windows.ACCESS_MASK = 0x1200a9
+
+	root, err := os.MkdirTemp(os.TempDir(), "dci-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	dir := filepath.Join(root, "ipc")
+	if err := os.Mkdir(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalDescriptor, err := windows.GetNamedSecurityInfo(
+		dir, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	originalDACL, _, err := originalDescriptor.DACL()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = windows.SetNamedSecurityInfo(
+			dir, windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+			nil, nil, originalDACL, nil,
+		)
+		runtime.KeepAlive(originalDescriptor)
+	})
+
+	gatewaySID := testGatewayServiceSID(t)
+	authenticatedUsers, err := windows.CreateWellKnownSid(windows.WinAuthenticatedUserSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for restart := 0; restart < 2; restart++ {
+		entries, buildErr := baselineIPCACEsForGatewaySID(aclObjectDirectory, gatewaySID)
+		if buildErr != nil {
+			t.Fatal(buildErr)
+		}
+		if err := applyBaselineIPCACLEntries(dir, entries); err != nil {
+			t.Fatalf("restart %d directory ACL: %v", restart+1, err)
+		}
+		directoryMask := allowedMaskForSID(t, dir, authenticatedUsers)
+		if directoryMask != wantAuthenticatedUsersMask {
+			t.Fatalf(
+				"restart %d Authenticated Users directory mask = %#x, want PowerShell canonical %#x",
+				restart+1,
+				directoryMask,
+				wantAuthenticatedUsersMask,
+			)
+		}
+		if directoryMask&(windows.FILE_WRITE_DATA|windows.FILE_APPEND_DATA|windows.WRITE_DAC) != 0 {
+			t.Fatalf("restart %d directory mask %#x grants client mutation rights", restart+1, directoryMask)
+		}
+	}
+}
+
+func allowedMaskForSID(t *testing.T, path string, want *windows.SID) windows.ACCESS_MASK {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(
+		path, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("DACL for %s: %v", path, err)
+	}
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			t.Fatal(err)
+		}
+		if ace == nil || ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if sid.Equals(want) {
+			return ace.Mask
+		}
+	}
+	t.Fatalf("allow ACE for %s was not found on %s", want, path)
+	return 0
+}
+
 // TestBaselineIPCACEsShapeDirectory asserts the four-ACE table
 // applyBaselineIPCACL writes for a DIRECTORY object matches spec 004
 // REQ-03 + REQ-04, with the Authenticated Users mask constrained to
-// traverse+list (CR spec-004:PRRT_kwDORuAK-s6ankzk — refuses
-// FILE_ADD_FILE / FILE_ADD_SUBDIRECTORY leakage).
+// traverse+list+metadata/security read (CR spec-004:PRRT_kwDORuAK-s6ankzk —
+// refuses FILE_ADD_FILE / FILE_ADD_SUBDIRECTORY leakage). AVC needs the
+// metadata rights to validate the endpoint after the gateway recreates it.
 //
 // The ACL-shape test supplies a syntactically valid NT SERVICE SID directly so
 // it does not depend on DefenseClawGateway being registered on the CI runner.
 func TestBaselineIPCACEsShapeDirectory(t *testing.T) {
 	assertBaselineIPCACEs(t, aclObjectDirectory,
-		windows.FILE_TRAVERSE|windows.FILE_LIST_DIRECTORY)
+		windows.FILE_TRAVERSE|windows.FILE_LIST_DIRECTORY|
+			windows.FILE_READ_EA|windows.FILE_READ_ATTRIBUTES|windows.READ_CONTROL|
+			windows.SYNCHRONIZE)
+}
+
+func TestBaselineIPCACEsDirectoryClientRightsStayReadOnly(t *testing.T) {
+	entries, err := baselineIPCACEsForGatewaySID(aclObjectDirectory, testGatewayServiceSID(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mask := entries[3].AccessPermissions
+	for _, required := range []windows.ACCESS_MASK{
+		windows.FILE_TRAVERSE,
+		windows.FILE_LIST_DIRECTORY,
+		windows.FILE_READ_EA,
+		windows.FILE_READ_ATTRIBUTES,
+		windows.READ_CONTROL,
+		windows.SYNCHRONIZE,
+	} {
+		if mask&required == 0 {
+			t.Errorf("Authenticated Users directory mask %#x is missing required right %#x", mask, required)
+		}
+	}
+	for _, refused := range []windows.ACCESS_MASK{
+		windows.FILE_WRITE_DATA,  // FILE_ADD_FILE for directory objects
+		windows.FILE_APPEND_DATA, // FILE_ADD_SUBDIRECTORY for directory objects
+		windows.FILE_WRITE_ATTRIBUTES,
+		windows.WRITE_DAC,
+		windows.WRITE_OWNER,
+		windows.DELETE,
+	} {
+		if mask&refused != 0 {
+			t.Errorf("Authenticated Users directory mask %#x includes refused right %#x", mask, refused)
+		}
+	}
 }
 
 // TestBaselineIPCACEsShapeSocketFile asserts the socket-file variant:

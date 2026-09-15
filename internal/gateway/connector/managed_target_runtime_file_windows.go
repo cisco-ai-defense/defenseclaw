@@ -26,6 +26,19 @@ const managedTargetRuntimeStageAttempts = 128
 var managedTargetRuntimeBeforePublish func(string) error
 
 func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace bool) error {
+	target, err := windowsManagedTargetRuntimeSID()
+	if err != nil {
+		return err
+	}
+	return writeManagedTargetRuntimeFileForTarget(path, data, replace, target)
+}
+
+func writeManagedTargetRuntimeFileForTarget(
+	path string,
+	data []byte,
+	replace bool,
+	target *windows.SID,
+) error {
 	if len(data) > atomicTransformMaxConfigBytes {
 		return fmt.Errorf(
 			"managed target runtime file exceeds %d-byte limit",
@@ -39,9 +52,8 @@ func writeManagedTargetRuntimeFilePlatform(path string, data []byte, replace boo
 	if err := validateAtomicTransformBoundLeaf(name); err != nil {
 		return fmt.Errorf("validate managed target runtime file name: %w", err)
 	}
-	target, err := windowsManagedTargetRuntimeSID()
-	if err != nil {
-		return err
+	if target == nil || !windowsManagedHookContractInteractiveUserSID(target) {
+		return fmt.Errorf("managed target runtime owner is not an interactive user")
 	}
 	descriptor, err := windowsManagedTargetRuntimeSecurityDescriptor(target)
 	if err != nil {
@@ -159,10 +171,7 @@ func windowsManagedTargetRuntimeSID() (*windows.SID, error) {
 	if err != nil || target == nil {
 		return nil, fmt.Errorf("resolve authenticated effective target SID: %w", err)
 	}
-	if target.IsWellKnown(windows.WinLocalSystemSid) ||
-		target.IsWellKnown(windows.WinLocalServiceSid) ||
-		target.IsWellKnown(windows.WinNetworkServiceSid) ||
-		target.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+	if !windowsManagedHookContractInteractiveUserSID(target) {
 		return nil, fmt.Errorf("effective Windows identity is not an interactive target user")
 	}
 	return target, nil
