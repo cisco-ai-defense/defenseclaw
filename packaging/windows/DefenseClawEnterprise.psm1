@@ -2975,27 +2975,6 @@ function Assert-DefenseClawCanonicalRawPathAcl {
         [Security.AccessControl.ControlFlags]::DiscretionaryAclProtected
     )
     if (([int]$Actual.ControlFlags -band $protectedFlag) -eq 0) {
-        # Diagnostic (retained until c061 root cause is confirmed): name the
-        # actual descriptor flags AND the on-disk Owner/Group SIDs AND the
-        # first three frames of the call stack. The prior ADMINFILE-DEBUG
-        # pushes proved that Set-DefenseClawPathAcl(AdminFile) is not being
-        # invoked for this file, so a different write path is producing an
-        # unprotected DACL. This diagnostic identifies which code path reads
-        # (or wrote) the file so the actual writer can be fixed.
-        $expectedFlags = [int]$expectedDescriptor.ControlFlags
-        $actualFlags = [int]$Actual.ControlFlags
-        $actualOwner = if ($null -eq $Actual.Owner) { '<null>' } else { $Actual.Owner.Value }
-        $actualGroup = if ($null -eq $Actual.Group) { '<null>' } else { $Actual.Group.Value }
-        [Console]::Error.WriteLine(
-            "[DACL-DEBUG] path=$Path expectedFlags=0x$($expectedFlags.ToString('x8')) actualFlags=0x$($actualFlags.ToString('x8')) actualOwner=$actualOwner actualGroup=$actualGroup"
-        )
-        $callers = Microsoft.PowerShell.Utility\Get-PSCallStack |
-            Microsoft.PowerShell.Utility\Select-Object -First 6 -Skip 1
-        foreach ($frame in $callers) {
-            [Console]::Error.WriteLine(
-                "[DACL-DEBUG] caller: $($frame.FunctionName) @ $($frame.ScriptName):$($frame.ScriptLineNumber)"
-            )
-        }
         throw "managed DACL is not protected after exact ACL replacement: $Path"
     }
     $ownerSID = if ($null -eq $Actual.Owner) {
@@ -3131,18 +3110,13 @@ function Set-DefenseClawPathAcl {
     # For file kinds (not directories) that must have SE_DACL_PROTECTED
     # stamped, bypass PowerShell's Set-Acl and go directly through
     # SetSecurityInfo with an explicit PROTECTED_DACL_SECURITY_INFORMATION
-    # flag. Windows PowerShell 5.1's Set-Acl, when applying a fresh
-    # FileSecurity to a file whose destination existed prior to an
-    # atomic Move-Item -Force replacement, has been observed to omit
-    # the protection flag from the underlying SetSecurityInfo call
-    # (actualFlags=0x8004 vs expectedFlags=0x9004 in the
-    # Assert-DefenseClawCanonicalRawPathAcl diagnostic). The native
-    # writer already used for RuntimeSecretFile explicitly stamps
-    # PROTECTED_DACL_SECURITY_INFORMATION and enforces the OWNER +
-    # GROUP + DACL bindings in one atomic call. Extend it to AdminFile
+    # flag. Set-Acl derives that flag from the FileSecurity object rather
+    # than requesting it, and it cannot bind owner, group and DACL in a
+    # single call. The native writer already used for RuntimeSecretFile
+    # stamps PROTECTED_DACL_SECURITY_INFORMATION explicitly and enforces
+    # the OWNER + GROUP + DACL bindings atomically. Extend it to AdminFile
     # files by passing expectedSize=0 (no fixed-length invariant).
     if (-not $isDirectory -and $Kind -eq 'AdminFile') {
-        [Console]::Error.WriteLine("[ADMINFILE-DEBUG] entering native branch path=$Path")
         $nativeSecurity = Initialize-DefenseClawNativeSecurity
         $before = $nativeSecurity::GetRegularFileSecuritySnapshotNoFollow(
             $Path,
@@ -3151,19 +3125,11 @@ function Set-DefenseClawPathAcl {
         $sddl = $security.GetSecurityDescriptorSddlForm(
             [Security.AccessControl.AccessControlSections]::All
         )
-        [Console]::Error.WriteLine("[ADMINFILE-DEBUG] sddl=$sddl")
         $after = $nativeSecurity::SetRegularFileSecurityDescriptorNoFollow(
             $Path,
             $sddl,
             [uint32]0,
             [string]$before.Identity
-        )
-        $afterFlags = [int]([Security.AccessControl.RawSecurityDescriptor]::new(
-            [byte[]]$after.SecurityDescriptor,
-            0
-        ).ControlFlags)
-        [Console]::Error.WriteLine(
-            "[ADMINFILE-DEBUG] afterFlags=0x$($afterFlags.ToString('x8'))"
         )
         if ([string]$after.Identity -cne [string]$before.Identity) {
             throw "managed AdminFile identity changed during ACL replacement: $Path"
@@ -3177,7 +3143,6 @@ function Set-DefenseClawPathAcl {
             -Expected $security
         return
     }
-    [Console]::Error.WriteLine("[ADMINFILE-DEBUG] SKIP native branch (isDir=$isDirectory kind=$Kind) path=$Path")
     Microsoft.PowerShell.Security\Set-Acl `
         -LiteralPath $Path `
         -AclObject $security `
