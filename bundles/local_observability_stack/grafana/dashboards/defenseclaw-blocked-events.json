@@ -651,8 +651,8 @@
     {
       "id": 13,
       "type": "logs",
-      "title": "Blocked event records — rules, reason, agent, and correlation",
-      "description": "Canonical hook decisions. Rules are verdict-ordered. Reason and target follow post-redaction projection. Expand for all fields; pivot by agent/evaluation/operation/trace without treating adjacency as causality.",
+      "title": "Recent blocked events",
+      "description": "A concise operator view of canonical hook decisions. Expand a row only when you need the raw, post-redaction record or advanced correlation fields.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -669,7 +669,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}ENFORCED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · target={{.body_defenseclaw_destination_app}} · rules={{.rule_ids}} · reason={{.body_defenseclaw_guardrail_reason}} · evaluation={{.body_defenseclaw_evaluation_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}BLOCKED{{else}}WOULD BLOCK{{end}} · {{.connector}} · {{.body_defenseclaw_hook_event}} · {{.body_defenseclaw_security_severity}} · agent {{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}}\\nRules: {{.rule_ids}}\\nWhy: {{.body_defenseclaw_guardrail_reason}}\"",
           "refId": "A"
         }
       ],
@@ -685,7 +685,7 @@
     {
       "id": 14,
       "type": "row",
-      "title": "Projected prompt/tool evidence and pivots",
+      "title": "Why it was blocked",
       "collapsed": false,
       "gridPos": {
         "x": 0,
@@ -697,8 +697,8 @@
     {
       "id": 15,
       "type": "logs",
-      "title": "Projected blocked tool calls",
-      "description": "Canonical tool.invocation.blocked records. Arguments are already projected for this destination and reflect its redaction profile; this panel never reverses redaction.",
+      "title": "Rules and what they mean",
+      "description": "Each decision's exact verdict-ordered rule IDs and the human-readable match explanation from canonical, post-redaction telemetry.",
       "datasource": {
         "type": "loki",
         "uid": "defenseclaw-loki"
@@ -706,7 +706,7 @@
       "gridPos": {
         "x": 0,
         "y": 38,
-        "w": 12,
+        "w": 15,
         "h": 11
       },
       "targets": [
@@ -715,7 +715,7 @@
             "type": "loki",
             "uid": "defenseclaw-loki"
           },
-          "expr": "{service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=\"tool.invocation.blocked\" | connector=~\"$connector\" | body_gen_ai_agent_id=~\"$agent\" | line_format \"{{.connector}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · tool={{.body_gen_ai_tool_name}} · args={{.body_gen_ai_tool_call_arguments}} · content_state={{.body_defenseclaw_content_input_state}} · call={{.body_gen_ai_tool_call_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
+          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"Rules: {{.rule_ids}}\\nMeaning: {{.body_defenseclaw_guardrail_reason}}\\nSeen on: {{.connector}} · {{.body_defenseclaw_hook_event}}\"",
           "refId": "A"
         }
       ],
@@ -730,43 +730,25 @@
     },
     {
       "id": 16,
-      "type": "logs",
-      "title": "Prompt-surface decisions",
-      "description": "Blocked prompt decisions with rules and post-redaction reason. Prompt bodies are not duplicated here; use Agent360 when the route permits projected content.",
-      "datasource": {
-        "type": "loki",
-        "uid": "defenseclaw-loki"
-      },
+      "type": "text",
+      "title": "Rule family guide",
+      "description": "A quick guide to the stable built-in rule ID families.",
       "gridPos": {
-        "x": 12,
+        "x": 15,
         "y": 38,
-        "w": 12,
+        "w": 9,
         "h": 11
       },
-      "targets": [
-        {
-          "datasource": {
-            "type": "loki",
-            "uid": "defenseclaw-loki"
-          },
-          "expr": "{service_name=\"defenseclaw\"} |~ \"$rule_id\" | json | __error__=\"\" | event_name=\"hook_decision\" | connector=~\"$connector\" | body_defenseclaw_security_severity=~\"$severity\" | body_defenseclaw_hook_event=~\"$hook_event\" | body_gen_ai_agent_id=~\"$agent\" | label_format decision=\"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}enforced{{else if eq .body_defenseclaw_guardrail_would_block \\\"true\\\"}}would_block{{else}}other{{end}}\" | decision=~\"$decision\" | body_defenseclaw_hook_event=~\"(?i)userpromptsubmit|beforesubmitprompt|pre_user_prompt|userpromptsubmitted|user_prompt_submit|prompt\" | regexp \"(?s).*\\\\\\\"defenseclaw.guardrail.rule_ids\\\\\\\":\\\\[(?P<rule_ids>[^]]*)\\\\].*\" | line_format \"{{if eq .body_defenseclaw_guardrail_enforced \\\"true\\\"}}ENFORCED{{else}}WOULD BLOCK{{end}} · {{.connector}} · agent={{if .body_gen_ai_agent_name}}{{.body_gen_ai_agent_name}}{{else}}{{.body_gen_ai_agent_id}}{{end}} · rules={{.rule_ids}} · reason={{.body_defenseclaw_guardrail_reason}} · evaluation={{.body_defenseclaw_evaluation_id}} · operation={{.body_defenseclaw_operation_id}} · trace_id={{.correlation_trace_id}}\"",
-          "refId": "A"
-        }
-      ],
       "options": {
-        "showTime": true,
-        "wrapLogMessage": true,
-        "prettifyLogMessage": false,
-        "dedupStrategy": "none",
-        "enableLogDetails": true,
-        "sortOrder": "Descending"
+        "mode": "markdown",
+        "content": "### Read a rule ID\n\n- **CMD-** Command behavior, such as `CMD-SUDO`\n- **PATH-** Sensitive files or credentials\n- **COG-** Agent identity, instructions, or memory integrity\n- **SEC-** Secrets and tokens\n- **C2-** Command-and-control or exfiltration destinations\n- **ENT-** Enterprise data and PII\n- **TRUST-** Prompt-injection and trust manipulation\n\nSome semantic rules use dotted IDs instead of a prefix. The matched IDs and meanings are recorded on every decision. The historical event does **not** record which `default`, `permissive`, or `strict` profile was active, so this dashboard does not guess that value."
       }
     },
     {
       "id": 17,
       "type": "text",
-      "title": "Investigation workflow",
-      "description": "Truthful correlation guidance",
+      "title": "How to investigate",
+      "description": "A simple operator workflow, with advanced correlation only when needed.",
       "gridPos": {
         "x": 0,
         "y": 49,
@@ -775,7 +757,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "### Investigate a block\n\n1. Filter by connector, decision, severity, hook surface, rule, or agent ID.\n2. Expand a decision and copy its agent, evaluation, operation, or trace ID.\n3. Open Agent360 for chronology/recovery, Findings for rule recurrence, or Policy Decisions for fleet trends.\n\nA verdict can carry eight rule IDs. “Similar” means the same telemetry signature, not semantic similarity. Missing content was not reported or was removed by destination redaction."
+        "content": "### Start with the decision, not the IDs\n\n1. Read **Recent blocked events** for the rule and plain-language reason.\n2. Filter by **Rule**, **Connector**, or **Hook surface**; use **Similar block signatures** to spot recurrence.\n3. Expand a row only for advanced correlation: **evaluation ID** joins scanner findings from one evaluation, **operation ID** groups one agent operation, and **trace ID** opens a distributed trace when one was emitted.\n\nA decision can match up to eight rules. “Similar” means the same telemetry signature, not semantic similarity. Missing prompt/tool content was either not reported or removed by destination redaction."
       }
     }
   ],

@@ -25,18 +25,18 @@ def test_blocked_event_dashboard_has_truthful_investigation_surfaces() -> None:
     assert {
         "Enforced blocks", "Would-block decisions", "Blocked prompt hooks",
         "Blocked tool hooks", "Similar block signatures",
-        "Blocked event records — rules, reason, agent, and correlation",
-        "Projected blocked tool calls", "Prompt-surface decisions",
+        "Recent blocked events", "Rules and what they mean", "Rule family guide",
     } <= titles
 
-    detail = _panel(dashboard, "Blocked event records — rules, reason, agent, and correlation")["targets"][0]["expr"]
+    detail = _panel(dashboard, "Recent blocked events")["targets"][0]["expr"]
     assert 'event_name="hook_decision"' in detail
     assert "body_defenseclaw_guardrail_enforced" in detail
     assert "body_defenseclaw_guardrail_would_block" in detail
     assert "defenseclaw.guardrail.rule_ids" in detail
     assert "(?P<rule_ids>" in detail
-    for field in ("body_defenseclaw_guardrail_reason", "body_defenseclaw_evaluation_id", "body_defenseclaw_operation_id", "correlation_trace_id"):
-        assert field in detail
+    assert "body_defenseclaw_guardrail_reason" in detail
+    for identifier in ("body_defenseclaw_evaluation_id", "body_defenseclaw_operation_id", "correlation_trace_id"):
+        assert identifier not in detail
 
     similar = _panel(dashboard, "Similar block signatures")
     assert "semantic or AI-generated similarity" in similar["description"]
@@ -44,14 +44,27 @@ def test_blocked_event_dashboard_has_truthful_investigation_surfaces() -> None:
     assert "(?P<primary_rule>" in similar["targets"][0]["expr"]
 
 
-def test_blocked_tool_context_preserves_projection_boundary() -> None:
-    panel = _panel(_dashboard(), "Projected blocked tool calls")
-    assert "already projected" in panel["description"]
-    assert "never reverses redaction" in panel["description"]
+def test_rule_explanation_uses_canonical_post_redaction_decisions() -> None:
+    panel = _panel(_dashboard(), "Rules and what they mean")
+    assert "post-redaction" in panel["description"]
     query = panel["targets"][0]["expr"]
-    assert 'event_name="tool.invocation.blocked"' in query
-    assert "body_gen_ai_tool_call_arguments" in query
-    assert "body_defenseclaw_content_input_state" in query
+    assert 'event_name="hook_decision"' in query
+    assert ".rule_ids" in query
+    assert "body_defenseclaw_guardrail_reason" in query
+
+
+def test_rule_guide_and_investigation_explain_limits_and_identifiers() -> None:
+    dashboard = _dashboard()
+    guide = _panel(dashboard, "Rule family guide")["options"]["content"]
+    for family in ("CMD-", "PATH-", "COG-", "SEC-", "C2-", "ENT-", "TRUST-"):
+        assert family in guide
+    assert "does **not** record" in guide
+    assert "does not guess" in guide
+
+    workflow = _panel(dashboard, "How to investigate")["options"]["content"]
+    assert "evaluation ID" in workflow
+    assert "operation ID" in workflow
+    assert "trace ID" in workflow
 
 
 def test_packaged_dashboard_matches_source() -> None:
