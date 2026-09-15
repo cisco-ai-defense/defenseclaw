@@ -80,14 +80,15 @@ type Sidecar struct {
 	hilt          *HILTApprovalManager
 	webhooks      *WebhookDispatcher
 	aiDiscovery   *inventory.ContinuousDiscoveryService
+	appProtection *applicationProtectionController
+	osNotifier    *notifier.Dispatcher
+	configMgr     *ConfigManager
+
 	// inventoryPublish is the managed_enterprise inventory change gate. It is nil
 	// in every other deployment mode. It lives here, not inside the emitter
 	// closures, because those closures are rebuilt on every config reload while
 	// the publish memory must survive reloads.
 	inventoryPublish *managedInventoryPublishState
-	appProtection *applicationProtectionController
-	osNotifier    *notifier.Dispatcher
-	configMgr     *ConfigManager
 
 	// ipcRunner is injected by the CLI layer to avoid a gateway/ipc import
 	// cycle. A nil runner disables the managed UDS server.
