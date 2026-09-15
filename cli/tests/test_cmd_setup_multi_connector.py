@@ -1967,6 +1967,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertNotIn(private_detail, str(raised.exception))
         self.assertNotIn("private-profile", str(raised.exception))
 
+    @unittest.skipIf(os.name == "nt", "POSIX ownership test")
     def test_protected_snapshot_names_root_owned_sudo_leftover(self):
         lock_path = os.path.join(self.app.cfg.data_dir, "hook_contract_lock.json")
         with open(lock_path, "w", encoding="utf-8") as fh:
@@ -1996,6 +1997,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertIn("root-owned from a sudo-started gateway", str(raised.exception))
         self.assertNotIn(lock_path, str(raised.exception))
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit repair test")
     def test_picked_connector_hint_repairs_owner_readable_mode(self):
         hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
         with open(hint_path, "w", encoding="utf-8") as fh:
@@ -2015,6 +2017,7 @@ class TestSetupAppliedRuntimeRollback(unittest.TestCase):
         self.assertIsNotNone(generation)
         self.assertEqual(os.stat(hint_path).st_mode & 0o777, 0o600)
 
+    @unittest.skipIf(os.name == "nt", "POSIX mode-bit rejection test")
     def test_picked_connector_hint_skips_world_writable_without_failing(self):
         hint_path = os.path.join(self.app.cfg.data_dir, "picked_connector")
         with open(hint_path, "w", encoding="utf-8") as fh:

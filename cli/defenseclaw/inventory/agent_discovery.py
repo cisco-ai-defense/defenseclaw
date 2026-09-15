@@ -954,6 +954,7 @@ def discover_agents(
                     name,
                     data_dir=data_dir,
                     require_trusted_binary_paths=require_trusted,
+                    include_workspace_config=False,
                 ),
                 DISCOVERABLE_CONNECTORS,
             )
@@ -1055,17 +1056,26 @@ def _scan_agent(
     *,
     data_dir: str | os.PathLike[str] | None = None,
     require_trusted_binary_paths: bool = False,
+    include_workspace_config: bool = True,
 ) -> AgentSignal:
     spec = _SPECS.get(name, _AgentSpec((), "", ("--version",)))
     config_candidates = spec.config_candidates
     if name == "codex":
         config_candidates = (connector_config_files("codex")[0],)
     elif name == "claudecode":
-        # MCP and workspace state are inventory, not generic user-level
-        # configuration evidence. Keeping this probe on the explicit Claude
-        # config home also prevents an unrelated current checkout from making
-        # every Claude installation look configured.
-        config_candidates = (claude_settings_paths()[0],)
+        # Interactive, workspace-scoped probes apply Claude's documented
+        # effective precedence: local, project, then user.  The global cached
+        # scan disables workspace evidence below so an unrelated checkout
+        # cannot make every Claude installation look configured.
+        explicit_config_home = bool((os.environ.get("CLAUDE_CONFIG_DIR") or "").strip())
+        settings_paths = claude_settings_paths(
+            os.getcwd() if include_workspace_config and not explicit_config_home else None
+        )
+        config_candidates = (
+            tuple(reversed(settings_paths))
+            if include_workspace_config and not explicit_config_home
+            else (settings_paths[0],)
+        )
     elif name == "hermes":
         config_candidates = (hermes_config_path(),)
     elif name == "antigravity":

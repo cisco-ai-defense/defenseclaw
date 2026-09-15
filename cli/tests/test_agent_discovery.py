@@ -648,6 +648,7 @@ def test_claude_discovery_does_not_count_mcp_only_state_as_generic_config(
     state = home / ".claude.json"
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
 
     signal = ad._scan_agent("claudecode")
@@ -707,6 +708,23 @@ def test_claude_discovery_falls_back_to_user_settings(monkeypatch, tmp_path):
 
     assert signal.configured is True
     assert signal.config_path == str(user_settings)
+
+
+def test_claude_global_discovery_ignores_unrelated_workspace_settings(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_claude_home(monkeypatch, tmp_path / "default-home")
+    project_settings = tmp_path / ".claude" / "settings.json"
+    project_settings.parent.mkdir(parents=True)
+    project_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode", include_workspace_config=False)
+
+    assert signal.configured is False
+    assert signal.config_path == ""
 
 
 def test_amp_discovery_reads_platform_managed_settings_without_mutating(
