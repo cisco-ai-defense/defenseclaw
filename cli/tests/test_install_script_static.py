@@ -25,7 +25,11 @@ try:
 except ModuleNotFoundError:  # pragma: no cover - Python 3.10 compatibility
     import tomli as tomllib
 
-from defenseclaw.platform_support import UNSUPPORTED, WINDOWS_CONNECTOR_SUPPORT
+from defenseclaw.platform_support import (
+    ACP_ONLY_CONNECTORS,
+    UNSUPPORTED,
+    WINDOWS_CONNECTOR_SUPPORT,
+)
 from defenseclaw.tui.panels.first_run import CONNECTOR_CHOICES
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -266,7 +270,7 @@ def test_release_installers_track_known_connector_choices() -> None:
     expected_windows_choices = {
         name
         for name, support in WINDOWS_CONNECTOR_SUPPORT.items()
-        if support.status != UNSUPPORTED
+        if support.status != UNSUPPORTED and name not in ACP_ONLY_CONNECTORS
     }
     assert ps_choices[-1] == "none"
     assert len(ps_choices) == len(set(ps_choices))

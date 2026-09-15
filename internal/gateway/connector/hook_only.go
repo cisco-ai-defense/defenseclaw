@@ -835,6 +835,7 @@ func openhandsNativeOTLPSpecForOS(opts SetupOpts, goos string) *NativeOTLPSpec {
 func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	caps := ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeForConnector(c.name),
+		ACP:            ACPAgentCapabilityForConnector(c.name),
 		Hooks:          c.capability(opts),
 		CodeGuard: CodeGuardCapability{
 			Supported:    false,
@@ -1095,7 +1096,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			RequiresOptIn:  true,
 			Notes: []string{
 				"Devin CLI v3000.3 and later prefers dedicated mcp_config.json files; embedded MCP entries in config.json remain discovery-only for backward compatibility.",
-				"Cloud Devin, proxy, ACP, team-managed, and dynamically registered MCP sources are outside this native local connector.",
+				"Cloud Devin, proxy, team-managed, and dynamically registered MCP sources are outside this native local connector; devin acp is mediated separately by the shared ACP guard.",
 			},
 		}
 		caps.Skills = SurfaceCapability{

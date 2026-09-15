@@ -8,11 +8,12 @@ independent runners must produce byte-identical outer
 
 ## What's in `signed-payload-fixture.tar.zst`
 
-Seven placeholder inner files with fixed contents:
+Eight placeholder inner files with fixed contents:
 
 | Name                              | Purpose in the real build |
 |-----------------------------------|---------------------------|
 | `DefenseClawEnterprise.psm1`      | PowerShell module the outer Setup embeds. |
+| `defenseclaw-acp.exe`             | ACP guard proxy binary. |
 | `defenseclaw-cmid-broker.exe`     | Isolated cloud credential broker service. |
 | `defenseclaw-gateway.exe`         | Gateway binary. |
 | `defenseclaw-hook.exe`            | Hook binary. |
@@ -44,7 +45,7 @@ scripts/generate-repro-fixture.sh
 
 The regeneration script:
 
-1. Writes the five files under a temp dir with **byte-identical
+1. Writes the eight files under a temp dir with **byte-identical
    deterministic contents** (short strings, no timestamps, no random).
 2. Tars them with `--sort=name --owner=0 --group=0 --numeric-owner
    --mtime=@0` so the archive is byte-reproducible.
@@ -55,13 +56,13 @@ The regeneration script:
    `.github/workflows/windows-deterministic-build.yml`.
 
 If a future refresh legitimately changes the fixture (e.g., you add
-a sixth expected filename to Workstream A), regenerate and update
+another expected filename to Workstream A), regenerate and update
 the CI expected-SHA in the same PR so the deterministic gate sees
 the new baseline.
 
 ## Why an inline fixture, not LFS?
 
-Fixture size is under 1 KiB (five tiny text-ish files). LFS overhead
+Fixture size is under 1 KiB (eight tiny text-ish files). LFS overhead
 is not justified. If the fixture ever grows past a few MiB (unlikely
 for a build-time reproducibility harness), migrate to LFS in a
 separate PR.

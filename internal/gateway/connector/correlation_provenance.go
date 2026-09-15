@@ -22,6 +22,10 @@ func correlationContractSources(name string) []CorrelationContractSource {
 	case "explicit":
 		return source("defenseclaw-explicit-canonical-v1",
 			"builtin://defenseclaw/explicit-canonical-correlation", "profile:explicit-canonical-v1")
+	case "kiro":
+		return source("acp-schema-v1.21.0",
+			"https://github.com/agentclientprotocol/agent-client-protocol/blob/schema-v1.21.0/schema/v1/schema.json",
+			"sha256:caf62ff962ada396878372ced11efb2c6764e59d90919a38583c319948931a42")
 	case "openclaw":
 		return source("openclaw-source-b93f4bb3",
 			"https://github.com/openclaw/openclaw", "b93f4bb3ac03f758cf807d109cdd3ef1702fdd6a")
@@ -260,6 +264,8 @@ func (s CorrelationSpec) bindingsForSurface(surface CorrelationSurface) []Correl
 		return s.ProxyBindings
 	case CorrelationSurfaceStream:
 		return s.StreamBindings
+	case CorrelationSurfaceACP:
+		return s.ACPBindings
 	default:
 		return nil
 	}

@@ -17,8 +17,8 @@ import (
 
 func TestBuiltinCorrelationProfilesAreVersionedAndValid(t *testing.T) {
 	reg := NewDefaultRegistry()
-	if got := len(reg.Names()); got != 14 {
-		t.Fatalf("builtin count=%d want 14", got)
+	if got := len(reg.Names()); got != 15 {
+		t.Fatalf("builtin count=%d want 15", got)
 	}
 	for _, name := range reg.Names() {
 		name := name
@@ -377,6 +377,8 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 				count = len(spec.StreamBindings)
 			case CorrelationSurfaceNativeOTLP:
 				count = len(spec.NativeOTLPBindings)
+			case CorrelationSurfaceACP:
+				count = len(spec.ACPBindings)
 			}
 			if count == 0 && !(surface == CorrelationSurfaceNativeOTLP && spec.NativeTelemetry.BindingMode == NativeTelemetryBindingsExporterOnly) {
 				t.Errorf("%s declares %s without bindings", name, surface)
@@ -389,6 +391,21 @@ func TestEveryDeclaredCorrelationSurfaceHasReviewedBindings(t *testing.T) {
 				t.Errorf("%s advertises an event stream without a production adapter", name)
 			}
 		}
+	}
+}
+
+func TestKiroACPBindingsAreIsolatedFromHookAliases(t *testing.T) {
+	spec := DefaultCorrelationSpec("kiro")
+	payload := map[string]interface{}{
+		"id":     "turn-7",
+		"params": map[string]interface{}{"sessionId": "session-3"},
+	}
+	values := spec.ACPValues(payload)
+	if len(values) < 2 {
+		t.Fatalf("Kiro ACP values = %+v, want reviewed session and turn identities", values)
+	}
+	if hookValues := spec.HookValues(payload); len(hookValues) != 0 {
+		t.Fatalf("ACP payload aliases leaked onto hook rail: %+v", hookValues)
 	}
 }
 

@@ -57,6 +57,7 @@ DEFAULT_ENV="prod"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd 2>/dev/null || echo "${SCRIPT_DIR}")"
 BINARY_SRC=""
+ACP_BINARY_SRC=""
 # Plist lookup order:
 #   1. --plist / DEFENSECLAW_PLIST_SRC  (explicit override)
 #   2. next to the script            (standalone-bundle layout)
@@ -185,6 +186,7 @@ GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
 ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
 ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
 GATEWAY_BIN="${INSTALL_PREFIX}/bin/defenseclaw-gateway"
+ACP_GUARD_BIN="${INSTALL_PREFIX}/bin/defenseclaw-acp"
 RENDER_TARGETS_BIN="${INSTALL_PREFIX}/lib/render-targets.sh"
 INSTALLER_LIB_DST="${INSTALL_PREFIX}/lib/installer_lib.sh"
 GUARDIAN_MANIFEST_DIR="${INSTALL_PREFIX}/hook-guardian"
@@ -526,7 +528,7 @@ _existing_install_markers=(
   "${LEGACY_GUARDIAN_PLIST_DST}"
 )
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
-  for _installed_command in defenseclaw defenseclaw-gateway; do
+  for _installed_command in defenseclaw defenseclaw-gateway defenseclaw-acp; do
     _installed_command_path="$(command -v "${_installed_command}" 2>/dev/null || true)"
     [[ -n "${_installed_command_path}" ]] \
       && _existing_install_markers+=("${_installed_command_path}")
@@ -537,6 +539,7 @@ if [[ -n "${TARGET_HOME}" ]]; then
     "${TARGET_HOME}/.defenseclaw"
     "${TARGET_HOME}/.local/bin/defenseclaw"
     "${TARGET_HOME}/.local/bin/defenseclaw-gateway"
+    "${TARGET_HOME}/.local/bin/defenseclaw-acp"
   )
 fi
 if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
@@ -554,6 +557,7 @@ if [[ "${DC_INSTALLER_SKIP_ROOT_CHECK:-}" != "1" ]]; then
       "${_candidate_home}/.defenseclaw"
       "${_candidate_home}/.local/bin/defenseclaw"
       "${_candidate_home}/.local/bin/defenseclaw-gateway"
+      "${_candidate_home}/.local/bin/defenseclaw-acp"
     )
   done <<< "${_local_users}"
 fi
@@ -606,6 +610,20 @@ if [[ "${SKIP_BUILD}" != "true" && ! -x "${BINARY_SRC}" ]]; then
 fi
 [[ -x "${BINARY_SRC}" ]] || die "binary not found or not executable: ${BINARY_SRC}"
 
+if [[ -x "${SCRIPT_DIR}/defenseclaw-acp" ]]; then
+  ACP_BINARY_SRC="${SCRIPT_DIR}/defenseclaw-acp"
+elif [[ -x "${REPO_ROOT}/defenseclaw-acp" ]]; then
+  ACP_BINARY_SRC="${REPO_ROOT}/defenseclaw-acp"
+elif [[ -d "${REPO_ROOT}/cmd/defenseclaw-acp" ]]; then
+  command -v go >/dev/null 2>&1 || die "go not in PATH; the ACP guard is required"
+  ACP_BINARY_SRC="${REPO_ROOT}/defenseclaw-acp"
+  log "building ACP guard from ${REPO_ROOT}/cmd/defenseclaw-acp"
+  ( cd "${REPO_ROOT}" && go build -o defenseclaw-acp ./cmd/defenseclaw-acp )
+else
+  die "required ACP guard is missing; ship defenseclaw-acp next to install.sh"
+fi
+[[ -x "${ACP_BINARY_SRC}" ]] || die "ACP guard not found or not executable: ${ACP_BINARY_SRC}"
+
 # Repeat the launchd/path boundary immediately before mutation. A deployment
 # that appears after the first preflight belongs to the concurrent installer;
 # never boot it out or remove its plist.
@@ -640,6 +658,7 @@ done
 create_install_directory_no_replace "${INSTALL_PREFIX}" root wheel 0755
 create_install_directory_no_replace "${INSTALL_PREFIX}/bin" root wheel 0755
 install_file_no_replace "${BINARY_SRC}" "${GATEWAY_BIN}" root wheel 0755
+install_file_no_replace "${ACP_BINARY_SRC}" "${ACP_GUARD_BIN}" root wheel 0755
 
 log "creating support dirs under ${SUPPORT_DIR}"
 # SUPPORT_DIR (= INSTALL_PREFIX) is root:wheel 0755. The

@@ -337,6 +337,174 @@ def test_posix_resolver_owns_dynamic_receipt_and_bundle_phases() -> None:
     assert 'print("recover" if len(latest) == 1 else "invalid")' in split_phase
 
 
+def test_posix_resolver_requires_and_activates_acp_guard_from_0811() -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+
+    extraction = source.index('tar -xzf "${STAGING_DIR}/${MATERIALIZED_TARBALL_NAME}"')
+    stop = source.index('section "Stopping Services"', extraction)
+    preflight = source[extraction:stop]
+    assert 'ACP_GUARD_RELEASE_VERSION="0.8.11"' in source
+    assert 'version_gte "${RELEASE_VERSION}" "${ACP_GUARD_RELEASE_VERSION}"' in preflight
+    assert "required defenseclaw-acp guard" in preflight
+    assert "com.cisco.defenseclaw.acp" in preflight
+    assert '"${STAGING_DIR}/defenseclaw-acp" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}" preflight' in preflight
+    assert "ACP guard runtime contracts verified before service stop" in preflight
+
+    install = source[source.index('section "Installing Artifacts"', stop) :]
+    assert "defenseclaw-acp.previous" in install
+    assert ".defenseclaw-acp.upgrade.XXXXXX" in install
+    assert "publish_acp_guard_with_contracts" in source
+    assert '"${ACP_GUARD_INSTALL_TEMP}" "${INSTALL_DIR}/defenseclaw-acp" "${DATA_DIR}"' in install
+    assert "ACP runtime contract lock permissions are too broad" in source
+    assert "ACP guard/contract publication failed and rollback also failed" in source
+    assert "ACP guard binary installed and verified (${RELEASE_VERSION})" in install
+
+
+@POSIX_UPGRADE_CUSTODY
+def test_posix_resolver_rebinds_acp_contract_with_guard_publication(tmp_path: Path) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("publish_acp_guard_with_contracts() {")
+    end = source.index("\n}\n\nconfigure_release", start) + 3
+    function = source[start:end]
+
+    binary_dir = tmp_path / "bin"
+    lock_dir = tmp_path / "data/acp"
+    binary_dir.mkdir()
+    lock_dir.mkdir(parents=True)
+    active = binary_dir / "defenseclaw-acp"
+    candidate = binary_dir / ".candidate"
+    active.write_bytes(b"old guard")
+    candidate.write_bytes(b"new guard")
+    active.chmod(0o755)
+    candidate.chmod(0o755)
+    lock = lock_dir / "zed-kiro.contract-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "guard": {
+                    "path": str(active),
+                    "sha256": hashlib.sha256(b"old guard").hexdigest(),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock.chmod(0o600)
+
+    completed = subprocess.run(
+        [_bash_executable(), "-s", "--", str(candidate), str(active), str(tmp_path / "data")],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3"\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == b"new guard"
+    assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"] == hashlib.sha256(b"new guard").hexdigest()
+    assert stat.S_IMODE(lock.stat().st_mode) == 0o600
+
+    candidate.write_bytes(b"third guard")
+    candidate.chmod(0o755)
+    document = json.loads(lock.read_text(encoding="utf-8"))
+    document["guard"]["sha256"] = "0" * 64
+    lock.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    lock.chmod(0o600)
+    refused = subprocess.run(
+        [_bash_executable(), "-s", "--", str(candidate), str(active), str(tmp_path / "data")],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3"\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "does not match the active guard" in refused.stderr
+    assert active.read_bytes() == b"new guard"
+    assert json.loads(lock.read_text(encoding="utf-8"))["guard"]["sha256"] == "0" * 64
+
+
+@POSIX_UPGRADE_CUSTODY
+def test_posix_resolver_preflights_real_guard_identity_without_mutation(tmp_path: Path) -> None:
+    source = UPGRADE_SCRIPT.read_text(encoding="utf-8")
+    start = source.index("publish_acp_guard_with_contracts() {")
+    end = source.index("\n}\n\nconfigure_release", start) + 3
+    function = source[start:end]
+
+    physical = tmp_path / "physical"
+    alias = tmp_path / "alias"
+    lock_dir = tmp_path / "data/acp"
+    physical.mkdir()
+    alias.symlink_to(physical, target_is_directory=True)
+    lock_dir.mkdir(parents=True)
+    active = physical / "defenseclaw-acp"
+    candidate = physical / ".candidate"
+    active.write_bytes(b"old guard")
+    candidate.write_bytes(b"new guard")
+    active.chmod(0o755)
+    candidate.chmod(0o755)
+    lock = lock_dir / "zed-kiro.contract-lock.json"
+    lock.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "guard": {
+                    "path": str(active),
+                    "sha256": hashlib.sha256(b"old guard").hexdigest(),
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    lock.chmod(0o600)
+    original_lock = lock.read_bytes()
+
+    completed = subprocess.run(
+        [
+            _bash_executable(),
+            "-s",
+            "--",
+            str(alias / ".candidate"),
+            str(alias / "defenseclaw-acp"),
+            str(tmp_path / "data"),
+        ],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3" preflight\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert active.read_bytes() == b"old guard"
+    assert candidate.read_bytes() == b"new guard"
+    assert lock.read_bytes() == original_lock
+
+    document = json.loads(lock.read_text(encoding="utf-8"))
+    document["guard"]["sha256"] = "0" * 64
+    lock.write_text(json.dumps(document) + "\n", encoding="utf-8")
+    lock.chmod(0o600)
+    refused = subprocess.run(
+        [
+            _bash_executable(),
+            "-s",
+            "--",
+            str(alias / ".candidate"),
+            str(alias / "defenseclaw-acp"),
+            str(tmp_path / "data"),
+        ],
+        input=function + '\npublish_acp_guard_with_contracts "$1" "$2" "$3" preflight\n',
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert refused.returncode != 0
+    assert "does not match the active guard" in refused.stderr
+    assert active.read_bytes() == b"old guard"
+    assert candidate.read_bytes() == b"new guard"
+
+
 @pytest.mark.parametrize(
     ("scenario", "expected_success", "expected_probes"),
     (
@@ -1329,9 +1497,7 @@ def test_future_candidate_fails_closed_for_unreviewed_source_config_family(
 
 def test_missing_cursor_first_run_verifier_uses_published_source_python() -> None:
     script = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
-    start = script.index(
-        "# Reproduce the real field state through the exact authenticated"
-    )
+    start = script.index("# Reproduce the real field state through the exact authenticated")
     end = script.index("source_config_sha256=", start)
     verifier = script[start:end]
 
@@ -1919,7 +2085,7 @@ def test_field_recovery_lane_reproduces_exact_published_086_and_087_first_run() 
 def test_candidate_resolver_paths_do_not_inherit_runner_uv() -> None:
     protocol = PROTOCOL_SCRIPT.read_text(encoding="utf-8")
     assert 'readonly RESOLVER_SYSTEM_TOOL_PATH="/usr/bin:/bin:/usr/sbin:/sbin"' in protocol
-    assert 'PATH="${resolver_path}" /bin/sh -c \'command -v uv\'' in protocol
+    assert "PATH=\"${resolver_path}\" /bin/sh -c 'command -v uv'" in protocol
     assert 'PATH="${resolver_path}" command -v uv' not in protocol
 
     for function_name, following_name in (

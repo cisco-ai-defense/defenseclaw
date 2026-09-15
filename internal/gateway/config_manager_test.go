@@ -712,6 +712,20 @@ func TestDiffConfigsMarksApplicationProtectionChanged(t *testing.T) {
 	}
 }
 
+func TestDiffConfigsMarksACPChangedHotReloadable(t *testing.T) {
+	oldCfg := config.DefaultConfig()
+	newCfg := cloneConfig(oldCfg)
+	newCfg.ACP.Enabled = true
+
+	diff := diffConfigs(oldCfg, newCfg)
+	if !slices.Contains(diff.Changed, "acp") {
+		t.Fatalf("changed = %v, missing acp", diff.Changed)
+	}
+	if slices.Contains(diff.RestartRequired, "acp") {
+		t.Fatalf("restart_required = %v, ACP must hot reload", diff.RestartRequired)
+	}
+}
+
 func TestDiffConfigsMarksRoutingRestartRequired(t *testing.T) {
 	oldCfg := config.DefaultConfig()
 	newCfg := cloneConfig(oldCfg)

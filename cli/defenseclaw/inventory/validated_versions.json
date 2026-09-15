@@ -3,6 +3,16 @@
   "description": "Human-reviewed highest validated upstream agent version per hook connector x OS. The live connector E2E workflow (.github/workflows/connector-live-e2e.yml) only REPORTS the version it ran against and opens a connector-regression issue on a live-cell failure — it never edits this file. A maintainer updates last_validated_version here (and, when raising/lowering a support floor/ceiling, hook_contracts.json + internal/gateway/connector/hook_contract.go) after reviewing a green run. 'os' keys are linux, macos, windows; an empty last_validated_version means 'not yet certified'.",
   "policy": "alert-only",
   "connectors": {
+    "kiro": {
+      "version_probe": "kiro-cli --version",
+      "live": false,
+      "os": {
+        "linux": {"last_validated_version": "", "last_validated_at": "", "run_url": ""},
+        "macos": {"last_validated_version": "", "last_validated_at": "", "run_url": ""},
+        "windows": {"last_validated_version": "", "last_validated_at": "", "run_url": ""}
+      },
+      "notes": "ACP live evidence is tracked in acp_certifications.json. Native Kiro hooks remain cataloged defense in depth and are not certified here."
+    },
     "codex": {
       "version_probe": "codex --version",
       "live": false,
@@ -63,7 +73,7 @@
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
       },
-      "notes": "Source-reviewed native Devin CLI hook contract pinned to 3000.4.25. Windows Setup additionally requires the exact current-user CLI path and trusted Exafunction, Inc. Authenticode signer. Authentic client live evidence remains pending and live=false; Restricted Mode, cloud, ACP, proxy, plugins, and native OTLP are unclaimed."
+      "notes": "Source-reviewed native Devin CLI hook contract pinned to 3000.4.25. Windows Setup additionally requires the exact current-user CLI path and trusted Exafunction, Inc. Authenticode signer. The separate devin acp entry point is cataloged for the generic ACP guard but has no official-client validation record. Authentic hook-client live evidence remains pending and live=false; Restricted Mode, cloud, proxy, plugins, and native OTLP are unclaimed."
     },
     "opencode": {
       "version_probe": "opencode --version",

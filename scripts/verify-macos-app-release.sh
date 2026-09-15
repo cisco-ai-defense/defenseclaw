@@ -81,7 +81,7 @@ PAYLOAD="${DMG_APP}/Contents/Resources/RuntimePayload"
     echo "DMG Applications link is missing or incorrect" >&2
     exit 1
 }
-for relative in defenseclaw-gateway overrides.txt payload-manifest.json upgrade-manifest.json runtime-candidate-checksums.txt LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
+for relative in defenseclaw-gateway defenseclaw-acp overrides.txt payload-manifest.json upgrade-manifest.json runtime-candidate-checksums.txt LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
     [[ -f "${PAYLOAD}/${relative}" ]] || { echo "runtime payload missing ${relative}" >&2; exit 1; }
 done
 for relative in LICENSE NOTICE THIRD_PARTY_LICENSES.txt; do
@@ -114,6 +114,13 @@ fi
 codesign --verify --strict -R "${GATEWAY_REQUIREMENT}" --verbose=2 \
     "${PAYLOAD}/defenseclaw-gateway"
 unset GATEWAY_REQUIREMENT
+ACP_REQUIREMENT='=identifier "com.cisco.defenseclaw.acp"'
+if [[ "${DMG_UNVERIFIED}" == "0" ]]; then
+    ACP_REQUIREMENT+=" and anchor apple generic and certificate leaf[subject.OU] = \"${EXPECTED_TEAM_ID}\""
+fi
+codesign --verify --strict -R "${ACP_REQUIREMENT}" --verbose=2 \
+    "${PAYLOAD}/defenseclaw-acp"
+unset ACP_REQUIREMENT
 
 python3 - "${PAYLOAD}" "${VERSION}" <<'PY'
 import hashlib
@@ -128,7 +135,7 @@ version = sys.argv[2]
 manifest = json.loads((payload / "payload-manifest.json").read_text(encoding="utf-8"))
 if manifest.get("runtime_version") != version or manifest.get("arch") != "arm64":
     raise SystemExit("payload manifest version or architecture mismatch")
-for key in ("gateway", "wheel", "overrides", "upgrade_manifest", "runtime_attestation"):
+for key in ("gateway", "acp_guard", "wheel", "overrides", "upgrade_manifest", "runtime_attestation"):
     item = manifest.get(key) or {}
     path = payload / str(item.get("file", ""))
     if not path.is_file():

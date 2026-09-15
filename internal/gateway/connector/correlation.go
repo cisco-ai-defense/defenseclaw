@@ -51,6 +51,7 @@ const (
 	CorrelationProfileOpenCodeV1    CorrelationProfileVersion = "opencode-correlation-v1"
 	CorrelationProfileAMPV1         CorrelationProfileVersion = "amp-correlation-v1"
 	CorrelationProfileOmniGentV1    CorrelationProfileVersion = "omnigent-correlation-v1"
+	CorrelationProfileKiroACPV1     CorrelationProfileVersion = "kiro-acp-correlation-v1"
 )
 
 // CorrelationOrigin describes how a canonical identity or relationship was
@@ -100,6 +101,7 @@ const (
 	CorrelationSurfaceProxy      CorrelationSurface = "proxy"
 	CorrelationSurfaceStream     CorrelationSurface = "stream"
 	CorrelationSurfaceInternal   CorrelationSurface = "internal"
+	CorrelationSurfaceACP        CorrelationSurface = "acp"
 )
 
 type NativeTelemetryStability string
@@ -294,8 +296,8 @@ type CorrelationFieldEvidence struct {
 }
 
 // CorrelationSpec is the versioned normalization contract for one connector.
-// HookBindings and NativeOTLPBindings are separate because an attribute name
-// documented on native OTLP must never become a hook-payload alias by accident.
+// Bindings are kept per authenticated rail because an attribute documented on
+// one surface must never become an alias on another by accident.
 type CorrelationSpec struct {
 	Connector           string
 	ProfileVersion      CorrelationProfileVersion
@@ -307,6 +309,7 @@ type CorrelationSpec struct {
 	HookBindings        []CorrelationFieldBinding
 	ProxyBindings       []CorrelationFieldBinding
 	StreamBindings      []CorrelationFieldBinding
+	ACPBindings         []CorrelationFieldBinding
 	NativeOTLPBindings  []CorrelationFieldBinding
 	NativeTelemetry     NativeTelemetrySpec
 	ContractSources     []CorrelationContractSource
@@ -569,7 +572,7 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 		if hasContract {
 			compatibility = HookCompatibilityKnown
 		}
-		return CorrelationSpec{
+		spec := CorrelationSpec{
 			Connector: name, ProfileVersion: version, HookContractID: contractID,
 			MinAgentVersion: contract.MinAgentVersion, MaxAgentVersion: contract.MaxAgentVersion,
 			CompatibilityStatus: compatibility,
@@ -585,10 +588,22 @@ func CorrelationSpecForConnector(name, hookContractID string) (CorrelationSpec, 
 			AllowedInferenceRules: append([]CorrelationInferenceRule(nil), inference...),
 			SupportsTraceparent:   contract.SupportsTraceparent || nativeSpec.AcceptsW3C || nativeSpec.PropagatesW3C,
 			Completeness:          completeness,
-		}, true
+		}
+		if len(surfaces) == 1 && surfaces[0] == CorrelationSurfaceACP {
+			spec.ACPBindings = append([]CorrelationFieldBinding(nil), bindings...)
+			spec.HookBindings = nil
+		}
+		return spec, true
 	}
 
 	switch name {
+	case "kiro":
+		bindings := appendBindings(base,
+			reported(CorrelationTargetSession, ns, "session", "params.sessionId"),
+			reported(CorrelationTargetTurn, ns, "request", "id"),
+			reported(CorrelationTargetTool, ns, "tool_invocation", "params.update.toolCallId", "params.toolCall.toolCallId"),
+		)
+		return makeSpec(CorrelationProfileKiroACPV1, "", []CorrelationSurface{CorrelationSurfaceACP}, bindings, nil, []CorrelationInferenceRule{CorrelationInferencePromptBoundaryTurn, CorrelationInferenceUniquePendingTool}, complete(CorrelationCompletenessComplete, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, CorrelationCompletenessPartial, CorrelationCompletenessPartial, CorrelationCompletenessAbsent, "ACP does not require a stable agent lifecycle ID or provider model request/response IDs"))
 	case "openclaw":
 		bindings := appendBindings(base,
 			reported(CorrelationTargetSession, ns, "session", "sessionKey", "session_key"),
@@ -915,6 +930,11 @@ func (c *OmnigentConnector) CorrelationSpec(opts SetupOpts) CorrelationSpec {
 	return correlationSpecForOptions(c.Name(), opts)
 }
 
+func (c *KiroConnector) CorrelationSpec(SetupOpts) CorrelationSpec {
+	spec, _ := CorrelationSpecForConnector(c.Name(), "")
+	return spec
+}
+
 func (s CorrelationSpec) Allows(rule CorrelationInferenceRule) bool {
 	for _, candidate := range s.AllowedInferenceRules {
 		if candidate == rule {
@@ -986,7 +1006,7 @@ func (s CorrelationSpec) Validate() error {
 	if err := s.validateProvenance(validTarget); err != nil {
 		return err
 	}
-	for _, bindings := range [][]CorrelationFieldBinding{s.HookBindings, s.ProxyBindings, s.StreamBindings, s.NativeOTLPBindings} {
+	for _, bindings := range [][]CorrelationFieldBinding{s.HookBindings, s.ProxyBindings, s.StreamBindings, s.ACPBindings, s.NativeOTLPBindings} {
 		pathTargets := make(map[string]CorrelationTarget, len(bindings))
 		for _, binding := range bindings {
 			if !validTarget[binding.Target] {
@@ -1066,6 +1086,8 @@ func (s CorrelationSpec) Validate() error {
 			bindings = s.StreamBindings
 		case CorrelationSurfaceNativeOTLP:
 			bindings = s.NativeOTLPBindings
+		case CorrelationSurfaceACP:
+			bindings = s.ACPBindings
 		default:
 			return fmt.Errorf("unknown correlation surface %q", surface)
 		}
@@ -1165,6 +1187,12 @@ func (s CorrelationSpec) ProxyValues(payload map[string]interface{}) []Correlati
 // connector's authenticated event-stream adapter.
 func (s CorrelationSpec) StreamValues(payload map[string]interface{}) []CorrelationValue {
 	return correlationValuesFromBindings(payload, s.StreamBindings)
+}
+
+// ACPValues resolves only fields declared by the guarded ACP transport. ACP
+// envelope aliases never become hook, proxy, stream, or native OTLP aliases.
+func (s CorrelationSpec) ACPValues(payload map[string]interface{}) []CorrelationValue {
+	return correlationValuesFromBindings(payload, s.ACPBindings)
 }
 
 // NativeOTLPValue resolves only attributes declared for the authenticated

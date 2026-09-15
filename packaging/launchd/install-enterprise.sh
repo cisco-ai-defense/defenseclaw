@@ -42,7 +42,7 @@ Usage:
   sudo ./packaging/launchd/install-enterprise.sh \
     --config /path/to/config.yaml \
     --manifest /path/to/targets.yaml \
-    [--binary /path/to/defenseclaw] [--no-start]
+    [--binary /path/to/defenseclaw] [--acp-binary /path/to/defenseclaw-acp] [--no-start]
 
 Installs the macOS managed-enterprise gateway and guardian. The managed
 config is atomically installed as root:wheel with mode 0640 and is
@@ -55,6 +55,8 @@ Options:
   --config PATH    Administrator-approved managed config (required)
   --manifest PATH  Administrator-approved guardian targets (required)
   --binary PATH    Gateway binary (default: release archive root/defenseclaw)
+  --acp-binary PATH
+                   ACP guard binary (default: release archive root/defenseclaw-acp)
   --no-start       Install and verify files without loading LaunchDaemons
   --help           Show this help
 EOF
@@ -379,6 +381,7 @@ SCRIPT_DIR="$(cd -P "$(dirname "$SCRIPT_PATH")" && pwd)"
 CONFIG_SOURCE=
 MANIFEST_SOURCE=
 BINARY_SOURCE="$(cd -P "${SCRIPT_DIR}/../.." && pwd)/defenseclaw"
+ACP_BINARY_SOURCE="$(cd -P "${SCRIPT_DIR}/../.." && pwd)/defenseclaw-acp"
 START_JOBS=true
 
 while [ "$#" -gt 0 ]; do
@@ -396,6 +399,11 @@ while [ "$#" -gt 0 ]; do
         --binary)
             [ "$#" -ge 2 ] || die "--binary requires a path"
             BINARY_SOURCE="$2"
+            shift 2
+            ;;
+        --acp-binary)
+            [ "$#" -ge 2 ] || die "--acp-binary requires a path"
+            ACP_BINARY_SOURCE="$2"
             shift 2
             ;;
         --no-start)
@@ -590,6 +598,7 @@ unset _installer_version_tag _legacy_timestamp _legacy_path _legacy_base \
 assert_trusted_file_source "$CONFIG_SOURCE" "managed config"
 assert_trusted_file_source "$MANIFEST_SOURCE" "guardian manifest"
 require_regular_source "$BINARY_SOURCE" "gateway binary"
+require_regular_source "$ACP_BINARY_SOURCE" "ACP guard binary"
 require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "gateway plist"
 require_regular_source "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist" "guardian plist"
 
@@ -617,6 +626,7 @@ refuse_symlink "$CONFIG_DEST"
 
 INSTALL_DESTINATIONS=(
     "${BIN_DIR}/defenseclaw-gateway"
+    "${BIN_DIR}/defenseclaw-acp"
     "$CONFIG_DEST"
     "$MANIFEST_DEST"
     "$GATEWAY_PLIST_DEST"
@@ -666,6 +676,7 @@ assert_trusted_system_dir /opt/cisco
 assert_trusted_system_dir /opt/cisco/secureclient
 
 install_file_atomic "$BINARY_SOURCE" "${BIN_DIR}/defenseclaw-gateway" root wheel 0755
+install_file_atomic "$ACP_BINARY_SOURCE" "${BIN_DIR}/defenseclaw-acp" root wheel 0755
 install_file_atomic "$CONFIG_SOURCE" "$CONFIG_DEST" root wheel 0640
 install_file_atomic "$MANIFEST_SOURCE" "$MANIFEST_DEST" root wheel 0640
 install_file_atomic "${SCRIPT_DIR}/com.cisco.secureclient.defenseclaw.plist" "$GATEWAY_PLIST_DEST" root wheel 0644
@@ -679,6 +690,7 @@ assert_path_metadata "$GUARDIAN_DIR" dir 0 "$WHEEL_GID" 750
 assert_path_metadata "$AUTH_DIR" dir 0 "$WHEEL_GID" 750
 assert_path_metadata "$LOG_DIR" dir 0 "$WHEEL_GID" 750
 assert_path_metadata "${BIN_DIR}/defenseclaw-gateway" file 0 "$WHEEL_GID" 755
+assert_path_metadata "${BIN_DIR}/defenseclaw-acp" file 0 "$WHEEL_GID" 755
 assert_path_metadata "$CONFIG_DEST" file 0 "$WHEEL_GID" 640
 assert_path_metadata "$MANIFEST_DEST" file 0 "$WHEEL_GID" 640
 assert_path_metadata "$GATEWAY_PLIST_DEST" file 0 "$WHEEL_GID" 644

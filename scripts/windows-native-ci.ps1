@@ -146,7 +146,7 @@ function Get-WorkspacePackageVersion {
 
 function Assert-WindowsExecutableResource(
     [string]$Path,
-    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup')][string]$Component,
+    [ValidateSet('gateway', 'hook', 'launcher', 'startup', 'setup', 'acp-guard')][string]$Component,
     [string]$Version,
     [switch]$Apply
 ) {
@@ -1704,6 +1704,7 @@ function Invoke-BuildArtifacts {
         $env:CGO_ENABLED = '0'
         foreach ($binary in @(
             @('defenseclaw.exe', './cmd/defenseclaw', "-s -w -buildid=defenseclaw-gateway-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'gateway'),
+            @('defenseclaw-acp.exe', './cmd/defenseclaw-acp', "-s -w -buildid=defenseclaw-acp-$sourceCommit -X main.version=$packageVersion -X main.commit=$sourceCommit", 'acp-guard'),
             @('defenseclaw-hook.exe', './cmd/defenseclaw-hook', "-s -w -buildid=defenseclaw-hook-$sourceCommit -H=windowsgui -X main.version=$packageVersion -X main.commit=$sourceCommit", 'hook')
         )) {
             foreach ($targetRoot in @($gatewayVerificationStage, $stage)) {
@@ -3524,6 +3525,7 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     $expanded = Join-Path $fixtureRoot 'expanded'
     Expand-Archive -LiteralPath $zip[0].FullName -DestinationPath $expanded
     $gateway = Join-Path $expanded 'defenseclaw.exe'
+    $acp = Join-Path $expanded 'defenseclaw-acp.exe'
     $hook = Join-Path $expanded 'defenseclaw-hook.exe'
     $stream = [IO.File]::Open(
         $gateway, [IO.FileMode]::Append, [IO.FileAccess]::Write, [IO.FileShare]::Read
@@ -3532,7 +3534,7 @@ function New-RollbackArtifactFixture([string]$Artifacts, [string]$Root) {
     $mutatedHash = (Get-FileHash -LiteralPath $gateway -Algorithm SHA256).Hash
     Invoke-WindowsNativeProcess $gateway @('--version') -TimeoutSeconds 30 | Out-Null
     Remove-Item -LiteralPath $zip[0].FullName -Force
-    Compress-Archive -LiteralPath $gateway, $hook -DestinationPath $zip[0].FullName
+    Compress-Archive -LiteralPath $gateway, $acp, $hook -DestinationPath $zip[0].FullName
     Remove-SafeDisposableTree -Path $expanded -Root $fixtureRoot
     return [pscustomobject]@{ Root = $fixtureRoot; MutatedGatewayHash = $mutatedHash }
 }

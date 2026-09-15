@@ -82,6 +82,9 @@
     "agent": {
       "$ref": "#/$defs/agent"
     },
+    "acp": {
+      "$ref": "#/$defs/acp"
+    },
     "inspect_llm": {
       "$ref": "#/$defs/inspectLLM"
     },
@@ -168,6 +171,63 @@
     }
   },
   "$defs": {
+    "acp": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "mode": { "$ref": "#/$defs/acpMode" },
+        "default_profile": { "$ref": "#/$defs/stableName" },
+        "clients": { "$ref": "#/$defs/acpBindings" },
+        "agents": { "$ref": "#/$defs/acpBindings" },
+        "profiles": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": { "$ref": "#/$defs/stableName" },
+          "additionalProperties": { "$ref": "#/$defs/acpProfile" }
+        }
+      }
+    },
+    "acpMode": {
+      "type": "string",
+      "enum": ["observe", "action"]
+    },
+    "acpBindings": {
+      "type": "object",
+      "maxProperties": 128,
+      "propertyNames": { "$ref": "#/$defs/stableName" },
+      "additionalProperties": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "enabled": { "type": "boolean" },
+          "profile": { "$ref": "#/$defs/stableName" }
+        }
+      }
+    },
+    "acpProfile": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "mode": { "$ref": "#/$defs/acpMode" },
+        "fail_mode": { "type": "string", "enum": ["open", "closed"] },
+        "allowed_clients": { "$ref": "#/$defs/acpNameList" },
+        "allowed_agents": { "$ref": "#/$defs/acpNameList" },
+        "denied_methods": { "$ref": "#/$defs/acpMethodList" }
+      }
+    },
+    "acpNameList": {
+      "type": "array",
+      "maxItems": 128,
+      "uniqueItems": true,
+      "items": { "$ref": "#/$defs/stableName" }
+    },
+    "acpMethodList": {
+      "type": "array",
+      "maxItems": 256,
+      "uniqueItems": true,
+      "items": { "type": "string", "minLength": 1, "maxLength": 256 }
+    },
     "boundedString": {
       "type": "string",
       "maxLength": 4096

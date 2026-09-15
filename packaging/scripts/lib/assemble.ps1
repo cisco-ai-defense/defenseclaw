@@ -171,6 +171,7 @@ try {
 Write-DefenseClawStage "stage 2/6  verify-signatures"
 $expectedPayload = @(
     'DefenseClawEnterprise.psm1',
+    'defenseclaw-acp.exe',
     'defenseclaw-cmid-broker.exe',
     'defenseclaw-gateway.exe',
     'defenseclaw-hook.exe',
