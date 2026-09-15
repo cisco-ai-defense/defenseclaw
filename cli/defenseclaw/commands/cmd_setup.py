@@ -1296,6 +1296,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         flag_value=None,
         non_interactive=False,
     )
+    current_model = (llm.model or "") if llm.provider == previous_provider else ""
     if llm.provider in _LOCAL_LLM_WIZARD_PROVIDERS:
         # Local runtimes: no API key. Ask for the endpoint first so we
         # can list the models actually installed on that runtime.
@@ -1303,7 +1304,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
         default_base = current_base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(llm.provider, "")
         llm.model, llm.base_url = pick_local_runtime(
             provider=llm.provider,
-            current_model=llm.model or "",
+            current_model=current_model,
             current_base_url=current_base_url,
             default_base_url=default_base,
             flag_model=None,
@@ -1315,7 +1316,7 @@ def _configure_llm(cfg, data_dir: str, *, target_path: str = "") -> None:
     else:
         instance_obj = custom_instance(data_dir, llm.instance_name) if llm.instance_name else None
         llm.model = pick_model(
-            current=llm.model or "",
+            current=current_model,
             provider=llm.provider,
             instance=instance_obj,
             flag_value=None,

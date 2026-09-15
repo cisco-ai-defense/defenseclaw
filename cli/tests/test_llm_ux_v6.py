@@ -863,10 +863,11 @@ class TestLocalModelListing(unittest.TestCase):
         self.assertEqual(base_url, "http://127.0.0.1:11434")
         poll.assert_not_called()
 
-    def test_interactive_provider_change_drops_stale_base_url(self) -> None:
+    def test_interactive_provider_change_drops_stale_model_and_base_url(self) -> None:
         with tempfile.TemporaryDirectory() as data_dir:
             cfg = _make_cfg(data_dir)
             cfg.llm.provider = "openai"
+            cfg.llm.model = "gpt-5"
             cfg.llm.base_url = "https://old-provider.example/v1"
             with (
                 mock.patch.object(_llm_picker, "pick_provider", return_value="ollama"),
@@ -881,6 +882,7 @@ class TestLocalModelListing(unittest.TestCase):
             ):
                 cmd_setup._configure_llm(cfg, data_dir)
 
+        self.assertEqual(local_runtime.call_args.kwargs["current_model"], "")
         self.assertEqual(local_runtime.call_args.kwargs["current_base_url"], "")
         self.assertEqual(
             local_runtime.call_args.kwargs["default_base_url"],
