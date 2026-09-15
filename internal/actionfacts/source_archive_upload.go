@@ -166,7 +166,7 @@ func hasSourceArchiveExternalUpload(facts Facts, commandID int64) bool {
 		if host == "" || host == "localhost" || strings.HasSuffix(host, ".localhost") {
 			continue
 		}
-		if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil && address.IsLoopback() {
+		if address, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil && address.Unmap().IsLoopback() {
 			continue
 		}
 		return true

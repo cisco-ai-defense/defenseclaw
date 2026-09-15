@@ -51,6 +51,7 @@ func TestSourceArchiveUploadLoopbackAliasesDoNotProjectExternalFlow(t *testing.T
 		"https://collector.localhost/repo",
 		"http://127.1/repo",
 		"http://0x7f000001/repo",
+		"http://[::ffff:127.0.0.1]/repo",
 	} {
 		t.Run(target, func(t *testing.T) {
 			command := "git archive HEAD | base64 | curl --data-binary @- " + target
@@ -69,6 +70,7 @@ func TestSourceArchiveUploadUnknownScopeOnlyExcludesNumericLoopback(t *testing.T
 		want bool
 	}{
 		{name: "loopback", host: "127.0.0.1", want: false},
+		{name: "ipv4_mapped_loopback", host: "::ffff:127.0.0.1", want: false},
 		{name: "public_numeric", host: "198.51.100.7", want: true},
 	} {
 		t.Run(test.name, func(t *testing.T) {

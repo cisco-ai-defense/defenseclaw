@@ -24,6 +24,8 @@ SELECTOR_REASON = "deterministic_benign_finding"
 
 
 def sha256_file(path: Path) -> str:
+    """Return the SHA-256 digest of a file without interpreting its values."""
+
     digest = hashlib.sha256()
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
@@ -32,6 +34,8 @@ def sha256_file(path: Path) -> str:
 
 
 def sha256_json(value: Any) -> str:
+    """Return a stable digest for a JSON-compatible value."""
+
     encoded = json.dumps(
         value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -39,11 +43,15 @@ def sha256_json(value: Any) -> str:
 
 
 def read_json(path: Path) -> Any:
+    """Read one small JSON provenance file."""
+
     with path.open("r", encoding="utf-8") as stream:
         return json.load(stream)
 
 
 def payload_summary(payload: Any) -> dict[str, Any]:
+    """Describe payload shape and tool names without retaining argument values."""
+
     if not isinstance(payload, dict):
         return {"type": type(payload).__name__}
 
@@ -68,6 +76,8 @@ def payload_summary(payload: Any) -> dict[str, Any]:
 
 
 def selected_case(row: dict[str, Any]) -> bool:
+    """Return whether a row satisfies the frozen benign near-miss selector."""
+
     reasons = row.get("reasons")
     baseline = row.get("baseline")
     return (
@@ -82,6 +92,8 @@ def selected_case(row: dict[str, Any]) -> bool:
 
 
 def compact_baseline(baseline: dict[str, Any]) -> dict[str, Any]:
+    """Keep only stable, non-payload baseline decision metadata."""
+
     return {
         "detected": baseline.get("detected") is True,
         "action": baseline.get("action", ""),
@@ -95,8 +107,25 @@ def compact_baseline(baseline: dict[str, Any]) -> dict[str, Any]:
 
 
 def build_source(queue_path: Path, clusters_path: Path) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Validate one queue/cluster pair and return its source metadata and rows."""
+
+    if queue_path.resolve().parent != clusters_path.resolve().parent:
+        raise ValueError(
+            f"queue and clusters must be from the same source directory: "
+            f"{queue_path} / {clusters_path}"
+        )
     clusters = read_json(clusters_path)
-    rows: list[dict[str, Any]] = []
+    if not isinstance(clusters, dict):
+        raise ValueError(f"{clusters_path}: cluster metadata is not an object")
+    if clusters.get("schema_version") != "1":
+        raise ValueError(f"{clusters_path}: unsupported cluster schema")
+    if clusters.get("profile") != "default":
+        raise ValueError(f"{clusters_path}: cluster profile is not default")
+    for field in ("case_count", "prediction_count", "queue_count"):
+        value = clusters.get(field)
+        if not isinstance(value, int) or isinstance(value, bool) or value < 0:
+            raise ValueError(f"{clusters_path}: invalid {field}")
+    queue_rows: list[dict[str, Any]] = []
     with queue_path.open("r", encoding="utf-8") as stream:
         for line_number, line in enumerate(stream, 1):
             if not line.strip():
@@ -104,32 +133,44 @@ def build_source(queue_path: Path, clusters_path: Path) -> tuple[dict[str, Any],
             value = json.loads(line)
             if not isinstance(value, dict):
                 raise ValueError(f"{queue_path}:{line_number}: queue row is not an object")
-            if selected_case(value):
-                payload = value.get("payload")
-                rows.append(
-                    {
-                        "schema_version": SCHEMA_VERSION,
-                        "case_id": value.get("id", ""),
-                        "dataset": value.get("dataset", ""),
-                        "split": value.get("split", ""),
-                        "surface": value.get("surface", ""),
-                        "selection_reason": (
-                            "authoritative benign case selected because the frozen "
-                            "baseline emitted a finding; review-only"
-                        ),
-                        "reason_codes": list(value.get("reasons", [])),
-                        "source_disposition": value.get("source_disposition", ""),
-                        "label_reference": {
-                            "truth_source": "deterministic",
-                            "deterministic_truth": "benign",
-                            "authoritative_label_unchanged": True,
-                        },
-                        "baseline": compact_baseline(value["baseline"]),
-                        "profile_actions": dict(value.get("profile_actions", {})),
-                        "payload_sha256": sha256_json(payload),
-                        "payload_summary": payload_summary(payload),
-                    }
-                )
+            if value.get("schema_version") != "1":
+                raise ValueError(f"{queue_path}:{line_number}: unsupported queue schema")
+            queue_rows.append(value)
+
+    if clusters["queue_count"] != len(queue_rows):
+        raise ValueError(
+            f"{queue_path}: queue row count {len(queue_rows)} does not match "
+            f"cluster metadata {clusters['queue_count']}"
+        )
+
+    rows: list[dict[str, Any]] = []
+    for value in queue_rows:
+        if selected_case(value):
+            payload = value.get("payload")
+            rows.append(
+                {
+                    "schema_version": SCHEMA_VERSION,
+                    "case_id": value.get("id", ""),
+                    "dataset": value.get("dataset", ""),
+                    "split": value.get("split", ""),
+                    "surface": value.get("surface", ""),
+                    "selection_reason": (
+                        "authoritative benign case selected because the frozen "
+                        "baseline emitted a finding; review-only"
+                    ),
+                    "reason_codes": list(value.get("reasons", [])),
+                    "source_disposition": value.get("source_disposition", ""),
+                    "label_reference": {
+                        "truth_source": "deterministic",
+                        "deterministic_truth": "benign",
+                        "authoritative_label_unchanged": True,
+                    },
+                    "baseline": compact_baseline(value["baseline"]),
+                    "profile_actions": dict(value.get("profile_actions", {})),
+                    "payload_sha256": sha256_json(payload),
+                    "payload_summary": payload_summary(payload),
+                }
+            )
 
     source = {
         "queue_file_sha256": sha256_file(queue_path),
@@ -146,6 +187,8 @@ def build_source(queue_path: Path, clusters_path: Path) -> tuple[dict[str, Any],
 
 
 def action_counts(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
+    """Count retained rows by recorded profile action."""
+
     profiles = {"default", "permissive", "strict"}
     for row in rows:
         profiles.update(row.get("profile_actions", {}).keys())
@@ -160,6 +203,8 @@ def action_counts(rows: list[dict[str, Any]]) -> dict[str, dict[str, int]]:
 
 
 def parse_args() -> argparse.Namespace:
+    """Parse the command-line interface for the metadata-only lane builder."""
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--queue", action="append", required=True)
     parser.add_argument("--clusters", action="append", required=True)
@@ -169,6 +214,8 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> int:
+    """Validate all sources, then atomically begin writing the requested lane."""
+
     args = parse_args()
     if len(args.queue) != len(args.clusters):
         raise SystemExit("--queue and --clusters must have the same number of values")
@@ -176,7 +223,6 @@ def main() -> int:
     output_dir = Path(args.output_dir)
     if output_dir.exists():
         raise SystemExit(f"refusing to overwrite existing output directory: {output_dir}")
-    output_dir.mkdir(parents=True)
 
     sources: list[dict[str, Any]] = []
     rows: list[dict[str, Any]] = []
@@ -192,6 +238,7 @@ def main() -> int:
         rows.extend(source_rows)
 
     rows.sort(key=lambda row: (row["dataset"], row["case_id"]))
+    output_dir.mkdir(parents=True)
     cases_path = output_dir / "cases.jsonl"
     with cases_path.open("x", encoding="utf-8") as stream:
         for row in rows:
