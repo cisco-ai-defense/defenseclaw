@@ -71,9 +71,10 @@ param(
     [switch]$AllowUnsigned,
     [switch]$AttestAgentApplicationControl,
     [switch]$AttestClaudeEffectivePolicy,
-    # Retained for command-line compatibility, but rejected before bootstrap
-    # creation until late config publication can authenticate and prepare all
-    # enrolled user runtimes before any service activation.
+    # Stages an installed but disabled deployment with protected placeholder
+    # policy. Activation is allowed only through a later Repair that supplies
+    # BOTH authenticated Config and Manifest inputs; direct file-drop/start is
+    # deliberately not an activation contract.
     [switch]$DeferredConfig,
     [int]$SelfUninstallCallerPID,
     # Protected parent directory for the installer's one-shot bootstrap
@@ -399,6 +400,22 @@ namespace $nativeNamespace
             }
         }
 
+        public static bool IsInteractiveUserSID(SecurityIdentifier sid)
+        {
+            if (sid == null)
+                return false;
+            string value = sid.Value;
+            int componentCount = value.Split('-').Length;
+            return (value.StartsWith(
+                        "S-1-5-21-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount >= 8) ||
+                (value.StartsWith(
+                        "S-1-12-1-",
+                        StringComparison.OrdinalIgnoreCase) &&
+                    componentCount == 8);
+        }
+
         public static string[] GetActiveSessionSIDs()
         {
             IntPtr sessions = IntPtr.Zero;
@@ -448,9 +465,7 @@ namespace $nativeNamespace
                         : new NTAccount(domain, user);
                     SecurityIdentifier sid = (SecurityIdentifier)account.Translate(
                         typeof(SecurityIdentifier));
-                    if (sid.Value.StartsWith(
-                            "S-1-5-21-",
-                            StringComparison.OrdinalIgnoreCase))
+                    if (IsInteractiveUserSID(sid))
                         active.Add(sid.Value);
                 }
                 List<string> ordered = new List<string>(active);
@@ -1817,6 +1832,25 @@ function Get-DefenseClawRenderedEnterpriseConfig {
     return $sb.ToString()
 }
 
+function Test-DefenseClawInteractiveUserSID {
+    param(
+        [AllowNull()]
+        [Security.Principal.SecurityIdentifier]$SID
+    )
+
+    if ($null -eq $SID) { return $false }
+    $value = $SID.Value
+    $componentCount = $value.Split('-').Length
+    return ($value.StartsWith(
+            'S-1-5-21-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -ge 8) -or
+        ($value.StartsWith(
+            'S-1-12-1-',
+            [StringComparison]::OrdinalIgnoreCase
+        ) -and $componentCount -eq 8)
+}
+
 function Select-DefenseClawActiveInteractiveUserProfiles {
     param(
         [AllowEmptyCollection()][object[]]$Profiles = @(),
@@ -1834,10 +1868,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($candidate.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            )) {
+        if (Test-DefenseClawInteractiveUserSID -SID $candidate) {
             [void]$active.Add($candidate.Value)
         }
     }
@@ -1854,10 +1885,7 @@ function Select-DefenseClawActiveInteractiveUserProfiles {
             )
         }
         catch { continue }
-        if ($profileSID.Value.StartsWith(
-                'S-1-5-21-',
-                [StringComparison]::OrdinalIgnoreCase
-            ) -and
+        if ((Test-DefenseClawInteractiveUserSID -SID $profileSID) -and
             $active.Contains($profileSID.Value)) {
             $selected.Add($profile)
         }
@@ -1882,9 +1910,9 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
 
     # Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList
-    # and return one PSCustomObject per eligible interactive user (SID starts
-    # with S-1-5-21-, has a resolvable ProfileImagePath that exists on disk, and
-    # the SID translates to a live NTAccount).
+    # and return one PSCustomObject per eligible local/domain or Microsoft Entra
+    # ID interactive user with a resolvable on-disk ProfileImagePath whose SID
+    # translates to a live NTAccount.
     $rootKey = 'HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList'
     $out = [Collections.Generic.List[psobject]]::new()
     if (-not (Test-Path -LiteralPath $rootKey)) {
@@ -1892,7 +1920,11 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
     }
     foreach ($sub in Get-ChildItem -LiteralPath $rootKey -ErrorAction SilentlyContinue) {
         $sid = $sub.PSChildName
-        if (-not $sid.StartsWith('S-1-5-21-')) { continue }
+        try {
+            $profileSID = [Security.Principal.SecurityIdentifier]::new($sid)
+        }
+        catch { continue }
+        if (-not (Test-DefenseClawInteractiveUserSID -SID $profileSID)) { continue }
         $image = $null
         try {
             $image = (Get-ItemProperty -LiteralPath $sub.PSPath `
@@ -1904,7 +1936,7 @@ function Get-DefenseClawEligibleInteractiveUserProfiles {
         if (-not [IO.Directory]::Exists($image)) { continue }
         $account = $null
         try {
-            $account = ([Security.Principal.SecurityIdentifier]::new($sid)).Translate(
+            $account = $profileSID.Translate(
                 [Security.Principal.NTAccount]
             ).Value
         }
@@ -3101,15 +3133,13 @@ $result = $null
 $failureMessage = $null
 $exitCode = 0
 try {
-    # Deferred installation cannot authenticate or precreate per-user target
-    # runtimes because targets.yaml does not exist yet. Fail before the
-    # bootstrap environment creates its first protected staging directory;
-    # the module repeats this check as defense in depth for direct callers.
-    if ($DeferredConfig) {
-        throw (
-            '-DeferredConfig is temporarily unavailable: secure target ' +
-            'runtime preparation requires authenticated targets.yaml during Install'
-        )
+    if ($DeferredConfig -and $Action -ne 'Install') {
+        throw '-DeferredConfig is valid only with Install'
+    }
+    if ($DeferredConfig -and
+        (-not [string]::IsNullOrWhiteSpace($Config) -or
+            -not [string]::IsNullOrWhiteSpace($Manifest))) {
+        throw '-DeferredConfig cannot be combined with -Config or -Manifest'
     }
     $bootstrapEnvironment = New-DefenseClawBootstrapEnvironment
     $modulePath = [IO.Path]::GetFullPath(
@@ -3177,6 +3207,35 @@ try {
     if ($modeSupplied -and $Action -ne 'Install' -and $Action -ne 'Upgrade' -and $Action -ne 'Repair') {
         throw '-Mode / -Connector are valid only with Install, Upgrade, or Repair'
     }
+    if ($DeferredConfig) {
+        # Use a real, valid managed-enterprise policy and an empty target set so
+        # the ordinary authenticated install transaction can establish every
+        # machine artifact and ACL. All services remain disabled. A later
+        # Repair with both real inputs performs target preparation and the
+        # guardian-first service activation transaction.
+        $renderRoot = $bootstrapEnvironment.Path
+        $deferredConnectors = @('codex')
+        $deferredConfigPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-config-placeholder.yaml'
+        )
+        $deferredManifestPath = [IO.Path]::Combine(
+            $renderRoot, 'deferred-targets-placeholder.yaml'
+        )
+        [IO.File]::WriteAllText(
+            $deferredConfigPath,
+            (Get-DefenseClawRenderedEnterpriseConfig `
+                -Mode observe -Connectors $deferredConnectors),
+            [Text.UTF8Encoding]::new($false)
+        )
+        [IO.File]::WriteAllText(
+            $deferredManifestPath,
+            (Get-DefenseClawRenderedEnterpriseTargets `
+                -Connectors $deferredConnectors -Profiles @()),
+            [Text.UTF8Encoding]::new($false)
+        )
+        $Config = $deferredConfigPath
+        $Manifest = $deferredManifestPath
+    }
     if ($modeSupplied) {
         $renderedConnectors = ConvertTo-DefenseClawConnectorList -Connector $Connector
         $renderedConfigBody = Get-DefenseClawRenderedEnterpriseConfig `
@@ -3243,9 +3302,8 @@ try {
         # The exact service/root/CODEX_HOME grammar scopes this relaxation for
         # every certification lifecycle action, including pre-install Status.
         AllowUnsigned = [bool]$AllowUnsigned
-        # Retained in the module invocation shape for CLI compatibility. The
-        # entry gate above rejects it before bootstrap creation, and the module
-        # repeats that rejection for direct callers.
+        # Marks the protected installed metadata as awaiting a complete Repair;
+        # the module keeps every managed service disabled until then.
         DeferredConfig = [bool]$DeferredConfig
         InstallerSource = $PSCommandPath
         ModuleSource = $modulePath

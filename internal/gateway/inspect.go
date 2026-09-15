@@ -124,6 +124,12 @@ type ToolInspectVerdict struct {
 	// ctx / emitted events. Tri-state (nil/true/false); never
 	// serialized on the hook response wire.
 	RedactionEnabled *bool `json:"-"`
+	// aiDefenseBlock is trusted in-process provenance: it is set only when
+	// Cisco AI Defense itself returned a block verdict. Hook finalization uses
+	// it to distinguish an enforced AID decision from a later local asset-policy
+	// escalation. It is intentionally absent from every caller-controlled wire
+	// shape.
+	aiDefenseBlock bool
 	// managedAIDFailOpenReason is an internal accounting marker. The generic
 	// HTTP handler consumes it only after selecting an allow result, so
 	// a timed-out request that the connector fails closed cannot be counted as
@@ -397,7 +403,11 @@ func managedAIDHookContentIsInspectable(toolName, content string) bool {
 // (allow → alert → block), severity escalates, findings concatenate.
 // Used by the hook-lane callers below.
 func mergeWithAIDVerdict(local *ToolInspectVerdict, aid *ScanVerdict) *ToolInspectVerdict {
-	return mergeWithLaneVerdict(local, aid, "ai-defense:")
+	merged := mergeWithLaneVerdict(local, aid, "ai-defense:")
+	if merged != nil && aid != nil && strings.EqualFold(strings.TrimSpace(aid.Action), "block") {
+		merged.aiDefenseBlock = true
+	}
+	return merged
 }
 
 // mergeWithJudgeVerdict folds an LLM-judge ScanVerdict into the hook
@@ -1026,6 +1036,10 @@ func clampSourceScopeVerdict(verdict *ToolInspectVerdict) {
 	verdict.RawAction = ""
 	verdict.WouldBlock = false
 	verdict.ApprovalTimeoutMS = 0
+	// Source-only content is never enforceable. Do not let a cloud block
+	// observed while scanning trusted detector/test source survive as AID
+	// enforcement provenance when the untrusted segment is merged later.
+	verdict.aiDefenseBlock = false
 	if detected {
 		verdict.Severity = "LOW"
 	} else {

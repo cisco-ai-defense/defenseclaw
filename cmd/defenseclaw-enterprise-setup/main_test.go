@@ -36,9 +36,30 @@ func TestParseEnterpriseSetupInstallContract(t *testing.T) {
 	}
 }
 
+func TestParseEnterpriseSetupDefaultsEmptyInstallToDeferredConfiguration(t *testing.T) {
+	opts, help, err := parseEnterpriseSetupOptions([]string{
+		"/install",
+		"/quiet",
+		"DEFERREDCONFIG=1",
+	})
+	if err != nil || help {
+		t.Fatalf("parse deferred install: help=%v err=%v", help, err)
+	}
+	if !opts.DeferredConfig || opts.Config != "" || opts.Manifest != "" {
+		t.Fatalf("deferred install = %+v", opts)
+	}
+
+	opts, help, err = parseEnterpriseSetupOptions([]string{"/install"})
+	if err != nil || help || !opts.DeferredConfig {
+		t.Fatalf("implicit deferred install: opts=%+v help=%v err=%v", opts, help, err)
+	}
+}
+
 func TestParseEnterpriseSetupRejectsUnsafeScopeCombinations(t *testing.T) {
 	tests := [][]string{
 		{"/install", "--config", "config.yaml"},
+		{"/install", "--manifest", "targets.yaml"},
+		{"/install", "--deferred-config", "--config", "config.yaml", "--manifest", "targets.yaml"},
 		{"/status", "--no-start"},
 		{"/repair", "--purge"},
 		{"/install", "--config", "config.yaml", "--manifest", "targets.yaml", "--allow-unsigned"},

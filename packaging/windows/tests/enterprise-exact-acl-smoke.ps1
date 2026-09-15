@@ -40,10 +40,10 @@ $expected = [ordered]@{
     LogDirectory = 'O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)'
     GatewayLogDirectory = "O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)(A;OICI;0x1301bf;;;$serviceSID)"
     # FileSystemAccessRule adds Synchronize (0x100000) to explicit allow
-    # rules. ListDirectory | Traverse is therefore serialized as 0x100021.
+    # rules. ReadAndExecute is therefore serialized as 0x1200a9.
     # CommonAcl then canonicalizes equal-priority allow ACEs by SID, placing
     # Authenticated Users before SYSTEM, Administrators, and the service SID.
-    ManagedIPCDirectory = "O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)"
+    ManagedIPCDirectory = "O:BAG:BAD:P(A;;0x1200a9;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;$serviceSID)"
 }
 $directoryKinds = @(
     'InstallDirectory',
@@ -323,7 +323,7 @@ $ipcCleanupCases = & $module {
     param($ScopeASID, $ScopeBSID)
     $source = [Security.AccessControl.RawSecurityDescriptor]::new(
         (
-            'O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)' +
+            'O:BAG:BAD:P(A;;0x1200a9;;;AU)(A;;FA;;;SY)(A;;FA;;;BA)' +
             "(A;;FA;;;$ScopeASID)(A;;0x1200a9;;;$ScopeBSID)"
         )
     )
@@ -700,7 +700,7 @@ $nativeIPCCleanup = & $module {
         $security = [Security.AccessControl.DirectorySecurity]::new()
         $security.SetSecurityDescriptorSddlForm(
             (
-                'O:BAG:BAD:P(A;;0x100021;;;AU)(A;;FA;;;SY)' +
+                'O:BAG:BAD:P(A;;0x1200a9;;;AU)(A;;FA;;;SY)' +
                 "(A;;FA;;;BA)(A;;FA;;;$ScopeASID)" +
                 "(A;;0x1200a9;;;$ScopeBSID)"
             ),

@@ -959,6 +959,13 @@ func verifyWindowsGenericManagedTarget(ctx context.Context, target windowsGeneri
 	if lock.Connector != target.conn.Name() {
 		return fmt.Errorf("enterprise hooks: connector %s hook contract lock is missing", target.conn.Name())
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return fmt.Errorf(
+			"enterprise hooks: connector %s managed gateway binding: %w",
+			target.conn.Name(),
+			err,
+		)
+	}
 	current, err := connector.NewHookContractLockEntryForMode(
 		target.setup,
 		target.conn,

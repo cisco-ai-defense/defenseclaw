@@ -84,12 +84,10 @@ type enterpriseSetupOptions struct {
 	CoreHardeningCertification    bool
 	AttestAgentApplicationControl bool
 	AttestClaudeEffectivePolicy   bool
-	// DeferredConfig turns on the UCB-friendly late-config install
-	// path from spec 003 (docs/specs/003-windows-deferred-config/):
-	// --config and --manifest become optional at install time; the
-	// installer provisions the canonical drop-point directories with
-	// ACLs but writes no file bodies; the daemon + guardian fsnotify-
-	// wait for UCB to atomically drop them later.
+	// DeferredConfig stages a protected installed deployment with all
+	// managed services disabled. A later Repair supplying both authenticated
+	// config and manifest files performs target preparation and activation;
+	// directly dropping files or starting services is not supported.
 	DeferredConfig bool
 	// Mode / Connector are the macOS-parity QA shorthand: when both are
 	// supplied (and --config / --manifest are empty) the installed
@@ -187,7 +185,7 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 	flags.BoolVar(&opts.CoreHardeningCertification, "core-hardening-certification", false, "run the unsigned core-only certification profile")
 	flags.BoolVar(&opts.AttestAgentApplicationControl, "attest-agent-application-control", false, "attest live WDAC or AppLocker enforcement")
 	flags.BoolVar(&opts.AttestClaudeEffectivePolicy, "attest-claude-effective-policy", false, "attest Claude managed-policy precedence")
-	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "spec 003 UCB-friendly install: --config and --manifest optional; services registered stopped")
+	flags.BoolVar(&opts.DeferredConfig, "deferred-config", false, "stage all services disabled; activate through repair with both config and manifest")
 	timeoutSeconds := int(defaultLifecycleTimeout / time.Second)
 	flags.IntVar(&timeoutSeconds, "timeout-seconds", timeoutSeconds, "bounded lifecycle timeout")
 	if err := flags.Parse(normalized); err != nil {
@@ -244,23 +242,26 @@ func parseEnterpriseSetupOptions(arguments []string) (enterpriseSetupOptions, bo
 			}
 		}
 	}
-	if opts.Action == "install" && !opts.DeferredConfig && !modeSupplied &&
-		(strings.TrimSpace(opts.Config) == "" || strings.TrimSpace(opts.Manifest) == "") {
-		// --deferred-config bypasses the config/manifest requirement:
-		// the installer will provision the drop-point directories
-		// with ACLs but write no file bodies; UCB atomically writes
-		// the bodies later, and the daemon + guardian fsnotify-wait
-		// pick them up. Spec 003 REQ-02 / REQ-03.
-		// --mode + --connector also bypass it: install-enterprise.ps1
-		// renders config.yaml + targets.yaml into the bootstrap
-		// staging directory before invoking the lifecycle.
-		return opts, false, errors.New("install requires both --config and --manifest (or --mode/--connector, or --deferred-config)")
+	configSupplied := strings.TrimSpace(opts.Config) != ""
+	manifestSupplied := strings.TrimSpace(opts.Manifest) != ""
+	if opts.Action == "install" && !modeSupplied {
+		if configSupplied != manifestSupplied {
+			return opts, false, errors.New("install requires config and manifest together")
+		}
+		if opts.DeferredConfig && (configSupplied || manifestSupplied) {
+			return opts, false, errors.New("--deferred-config cannot be combined with --config or --manifest")
+		}
+		if !configSupplied && !manifestSupplied {
+			// A standalone /install with no policy inputs is the supported
+			// first half of the late-configuration lifecycle. It stages a
+			// protected, disabled deployment; a later /repair with BOTH
+			// authenticated files performs target preparation and activation.
+			opts.DeferredConfig = true
+		}
 	}
 	if opts.DeferredConfig && opts.Action != "install" {
-		// Spec 003 --deferred-config is meaningful only at initial
-		// install. Upgrade/repair use the config/manifest already on
-		// disk; deferring them would leave the deployment offline.
-		// CR spec-003:PRRT_kwDORuAK-s6alkr4.
+		// The flag marks only the initial staged install. Its protected
+		// metadata later selects the special complete-Repair activation path.
 		return opts, false, errors.New("--deferred-config is valid only with install")
 	}
 	mutation := opts.Action == "install" || opts.Action == "upgrade" || opts.Action == "repair"
@@ -301,7 +302,8 @@ func normalizeEnterpriseSetupArguments(arguments []string) ([]string, bool, erro
 	}
 	boolNames := map[string]string{
 		"nostart": "no-start", "purge": "purge", "json": "json",
-		"allowunsigned": "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
+		"deferredconfig": "deferred-config",
+		"allowunsigned":  "allow-unsigned", "corehardeningcertification": "core-hardening-certification",
 		"attestagentapplicationcontrol": "attest-agent-application-control",
 		"attestclaudeeffectivepolicy":   "attest-claude-effective-policy",
 	}

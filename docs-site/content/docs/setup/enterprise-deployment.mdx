@@ -396,7 +396,10 @@ targets:
     agent_version: "2.1.207 (Claude Code)"
 ```
 
-For domain, directory-backed, or renamed accounts, record and deploy the exact
+Windows managed hook enrollment supports local/domain users with
+`S-1-5-21-...` SIDs and Microsoft Entra ID users with canonical
+`S-1-12-1-...` SIDs for Codex, Claude Code, and Cursor. For domain,
+directory-backed, Entra ID, or renamed accounts, record and deploy the exact
 SID in the target. The guardian binds the resolved profile owner to that SID
 and refuses service identities, mismatches, and profile paths outside the
 declared user's trusted path:
@@ -542,6 +545,23 @@ must not be used to make parallel production installations. Both the installer
 and certification harness resolve their default roots through Windows
 known-folder APIs; changing process environment variables cannot redirect
 them.
+
+The signed standalone Setup also supports installation before tenant policy is
+available. `/install` with neither `CONFIG` nor `MANIFEST` automatically creates
+a protected placeholder deployment, records `deferred_config_pending=true`, and
+leaves the broker, gateway, guardian, and enumerator disabled. Deliver the real
+policy as one complete activation transaction:
+
+```powershell
+DefenseClawSetup.exe /repair CONFIG=C:\staging\config.yaml MANIFEST=C:\staging\targets.yaml
+```
+
+Both files are required. This Repair authenticates them, prepares every enabled
+target runtime, runs a fresh guardian reconcile, starts all four services, and
+clears the pending marker only after readiness succeeds. Copying files directly
+into the installed directories or calling `Start-Service` is not supported and
+must not be used as a late-configuration mechanism. Upgrade is rejected while
+configuration remains pending; Purge remains available for recovery.
 
 `-CertificationCodexHome` is a harness-only unsigned-scope marker, not a fleet
 layout option or an implicit core-mode switch. The module accepts it only when
@@ -1171,8 +1191,8 @@ defenseclaw-gateway enterprise hooks uninstall `
 ```
 
 If the account and profile have already been removed, pass the recorded
-`--sid S-1-5-21-...` without `--user` or `--user-home` to remove the stale
-allow-list entry.
+`--sid S-1-5-21-...` or `--sid S-1-12-1-...` without `--user` or
+`--user-home` to remove the stale allow-list entry.
 
 Cleanup verifies the protected digest and ownership metadata before mutation.
 It removes the machine drop-in after the last target and otherwise updates the

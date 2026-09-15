@@ -105,6 +105,20 @@ const (
 	windowsCursorTestPrivateSDDL = "O:BAG:BAD:P(A;;FA;;;SY)(A;;FA;;;BA)"
 )
 
+func TestCanonicalWindowsCursorManagedTargetsAcceptsEntraID(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	dataDir := filepath.Clean(`C:\Users\entra-user\.defenseclaw`)
+	targets, err := canonicalWindowsCursorManagedTargets([]WindowsCursorManagedRuntimeTarget{{
+		SID: entraSID, DataDir: dataDir,
+	}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].SID != entraSID || targets[0].DataDir != dataDir {
+		t.Fatalf("Cursor targets = %+v, want Microsoft Entra ID target", targets)
+	}
+}
+
 func TestWindowsCursorInactiveSnapshotPreservesForeignEnterpriseConfig(t *testing.T) {
 	foreign := []byte(`{"version":1,"hooks":{"operatorEvent":[{"type":"command","command":"operator-hook"}]}}`)
 	snapshot := WindowsCursorManagedPolicyTeardownSnapshot{

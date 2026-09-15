@@ -97,8 +97,10 @@ type claudeCodeHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHook can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled *bool  `json:"-"`
-	SourceReason     string `json:"-"`
+	RedactionEnabled     *bool  `json:"-"`
+	SourceReason         string `json:"-"`
+	SuppressNotification bool   `json:"-"`
+	aiDefenseEnforced    bool
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
@@ -215,6 +217,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
 		action = "alert"
 	}
+	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	for _, asset := range assetDecisions {
 		mergedAction, mergedRawAction, mergedSeverity, mergedReason, mergedFindings, assetWouldBlock := mergeAssetDecision(
 			asset.decision, true, asset.targetType, req.HookEventName, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings,
@@ -232,15 +235,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	// finding pipeline so SIEM sees one EventScanFinding per
 	// matched rule and the correlator gets a chance to upgrade
 	// the verdict on multi-step attack flows. scanner="hook-rules".
-	// Done before dispatchClaudeCodeHookNotification so the OS toast
-	// can carry the same evaluation_id + rule_ids that the audit
-	// row + HTTP response will surface.
+	// Done before finalization so the eventual OS toast, audit row, and HTTP
+	// response carry the same evaluation_id + rule_ids.
 	evalCtx := a.emitHookRuleFindings(ctx, "claudecode", req.HookEventName, verdict,
 		hookTargetTypeForEvent(req.HookEventName), time.Since(t0))
-	if !hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions) {
-		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
-			sinkPolicyFor(ctx, verdict.RedactionEnabled))
-	}
 	resp := claudeCodeResponseFor(
 		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
 		sinkPolicyFor(ctx, verdict.RedactionEnabled),
@@ -252,6 +250,8 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	resp.EvaluationID = evalCtx.EvaluationID
 	resp.RuleIDs = evalCtx.RuleIDs
 	resp.RedactionEnabled = verdict.RedactionEnabled
+	resp.SuppressNotification = hookNotificationCoveredByAssetPolicy(rawActionBeforeAssets, assetDecisions)
+	resp.aiDefenseEnforced = aiDefenseEnforced && resp.Action == "block"
 	return resp
 }
 

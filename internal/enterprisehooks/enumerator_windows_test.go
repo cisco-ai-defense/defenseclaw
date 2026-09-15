@@ -27,13 +27,9 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/winpath"
 )
 
-// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the shape spec 005
-// REQ-11 requires: an S-1-5-21-… SID with at least 5 sub-authorities
-// (21, A, B, C, RID) is accepted; anything else is refused. The
-// boundary case (`S-1-5-21-A-B-C`, 4 sub-authorities — the bare
-// domain SID without a trailing RID) MUST be rejected: enumerating a
-// bare domain as an interactive user would emit garbage manifest
-// rows. See CR spec-005:PRRT_kwDORuAK-s6atyfL.
+// TestSIDIsInteractiveUserAcceptsRealUserSIDs pins the supported local,
+// domain, and Microsoft Entra ID user SID shapes. Classification does
+// not depend on administrator privileges.
 func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	cases := []struct {
 		name string
@@ -42,6 +38,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 	}{
 		{"typical local user (5 sub-auths)", "S-1-5-21-1000-2000-3000-1001", true},
 		{"domain user with high RID (5 sub-auths)", "S-1-5-21-1234567890-987654321-1111111111-4321", true},
+		{"Microsoft Entra ID user (5 sub-auths)", "S-1-12-1-1111111111-2222222222-3333333333-4000000000", true},
 		// Exact 5-sub-authority boundary — smallest legal user SID.
 		{"minimum accepted (exactly 5 sub-auths)", "S-1-5-21-0-0-0-500", true},
 		// The bare domain SID (`S-1-5-21-A-B-C`) has 4 sub-auths and
@@ -49,6 +46,7 @@ func TestSIDIsInteractiveUserAcceptsRealUserSIDs(t *testing.T) {
 		// `< 4` check missed.
 		{"bare domain SID (4 sub-auths)", "S-1-5-21-1000-2000-3000", false},
 		{"NT AUTHORITY too short (1 sub-auth)", "S-1-5-21", false},
+		{"truncated Microsoft Entra ID SID", "S-1-12-1-1111111111-2222222222-3333333333", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

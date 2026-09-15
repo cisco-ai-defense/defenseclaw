@@ -3492,6 +3492,48 @@ func alertEffectiveSeveritySQL() string {
 	END`
 }
 
+// AIDHookEnforcementProducer is the authenticated provenance stamped on the
+// durable enforcement companion when Cisco AI Defense supplied the block that
+// the connector actually enforced. Kept as a shared constant so downstream
+// projections that WANT to filter for the AID lane specifically can still do
+// so; the Active-Alert count itself is provenance-agnostic (see the SQL
+// below).
+const AIDHookEnforcementProducer = "gateway.hook.aid.enforcement"
+
+// HookDecisionMetricsProducer is the authenticated provenance stamped on the
+// durable enforcement companion when a connector hook enforced a block whose
+// origin was not the AID cloud lane (local ordered rules, MCP/asset policy,
+// judge, panic fallback). Kept as a shared constant so the gateway emitters,
+// the audit projection, and downstream consumers agree on the string.
+const HookDecisionMetricsProducer = "gateway.hook.decision.metrics"
+
+// activeConnectorHookBlockSQL identifies the durable enforcement companion
+// emitted after a connector hook actually applies a block. This restores the
+// 26.7.3 semantics: any enforced connector-hook block counts as an Active
+// Alert, regardless of whether AID or a local ordered rule / MCP-asset policy
+// / judge / panic-fallback originated the verdict. Managed-enterprise
+// deployments frequently enforce through local rule packs, and gating the
+// alert on a single actor string silently pinned the count at 0 for those
+// scenarios. Severity, findings, advisory outcomes, health events, and legacy
+// hook summaries without enforced=1 remain deliberately irrelevant.
+func activeConnectorHookBlockSQL() string {
+	canonicalOutcome := canonicalAlertOutcomeSQL()
+	return `(
+		event.bucket = 'enforcement.action'
+		AND event.event_name = 'enforcement.block.applied'
+		AND event.source = 'connector'
+		AND COALESCE(event.enforced, 0) = 1
+		AND ` + canonicalOutcome + ` IN ('block','blocked')
+	)`
+}
+
+// activeAIDHookBlockSQL retains the historical name for callers that already
+// spell the alert predicate this way; the underlying set is the 26.7.3-parity
+// "any enforced connector-hook block" projection.
+func activeAIDHookBlockSQL() string {
+	return activeConnectorHookBlockSQL()
+}
+
 // SelectAlertAcknowledgementTargets returns a stable alert-ID ordering and
 // the projection versions that must be included in the caller's preview
 // digest. Every caller-controlled value is bound as a SQL parameter.
@@ -3769,22 +3811,12 @@ type Counts struct {
 
 func (s *Store) GetCounts() (Counts, error) {
 	var c Counts
-	legacyActions := legacyAlertEligibleActions()
-	legacyPlaceholders := strings.TrimSuffix(strings.Repeat("?,", len(legacyActions)), ",")
 	alertCountSQL := `SELECT COUNT(*) FROM audit_events AS event
-		WHERE (event.bucket IS NULL OR event.bucket IN (
-			'security.finding','enforcement.action','network.egress','platform.health','diagnostic'
-		))
-		  AND ` + alertEligibilitySQL(legacyPlaceholders) + `
-		  AND ` + alertEffectiveSeveritySQL() + ` IN ('CRITICAL','HIGH','ERROR')
+		WHERE ` + activeAIDHookBlockSQL() + `
 		  AND NOT EXISTS (
 			  SELECT 1 FROM alert_acknowledgement_projection AS projection
 			  WHERE projection.alert_id = event.id
 		  )`
-	alertCountArgs := make([]any, 0, len(legacyActions))
-	for _, action := range legacyActions {
-		alertCountArgs = append(alertCountArgs, action)
-	}
 	queries := []struct {
 		sql  string
 		args []any
@@ -3794,12 +3826,9 @@ func (s *Store) GetCounts() (Counts, error) {
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'skill' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedSkills},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'block'`, nil, &c.BlockedMCPs},
 		{`SELECT COUNT(*) FROM actions WHERE target_type = 'mcp' AND json_extract(actions_json, '$.install') = 'allow'`, nil, &c.AllowedMCPs},
-		// ActiveAlerts is the unacknowledged actionable queue, not a count
-		// of every non-INFO audit row. Keep this IPC surface aligned with
-		// the v8 disposition selector: real findings, explicit non-allow
-		// outcomes, and important health failures only. Detection-only,
-		// clean lifecycle, LOW/MEDIUM/WARNING, and reviewed rows stay out.
-		{alertCountSQL, alertCountArgs, &c.Alerts},
+		// AVC ActiveAlerts is exactly the number of unacknowledged AI Defense
+		// blocks that managed-enterprise connector hooks actually enforced.
+		{alertCountSQL, nil, &c.Alerts},
 		{`SELECT COUNT(*) FROM scan_results`, nil, &c.TotalScans},
 		{`SELECT COUNT(*) FROM network_egress_events WHERE blocked = 1`, nil, &c.BlockedEgressCalls},
 	}

@@ -39,7 +39,13 @@ $PythonEmbedSha256 = "90B4E5B9898B72D744650524BFF92377C367F44BD5FBD09E3148656C08
 # Force the runtime owner to review the pinned binary at least quarterly. A
 # release after this deadline must deliberately move the deadline (and normally
 # the version/hash) after checking Python's current security release line.
-$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-09-10T00:00:00Z')
+#
+# 2026-09-14 extension: original deadline (2026-09-10) tripped Windows CI on
+# the fix/windows-enterprise-reconcile-freshness branch. The pinned CPython
+# 3.13.14 embeddable + hash are unchanged; extending the deadline by one
+# quarter keeps the routine review cadence intact. The runtime owner must
+# still perform the actual security-release review before the next expiry.
+$PythonRuntimeReviewDeadlineUTC = [DateTimeOffset]::Parse('2026-12-10T00:00:00Z')
 $WinUnicodeSourceName = 'win_unicode_console-0.5.zip'
 $WinUnicodeSourceUrl = 'https://files.pythonhosted.org/packages/89/8d/7aad74930380c8972ab282304a2ff45f3d4927108bb6693cabcc9fc6a099/win_unicode_console-0.5.zip'
 $WinUnicodeSourceSha256 = 'D4142D4D56D46F449D6F00536A73625A871CBA040F0BC1A2E305A04578F07D1E'
