@@ -257,7 +257,8 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 			failure: redaction.ProjectionFailureSerialization,
 		}
 		pipeline, appender := mustPipeline(t, source, projector)
-		outcome, err := pipeline.Process(context.Background(), metadata, func(admission router.Admission) (observability.Record, error) {
+		ctx := legacyredaction.WithSinkPolicy(t.Context(), legacyredaction.SinkPolicyRedact)
+		outcome, err := pipeline.Process(ctx, metadata, func(admission router.Admission) (observability.Record, error) {
 			return buildClassifiedLog(test, admission, "raw-original-marker-8172")
 		})
 		assertPipelineError(t, err, ErrorLocalProjection)
@@ -277,6 +278,9 @@ func TestLocalLogPipelineWithholdsOptionalWorkOnLocalFailure(t *testing.T) {
 		}
 		if bytes.Contains(projected, []byte("raw-original-marker-8172")) {
 			t.Fatal("projection failure health record retained the failed record ID")
+		}
+		if got := calls[0].projection.Metadata().RedactionProfile; got != string(redaction.ProfileSensitive) {
+			t.Fatalf("projection failure profile = %s, want sensitive", got)
 		}
 	})
 

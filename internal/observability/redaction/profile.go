@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 // ProfileName is a stable route-selectable projection identity.
@@ -93,6 +94,29 @@ func BuiltInProfiles() []Profile {
 		definitions[ProfileContent],
 		definitions[ProfileStrict],
 		definitions[ProfileLegacyV7],
+	}
+}
+
+// ResolveSinkPolicyProfile applies one already-authorized request-scoped sink
+// policy to an immutable configured profile. Both projection producers and
+// trusted persistence validators must use this resolver so they cannot disagree
+// about the effective profile for an occurrence.
+func ResolveSinkPolicyProfile(
+	configured Profile,
+	policy legacyredaction.SinkPolicy,
+) (Profile, bool) {
+	if !validProfile(configured) {
+		return Profile{}, false
+	}
+	switch policy {
+	case legacyredaction.SinkPolicyDefault:
+		return configured, true
+	case legacyredaction.SinkPolicyRaw:
+		return BuiltInProfile(ProfileNone)
+	case legacyredaction.SinkPolicyRedact:
+		return BuiltInProfile(ProfileSensitive)
+	default:
+		return Profile{}, false
 	}
 }
 

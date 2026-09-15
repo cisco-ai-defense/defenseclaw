@@ -508,17 +508,11 @@ func (pipeline *LocalLogPipeline) resolveProjectionProfile(
 	if pipeline == nil {
 		return v8redaction.Profile{}, false
 	}
-	profileName := configured
-	switch policy {
-	case legacyredaction.SinkPolicyDefault:
-	case legacyredaction.SinkPolicyRaw:
-		profileName = v8redaction.ProfileNone
-	case legacyredaction.SinkPolicyRedact:
-		profileName = v8redaction.ProfileSensitive
-	default:
+	profile, ok := pipeline.catalog.Resolve(configured)
+	if !ok {
 		return v8redaction.Profile{}, false
 	}
-	return pipeline.catalog.Resolve(profileName)
+	return v8redaction.ResolveSinkPolicyProfile(profile, policy)
 }
 
 func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
@@ -546,7 +540,9 @@ func (pipeline *LocalLogPipeline) persistLocalProjectionFailure(
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}
-	localProfile, ok := pipeline.catalog.Resolve(profileName)
+	localProfile, ok := pipeline.resolveProjectionProfile(
+		profileName, legacyredaction.SinkPolicyFromContext(ctx),
+	)
 	if !ok {
 		return &Error{code: ErrorFailureRecord}
 	}
