@@ -2230,11 +2230,17 @@ def test_certification_threads_broker_and_vendor_provider_through_lifecycle() ->
     module = read(MODULE)
 
     assert "@('BrokerBinary', $BrokerBinary)" in module
-    assert "@('ProviderLibrary', $ProviderLibrary)" in module
-    assert (
-        "Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, and "
-        "-HookBinary" in module
-    )
+    # -ProviderLibrary is deliberately NOT a required source for Install or
+    # Upgrade. A full XDR deployment installs Cloud Management after
+    # DefenseClaw, so cmidapi.dll routinely does not exist at lifecycle time;
+    # the broker discovers it at runtime instead. Requiring it here is what
+    # used to make that install order fail outright, so assert its absence
+    # rather than merely dropping the old assertion.
+    assert "@('ProviderLibrary', $ProviderLibrary)" not in module
+    assert "Upgrade requires -BrokerBinary, -GatewayBinary, and -HookBinary" in module
+    assert "-ProviderLibrary, -GatewayBinary" not in module
+    # A path that *is* supplied still has to be described and trusted like
+    # every other artifact; only the requirement relaxed, not the validation.
     assert "@('provider_library', $ProviderLibrary" in module
     assert "$Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path" in (
         module
