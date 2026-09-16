@@ -442,6 +442,13 @@ func runWithDeadline(t *testing.T, cause string, operation func() error) {
 // reasonably query the provider they are resolving for. None may be invoked
 // under the provider's non-reentrant mutex: the first successful Token would
 // deadlock on Available or ResolvedPath.
+//
+// This pins the whole set the config documents as permitted — Available,
+// ResolvedPath, and Invalidate — because a contract that names three methods
+// and tests two leaves the third free to regress. Token and Refresh are
+// deliberately absent: the config prohibits them from Discover, Validate, and
+// Construct, since those run under resolveMu and re-entering resolution would
+// block on a mutex the same goroutine already holds.
 func TestDeferredProviderInjectedCallbacksMayQueryProvider(t *testing.T) {
 	library := `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.2\CMID\1.0.4\x64\cmidapi.dll`
 
@@ -452,11 +459,12 @@ func TestDeferredProviderInjectedCallbacksMayQueryProvider(t *testing.T) {
 				provider *DeferredProvider
 				probed   bool
 			)
-			// Both accessors take provider.mu.
+			// Every one of these takes provider.mu.
 			probe := func() {
 				probed = true
 				_ = provider.Available()
 				_ = provider.ResolvedPath()
+				provider.Invalidate()
 			}
 
 			config := DeferredProviderConfig{
@@ -480,7 +488,10 @@ func TestDeferredProviderInjectedCallbacksMayQueryProvider(t *testing.T) {
 			if err != nil {
 				t.Fatalf("NewDeferredProvider: %v", err)
 			}
-			runWithDeadline(t, callback+" deadlocked: it ran while holding provider.mu", func() error {
+			cause := callback + " deadlocked: either it ran under provider.mu, or one of" +
+				" the methods it is permitted to call now re-enters resolution and" +
+				" blocks on resolveMu"
+			runWithDeadline(t, cause, func() error {
 				_, tokenErr := provider.Token(context.Background())
 				return tokenErr
 			})
@@ -544,6 +555,9 @@ func TestDeferredProviderValidateMayQueryProviderWhileDropping(t *testing.T) {
 		Validate: func(string) error {
 			_ = provider.Available()
 			_ = provider.ResolvedPath()
+			// Reached with a provider adopted, unlike the resolve path, so
+			// this is the case where Invalidate actually delegates inward.
+			provider.Invalidate()
 			if vanished {
 				return errors.New("library is gone")
 			}

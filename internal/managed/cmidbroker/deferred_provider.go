@@ -39,6 +39,12 @@ const DefaultRediscoveryInterval = 15 * time.Second
 // DeferredProviderConfig wires a DeferredProvider to its discovery,
 // trust, and construction steps. Every step is injected so this file
 // carries no Windows-only dependency and its tests run on any platform.
+//
+// Every step may call the provider's Available, ResolvedPath, and Invalidate.
+// Discover, Validate, and Construct additionally run while resolution is in
+// flight, so they must not call Token or Refresh; see the Locking note on
+// DeferredProvider. OnResolved runs after resolution completes and so has no
+// such restriction.
 type DeferredProviderConfig struct {
 	// PinnedLibraryPath is the path the installer recorded, when it
 	// found one. It is preferred over discovery for as long as it still
@@ -78,8 +84,18 @@ type DeferredProviderConfig struct {
 // missing library into a recoverable state.
 //
 // Locking: resolveMu is always acquired before mu, and mu is never held
-// across an acquisition of resolveMu. Every injected callback runs with
-// neither held, so a callback may query this provider without deadlocking.
+// across an acquisition of resolveMu. No injected callback runs under mu, so
+// any of them may call Available, ResolvedPath, or Invalidate.
+//
+// Discover, Validate, and Construct do run under resolveMu — that is what
+// collapses a concurrent burst into a single adoption — so Token and Refresh
+// are off-limits from inside them: either re-enters resolve and blocks on the
+// resolveMu the calling goroutine already owns. That prohibition is stated
+// rather than enforced. Detecting it needs goroutine identity, which Go
+// exposes only by parsing a stack dump, and the check would buy nothing real:
+// a callback asking for a token from the provider it is currently resolving
+// is asking a question that only the in-flight resolution can answer, so
+// there is no useful result to hand back in place of the deadlock.
 type DeferredProvider struct {
 	discover  func() string
 	validate  func(string) error
@@ -214,10 +230,12 @@ func (provider *DeferredProvider) ensure() (Provider, error) {
 // non-empty path back, so concurrent callers still produce exactly one
 // announcement per adoption.
 //
-// discover, validate, and construct all run outside mu. They are supplied
-// by the caller, so treating them as unable to touch this provider would
-// be an assumption about code this package does not own; the two-mutex
-// split removes the assumption instead of documenting it.
+// discover, validate, and construct all run outside mu, though under
+// resolveMu. They are supplied by the caller, so treating them as unable to
+// read this provider's state would be an assumption about code this package
+// does not own; the two-mutex split removes that assumption instead of
+// documenting it. What resolveMu still rules out is a callback re-entering
+// Token or Refresh, which the Locking note on DeferredProvider prohibits.
 func (provider *DeferredProvider) resolve() (Provider, string, error) {
 	if inner := provider.current(); inner != nil {
 		return inner, "", nil
