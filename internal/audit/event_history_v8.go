@@ -36,6 +36,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	observabilityredaction "github.com/defenseclaw/defenseclaw/internal/observability/redaction"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -463,6 +464,15 @@ func (writer *EventHistoryWriter) appendContextTx(
 		return eventHistoryAppendOutcome{}, eventHistoryFailure(
 			EventHistoryHealthProjectionRejected,
 			fmt.Errorf("audit: no effective local redaction profile for bucket %s", record.Bucket()),
+		)
+	}
+	expectedProfile, ok = observabilityredaction.ResolveSinkPolicyProfile(
+		expectedProfile, legacyredaction.SinkPolicyFromContext(ctx),
+	)
+	if !ok {
+		return eventHistoryAppendOutcome{}, eventHistoryFailure(
+			EventHistoryHealthProjectionRejected,
+			fmt.Errorf("audit: effective local redaction profile is invalid"),
 		)
 	}
 	trustedProjection, _, err := writer.projectionEngine.Reproject(projection, expectedProfile)
