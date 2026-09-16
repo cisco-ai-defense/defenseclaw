@@ -289,12 +289,14 @@ func runWindowsEnterpriseLifecycle(
 	}
 	mutation := action == "install" || action == "upgrade" || action == "repair"
 	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+		// A full XDR installation sequences Cloud Management last, so
+		// cmidapi.dll is routinely absent while DefenseClaw installs.
+		// That is no longer a preflight failure: the deployment completes
+		// without the library and the credential broker discovers it at
+		// runtime, enabling the CMID lane once Cloud Management lands. An
+		// already-installed library is still pinned here so nothing
+		// changes for the Cloud-Management-first order.
 		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
-		if opts.providerLibrary == "" {
-			return failPreflight(errors.New(
-				"the managed credential provider library was not found in the trusted Secure Client installation",
-			))
-		}
 	}
 	script, err := windowsEnterpriseScriptFinder(opts.installerPath)
 	if err != nil {
