@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 func TestBuiltInProfileMatrixIsExact(t *testing.T) {
@@ -48,6 +49,38 @@ func TestBuiltInProfileMatrixIsExact(t *testing.T) {
 		if !reflect.DeepEqual(profile.DetectorGroups(), wantGroups) {
 			t.Fatalf("%s groups = %v, want %v", name, profile.DetectorGroups(), wantGroups)
 		}
+	}
+}
+
+func TestResolveSinkPolicyProfile(t *testing.T) {
+	configured, ok := BuiltInProfile(ProfileStrict)
+	if !ok {
+		t.Fatal("strict profile is unavailable")
+	}
+	tests := []struct {
+		name   string
+		policy legacyredaction.SinkPolicy
+		want   ProfileName
+		ok     bool
+	}{
+		{name: "default", policy: legacyredaction.SinkPolicyDefault, want: ProfileStrict, ok: true},
+		{name: "raw", policy: legacyredaction.SinkPolicyRaw, want: ProfileNone, ok: true},
+		{name: "redact", policy: legacyredaction.SinkPolicyRedact, want: ProfileSensitive, ok: true},
+		{name: "invalid policy", policy: legacyredaction.SinkPolicy(255), ok: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			resolved, resolvedOK := ResolveSinkPolicyProfile(configured, test.policy)
+			if resolvedOK != test.ok {
+				t.Fatalf("resolved = %t, want %t", resolvedOK, test.ok)
+			}
+			if resolvedOK && resolved.Name() != test.want {
+				t.Fatalf("profile = %s, want %s", resolved.Name(), test.want)
+			}
+		})
+	}
+	if _, ok := ResolveSinkPolicyProfile(Profile{}, legacyredaction.SinkPolicyDefault); ok {
+		t.Fatal("zero configured profile was accepted")
 	}
 }
 
