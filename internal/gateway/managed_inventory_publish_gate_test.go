@@ -36,6 +36,11 @@ import (
 type managedGateEmitter struct {
 	endpointInventoryCapture
 	failEventName observability.EventName
+	// managedRejectSource names one ai.discovery collection whose records the
+	// managed AI Defense projection cannot build. Those emits still succeed
+	// locally and return a nil error — the failure is visible only through the
+	// outcome, which is exactly the shape the gate must not mistake for delivery.
+	managedRejectSource string
 }
 
 func (emitter *managedGateEmitter) Emit(
@@ -49,7 +54,40 @@ func (emitter *managedGateEmitter) Emit(
 			return pipeline.LocalLogOutcome{}, errors.New("emit rejected")
 		}
 	}
-	return emitter.endpointInventoryCapture.Emit(ctx, metadata, build)
+	outcome, err := emitter.endpointInventoryCapture.Emit(ctx, metadata, build)
+	if err == nil && emitter.managedRejectSource != "" &&
+		managedGateRecordSource(emitter.lastRecord()) == emitter.managedRejectSource {
+		return pipeline.NewManagedOptionalFailureOutcomeForTest(
+			pipeline.OptionalFailureProjection,
+		), nil
+	}
+	return outcome, err
+}
+
+// lastRecord returns the record the capture just appended, so the fake can decide
+// per record without re-running the builder.
+func (capture *endpointInventoryCapture) lastRecord() observability.Record {
+	capture.mu.Lock()
+	defer capture.mu.Unlock()
+	if len(capture.records) == 0 {
+		return observability.Record{}
+	}
+	return capture.records[len(capture.records)-1]
+}
+
+// managedGateRecordSource reads defenseclaw.ai.discovery.source without a
+// *testing.T so the fake emitter can use it inline.
+func managedGateRecordSource(record observability.Record) string {
+	body, present := record.Body()
+	if !present {
+		return ""
+	}
+	object, err := body.Object()
+	if err != nil {
+		return ""
+	}
+	source, _ := object[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+	return source
 }
 
 // managedGateScanCounts counts the endpoint-inventory records per collection so a
@@ -645,4 +683,112 @@ func TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes(t *testing.
 	if counts := managedGateSourceCounts(t, second.snapshot()); counts["endpoint_per_connector_mcp_inventory"] != 0 {
 		t.Fatalf("empty per-connector MCP collection republished unchanged: %v", counts)
 	}
+}
+
+// TestEmitEndpointInventoryGateManagedProjectionFailureStoresNoDigest pins the
+// rule that a nil error from Emit is not proof the managed AI Defense
+// destination received anything.
+//
+// The managed route is an optional projection: when its record cannot be
+// projected the pipeline reports the failure through the outcome and returns a
+// nil error. Storing a digest on the strength of that nil would suppress the
+// republish for up to a full bundle interval even though the cloud holds
+// nothing.
+func TestEmitEndpointInventoryGateManagedProjectionFailureStoresNoDigest(t *testing.T) {
+	withManagedEnterprise(t, true)
+	gate := managedPublishTestState(t)
+	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("omnigent")}}
+	registry := connector.NewDefaultRegistry()
+
+	rejected := &managedGateEmitter{managedRejectSource: endpointMCPInventorySource}
+	baseline := managedGateReport("scan-1", "alpha")
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, rejected, false, &baseline, gate,
+	); err != nil {
+		t.Fatalf("managed projection failure must not surface as an emit error: %v", err)
+	}
+	// The collection still emitted locally — only its managed projection failed.
+	if counts := managedGateSourceCounts(t, rejected.snapshot()); counts[endpointMCPInventorySource] == 0 {
+		t.Fatalf("rejected collection emitted nothing at all: %v", counts)
+	}
+	file := managedPublishReadFile(t, gate)
+	if record, ok := file.Collections[endpointMCPInventorySource]; ok && record.Digest != "" {
+		t.Fatalf("digest stored for a collection the managed destination never received: %+v", record)
+	}
+	// A collection whose managed projection succeeded in the same cycle keeps its
+	// digest: the promise is per collection, not per cycle.
+	if record, ok := file.Collections[endpointConnectorInventorySource]; !ok || record.Digest == "" {
+		t.Fatalf("clean collection lost its digest: %+v", record)
+	}
+	// And the cycle cannot anchor the daily bundle, because the cloud did not get
+	// a complete copy.
+	if !file.FullBundleAt.IsZero() {
+		t.Fatalf("degraded cycle stamped the bundle clock: %s", file.FullBundleAt)
+	}
+
+	// Next cycle: the rejected collection republishes, unsuppressed.
+	steady := managedGateReport("scan-2", "alpha")
+	retry := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, retry, false, &steady, gate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if counts := managedGateSourceCounts(t, retry.snapshot()); counts[endpointMCPInventorySource] == 0 {
+		t.Fatalf("collection the managed destination never received was suppressed: %v", counts)
+	}
+}
+
+// TestAIDiscoveryV8SignalsGateManagedProjectionFailureStoresNoDigest is the
+// per-signal half of the same rule.
+func TestAIDiscoveryV8SignalsGateManagedProjectionFailureStoresNoDigest(t *testing.T) {
+	withManagedEnterprise(t, true)
+	gate := managedPublishTestState(t)
+
+	// The per-signal records carry no ai.discovery.source attribute, so the fake
+	// rejects every record except the liveness summary.
+	rejected := &managedGateSignalRejectEmitter{}
+	adapter := &aiDiscoveryV8Adapter{runtime: rejected, publishGate: gate}
+	if err := adapter.EmitReport(t.Context(), managedGateReport("scan-1", "alpha"), nil); err != nil {
+		t.Fatalf("managed projection failure must not surface as an emit error: %v", err)
+	}
+	if counts := managedGateScanCounts(rejected.snapshot()); counts["ai_component.observed"] == 0 {
+		t.Fatalf("signals emitted nothing at all: %v", counts)
+	}
+	// Nothing was promised, so the cycle writes no state at all — the assertion is
+	// that no signals digest exists, whether or not the file was created.
+	if record, ok := managedPublishStoredRecord(t, gate, managedInventorySignalsKey); ok &&
+		record.Digest != "" {
+		t.Fatalf("signals digest stored despite a managed projection failure: %+v", record)
+	}
+
+	// Next scan with identical content still publishes the snapshot.
+	replay := &endpointInventoryCapture{}
+	next := &aiDiscoveryV8Adapter{runtime: replay, publishGate: gate}
+	if err := next.EmitReport(t.Context(), managedGateReport("scan-2", "alpha"), nil); err != nil {
+		t.Fatal(err)
+	}
+	if counts := managedGateScanCounts(replay.snapshot()); counts["ai_component.observed"] == 0 {
+		t.Fatalf("signals snapshot suppressed after a managed projection failure: %v", counts)
+	}
+}
+
+// managedGateSignalRejectEmitter reports a managed projection failure for every
+// per-signal record while the liveness summary succeeds.
+type managedGateSignalRejectEmitter struct {
+	endpointInventoryCapture
+}
+
+func (emitter *managedGateSignalRejectEmitter) Emit(
+	ctx context.Context,
+	metadata router.Metadata,
+	build observabilityruntime.EmitBuilder,
+) (pipeline.LocalLogOutcome, error) {
+	outcome, err := emitter.endpointInventoryCapture.Emit(ctx, metadata, build)
+	if err == nil && emitter.lastRecord().EventName() != "ai.discovery.completed" {
+		return pipeline.NewManagedOptionalFailureOutcomeForTest(
+			pipeline.OptionalFailureProfile,
+		), nil
+	}
+	return outcome, err
 }

@@ -36,6 +36,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/google/uuid"
@@ -704,20 +705,30 @@ func emitInventorySnapshot(
 	case publish.cycle != nil:
 		publish.cycle.markDegraded()
 	}
-	firstErr := emitEndpointInventorySummary(
+	summaryOutcome, firstErr := emitEndpointInventorySummary(
 		ctx, emitter, source, scanID, scannedAt, len(components), active, partial,
 		recordSource, action, phase, carrier,
 	)
+	// A nil error does not mean the managed AI Defense route received the record:
+	// the managed projection is optional, and a profile or projection failure is
+	// reported through the outcome while Emit still returns nil. Any such record
+	// makes this collection's publish incomplete, so it must neither store a
+	// digest nor count toward the daily bundle.
+	managedRejected := managedInventoryPublishRejected(summaryOutcome)
 	for _, component := range components {
-		if err := emitEndpointInventoryComponent(
+		outcome, err := emitEndpointInventoryComponent(
 			ctx, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
-		); err != nil && firstErr == nil {
+		)
+		if managedInventoryPublishRejected(outcome) {
+			managedRejected = true
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
 		}
 	}
 	if gated {
-		if firstErr != nil {
+		if firstErr != nil || managedRejected {
 			publish.cycle.markDegraded()
 		} else {
 			publish.cycle.recordPublished(source, digest, len(components))
@@ -843,7 +854,7 @@ func emitEndpointInventorySummary(
 	action observability.ProducerKey,
 	phase string,
 	carrier endpointInventoryCarrier,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	severity := "INFO"
 	canonicalSeverity := observability.SeverityInfo
 	logLevel := observability.LogLevelInfo
@@ -869,9 +880,9 @@ func emitEndpointInventorySummary(
 		action,
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = emitter.Emit(ctx, metadata, func(
+	return emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -909,7 +920,6 @@ func emitEndpointInventorySummary(
 			DefenseClawInventoryAgentMetadata:        carrier.agentMetadata,
 		})
 	})
-	return err
 }
 
 func emitEndpointInventoryComponent(
@@ -920,7 +930,7 @@ func emitEndpointInventoryComponent(
 	recordSource observability.Source,
 	action observability.ProducerKey,
 	phase, detector string,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		observability.ProducerKey("ai_discovery"),
@@ -932,9 +942,9 @@ func emitEndpointInventoryComponent(
 		action,
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = emitter.Emit(ctx, metadata, func(
+	return emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -980,7 +990,6 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 		})
 	})
-	return err
 }
 
 // emitManagedAgentInventory publishes a validated coding-agent snapshot into

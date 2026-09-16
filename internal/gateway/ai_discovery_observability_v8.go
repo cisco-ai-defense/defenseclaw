@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -211,7 +212,15 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 			// lifecycle delta can be dropped here.
 			continue
 		}
-		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil {
+		outcome, err := adapter.emitSignalLog(ctx, report.Summary, signal)
+		// Emit returns nil when the optional managed AI Defense projection fails,
+		// so the outcome — not the error — is what says whether the managed
+		// destination actually received this record. See
+		// managedInventoryPublishRejected.
+		if managedInventoryPublishRejected(outcome) {
+			signalsErr = true
+		}
+		if err != nil {
 			signalsErr = true
 			if logErr == nil {
 				logErr = err
@@ -280,7 +289,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	ctx context.Context,
 	summary inventory.AIDiscoverySummary,
 	signal inventory.AISignal,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	eventName := observability.EventName("ai_component.changed")
 	switch signal.State {
 	case inventory.AIStateNew:
@@ -292,10 +301,10 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	case inventory.AIStateGone:
 		eventName = "ai_component.removed"
 	default:
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	if signal.SignalID == "" || signal.Category == "" {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
@@ -308,9 +317,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		observability.ProducerKey("ai_discovery"),
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = adapter.runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+	outcome, err := adapter.runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
@@ -390,7 +399,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		}
 	})
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	// Human-readable info line for operators tailing gateway.err.log (macOS) /
 	// gateway.log (Windows). Format matches the historical macOS convention:
@@ -425,7 +434,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		displayName,
 		aiDiscoveryV8Clamp(signal.Confidence),
 	)
-	return nil
+	return outcome, nil
 }
 
 // aiDiscoverySanitizeLogValue prepares a signal field for single-line stderr

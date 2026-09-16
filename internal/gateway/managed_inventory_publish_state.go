@@ -32,6 +32,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 )
 
 // Change-gated managed inventory publishing.
@@ -265,6 +266,35 @@ func (cycle *managedInventoryPublishCycle) recordPublished(key, digest string, r
 		PublishedAt: cycle.now,
 		Records:     records,
 	}
+}
+
+// managedInventoryPublishRejected reports whether an emit that returned no error
+// nevertheless failed to hand its record to the managed AI Defense destination.
+//
+// A nil error from Emit is not a delivery receipt, and it is not even evidence
+// that the record was queued. The managed AID route is an OPTIONAL projection:
+// when its redaction profile cannot be resolved, or projecting the canonical
+// record fails, the pipeline records an OptionalFailure against that destination
+// and returns (outcome, nil) without queueing anything — see the managed-fallback
+// path in internal/observability/pipeline/local_logs.go. Recording a digest on
+// the strength of that nil would break this file's central rule that a stored
+// digest is a promise the cloud holds that exact content, and would suppress the
+// republish for up to managedInventoryFullBundleInterval.
+//
+// Deliberately scoped to the managed AID destination: another optional
+// destination failing says nothing about what AI Defense received, and treating
+// it as a managed failure would republish for reasons unrelated to the gate.
+//
+// True delivery failures after enqueue (queue-full drop, network loss — the
+// endpoint does not ack) remain invisible here by construction; the daily
+// complete bundle is what covers those.
+func managedInventoryPublishRejected(outcome pipeline.LocalLogOutcome) bool {
+	for _, failure := range outcome.OptionalFailures() {
+		if failure.DestinationName() == config.ObservabilityV8ManagedAIDDestinationName {
+			return true
+		}
+	}
+	return false
 }
 
 // markDegraded disqualifies this cycle from satisfying the daily bundle. Any

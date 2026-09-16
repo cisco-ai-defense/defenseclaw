@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"encoding/json"
+	"errors"
+	"io/fs"
 	"math/rand"
 	"os"
 	"path/filepath"
@@ -52,6 +54,22 @@ func managedPublishReadFile(t *testing.T, state *managedInventoryPublishState) m
 		t.Fatalf("decode publish state: %v", err)
 	}
 	return file
+}
+
+// managedPublishStoredRecord reads one collection's durable record, tolerating a
+// state file that was never created. A cycle that promises nothing performs no
+// write at all, so "no file" and "no record for this key" are the same answer.
+func managedPublishStoredRecord(
+	t *testing.T,
+	state *managedInventoryPublishState,
+	key string,
+) (managedInventoryPublishRecord, bool) {
+	t.Helper()
+	if _, err := os.Stat(state.path); errors.Is(err, fs.ErrNotExist) {
+		return managedInventoryPublishRecord{}, false
+	}
+	record, ok := managedPublishReadFile(t, state).Collections[key]
+	return record, ok
 }
 
 // managedPublishFullComponent exercises every field the components digest is
