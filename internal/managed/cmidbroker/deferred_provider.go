@@ -183,38 +183,62 @@ func (provider *DeferredProvider) Invalidate() {
 // ensure returns the underlying provider, resolving one on first use and
 // re-attempting on later calls while the library is still missing.
 func (provider *DeferredProvider) ensure() (Provider, error) {
+	inner, adopted, err := provider.resolve()
+	if err != nil {
+		return nil, err
+	}
+	// Announce outside the lock. OnResolved is caller-supplied, so it may
+	// legitimately call Available or ResolvedPath — which take the same
+	// non-reentrant mutex — and it may block on a log write that no other
+	// token request should be made to wait behind.
+	if adopted != "" && provider.notify != nil {
+		provider.notify(adopted)
+	}
+	return inner, nil
+}
+
+// resolve returns the underlying provider and, when this call is the one
+// that adopted it, the path to announce. Only the adopting caller gets a
+// non-empty path back, so concurrent callers still produce exactly one
+// announcement per adoption.
+//
+// It holds provider.mu for its whole body, which does mean the injected
+// discover, validate, and construct steps run locked. That is deliberate:
+// serializing them collapses a concurrent burst into a single directory
+// walk, and none of the three has any reason to read this provider's state.
+// OnResolved is the opposite case — it is an observer, so it is the one
+// callback a caller may reasonably expect to be able to query. It is
+// invoked from ensure after the unlock for exactly that reason.
+func (provider *DeferredProvider) resolve() (Provider, string, error) {
 	provider.mu.Lock()
 	defer provider.mu.Unlock()
 	if provider.inner != nil {
-		return provider.inner, nil
+		return provider.inner, "", nil
 	}
 	// Throttle only repeat failures. The first call always tries, so a
 	// broker that starts after Cloud Management is already installed
 	// serves its very first request.
 	now := provider.now()
 	if provider.attempted && now.Sub(provider.lastAttempt) < provider.interval {
-		return nil, ErrLibraryUnavailable
+		return nil, "", ErrLibraryUnavailable
 	}
 	provider.attempted = true
 	provider.lastAttempt = now
 
 	path := provider.selectPathLocked()
 	if path == "" {
-		return nil, ErrLibraryUnavailable
+		return nil, "", ErrLibraryUnavailable
 	}
 	inner, err := provider.construct(path)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %w", ErrLibraryUnavailable, err)
+		return nil, "", fmt.Errorf("%w: %w", ErrLibraryUnavailable, err)
 	}
 	if inner == nil {
-		return nil, ErrLibraryUnavailable
+		return nil, "", ErrLibraryUnavailable
 	}
 	provider.inner = inner
 	provider.resolvedPath = path
-	if provider.notify != nil {
-		provider.notify(path)
-	}
-	return inner, nil
+	return inner, path, nil
 }
 
 // selectPathLocked picks the library to load: the installer's pin while

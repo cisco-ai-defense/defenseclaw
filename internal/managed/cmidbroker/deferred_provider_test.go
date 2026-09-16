@@ -419,3 +419,57 @@ func TestDeferredProviderConcurrentUse(t *testing.T) {
 	}
 	wait.Wait()
 }
+
+// OnResolved is an observer, so a caller may reasonably want it to report
+// what was adopted. Invoking it under the provider's non-reentrant mutex
+// would deadlock the very first Token call that succeeds.
+func TestDeferredProviderOnResolvedMayQueryProvider(t *testing.T) {
+	harness := newDeferredHarness()
+	harness.discovered = `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.2\CMID\1.0.4\x64\cmidapi.dll`
+	harness.trusted[harness.discovered] = true
+
+	var (
+		seenAvailable bool
+		seenPath      string
+		provider      *DeferredProvider
+	)
+	provider, err := NewDeferredProvider(DeferredProviderConfig{
+		Discover:  func() string { return harness.discovered },
+		Validate:  func(string) error { return nil },
+		Construct: func(string) (Provider, error) { return harness.inner, nil },
+		OnResolved: func(string) {
+			// Both of these take provider.mu.
+			seenAvailable = provider.Available()
+			seenPath = provider.ResolvedPath()
+		},
+		now: func() time.Time { return harness.clock },
+	})
+	if err != nil {
+		t.Fatalf("NewDeferredProvider: %v", err)
+	}
+
+	// A deadlock here fails the test by panicking the whole run on timeout,
+	// so guard it with an explicit deadline to report the real cause.
+	done := make(chan error, 1)
+	go func() {
+		_, tokenErr := provider.Token(context.Background())
+		done <- tokenErr
+	}()
+	select {
+	case tokenErr := <-done:
+		if tokenErr != nil {
+			t.Fatalf("Token: %v", tokenErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Token deadlocked: OnResolved ran while holding provider.mu")
+	}
+
+	// The state the callback observed must be the committed state, not a
+	// half-written one.
+	if !seenAvailable {
+		t.Fatal("OnResolved saw Available() == false; adoption was not committed before the callback")
+	}
+	if seenPath != harness.discovered {
+		t.Fatalf("OnResolved saw ResolvedPath() = %q, want %q", seenPath, harness.discovered)
+	}
+}
