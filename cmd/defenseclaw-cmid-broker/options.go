@@ -47,23 +47,30 @@ func parseBrokerOptions(arguments []string) (brokerOptions, error) {
 		"--gateway-service-name",
 		"--pipe-name",
 		"--auth-key",
-		"--cmid-library",
 		"--log",
 	}
+	// --cmid-library is an optional pin, not a requirement. A full XDR
+	// deployment installs Cloud Management after DefenseClaw, so
+	// cmidapi.dll does not exist when the broker service is registered.
+	// The broker discovers the library at runtime and enables the CMID
+	// lane once Cloud Management lands; the installer still pins a path
+	// when one is already on disk.
+	optional := []string{"--cmid-library"}
 	for _, name := range required {
 		if values[name] == "" {
 			return options, fmt.Errorf("missing required broker option %s", name)
 		}
 	}
-	if len(values) != len(required) {
-		for name := range values {
-			known := false
-			for _, candidate := range required {
-				known = known || name == candidate
-			}
-			if !known {
-				return options, fmt.Errorf("unsupported broker option %s", name)
-			}
+	for name := range values {
+		known := false
+		for _, candidate := range required {
+			known = known || name == candidate
+		}
+		for _, candidate := range optional {
+			known = known || name == candidate
+		}
+		if !known {
+			return options, fmt.Errorf("unsupported broker option %s", name)
 		}
 	}
 	options = brokerOptions{
