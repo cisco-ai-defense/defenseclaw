@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -420,25 +421,93 @@ func TestDeferredProviderConcurrentUse(t *testing.T) {
 	wait.Wait()
 }
 
-// OnResolved is an observer, so a caller may reasonably want it to report
-// what was adopted. Invoking it under the provider's non-reentrant mutex
-// would deadlock the very first Token call that succeeds.
-func TestDeferredProviderOnResolvedMayQueryProvider(t *testing.T) {
+// runWithDeadline runs a provider operation that must not block. A deadlock
+// would otherwise hang until the whole test binary panics, which reports the
+// symptom but buries the cause, so name the cause here instead.
+func runWithDeadline(t *testing.T, cause string, operation func() error) {
+	t.Helper()
+	done := make(chan error, 1)
+	go func() { done <- operation() }()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("operation: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal(cause)
+	}
+}
+
+// Every injected callback is supplied by the caller, so any of them may
+// reasonably query the provider they are resolving for. None may be invoked
+// under the provider's non-reentrant mutex: the first successful Token would
+// deadlock on Available or ResolvedPath.
+func TestDeferredProviderInjectedCallbacksMayQueryProvider(t *testing.T) {
+	library := `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.2\CMID\1.0.4\x64\cmidapi.dll`
+
+	for _, callback := range []string{"Discover", "Validate", "Construct", "OnResolved"} {
+		t.Run(callback, func(t *testing.T) {
+			harness := newDeferredHarness()
+			var (
+				provider *DeferredProvider
+				probed   bool
+			)
+			// Both accessors take provider.mu.
+			probe := func() {
+				probed = true
+				_ = provider.Available()
+				_ = provider.ResolvedPath()
+			}
+
+			config := DeferredProviderConfig{
+				Discover:  func() string { return library },
+				Validate:  func(string) error { return nil },
+				Construct: func(string) (Provider, error) { return harness.inner, nil },
+				now:       func() time.Time { return harness.clock },
+			}
+			switch callback {
+			case "Discover":
+				config.Discover = func() string { probe(); return library }
+			case "Validate":
+				config.Validate = func(string) error { probe(); return nil }
+			case "Construct":
+				config.Construct = func(string) (Provider, error) { probe(); return harness.inner, nil }
+			case "OnResolved":
+				config.OnResolved = func(string) { probe() }
+			}
+
+			provider, err := NewDeferredProvider(config)
+			if err != nil {
+				t.Fatalf("NewDeferredProvider: %v", err)
+			}
+			runWithDeadline(t, callback+" deadlocked: it ran while holding provider.mu", func() error {
+				_, tokenErr := provider.Token(context.Background())
+				return tokenErr
+			})
+			if !probed {
+				t.Fatalf("%s never ran, so this test proved nothing", callback)
+			}
+		})
+	}
+}
+
+// OnResolved is an observer, so what it sees has to be the committed state
+// rather than a half-written one.
+func TestDeferredProviderOnResolvedObservesCommittedState(t *testing.T) {
 	harness := newDeferredHarness()
 	harness.discovered = `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.2\CMID\1.0.4\x64\cmidapi.dll`
 	harness.trusted[harness.discovered] = true
 
 	var (
+		provider      *DeferredProvider
 		seenAvailable bool
 		seenPath      string
-		provider      *DeferredProvider
 	)
 	provider, err := NewDeferredProvider(DeferredProviderConfig{
 		Discover:  func() string { return harness.discovered },
 		Validate:  func(string) error { return nil },
 		Construct: func(string) (Provider, error) { return harness.inner, nil },
 		OnResolved: func(string) {
-			// Both of these take provider.mu.
 			seenAvailable = provider.Available()
 			seenPath = provider.ResolvedPath()
 		},
@@ -447,29 +516,118 @@ func TestDeferredProviderOnResolvedMayQueryProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("NewDeferredProvider: %v", err)
 	}
-
-	// A deadlock here fails the test by panicking the whole run on timeout,
-	// so guard it with an explicit deadline to report the real cause.
-	done := make(chan error, 1)
-	go func() {
+	runWithDeadline(t, "Token deadlocked: OnResolved ran while holding provider.mu", func() error {
 		_, tokenErr := provider.Token(context.Background())
-		done <- tokenErr
-	}()
-	select {
-	case tokenErr := <-done:
-		if tokenErr != nil {
-			t.Fatalf("Token: %v", tokenErr)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("Token deadlocked: OnResolved ran while holding provider.mu")
-	}
+		return tokenErr
+	})
 
-	// The state the callback observed must be the committed state, not a
-	// half-written one.
 	if !seenAvailable {
 		t.Fatal("OnResolved saw Available() == false; adoption was not committed before the callback")
 	}
 	if seenPath != harness.discovered {
 		t.Fatalf("OnResolved saw ResolvedPath() = %q, want %q", seenPath, harness.discovered)
+	}
+}
+
+// Validate runs on the drop path too, when an operation fails and the
+// adopted library is re-checked. That call site must not hold mu either.
+func TestDeferredProviderValidateMayQueryProviderWhileDropping(t *testing.T) {
+	harness := newDeferredHarness()
+	library := `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.1\CMID\1.0.3\x64\cmidapi.dll`
+
+	var (
+		provider *DeferredProvider
+		vanished bool
+	)
+	provider, err := NewDeferredProvider(DeferredProviderConfig{
+		Discover: func() string { return library },
+		Validate: func(string) error {
+			_ = provider.Available()
+			_ = provider.ResolvedPath()
+			if vanished {
+				return errors.New("library is gone")
+			}
+			return nil
+		},
+		Construct: func(string) (Provider, error) { return harness.inner, nil },
+		now:       func() time.Time { return harness.clock },
+	})
+	if err != nil {
+		t.Fatalf("NewDeferredProvider: %v", err)
+	}
+	if _, err := provider.Token(context.Background()); err != nil {
+		t.Fatalf("Token: %v", err)
+	}
+
+	// Cloud Management upgrades out from under the adopted path.
+	harness.inner.tokenErr = errors.New("library handle is stale")
+	vanished = true
+	runWithDeadline(t, "Token deadlocked: Validate ran while holding provider.mu on the drop path", func() error {
+		if _, tokenErr := provider.Token(context.Background()); tokenErr == nil {
+			return errors.New("Token succeeded despite an inner error")
+		}
+		return nil
+	})
+	if provider.Available() {
+		t.Fatal("provider retained a library that no longer validates")
+	}
+}
+
+// Resolution runs unlocked, so the re-check under resolveMu is the only
+// thing that still collapses a concurrent burst into one adoption. Drop it
+// and the queued callers either each dlopen their own handle, or — once the
+// first one has recorded the attempt — get turned away by the rediscovery
+// throttle and answer ErrLibraryUnavailable for a library that is present
+// and already adopted. Both are regressions; which one shows up is a matter
+// of timing, so assert the invariant that rules out either.
+func TestDeferredProviderResolvesOnceUnderConcurrentBurst(t *testing.T) {
+	harness := newDeferredHarness()
+	library := `C:\Program Files\Cisco\Cisco Secure Client\CM\5.1.2\CMID\1.0.4\x64\cmidapi.dll`
+
+	var discovers, constructs atomic.Int64
+	provider, err := NewDeferredProvider(DeferredProviderConfig{
+		Discover: func() string {
+			discovers.Add(1)
+			// Widen the window a serialized implementation would close for
+			// free, so a missing re-check actually loses the race.
+			time.Sleep(10 * time.Millisecond)
+			return library
+		},
+		Validate: func(string) error { return nil },
+		Construct: func(string) (Provider, error) {
+			constructs.Add(1)
+			return harness.inner, nil
+		},
+		now: func() time.Time { return harness.clock },
+	})
+	if err != nil {
+		t.Fatalf("NewDeferredProvider: %v", err)
+	}
+
+	var wait sync.WaitGroup
+	start := make(chan struct{})
+	errs := make(chan error, 16)
+	for i := 0; i < 16; i++ {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			<-start
+			if _, tokenErr := provider.Token(context.Background()); tokenErr != nil {
+				errs <- tokenErr
+			}
+		}()
+	}
+	close(start)
+	wait.Wait()
+	close(errs)
+	for tokenErr := range errs {
+		t.Fatalf("Token in burst: %v", tokenErr)
+	}
+
+	if got := constructs.Load(); got != 1 {
+		t.Fatalf("construct ran %d times for a concurrent burst, want 1", got)
+	}
+	if got := discovers.Load(); got != 1 {
+		t.Fatalf("discover ran %d times for a concurrent burst, want 1", got)
 	}
 }

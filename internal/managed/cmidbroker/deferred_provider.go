@@ -76,6 +76,10 @@ type DeferredProviderConfig struct {
 // schedule, and the module's built-in default points at the flat
 // CM\cmidapi.dll location instead. Re-running discovery is what turns a
 // missing library into a recoverable state.
+//
+// Locking: resolveMu is always acquired before mu, and mu is never held
+// across an acquisition of resolveMu. Every injected callback runs with
+// neither held, so a callback may query this provider without deadlocking.
 type DeferredProvider struct {
 	discover  func() string
 	validate  func(string) error
@@ -84,11 +88,19 @@ type DeferredProvider struct {
 	// interval throttles failed resolution attempts.
 	interval time.Duration
 	now      func() time.Time
+	// pinnedPath is fixed at construction, so it is read without mu.
+	pinnedPath string
+
+	// resolveMu serializes resolution attempts. It exists so that discover,
+	// validate, and construct can run without mu held while a concurrent
+	// burst of requests still collapses into one adoption: every caller
+	// queues here, and all but the first find the library already adopted
+	// once they get in.
+	resolveMu sync.Mutex
 
 	mu           sync.Mutex
 	inner        Provider
 	resolvedPath string
-	pinnedPath   string
 	lastAttempt  time.Time
 	attempted    bool
 }
@@ -187,10 +199,10 @@ func (provider *DeferredProvider) ensure() (Provider, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Announce outside the lock. OnResolved is caller-supplied, so it may
-	// legitimately call Available or ResolvedPath — which take the same
-	// non-reentrant mutex — and it may block on a log write that no other
-	// token request should be made to wait behind.
+	// Announce with no lock held. OnResolved is caller-supplied, so it may
+	// legitimately call Available or ResolvedPath — which take the
+	// non-reentrant mu — and it may block on a log write that no other token
+	// request should be made to wait behind.
 	if adopted != "" && provider.notify != nil {
 		provider.notify(adopted)
 	}
@@ -202,30 +214,31 @@ func (provider *DeferredProvider) ensure() (Provider, error) {
 // non-empty path back, so concurrent callers still produce exactly one
 // announcement per adoption.
 //
-// It holds provider.mu for its whole body, which does mean the injected
-// discover, validate, and construct steps run locked. That is deliberate:
-// serializing them collapses a concurrent burst into a single directory
-// walk, and none of the three has any reason to read this provider's state.
-// OnResolved is the opposite case — it is an observer, so it is the one
-// callback a caller may reasonably expect to be able to query. It is
-// invoked from ensure after the unlock for exactly that reason.
+// discover, validate, and construct all run outside mu. They are supplied
+// by the caller, so treating them as unable to touch this provider would
+// be an assumption about code this package does not own; the two-mutex
+// split removes the assumption instead of documenting it.
 func (provider *DeferredProvider) resolve() (Provider, string, error) {
-	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	if provider.inner != nil {
-		return provider.inner, "", nil
+	if inner := provider.current(); inner != nil {
+		return inner, "", nil
 	}
-	// Throttle only repeat failures. The first call always tries, so a
-	// broker that starts after Cloud Management is already installed
-	// serves its very first request.
-	now := provider.now()
-	if provider.attempted && now.Sub(provider.lastAttempt) < provider.interval {
+
+	provider.resolveMu.Lock()
+	defer provider.resolveMu.Unlock()
+
+	// Re-check now that this call owns resolution. A burst of requests all
+	// miss the check above and queue here. Without this second look each of
+	// them either walks the tree and dlopens its own handle, or — once the
+	// first has recorded the attempt — is turned away by the throttle in
+	// beginAttempt and reports a library that is present as unavailable.
+	if inner := provider.current(); inner != nil {
+		return inner, "", nil
+	}
+	if !provider.beginAttempt() {
 		return nil, "", ErrLibraryUnavailable
 	}
-	provider.attempted = true
-	provider.lastAttempt = now
 
-	path := provider.selectPathLocked()
+	path := provider.selectPath()
 	if path == "" {
 		return nil, "", ErrLibraryUnavailable
 	}
@@ -236,15 +249,49 @@ func (provider *DeferredProvider) resolve() (Provider, string, error) {
 	if inner == nil {
 		return nil, "", ErrLibraryUnavailable
 	}
-	provider.inner = inner
-	provider.resolvedPath = path
+	provider.adopt(inner, path)
 	return inner, path, nil
 }
 
-// selectPathLocked picks the library to load: the installer's pin while
-// it still validates, otherwise a freshly discovered one. Returns "" when
-// nothing trustworthy is on disk. Caller must hold provider.mu.
-func (provider *DeferredProvider) selectPathLocked() string {
+// current returns the adopted provider, or nil when none has been adopted.
+func (provider *DeferredProvider) current() Provider {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	return provider.inner
+}
+
+// beginAttempt reports whether this call may attempt resolution, recording
+// the attempt when it may.
+//
+// Only repeat failures are throttled. The first call always tries, so a
+// broker that starts after Cloud Management is already installed serves its
+// very first request. Caller must hold resolveMu, which is what makes the
+// read-then-write of the attempt clock safe against another resolver.
+func (provider *DeferredProvider) beginAttempt() bool {
+	now := provider.now()
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	if provider.attempted && now.Sub(provider.lastAttempt) < provider.interval {
+		return false
+	}
+	provider.attempted = true
+	provider.lastAttempt = now
+	return true
+}
+
+// adopt publishes a resolved provider. Caller must hold resolveMu, so no
+// other resolution can be racing this one.
+func (provider *DeferredProvider) adopt(inner Provider, path string) {
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	provider.inner = inner
+	provider.resolvedPath = path
+}
+
+// selectPath picks the library to load: the installer's pin while it still
+// validates, otherwise a freshly discovered one. Returns "" when nothing
+// trustworthy is on disk. Caller must hold resolveMu and must not hold mu.
+func (provider *DeferredProvider) selectPath() string {
 	if provider.pinnedPath != "" && provider.validate(provider.pinnedPath) == nil {
 		return provider.pinnedPath
 	}
@@ -267,13 +314,28 @@ func (provider *DeferredProvider) selectPathLocked() string {
 // Operation failures that are not about the library (an offline agent,
 // a cloud transport error) leave the provider in place, because the path
 // still validates.
+//
+// validate runs with no lock held here for the same reason it does in
+// resolve: it is caller-supplied.
 func (provider *DeferredProvider) dropIfLibraryVanished() {
 	provider.mu.Lock()
-	defer provider.mu.Unlock()
-	if provider.inner == nil || provider.resolvedPath == "" {
+	checked := provider.resolvedPath
+	adopted := provider.inner != nil
+	provider.mu.Unlock()
+	if !adopted || checked == "" {
 		return
 	}
-	if provider.validate(provider.resolvedPath) == nil {
+
+	if provider.validate(checked) == nil {
+		return
+	}
+
+	provider.mu.Lock()
+	defer provider.mu.Unlock()
+	// Drop only the provider that was actually checked. A concurrent
+	// resolution may have adopted a different library while validate ran,
+	// and that one has not been shown to be gone.
+	if provider.resolvedPath != checked {
 		return
 	}
 	provider.inner = nil
