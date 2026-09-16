@@ -31,6 +31,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/observability/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
+	legacyredaction "github.com/defenseclaw/defenseclaw/internal/redaction"
 )
 
 type realLocalPipelineHarness struct {
@@ -171,6 +172,91 @@ func TestRealLocalLogPipelinePersistsEveryCatalogBucketExactlyOnce(t *testing.T)
 	}
 
 	assertPersistedLogsExactlyOnce(t, harness.reader, expected)
+}
+
+func TestRealLocalLogPipelinePersistsSinkPolicyOverrides(t *testing.T) {
+	test := findCatalogLogCase(t, observability.BucketSecurityFinding)
+	tests := []struct {
+		name       string
+		configured redaction.ProfileName
+		policy     legacyredaction.SinkPolicy
+		want       redaction.ProfileName
+	}{
+		{
+			name:       "default retains configured profile",
+			configured: redaction.ProfileStrict,
+			policy:     legacyredaction.SinkPolicyDefault,
+			want:       redaction.ProfileStrict,
+		},
+		{
+			name:       "raw overrides strict with none",
+			configured: redaction.ProfileStrict,
+			policy:     legacyredaction.SinkPolicyRaw,
+			want:       redaction.ProfileNone,
+		},
+		{
+			name:       "redact overrides none with sensitive",
+			configured: redaction.ProfileNone,
+			policy:     legacyredaction.SinkPolicyRedact,
+			want:       redaction.ProfileSensitive,
+		},
+	}
+
+	for index, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			harness := newRealLocalPipelineHarness(
+				t, sinkPolicyProjectionSource(testCase.configured),
+			)
+			ctx := legacyredaction.WithSinkPolicy(t.Context(), testCase.policy)
+			recordID := fmt.Sprintf("real-sqlite-sink-policy-%02d", index)
+			content := recordID + "@example.test"
+			var built observability.Record
+			outcome, processErr := harness.pipeline.Process(
+				ctx,
+				mustMetadata(t, test),
+				func(admission router.Admission) (observability.Record, error) {
+					var buildErr error
+					built, buildErr = buildClassifiedLogWithContent(
+						test, admission, recordID, content,
+					)
+					return built, buildErr
+				},
+			)
+			if processErr != nil {
+				t.Fatal(processErr)
+			}
+			if !outcome.LocalPersisted() {
+				t.Fatal("sink-policy projection was not persisted locally")
+			}
+
+			catalog, catalogErr := harness.plan.RedactionProfileCatalog()
+			if catalogErr != nil {
+				t.Fatal(catalogErr)
+			}
+			profile, ok := catalog.Resolve(testCase.want)
+			if !ok {
+				t.Fatalf("expected profile %s is unavailable", testCase.want)
+			}
+			projection, _, projectErr := harness.engine.Project(built, profile)
+			if projectErr != nil {
+				t.Fatal(projectErr)
+			}
+			projectedBytes, bytesErr := projection.Bytes()
+			if bytesErr != nil {
+				t.Fatal(bytesErr)
+			}
+			assertPersistedLogsExactlyOnce(t, harness.reader, map[string]expectedPersistedLog{
+				recordID: {
+					record: built, projectedBytes: projectedBytes, profile: testCase.want,
+				},
+			})
+
+			configured, resolveErr := harness.plan.ResolveLocalRedactionProfile(test.bucket)
+			if resolveErr != nil || configured != testCase.configured {
+				t.Fatalf("compiled profile changed to %s, want %s: %v", configured, testCase.configured, resolveErr)
+			}
+		})
+	}
 }
 
 type mandatoryFloorIntegrationCase struct {
