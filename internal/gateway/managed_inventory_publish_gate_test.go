@@ -549,3 +549,100 @@ func TestAIDiscoveryV8SignalsNonManagedUnchangedByGate(t *testing.T) {
 		}
 	}
 }
+
+// managedGateSourceCounts tallies emitted records by collection source, which is
+// how a collection's presence or absence in a cycle is observed.
+func managedGateSourceCounts(t *testing.T, records []observability.Record) map[string]int {
+	t.Helper()
+	counts := map[string]int{}
+	for _, record := range records {
+		body := canonicalBody(t, record)
+		source, _ := body[observability.TelemetryAttributeDefenseClawAIDiscoverySource].(string)
+		counts[source]++
+	}
+	return counts
+}
+
+// TestEmitEndpointInventoryGatePartialReportCannotStampBundle: internal/inventory
+// stamps Summary.Result "partial" whenever a scan recorded any error, and a
+// detector that errored contributes none of its signals — so the collections
+// derived from that report are truncated. Such a cycle must still publish (that
+// is today's behavior and it self-corrects), but it must not be allowed to
+// satisfy the daily complete-bundle guarantee with a partial copy.
+func TestEmitEndpointInventoryGatePartialReportCannotStampBundle(t *testing.T) {
+	withManagedEnterprise(t, true)
+	gate := managedPublishTestState(t)
+	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("omnigent")}}
+	registry := connector.NewDefaultRegistry()
+
+	partial := managedGateReport("scan-partial", "alpha")
+	partial.Summary.Result = "partial"
+	partial.Summary.Errors = 1
+	degraded := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, degraded, false, &partial, gate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if len(degraded.snapshot()) == 0 {
+		t.Fatal("partial report published nothing; it must publish, just not anchor the bundle")
+	}
+	if got := managedPublishReadFile(t, gate).FullBundleAt; !got.IsZero() {
+		t.Fatalf("partial report stamped the bundle clock: %s", got)
+	}
+
+	// The bundle is therefore still due, and the next complete scan takes it.
+	complete := managedGateReport("scan-complete", "alpha")
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, &endpointInventoryCapture{}, false, &complete, gate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if managedPublishReadFile(t, gate).FullBundleAt.IsZero() {
+		t.Fatal("complete report after a partial one did not stamp the bundle clock")
+	}
+}
+
+// TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes: a zero-count
+// snapshot is how a collection reports that its last entry is gone. Skipping the
+// per-connector MCP emission when the list is empty would leave the cloud holding
+// removed servers forever, because the stored digest would never advance past the
+// last non-empty publish.
+func TestEmitEndpointInventoryGateEmptyPerConnectorMCPStillPublishes(t *testing.T) {
+	withManagedEnterprise(t, true)
+	gate := managedPublishTestState(t)
+	// An empty registry with no active connectors leaves the per-connector MCP
+	// fanout nothing to enumerate. Asserted rather than assumed so this test
+	// fails loudly if the fixture ever stops being empty.
+	cfg := &config.Config{Claw: config.ClawConfig{Mode: config.ClawMode("omnigent")}}
+	registry := connector.NewRegistry()
+	if entries := perConnectorMCPEntries(cfg, registry); len(entries) != 0 {
+		t.Fatalf("fixture is not empty: %d per-connector MCP entries", len(entries))
+	}
+
+	// Both cycles carry a complete report: only such a cycle stamps the bundle
+	// clock, and without that stamp every cycle stays forced and nothing can be
+	// suppressed. The report does not feed this collection, which stays empty.
+	baseline := managedGateReport("scan-1", "alpha")
+	first := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, first, false, &baseline, gate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if counts := managedGateSourceCounts(t, first.snapshot()); counts["endpoint_per_connector_mcp_inventory"] == 0 {
+		t.Fatalf("empty per-connector MCP collection was skipped: %v", counts)
+	}
+
+	// And the empty digest is stable, so it does not republish every cycle.
+	steady := managedGateReport("scan-2", "alpha")
+	second := &endpointInventoryCapture{}
+	if err := emitEndpointInventory(
+		t.Context(), cfg, registry, second, false, &steady, gate,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if counts := managedGateSourceCounts(t, second.snapshot()); counts["endpoint_per_connector_mcp_inventory"] != 0 {
+		t.Fatalf("empty per-connector MCP collection republished unchanged: %v", counts)
+	}
+}

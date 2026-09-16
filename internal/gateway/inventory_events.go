@@ -144,6 +144,27 @@ func endpointInventoryCycleScanID(discoveryScanID string) string {
 	return "inventory-" + discoveryScanID
 }
 
+// aiDiscoveryResultPartial is the inventory.AIDiscoverySummary.Result value a
+// scan reports when it did not complete cleanly. internal/inventory sets it
+// whenever the scan recorded any error at all, including a single detector that
+// failed and therefore contributed none of its signals.
+const aiDiscoveryResultPartial = "partial"
+
+// aiDiscoveryReportComplete reports whether a discovery report enumerated the
+// endpoint exhaustively enough to anchor the daily complete bundle.
+//
+// A partial report under-enumerates the collections derived from it. Publishing
+// that truncated view is still correct and self-correcting — the next complete
+// scan produces a different digest and republishes in full — but treating it as
+// the day's bundle is not: the cloud would hold an incomplete copy and the real
+// bundle would stay suppressed for another interval.
+func aiDiscoveryReportComplete(report *inventory.AIDiscoveryReport) bool {
+	if report == nil {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(report.Summary.Result), aiDiscoveryResultPartial)
+}
+
 func emitEndpointInventory(
 	ctx context.Context,
 	cfg *config.Config,
@@ -156,19 +177,23 @@ func emitEndpointInventory(
 	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
 		return nil
 	}
-	// bundleScope: only a cycle carrying a discovery report can enumerate the
-	// discovered MCP / skill / plugin collections below, so only such a cycle
-	// may satisfy the daily complete-bundle guarantee. Letting a reload or
-	// startup emit (no report) stamp the bundle clock would suppress the real
-	// bundle for another day and leave the cloud permanently missing those
-	// three collections.
+	// bundleScope: only a cycle carrying a COMPLETE discovery report may satisfy
+	// the daily complete-bundle guarantee, and there are two ways to fail that.
+	//
+	// A reload or startup emit carries no report at all, so it cannot enumerate
+	// the discovered MCP / skill / plugin collections below. A partial report
+	// enumerates a truncated set for those same three. Either way the bundle is
+	// incomplete, so stamping the clock would hand the cloud a partial copy and
+	// then suppress the real bundle for another interval.
 	discoveryScanID := ""
 	if discoveryReport != nil {
 		discoveryScanID = strings.TrimSpace(discoveryReport.Summary.ScanID)
 	}
 	publish := endpointInventoryCycle{
 		scanID: endpointInventoryCycleScanID(discoveryScanID),
-		cycle:  gate.beginCycle(discoveryScanID, time.Now().UTC(), discoveryReport != nil),
+		cycle: gate.beginCycle(
+			discoveryScanID, time.Now().UTC(), aiDiscoveryReportComplete(discoveryReport),
+		),
 	}
 	// One write per cycle at most, and none at all in steady state.
 	defer publish.cycle.commit()
@@ -231,13 +256,19 @@ func emitEndpointInventory(
 	// installs that don't run `defenseclaw setup` populate no explicit
 	// roster), fall back to the built-in connector registry so every known
 	// connector still gets a scan.
-	if perConnectorMCP := perConnectorMCPEntries(cfg, reg); len(perConnectorMCP) > 0 {
-		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
-			config.ObservabilityV8ManagedMCPInventoryAction, publish,
-		); err != nil && firstErr == nil {
-			firstErr = err
-		}
+	//
+	// The empty case publishes too, matching the collections above. A zero-count
+	// snapshot is how this collection reports that its last entry is gone, and
+	// its stable empty digest is what supersedes previously published rows.
+	// Skipping it would leave the cloud holding removed MCP servers forever — the
+	// stored digest would never advance past the last non-empty publish — and
+	// would silently drop the collection from the daily complete bundle.
+	perConnectorMCP := perConnectorMCPEntries(cfg, reg)
+	if err := emitEndpointInventorySnapshot(
+		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
+		config.ObservabilityV8ManagedMCPInventoryAction, publish,
+	); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
 }
