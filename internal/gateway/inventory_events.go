@@ -30,11 +30,13 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/google/uuid"
@@ -119,7 +121,49 @@ func EmitEndpointInventory(
 	reg *connector.Registry,
 	emitter sidecarRuntimeEmitter,
 ) error {
-	return emitEndpointInventory(ctx, cfg, reg, emitter, false, nil)
+	return emitEndpointInventory(ctx, cfg, reg, emitter, false, nil, nil)
+}
+
+// endpointInventoryCycle carries one publish cycle's shared identity and change
+// gate through the six collection emissions.
+//
+// A zero value is the ungated path: a fresh scan id is minted per collection and
+// nothing is suppressed, which is what every non-managed caller gets.
+type endpointInventoryCycle struct {
+	scanID string
+	cycle  *managedInventoryPublishCycle
+}
+
+// endpointInventoryCycleScanID derives one scan id for the whole cycle so the
+// cloud can recognize the collections of a single bundle as a set — and tie them
+// to the per-signal snapshot from the same discovery scan — instead of six
+// unrelated arrivals under six unrelated ids.
+func endpointInventoryCycleScanID(discoveryScanID string) string {
+	if discoveryScanID == "" {
+		return "inventory-" + uuid.NewString()
+	}
+	return "inventory-" + discoveryScanID
+}
+
+// aiDiscoveryResultPartial is the inventory.AIDiscoverySummary.Result value a
+// scan reports when it did not complete cleanly. internal/inventory sets it
+// whenever the scan recorded any error at all, including a single detector that
+// failed and therefore contributed none of its signals.
+const aiDiscoveryResultPartial = "partial"
+
+// aiDiscoveryReportComplete reports whether a discovery report enumerated the
+// endpoint exhaustively enough to anchor the daily complete bundle.
+//
+// A partial report under-enumerates the collections derived from it. Publishing
+// that truncated view is still correct and self-correcting — the next complete
+// scan produces a different digest and republishes in full — but treating it as
+// the day's bundle is not: the cloud would hold an incomplete copy and the real
+// bundle would stay suppressed for another interval.
+func aiDiscoveryReportComplete(report *inventory.AIDiscoveryReport) bool {
+	if report == nil {
+		return false
+	}
+	return !strings.EqualFold(strings.TrimSpace(report.Summary.Result), aiDiscoveryResultPartial)
 }
 
 func emitEndpointInventory(
@@ -129,10 +173,32 @@ func emitEndpointInventory(
 	emitter sidecarRuntimeEmitter,
 	connectorDiscoveryPartial bool,
 	discoveryReport *inventory.AIDiscoveryReport,
+	gate *managedInventoryPublishState,
 ) error {
 	if !ManagedEnterpriseActive() || ctx == nil || emitter == nil {
 		return nil
 	}
+	// bundleScope: only a cycle carrying a COMPLETE discovery report may satisfy
+	// the daily complete-bundle guarantee, and there are two ways to fail that.
+	//
+	// A reload or startup emit carries no report at all, so it cannot enumerate
+	// the discovered MCP / skill / plugin collections below. A partial report
+	// enumerates a truncated set for those same three. Either way the bundle is
+	// incomplete, so stamping the clock would hand the cloud a partial copy and
+	// then suppress the real bundle for another interval.
+	discoveryScanID := ""
+	if discoveryReport != nil {
+		discoveryScanID = strings.TrimSpace(discoveryReport.Summary.ScanID)
+	}
+	publish := endpointInventoryCycle{
+		scanID: endpointInventoryCycleScanID(discoveryScanID),
+		cycle: gate.beginCycle(
+			discoveryScanID, time.Now().UTC(), aiDiscoveryReportComplete(discoveryReport),
+		),
+	}
+	// One write per cycle at most, and none at all in steady state.
+	defer publish.cycle.commit()
+
 	connectorComponents, connectorPartial := endpointConnectorComponents(reg)
 	firstErr := emitEndpointInventorySnapshot(
 		ctx,
@@ -141,12 +207,13 @@ func emitEndpointInventory(
 		connectorComponents,
 		connectorPartial || connectorDiscoveryPartial,
 		config.ObservabilityV8ManagedConnectorInventoryAction,
+		publish,
 	)
 
 	mcpComponents, partial := endpointMCPComponents(cfg)
 	if err := emitEndpointInventorySnapshot(
 		ctx, emitter, endpointMCPInventorySource, mcpComponents, partial,
-		config.ObservabilityV8ManagedMCPInventoryAction,
+		config.ObservabilityV8ManagedMCPInventoryAction, publish,
 	); err != nil && firstErr == nil {
 		firstErr = err
 	}
@@ -162,21 +229,21 @@ func emitEndpointInventory(
 		mcpEntries := discoveredMCPEntriesFromReport(*discoveryReport)
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_discovered_mcp_inventory", mcpEntries, false,
-			config.ObservabilityV8ManagedMCPInventoryAction,
+			config.ObservabilityV8ManagedMCPInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		skillEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalSkill, "skill")
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_skill_inventory", skillEntries, false,
-			config.ObservabilityV8ManagedSkillInventoryAction,
+			config.ObservabilityV8ManagedSkillInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
 		pluginEntries := discoveredEntriesFromReport(*discoveryReport, inventory.SignalPlugin, "plugin")
 		if err := emitEndpointInventorySnapshot(
 			ctx, emitter, "endpoint_plugin_inventory", pluginEntries, false,
-			config.ObservabilityV8ManagedPluginInventoryAction,
+			config.ObservabilityV8ManagedPluginInventoryAction, publish,
 		); err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -190,13 +257,19 @@ func emitEndpointInventory(
 	// installs that don't run `defenseclaw setup` populate no explicit
 	// roster), fall back to the built-in connector registry so every known
 	// connector still gets a scan.
-	if perConnectorMCP := perConnectorMCPEntries(cfg, reg); len(perConnectorMCP) > 0 {
-		if err := emitEndpointInventorySnapshot(
-			ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
-			config.ObservabilityV8ManagedMCPInventoryAction,
-		); err != nil && firstErr == nil {
-			firstErr = err
-		}
+	//
+	// The empty case publishes too, matching the collections above. A zero-count
+	// snapshot is how this collection reports that its last entry is gone, and
+	// its stable empty digest is what supersedes previously published rows.
+	// Skipping it would leave the cloud holding removed MCP servers forever — the
+	// stored digest would never advance past the last non-empty publish — and
+	// would silently drop the collection from the daily complete bundle.
+	perConnectorMCP := perConnectorMCPEntries(cfg, reg)
+	if err := emitEndpointInventorySnapshot(
+		ctx, emitter, "endpoint_per_connector_mcp_inventory", perConnectorMCP, false,
+		config.ObservabilityV8ManagedMCPInventoryAction, publish,
+	); err != nil && firstErr == nil {
+		firstErr = err
 	}
 	return firstErr
 }
@@ -455,10 +528,14 @@ func readMCPServersUnderHome(connectorName, home string) [][]config.MCPServerEnt
 // servers per parent connector and ships each as its own
 // ai_component.observed record with defenseclaw.agent.discovery.connector set
 // so downstream can correlate MCP / skills / plugins with the owning agent.
+//
+// gate is the managed_enterprise change gate; it is nil in every other
+// deployment mode, and a nil gate publishes unconditionally as before.
 func makeEndpointInventoryEmitter(
 	cfg *config.Config,
 	emitter sidecarRuntimeEmitter,
 	snapshotFn func() inventory.AIDiscoveryReport,
+	gate *managedInventoryPublishState,
 ) func(context.Context) {
 	return func(ctx context.Context) {
 		reg := connector.NewDefaultRegistry()
@@ -474,7 +551,7 @@ func makeEndpointInventoryEmitter(
 			snap := snapshotFn()
 			report = &snap
 		}
-		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report)
+		_ = emitEndpointInventory(ctx, cfg, reg, emitter, partial, report, gate)
 	}
 }
 
@@ -564,10 +641,12 @@ func emitEndpointInventorySnapshot(
 	components []endpointInventoryComponent,
 	partial bool,
 	action observability.ProducerKey,
+	publish endpointInventoryCycle,
 ) error {
 	return emitInventorySnapshot(
 		ctx, emitter, source, "", components, partial,
 		observability.SourceSystem, action, "endpoint_inventory", endpointInventoryDetector,
+		publish,
 	)
 }
 
@@ -580,8 +659,12 @@ func emitInventorySnapshot(
 	recordSource observability.Source,
 	managedAction observability.ProducerKey,
 	phase, detector string,
+	publish endpointInventoryCycle,
 ) error {
-	scanID := "inventory-" + uuid.NewString()
+	scanID := publish.scanID
+	if scanID == "" {
+		scanID = "inventory-" + uuid.NewString()
+	}
 	components = append([]endpointInventoryComponent(nil), components...)
 	sort.SliceStable(components, func(left, right int) bool {
 		if components[left].itemName != components[right].itemName {
@@ -603,16 +686,52 @@ func emitInventorySnapshot(
 		carrier = endpointInventoryCarrier{}
 		action = config.ObservabilityV8LocalInventoryDiagnosticAction
 	}
-	firstErr := emitEndpointInventorySummary(
+	// Change gate. Deliberately after the action decision above: a snapshot that
+	// fell back to the local diagnostic action (partial, over-limit, or
+	// carrier-rejected) never reaches the managed AI Defense route, so it must
+	// publish as before but must NOT leave a digest behind — a stored digest is a
+	// promise that the cloud holds that exact content — and it disqualifies the
+	// cycle from satisfying the daily bundle.
+	digest := ""
+	gated := publish.cycle != nil && action != config.ObservabilityV8LocalInventoryDiagnosticAction
+	switch {
+	case gated:
+		digest = managedInventoryComponentsDigest(source, components)
+		if !publish.cycle.shouldPublish(source, digest) {
+			// Unchanged since the last successful publish and no bundle due:
+			// emit neither the summary nor any component record.
+			return nil
+		}
+	case publish.cycle != nil:
+		publish.cycle.markDegraded()
+	}
+	summaryOutcome, firstErr := emitEndpointInventorySummary(
 		ctx, emitter, source, scanID, scannedAt, len(components), active, partial,
 		recordSource, action, phase, carrier,
 	)
+	// A nil error does not mean the managed AI Defense route received the record:
+	// the managed projection is optional, and a profile or projection failure is
+	// reported through the outcome while Emit still returns nil. Any such record
+	// makes this collection's publish incomplete, so it must neither store a
+	// digest nor count toward the daily bundle.
+	managedRejected := managedInventoryPublishRejected(summaryOutcome)
 	for _, component := range components {
-		if err := emitEndpointInventoryComponent(
+		outcome, err := emitEndpointInventoryComponent(
 			ctx, emitter, source, scanID, component,
 			recordSource, action, phase, detector,
-		); err != nil && firstErr == nil {
+		)
+		if managedInventoryPublishRejected(outcome) {
+			managedRejected = true
+		}
+		if err != nil && firstErr == nil {
 			firstErr = err
+		}
+	}
+	if gated {
+		if firstErr != nil || managedRejected {
+			publish.cycle.markDegraded()
+		} else {
+			publish.cycle.recordPublished(source, digest, len(components))
 		}
 	}
 	return firstErr
@@ -735,7 +854,7 @@ func emitEndpointInventorySummary(
 	action observability.ProducerKey,
 	phase string,
 	carrier endpointInventoryCarrier,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	severity := "INFO"
 	canonicalSeverity := observability.SeverityInfo
 	logLevel := observability.LogLevelInfo
@@ -761,9 +880,9 @@ func emitEndpointInventorySummary(
 		action,
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = emitter.Emit(ctx, metadata, func(
+	return emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -801,7 +920,6 @@ func emitEndpointInventorySummary(
 			DefenseClawInventoryAgentMetadata:        carrier.agentMetadata,
 		})
 	})
-	return err
 }
 
 func emitEndpointInventoryComponent(
@@ -812,7 +930,7 @@ func emitEndpointInventoryComponent(
 	recordSource observability.Source,
 	action observability.ProducerKey,
 	phase, detector string,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
 		observability.ProducerKey("ai_discovery"),
@@ -824,9 +942,9 @@ func emitEndpointInventoryComponent(
 		action,
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = emitter.Emit(ctx, metadata, func(
+	return emitter.Emit(ctx, metadata, func(
 		snapshot observabilityruntime.EmitContext,
 		admission router.Admission,
 	) (observability.Record, error) {
@@ -872,7 +990,6 @@ func emitEndpointInventoryComponent(
 			DefenseClawAgentDiscoveryScannedAt:              aiDiscoveryV8OptionalText(component.agentScannedAt),
 		})
 	})
-	return err
 }
 
 // emitManagedAgentInventory publishes a validated coding-agent snapshot into
@@ -922,9 +1039,13 @@ func (a *APIServer) emitManagedAgentInventory(
 	// the carrier builder independently retains each exact Boolean and the
 	// compatibility projector verifies the aggregate before export.
 	_ = installed
+	// Ungated: this path is request-driven (POST /api/v1/agents/discover), not
+	// cadence-driven, so the caller expects a snapshot for every request. The
+	// zero cycle mints its own scan id and suppresses nothing.
 	return emitInventorySnapshot(
 		ctx, emitter, source, report.ScannedAt, components, partial,
 		recordSource, action, "agent_inventory", managedAgentInventoryDetector,
+		endpointInventoryCycle{},
 	)
 }
 
