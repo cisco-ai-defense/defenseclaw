@@ -2254,18 +2254,53 @@ function Get-DefenseClawCMIDBrokerServiceName {
     throw "cannot derive credential broker service name from unexpected gateway name: $GatewayServiceName"
 }
 
+# Builds the credential broker service command line from flat values.
+# Both Get-DefenseClawCMIDBrokerImage (layout-driven) and
+# Set-DefenseClawManagedServices (parameter-driven) route through here so
+# the registered image and the expected image cannot drift apart.
+#
+# ProviderLibraryPath is optional. A full XDR installation installs Cloud
+# Management last, so cmidapi.dll often does not exist when this service
+# is registered; omitting --cmid-library tells the broker to discover the
+# library at runtime and enable the CMID lane once Cloud Management
+# lands. When a library is already installed the installer still pins it.
+function Get-DefenseClawCMIDBrokerCommandLine {
+    # Pure string builder: every parameter allows the empty string so this
+    # helper validates exactly as much as the inline format strings it
+    # replaced (nothing). Callers keep their own preconditions.
+    param(
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BrokerPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BrokerServiceName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$GatewayServiceName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BrokerPipeName,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BrokerAuthKeyPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$ProviderLibraryPath,
+        [Parameter(Mandatory)][AllowEmptyString()][string]$BrokerLogPath
+    )
+    $image = (
+        '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}"' -f `
+            $BrokerPath, $BrokerServiceName, $GatewayServiceName, `
+            $BrokerPipeName, $BrokerAuthKeyPath
+    )
+    if (-not [string]::IsNullOrWhiteSpace($ProviderLibraryPath)) {
+        $image += (' --cmid-library "{0}"' -f $ProviderLibraryPath)
+    }
+    return $image + (' --log "{0}"' -f $BrokerLogPath)
+}
+
 function Get-DefenseClawCMIDBrokerImage {
     param(
         [Parameter(Mandatory)][hashtable]$Layout,
         [Parameter(Mandatory)][string]$GatewayServiceName
     )
-    if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
-        throw 'credential broker provider library path is missing'
-    }
-    return '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
-        $Layout.BrokerPath, $Layout.BrokerServiceName, $GatewayServiceName, `
-        $Layout.BrokerPipeName, $Layout.BrokerAuthKeyPath, `
-        $Layout.ProviderLibraryPath, $Layout.BrokerLogPath
+    return Get-DefenseClawCMIDBrokerCommandLine `
+        -BrokerPath $Layout.BrokerPath `
+        -BrokerServiceName $Layout.BrokerServiceName `
+        -GatewayServiceName $GatewayServiceName `
+        -BrokerPipeName $Layout.BrokerPipeName `
+        -BrokerAuthKeyPath $Layout.BrokerAuthKeyPath `
+        -ProviderLibraryPath ([string]$Layout.ProviderLibraryPath) `
+        -BrokerLogPath $Layout.BrokerLogPath
 }
 
 function Get-DefenseClawSensorHelperServiceName {
@@ -4834,12 +4869,16 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceName -Name $GuardianServiceName
     $brokerEnabled = Test-DefenseClawBrokerEnabled
     if ($brokerEnabled) {
+        # ProviderLibraryPath is deliberately absent from this list. Cloud
+        # Management installs last in a full XDR deployment, so cmidapi.dll
+        # need not exist for the broker service to be registered; the
+        # broker discovers the library at runtime via the shared command
+        # builder.
         foreach ($required in @(
             @('BrokerServiceName', $BrokerServiceName),
             @('BrokerPath', $BrokerPath),
             @('BrokerPipeName', $BrokerPipeName),
             @('BrokerAuthKeyPath', $BrokerAuthKeyPath),
-            @('ProviderLibraryPath', $ProviderLibraryPath),
             @('BrokerLogPath', $BrokerLogPath)
         )) {
             if ([string]::IsNullOrWhiteSpace([string]$required[1])) {
@@ -4866,11 +4905,21 @@ function Set-DefenseClawManagedServices {
     Assert-DefenseClawServiceName -Name $enumeratorServiceName
     $gatewayAccount = "NT SERVICE\$GatewayServiceName"
     $gatewayImage = '"{0}"' -f $GatewayPath
+    # Standalone profile keeps the empty image. Secure Client profile
+    # routes through the shared builder so the registered and expected
+    # images cannot drift. The library path is no longer required: a
+    # full XDR deployment installs Cloud Management after DefenseClaw,
+    # and the broker discovers the library at runtime.
     $brokerImage = ''
     if ($brokerEnabled) {
-        $brokerImage = '"{0}" service --service-name {1} --gateway-service-name {2} --pipe-name {3} --auth-key "{4}" --cmid-library "{5}" --log "{6}"' -f `
-            $BrokerPath, $BrokerServiceName, $GatewayServiceName, $BrokerPipeName, `
-            $BrokerAuthKeyPath, $ProviderLibraryPath, $BrokerLogPath
+        $brokerImage = Get-DefenseClawCMIDBrokerCommandLine `
+            -BrokerPath $BrokerPath `
+            -BrokerServiceName $BrokerServiceName `
+            -GatewayServiceName $GatewayServiceName `
+            -BrokerPipeName $BrokerPipeName `
+            -BrokerAuthKeyPath $BrokerAuthKeyPath `
+            -ProviderLibraryPath $ProviderLibraryPath `
+            -BrokerLogPath $BrokerLogPath
     }
     $guardianImage = '"{0}" enterprise hooks watch --manifest "{1}" --interval 1m' -f $GatewayPath, $ManifestPath
     # Spec 005 D1: third SCM service reuses the gateway binary, invoked
@@ -18096,9 +18145,13 @@ function Get-DefenseClawLifecycleSources {
     if ($Action -eq 'Install') {
         $required = @()
         if ($brokerEnabled) {
+            # -ProviderLibrary is deliberately absent from this list. Cloud
+            # Management installs last in a full XDR deployment, so
+            # cmidapi.dll need not exist for Install to succeed; the broker
+            # discovers it at runtime. A supplied path is still validated
+            # below.
             $required += @(
-                @('BrokerBinary', $BrokerBinary),
-                @('ProviderLibrary', $ProviderLibrary)
+                @('BrokerBinary', $BrokerBinary)
             )
         }
         $required += @(
@@ -18131,12 +18184,11 @@ function Get-DefenseClawLifecycleSources {
     }
     if ($Action -eq 'Upgrade' -and $brokerEnabled -and
         ([string]::IsNullOrWhiteSpace($BrokerBinary) -or
-        [string]::IsNullOrWhiteSpace($ProviderLibrary) -or
         [string]::IsNullOrWhiteSpace($GatewayBinary) -or
         [string]::IsNullOrWhiteSpace($ACPBinary) -or
         [string]::IsNullOrWhiteSpace($HookBinary) -or
         [string]::IsNullOrWhiteSpace($SensorHelperBinary))) {
-        throw 'Upgrade requires -BrokerBinary, -ProviderLibrary, -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
+        throw 'Upgrade requires -BrokerBinary, -GatewayBinary, -ACPBinary, -HookBinary, and -SensorHelperBinary'
     }
 
     foreach ($entry in @(
@@ -21975,13 +22027,18 @@ function Assert-DefenseClawExactScopeService {
                     -LiteralPath $serviceKey `
                     -Name ImagePath
             )
+            # The --cmid-library pin is optional: a deployment installed
+            # before Cloud Management (the full XDR order) registers the
+            # broker without it and discovers the library at runtime.
+            # Uninstall must recognise both shapes as canonical, otherwise
+            # it would refuse to remove its own service.
             $expectedPrefix = (
                 '"{0}" service --service-name {1} --gateway-service-name {2} ' +
-                '--pipe-name {3} --auth-key "{4}" --cmid-library "'
+                '--pipe-name {3} --auth-key "{4}"'
             ) -f `
                 $Layout.BrokerPath, $name, $GatewayServiceName,
                 $Layout.BrokerPipeName, $Layout.BrokerAuthKeyPath
-            $expectedSuffix = '" --log "{0}"' -f $Layout.BrokerLogPath
+            $expectedSuffix = ' --log "{0}"' -f $Layout.BrokerLogPath
             if (-not $image.StartsWith(
                     $expectedPrefix,
                     [StringComparison]::OrdinalIgnoreCase
@@ -21990,39 +22047,58 @@ function Assert-DefenseClawExactScopeService {
                     $expectedSuffix,
                     [StringComparison]::OrdinalIgnoreCase
                 ) -or
-                $image.Length -le
+                $image.Length -lt
                     ($expectedPrefix.Length + $expectedSuffix.Length)) {
                 throw "refusing to remove credential broker service $name with a noncanonical ImagePath"
             }
-            $library = $image.Substring(
+            $pinnedLibraryArgument = $image.Substring(
                 $expectedPrefix.Length,
                 $image.Length - $expectedPrefix.Length -
                     $expectedSuffix.Length
             )
-            if ($library.IndexOf('"', [StringComparison]::Ordinal) -ge 0 -or
-                -not [string]::Equals(
-                    [IO.Path]::GetFileName($library),
-                    'cmidapi.dll',
-                    [StringComparison]::OrdinalIgnoreCase
-                )) {
-                throw "refusing to remove credential broker service $name with a noncanonical provider path"
-            }
-            $providerRoot = [IO.Path]::Combine(
-                $script:ProgramFiles,
-                'Cisco',
-                'Cisco Secure Client',
-                'CM'
-            )
-            $canonicalLibrary = Assert-DefenseClawDescendant `
-                -Path $library `
-                -Root $providerRoot `
-                -Label 'credential broker service provider library'
-            if (-not [string]::Equals(
-                    $canonicalLibrary,
-                    $library,
-                    [StringComparison]::OrdinalIgnoreCase
-                )) {
-                throw "refusing to remove credential broker service $name with a noncanonical provider path"
+            if ($pinnedLibraryArgument.Length -gt 0) {
+                $libraryPrefix = ' --cmid-library "'
+                if (-not $pinnedLibraryArgument.StartsWith(
+                        $libraryPrefix,
+                        [StringComparison]::Ordinal
+                    ) -or
+                    -not $pinnedLibraryArgument.EndsWith(
+                        '"',
+                        [StringComparison]::Ordinal
+                    ) -or
+                    $pinnedLibraryArgument.Length -le
+                        ($libraryPrefix.Length + 1)) {
+                    throw "refusing to remove credential broker service $name with a noncanonical ImagePath"
+                }
+                $library = $pinnedLibraryArgument.Substring(
+                    $libraryPrefix.Length,
+                    $pinnedLibraryArgument.Length - $libraryPrefix.Length - 1
+                )
+                if ($library.IndexOf('"', [StringComparison]::Ordinal) -ge 0 -or
+                    -not [string]::Equals(
+                        [IO.Path]::GetFileName($library),
+                        'cmidapi.dll',
+                        [StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    throw "refusing to remove credential broker service $name with a noncanonical provider path"
+                }
+                $providerRoot = [IO.Path]::Combine(
+                    $script:ProgramFiles,
+                    'Cisco',
+                    'Cisco Secure Client',
+                    'CM'
+                )
+                $canonicalLibrary = Assert-DefenseClawDescendant `
+                    -Path $library `
+                    -Root $providerRoot `
+                    -Label 'credential broker service provider library'
+                if (-not [string]::Equals(
+                        $canonicalLibrary,
+                        $library,
+                        [StringComparison]::OrdinalIgnoreCase
+                    )) {
+                    throw "refusing to remove credential broker service $name with a noncanonical provider path"
+                }
             }
         }
     }
@@ -22732,10 +22808,13 @@ function Invoke-DefenseClawInstallLikeLifecycle {
     if ($Sources.ContainsKey('provider_library')) {
         $Layout.ProviderLibraryPath = [string]$Sources['provider_library'].path
     }
+    # An absent provider library is a supported state, not a failure: in a
+    # full XDR installation Cloud Management is installed after DefenseClaw,
+    # so cmidapi.dll appears later. The broker service is registered without
+    # --cmid-library and discovers the library at runtime, which enables the
+    # CMID lane with no further administrator action. A later Repair or
+    # Upgrade run pins the path once it exists.
     if ((Test-DefenseClawLayoutBrokerEnabled -Layout $Layout)) {
-        if ([string]::IsNullOrWhiteSpace([string]$Layout.ProviderLibraryPath)) {
-            throw "$Action requires a validated managed credential provider library"
-        }
         Assert-DefenseClawCMIDBrokerServiceOrAbsent `
             -Name $Layout.BrokerServiceName `
             -ExpectedImage (Get-DefenseClawCMIDBrokerImage `

@@ -240,3 +240,27 @@ flavor.
 There is no AVC handoff kit for the standalone Setup. The AVC flow in
 [Windows AVC packaging handoff](WINDOWS-AVC-PACKAGING-HANDOFF.md) builds only
 `DefenseClawSetup-Enterprise-x64.exe`.
+
+## Cloud Management install order
+
+A full XDR installation installs Cloud Management last, so
+`cmidapi.dll` is usually absent while DefenseClaw installs. That is a
+supported order and needs no sequencing work from the deploying system:
+
+- `/install`, `/upgrade`, and `/repair` complete without the library. The
+  credential broker service is registered without a `--cmid-library` pin.
+- The broker discovers the library at runtime under
+  `%ProgramFiles%\Cisco\Cisco Secure Client\CM\<cm-version>\CMID\<cmid-version>\<arch>\`,
+  newest version first, and applies the same path-trust checks an
+  installer-supplied path gets.
+- CMID integration therefore enables itself once Cloud Management lands —
+  no reinstall, repair, or service restart. Adoption is recorded in the
+  broker log as `stage=provider-resolved`.
+- Until then managed inspection stays fail-closed rather than allowing
+  uninspected traffic, and the broker log records
+  `category=cmid_library_pending`.
+
+Because Secure Client nests the library under two version directories
+that move on its own upgrade schedule, runtime discovery also survives a
+Cloud Management upgrade that retires the directory a previous install
+pinned.
