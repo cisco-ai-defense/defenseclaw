@@ -16,17 +16,6 @@ This file only maps the config-v8 implementation and its authoring sources.
 | Destination adapters | [`internal/observability/destinations/`](../internal/observability/destinations/) |
 | Local Grafana stack and Prometheus rules | [`bundles/local_observability_stack/`](../bundles/local_observability_stack/) |
 
-## Local projection invariant
-
-The mandatory SQLite writer and the local log pipeline must resolve the same
-effective redaction profile for every occurrence. A managed-enterprise
-request-scoped sink policy may select built-in `none` or `sensitive` without
-mutating the compiled plan; the writer must validate that resolved projection
-against its graph-bound engine before persistence. Unknown policies and
-projections from another engine, key, catalog, profile, or runtime graph remain
-fail-closed. See
-[`specs/007-event-history-sink-policy/`](specs/007-event-history-sink-policy/).
-
 Files named `internal/observability/zz_generated_telemetry_*.go` and the runtime
 assets under `schemas/telemetry/runtime/` are generated outputs. Edit the v8
 registry/domain YAML, run `make telemetry-generate`, review the generated diff,
