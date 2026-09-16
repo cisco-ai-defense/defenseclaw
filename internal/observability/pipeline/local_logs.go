@@ -128,6 +128,29 @@ func (failure OptionalFailure) RouteName() string         { return failure.route
 func (failure OptionalFailure) RouteIndex() int           { return failure.routeIndex }
 func (failure OptionalFailure) Code() OptionalFailureCode { return failure.code }
 
+// NewManagedOptionalFailureOutcomeForTest builds the outcome shape this pipeline
+// produces when a record's managed AI Defense projection cannot be built: the
+// record was never queued for that destination, no optional work was scheduled,
+// and Emit nevertheless returns a nil error because the managed route is an
+// optional projection.
+//
+// Exported purely so callers in other packages can test their handling of that
+// shape. Every field of LocalLogOutcome and OptionalFailure is deliberately
+// unexported, so this is the only way to reproduce it outside this package, and
+// a caller that treats a nil error as proof of managed delivery has no way to
+// notice the difference without it.
+func NewManagedOptionalFailureOutcomeForTest(code OptionalFailureCode) LocalLogOutcome {
+	return LocalLogOutcome{
+		admission:   router.AdmissionDrop,
+		managedOnly: true,
+		optionalFailure: []OptionalFailure{{
+			destinationName: config.ObservabilityV8ManagedAIDDestinationName,
+			destinationKind: config.ObservabilityV8DestinationOTLP,
+			code:            code,
+		}},
+	}
+}
+
 // ProjectedDeliveryIdentity is the complete bounded, non-content identity
 // retained beside one optional projection. It is derived only from the
 // already-validated canonical Record and never retains a producer input or the

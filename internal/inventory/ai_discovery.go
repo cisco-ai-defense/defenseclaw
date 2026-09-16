@@ -80,10 +80,12 @@ const (
 )
 
 // managedEnterpriseScanInterval is the minimum full-scan cadence in
-// managed_enterprise mode. Every full-scan tick fans out through
-// managedInventoryEmit to AI Defense, so this doubles as the AI Defense
-// publish cadence — the ingest cost of a fleet-wide 30-min beat is well
-// below the 5-min baseline while still keeping inventory drift bounded.
+// managed_enterprise mode. Every full-scan tick still fans out through
+// managedInventoryEmit, so this is the MAXIMUM AI Defense publish rate — not
+// the publish cadence itself. The gateway emitter change-gates the actual
+// publish on a content fingerprint (see managedInventoryPublishState in
+// internal/gateway), so a steady-state endpoint ships nothing on most ticks and
+// a complete bundle at least once every managedInventoryFullBundleInterval.
 // The value is also the floor applied to ProcessIntervalSec in the same
 // mode so the two tickers never diverge onto a faster wall-clock.
 const managedEnterpriseScanInterval = 30 * time.Minute

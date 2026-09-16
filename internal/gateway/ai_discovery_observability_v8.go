@@ -14,6 +14,7 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 	"github.com/defenseclaw/defenseclaw/internal/inventory"
 	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/observability/router"
 	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
 	"github.com/defenseclaw/defenseclaw/internal/telemetry"
@@ -33,14 +34,23 @@ type aiDiscoveryV8Runtime interface {
 	) (context.Context, *observabilityruntime.AIDiscoveryTrace, error)
 }
 
-type aiDiscoveryV8Adapter struct{ runtime aiDiscoveryV8Runtime }
+type aiDiscoveryV8Adapter struct {
+	runtime aiDiscoveryV8Runtime
+	// publishGate is the managed_enterprise change gate, nil in every other
+	// deployment mode. A nil gate never suppresses, so the lifecycle-delta
+	// contract for non-managed modes is unaffected.
+	publishGate *managedInventoryPublishState
+}
 
-func newAIDiscoveryV8Adapter(emitter sidecarRuntimeEmitter) inventory.AIDiscoveryObservabilityV8 {
+func newAIDiscoveryV8Adapter(
+	emitter sidecarRuntimeEmitter,
+	gate *managedInventoryPublishState,
+) inventory.AIDiscoveryObservabilityV8 {
 	runtime, ok := emitter.(aiDiscoveryV8Runtime)
 	if !ok || runtime == nil {
 		return nil
 	}
-	return &aiDiscoveryV8Adapter{runtime: runtime}
+	return &aiDiscoveryV8Adapter{runtime: runtime, publishGate: gate}
 }
 
 func (adapter *aiDiscoveryV8Adapter) StartScan(
@@ -179,20 +189,52 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 	if adapter == nil || adapter.runtime == nil || ctx == nil || !aiDiscoveryV8SummaryValid(report.Summary) {
 		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
+	// The per-scan summary is the liveness signal ("device alive, inventory
+	// unchanged, total = N") and stays unconditional in every mode, including a
+	// fully suppressed managed cycle.
 	logErr := adapter.emitSummaryLog(ctx, report.Summary)
+	managedSnapshot := ManagedEnterpriseActive()
+	signalsPublish, signalsCycle, signalsDigest := adapter.resolveSignalsPublish(managedSnapshot, report)
+	signalsErr := false
 	for _, signal := range report.Signals {
-		// Managed enterprise receives a complete endpoint snapshot on every
-		// cadence, including steady-state `seen` observations. Other modes keep
-		// the historical lifecycle-delta contract.
+		// Managed enterprise receives a complete endpoint snapshot, including
+		// steady-state `seen` observations, but only on a cycle where the
+		// inventory actually changed or the daily full bundle is due. Other modes
+		// keep the historical lifecycle-delta contract.
 		isDelta := signal.State == inventory.AIStateNew ||
 			signal.State == inventory.AIStateChanged || signal.State == inventory.AIStateGone
-		if !isDelta && !(ManagedEnterpriseActive() && signal.State == inventory.AIStateSeen) {
+		if !isDelta && !(managedSnapshot && signal.State == inventory.AIStateSeen) {
 			continue
 		}
-		if err := adapter.emitSignalLog(ctx, report.Summary, signal); err != nil && logErr == nil {
-			logErr = err
+		if managedSnapshot && !signalsPublish {
+			// Suppression is reachable only when this scan carried no
+			// new/changed/gone signal (see resolveSignalsPublish), so no
+			// lifecycle delta can be dropped here.
+			continue
+		}
+		outcome, err := adapter.emitSignalLog(ctx, report.Summary, signal)
+		// Emit returns nil when the optional managed AI Defense projection fails,
+		// so the outcome — not the error — is what says whether the managed
+		// destination actually received this record. See
+		// managedInventoryPublishRejected.
+		if managedInventoryPublishRejected(outcome) {
+			signalsErr = true
+		}
+		if err != nil {
+			signalsErr = true
+			if logErr == nil {
+				logErr = err
+			}
 		}
 	}
+	if signalsPublish && signalsCycle != nil {
+		if signalsErr {
+			signalsCycle.markDegraded()
+		} else {
+			signalsCycle.recordPublished(managedInventorySignalsKey, signalsDigest, len(report.Signals))
+		}
+	}
+	signalsCycle.commit()
 	for _, component := range components {
 		if !component.HasLifecycleChange {
 			continue
@@ -208,11 +250,46 @@ func (adapter *aiDiscoveryV8Adapter) EmitReport(
 	return metricErr
 }
 
+// resolveSignalsPublish decides whether the per-signal snapshot ships this scan.
+//
+// Returns (true, nil, "") for every non-managed mode and whenever no gate is
+// bound, so the historical behavior is reproduced without computing a digest or
+// touching any state file.
+//
+// The lifecycle-count term is what makes a REMOVAL publish: `gone` signals are
+// excluded from the digest input (they would otherwise keep the digest moving
+// forever as the tombstone ages out), so without the count term a disappearance
+// would be invisible to the gate. It also guarantees the gate can never drop a
+// new / changed / gone record — the exact records non-managed modes emit.
+func (adapter *aiDiscoveryV8Adapter) resolveSignalsPublish(
+	managedSnapshot bool,
+	report inventory.AIDiscoveryReport,
+) (bool, *managedInventoryPublishCycle, string) {
+	if !managedSnapshot || adapter == nil || adapter.publishGate == nil {
+		return true, nil, ""
+	}
+	// bundleScope is false: this publisher covers only the signals snapshot, so
+	// it must never satisfy the daily complete-bundle guarantee. The endpoint
+	// inventory hook, which runs last in the same fanout and carries all six
+	// collections, owns that stamp.
+	cycle := adapter.publishGate.beginCycle(report.Summary.ScanID, time.Now().UTC(), false)
+	// The digest is computed either way: publishing a lifecycle change must also
+	// fingerprint the scan, or the cycle after the change would republish
+	// forever instead of settling into suppression.
+	digest := managedInventorySignalsDigest(managedInventorySignalsKey, report.Signals)
+	lifecycleChanged := report.Summary.NewSignals+
+		report.Summary.ChangedSignals+report.Summary.GoneSignals > 0
+	if lifecycleChanged {
+		return true, cycle, digest
+	}
+	return cycle.shouldPublish(managedInventorySignalsKey, digest), cycle, digest
+}
+
 func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	ctx context.Context,
 	summary inventory.AIDiscoverySummary,
 	signal inventory.AISignal,
-) error {
+) (pipeline.LocalLogOutcome, error) {
 	eventName := observability.EventName("ai_component.changed")
 	switch signal.State {
 	case inventory.AIStateNew:
@@ -224,10 +301,10 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 	case inventory.AIStateGone:
 		eventName = "ai_component.removed"
 	default:
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	if signal.SignalID == "" || signal.Category == "" {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
 	metadata, err := router.NewClassifiedLogMetadata(
 		observability.ProducerGatewayEvent,
@@ -240,9 +317,9 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		observability.ProducerKey("ai_discovery"),
 	)
 	if err != nil {
-		return &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
+		return pipeline.LocalLogOutcome{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 	}
-	_, err = adapter.runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
+	outcome, err := adapter.runtime.Emit(ctx, metadata, func(snapshot observabilityruntime.EmitContext, admission router.Admission) (observability.Record, error) {
 		if admission != router.AdmissionOrdinary || snapshot.Generation() > math.MaxInt64 {
 			return observability.Record{}, &sidecarObservabilityError{code: sidecarObservabilityBuildFailed}
 		}
@@ -322,7 +399,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		}
 	})
 	if err != nil {
-		return err
+		return outcome, err
 	}
 	// Human-readable info line for operators tailing gateway.err.log (macOS) /
 	// gateway.log (Windows). Format matches the historical macOS convention:
@@ -357,7 +434,7 @@ func (adapter *aiDiscoveryV8Adapter) emitSignalLog(
 		displayName,
 		aiDiscoveryV8Clamp(signal.Confidence),
 	)
-	return nil
+	return outcome, nil
 }
 
 // aiDiscoverySanitizeLogValue prepares a signal field for single-line stderr
