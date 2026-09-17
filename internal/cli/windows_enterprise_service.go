@@ -65,17 +65,22 @@ type windowsEnterpriseLifecycleOptions struct {
 	noStart                       bool
 	purge                         bool
 	allowUnsigned                 bool
-	// deferredConfig requests the UCB-friendly install path (spec 003
-	// / Workstream B). When true: --config and --manifest are
-	// optional at install time; the installer provisions the
-	// canonical drop-point directories with ACLs but writes no file
-	// bodies; both services register but are NOT started so the
-	// bounded fsnotify wait loops in the gateway daemon
-	// (internal/cli/config_v8_wait.go) and hook-guardian
-	// (internal/cli/enterprise_hooks.go) pick the files up once UCB
-	// atomically drops them. See
-	// docs/specs/003-windows-deferred-config/.
+	// deferredConfig stages a protected installed deployment with every
+	// managed service disabled. A later Repair with both authenticated
+	// policy files prepares user runtimes and performs guardian-first
+	// activation; direct file publication or SCM start is not supported.
 	deferredConfig bool
+	// bootstrapParent forwards the outer signed DefenseClawSetup EXE's
+	// protected %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch
+	// path to install-enterprise.ps1's -BootstrapParent, so the
+	// installer's one-shot bootstrap directory lives inside an admin-
+	// only ancestor chain rather than C:\Windows\Temp. Required on
+	// Azure-AD-joined hosts, where C:\Windows\Temp carries an inherited
+	// Allow ACE for the interactive AAD principal with Delete rights;
+	// the module's later trusted-ancestor walk on rendered config /
+	// targets YAML would reject it otherwise. Empty falls back to
+	// C:\Windows\Temp for direct-caller compatibility on stock Windows.
+	bootstrapParent string
 	// mode / connector are the macOS-parity QA shorthand. When both
 	// are supplied (and configPath / manifestPath are empty),
 	// install-enterprise.ps1 renders a minimal managed_enterprise
@@ -180,6 +185,7 @@ func init() {
 	enterpriseWindowsCmd.AddCommand(newWindowsManagedHooksLifecycleCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsTargetRuntimeCommand())
 	enterpriseWindowsCmd.AddCommand(newWindowsNamespacePurgeCommand())
+	enterpriseWindowsCmd.AddCommand(newWindowsManagedHookContractCleanupCommand())
 	// Spec 005 D1: hook-enumerator subcommand. Windows-only; the
 	// whole file is //go:build windows so a non-Windows build never
 	// reaches this registration.
@@ -224,7 +230,9 @@ func newWindowsEnterpriseLifecycleCommand(action string) *cobra.Command {
 	// Requires managed-enterprise deployment mode; enforced by the
 	// installer, not here (this flag is a passthrough).
 	flags.BoolVar(&opts.deferredConfig, "deferred-config", false,
-		"provision drop points and register services stopped; config.yaml and targets.yaml may arrive later via UCB")
+		"stage services disabled; activate later with repair plus both config.yaml and targets.yaml")
+	flags.StringVar(&opts.bootstrapParent, "bootstrap-parent", "",
+		"protected admin-only parent directory for the installer's one-shot bootstrap dir (outer signed Setup EXE passes its own %ProgramData%\\DefenseClaw-Enterprise-Setup-<hex>\\scratch path here)")
 	flags.StringVar(&opts.mode, "mode", "",
 		"QA shorthand: observe|action (paired with --connector; the installed install-enterprise.ps1 renders config.yaml + targets.yaml)")
 	flags.StringVar(&opts.connector, "connector", "",
@@ -283,12 +291,14 @@ func runWindowsEnterpriseLifecycle(
 	}
 	mutation := action == "install" || action == "upgrade" || action == "repair"
 	if mutation && strings.TrimSpace(opts.brokerBinary) != "" {
+		// A full XDR installation sequences Cloud Management last, so
+		// cmidapi.dll is routinely absent while DefenseClaw installs.
+		// That is no longer a preflight failure: the deployment completes
+		// without the library and the credential broker discovers it at
+		// runtime, enabling the CMID lane once Cloud Management lands. An
+		// already-installed library is still pinned here so nothing
+		// changes for the Cloud-Management-first order.
 		opts.providerLibrary = strings.TrimSpace(windowsEnterpriseProviderLibraryResolver())
-		if opts.providerLibrary == "" {
-			return failPreflight(errors.New(
-				"the managed credential provider library was not found in the trusted Secure Client installation",
-			))
-		}
 	}
 	script, err := windowsEnterpriseScriptFinder(opts.installerPath)
 	if err != nil {
@@ -533,6 +543,7 @@ func windowsEnterprisePowerShellArgs(action string, opts *windowsEnterpriseLifec
 	appendValue("-GatewayServiceName", opts.gatewayServiceName)
 	appendValue("-GuardianServiceName", opts.guardianServiceName)
 	appendValue("-CertificationCodexHome", opts.certificationCodexHome)
+	appendValue("-BootstrapParent", opts.bootstrapParent)
 	if opts.coreHardeningCertification {
 		args = append(args, "-CoreHardeningCertification")
 	}
@@ -610,13 +621,8 @@ func validateWindowsEnterpriseLifecycleSecurityOptions(
 			)
 		}
 	}
-	// Spec 003 --deferred-config is meaningful only for the initial
-	// Install action. On upgrade/repair the config.yaml + targets.yaml
-	// artefacts are already on disk; deferring them would leave the
-	// deployment offline and mask a real re-signing failure. Reject
-	// the combination up front so the CLI-side matches the PowerShell
-	// installer's Install-only relaxation in Get-DefenseClawLifecycleSources.
-	// See CR spec-003:PRRT_kwDORuAK-s6alkr4.
+	// The flag marks only the initial staged install. Protected deployment
+	// metadata later selects the complete Repair activation path.
 	if opts.deferredConfig && action != "install" {
 		return fmt.Errorf(
 			"--deferred-config is valid only with install (got: %s)", action,

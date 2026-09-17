@@ -2321,6 +2321,8 @@ func mergeAgentHookFindings(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.SuppressNotification = resp.SuppressNotification
+	next.aiDefenseEnforced = resp.aiDefenseEnforced && next.Action == "block"
 	return next
 }
 
@@ -2344,6 +2346,8 @@ func committedAgentHookChainBlock(
 	next.EvaluationID = resp.EvaluationID
 	next.RuleIDs = append([]string(nil), resp.RuleIDs...)
 	next.RedactionEnabled = resp.RedactionEnabled
+	next.SuppressNotification = resp.SuppressNotification
+	next.aiDefenseEnforced = resp.aiDefenseEnforced && next.Action == "block"
 	return next
 }
 

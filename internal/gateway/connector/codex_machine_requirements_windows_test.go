@@ -17,6 +17,20 @@ import (
 	"golang.org/x/sys/windows"
 )
 
+func TestNormalizeWindowsCodexManagedRuntimeTargetsAcceptsEntraID(t *testing.T) {
+	const entraSID = "S-1-12-1-1111111111-2222222222-3333333333-4000000000"
+	dataDir := filepath.Clean(`C:\Users\entra-user\.defenseclaw`)
+	targets, err := normalizeWindowsCodexManagedRuntimeTargets([]WindowsCodexManagedRuntimeTarget{{
+		SID: entraSID, DataDir: dataDir,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].SID != entraSID || targets[0].DataDir != dataDir {
+		t.Fatalf("Codex targets = %+v, want Microsoft Entra ID target", targets)
+	}
+}
+
 func TestResolveWindowsCodexManagedRuntimeRegistryCleanAbsenceIsNoop(t *testing.T) {
 	programData := t.TempDir()
 	originalProgramData := windowsCodexMachineProgramData

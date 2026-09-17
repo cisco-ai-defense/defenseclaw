@@ -203,7 +203,7 @@ func stageEnterprisePayload(payload enterprisePayload) (string, func() error, er
 		if err != nil {
 			return "", nil, errors.Join(fmt.Errorf("create staged enterprise payload %s: %w", name, err), cleanup())
 		}
-		source, sourceErr := embeddedPayload.Open("payload/" + name)
+		source, sourceErr := payload.PayloadFS.Open("payload/" + name)
 		if sourceErr != nil {
 			_ = file.Close()
 			return "", nil, errors.Join(fmt.Errorf("open embedded enterprise payload %s: %w", name, sourceErr), cleanup())
@@ -347,6 +347,15 @@ func enterpriseLifecycleArguments(stageRoot string, opts enterpriseSetupOptions)
 	appendValue("--gateway-service-name", opts.GatewayServiceName)
 	appendValue("--guardian-service-name", opts.GuardianServiceName)
 	appendValue("--certification-codex-home", opts.CertificationCodexHome)
+	// Forward the outer Setup's protected scratch directory under
+	// %ProgramData%\DefenseClaw-Enterprise-Setup-<hex>\scratch as the
+	// installer's one-shot bootstrap parent. install-enterprise.ps1 uses
+	// this instead of C:\Windows\Temp so its rendered YAML content passes
+	// the module's later trusted-ancestor walk on Azure-AD-joined hosts,
+	// where C:\Windows\Temp carries an inherited Allow ACE for the
+	// interactive AAD principal with Delete rights.
+	arguments = append(arguments, "--bootstrap-parent",
+		filepath.Join(stageRoot, enterpriseSetupScratchDirName))
 	if opts.NoStart {
 		arguments = append(arguments, "--no-start")
 	}

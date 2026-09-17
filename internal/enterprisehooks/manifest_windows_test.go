@@ -56,6 +56,27 @@ func TestLoadManifestWindowsRejectsMissingOrServiceSID(t *testing.T) {
 	}
 }
 
+func TestLoadManifestWindowsAcceptsEntraIDTarget(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "targets.yaml")
+	if err := os.WriteFile(path, []byte(`
+version: 1
+targets:
+  - user_home: 'C:\Users\entra-user'
+    sid: S-1-12-1-1111111111-2222222222-3333333333-4000000000
+    connector: codex
+    agent_version: codex-cli 0.142.0
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := LoadManifest(path)
+	if err != nil {
+		t.Fatalf("LoadManifest: %v", err)
+	}
+	if len(manifest.Targets) != 1 || manifest.Targets[0].SID != "S-1-12-1-1111111111-2222222222-3333333333-4000000000" {
+		t.Fatalf("manifest = %+v, want one Microsoft Entra ID target", manifest)
+	}
+}
+
 func TestLoadManifestWindowsRejectsDuplicateSIDTarget(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
 	if err := os.WriteFile(path, []byte(`
