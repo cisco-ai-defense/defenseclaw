@@ -10,7 +10,7 @@
       "version_probe": "kiro-cli --version",
       "contracts": [],
       "native_hook_inventory": {
-        "status": "cataloged-only",
+        "status": "installed",
         "format": "kiro-hooks-v3",
         "workspace_path": ".kiro/hooks/*.json",
         "events": [
@@ -25,8 +25,10 @@
         ]
       },
       "notes": [
-        "The ACP guard is the authoritative enforcement path and is versioned independently from Kiro native hooks.",
-        "Native hooks are inventoried for future defense in depth but are not installed or certification-claimed by this release.",
+        "block_events describes the v1 hook schema (Kiro IDE 1.x, CLI 3.x). CLI 2.x honors exit 2 on preToolUse only, so the connector narrows its veto surface to PreToolUse when it detects a 2.x release.",
+        "The ACP guard is an optional second enforcement path and is versioned independently from Kiro native hooks.",
+        "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
+        "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
         "Hook stdout must remain empty because Kiro adds stdout to agent context."
       ]
     },

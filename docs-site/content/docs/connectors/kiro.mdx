@@ -1,12 +1,27 @@
 ---
 title: Kiro
-description: Use Kiro CLI through DefenseClaw's ACP guard in Zed or JetBrains.
+description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. They share hooks; ACP is optional.
 ---
 
-Kiro is a regular DefenseClaw connector with native ACP support. First-run
-and `defenseclaw setup kiro` activate it like the other CLI connectors. The
-ACP enforcement path is `kiro-cli acp` behind `defenseclaw-acp`; native Kiro
-hooks are cataloged separately as future defense in depth.
+Kiro is a regular DefenseClaw connector. First-run and `defenseclaw setup kiro`
+activate it whether the operator has Kiro IDE, Kiro CLI, or both: those
+surfaces share `.kiro/hooks`, so DefenseClaw shows one Kiro row. The optional
+ACP path is `kiro-cli acp` behind `defenseclaw-acp` when the CLI is present.
+`defenseclaw setup kiro` installs native hooks and a CLI 2.x `defenseclaw`
+agent (`kiro-cli` cannot put hooks on built-in `kiro_default`). Restart the CLI
+or run `/agent swap defenseclaw` so `/hooks` lists them.
+
+<Callout type="warn">
+Kiro hooks are **workspace-scoped**. Kiro discovers hooks only from
+`.kiro/hooks/*.json` relative to the project root and documents no user-level
+location, so the enforcing file is `<workspace>/.kiro/hooks/defenseclaw.json`.
+Setup also writes `~/.kiro/hooks/defenseclaw.json` so teardown can reclaim it,
+but Kiro never reads that copy: a global-only install blocks nothing, even
+though the connector reports healthy and the gateway keeps recording findings.
+Set `claw.workspace_dir` to the project root before running setup, and confirm
+with `defenseclaw doctor` — the `Connector scope [kiro]` check fails when no
+project-local hook file exists.
+</Callout>
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro

@@ -258,7 +258,7 @@
       "label": "Kiro",
       "windowsSupport": "supported",
       "windowsNote": "The defenseclaw-acp stdio mediator is platform-neutral; packaged Windows x64 evidence is required before release certification.",
-      "summary": "Kiro's ACP agent is mediated before Zed or JetBrains receives protocol traffic.",
+      "summary": "Kiro IDE and Kiro CLI share native hooks; ACP adds an optional mediated stdio path.",
       "family": "hooks",
       "toolInspection": "pre-execution + response-scan",
       "subprocessPolicy": "none",
@@ -266,12 +266,12 @@
         "canBlock": true,
         "canAskNative": false,
         "askEvents": [],
-        "blockEvents": ["session/prompt", "session/request_permission", "fs/write_text_file", "terminal/create"],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse"],
         "supportsFailClosed": true,
-        "scope": "acp"
+        "scope": "workspace"
       },
-      "hilt": "ACP permission requests remain native client interactions; policy may deny them before the client displays or accepts them.",
-      "notes": "The first-class enforcement boundary is defenseclaw-acp. Kiro v2/v3 native hook formats are versioned defense-in-depth surfaces and are not treated as a prerequisite for ACP protection."
+      "hilt": "Kiro has no native ask verdict; policy confirms are recorded and downgraded to alerts. ACP permission requests stay native client interactions and may be denied before the client displays them.",
+      "notes": "Native hooks are the enforcement boundary and are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root, so a project-local defenseclaw.json is required and the user-global ~/.kiro/hooks copy is inert. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x. defenseclaw-acp remains an optional second surface configured with `defenseclaw acp setup --agent kiro`."
     },
     {
       "id": "zeptoclaw",
