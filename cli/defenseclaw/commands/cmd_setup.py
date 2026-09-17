@@ -4383,7 +4383,7 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
     },
     "kiro": {
         "label": "Kiro",
-        "description": "Kiro CLI connector with native ACP support; native hooks remain cataloged defense in depth",
+        "description": "Kiro IDE or CLI connector; they share the same hooks, with optional ACP",
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
@@ -4541,8 +4541,9 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
     ),
     "kiro": (
         "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
-        "Native Kiro hooks are inventoried but not installed in this release",
-        "ACP enforcement is configured with `defenseclaw acp setup --agent kiro`",
+        "Kiro IDE and Kiro CLI share .kiro/hooks; setup writes ~/.kiro/hooks/defenseclaw.json",
+        "CLI 2.x uses a defenseclaw agent (built-in kiro_default cannot carry hooks); /agent swap defenseclaw",
+        "Optional ACP enforcement is configured with `defenseclaw acp setup --agent kiro`",
     ),
 }
 
@@ -13031,12 +13032,42 @@ def _connector_runtime_snapshot_ready(
     state_fresh = previous_state_marker is None or state_marker != previous_state_marker
     lock_fresh = previous_lock_marker is None or lock_marker != previous_lock_marker
     return bool(
-        active == expected
+        expected.issubset(active)
         and state_fresh
         and lock_fresh
         and _hook_contract_lock_covers(lock, expected, inactive)
     )
 
+
+def _lock_contract_failure_detail(connector: str, entry: Any, invariant: str) -> str:
+    """Describe why a protected-lock entry failed its contract invariant.
+
+    "protected lock <invariant> is invalid" was the only message this gate
+    produced, and it is wrong for the most common cause. When an agent updates
+    past the last reviewed hook contract, the lock records that faithfully --
+    compatibility_status "unknown" plus "no hook contract matches normalized
+    agent version" -- and nothing about the lock is invalid. The connector
+    version is simply ungated. Reporting it as lock corruption sends the
+    operator looking for tampering instead of at the version they just
+    upgraded, and this gate covers the whole desired roster, so the message
+    appears while setting up an unrelated connector.
+    """
+
+    raw_version = ""
+    if isinstance(entry, dict) and isinstance(entry.get("raw_agent_version"), str):
+        raw_version = entry["raw_agent_version"].strip()
+    try:
+        compatibility = resolve_connector_contract(normalize_connector(connector), raw_version)
+    except Exception:  # noqa: BLE001 - diagnostics must not mask the gate result.
+        return f"protected lock {invariant} is invalid"
+    if compatibility.status == STATUS_NOT_GATED or (compatibility.contract and compatibility.supported):
+        return f"protected lock {invariant} is invalid"
+    version = raw_version or "an unreported version"
+    return (
+        f"no reviewed hook contract covers {connector} {version}; "
+        f"the protected lock records that correctly. Pin a contract for this version in "
+        f"hook_contracts.json, or remove {connector} from the active roster"
+    )
 
 def _connector_runtime_snapshot_failure(
     state: Any,
@@ -13052,8 +13083,8 @@ def _connector_runtime_snapshot_failure(
     if runtime_sets is None:
         return _ConnectorRuntimeReadiness(False, invariant="roster", detail="active connector state is malformed")
     active, inactive = runtime_sets
-    if active != expected:
-        peer = next(iter(sorted(active ^ expected)), "")
+    if not expected.issubset(active):
+        peer = next(iter(sorted(expected - active)), "")
         return _ConnectorRuntimeReadiness(
             False,
             peer,
@@ -13069,7 +13100,9 @@ def _connector_runtime_snapshot_failure(
         return _ConnectorRuntimeReadiness(False, invariant="contract", detail="contract lock is malformed")
     for name in sorted(expected):
         if invariant := connector_lock_contract_invariant(name, entries.get(name)):
-            return _ConnectorRuntimeReadiness(False, name, invariant, f"protected lock {invariant} is invalid")
+            return _ConnectorRuntimeReadiness(
+                False, name, invariant, _lock_contract_failure_detail(name, entries.get(name), invariant)
+            )
     extra = {normalize_connector(name) for name in entries if isinstance(name, str)} - expected
     if inactive is None and extra:
         peer = next(iter(sorted(extra)))

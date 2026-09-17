@@ -740,11 +740,74 @@ def test_wait_targets_keep_prior_active_and_the_focus_connector(tmp_path: Path) 
     ) == ["amp", "codex", "kiro", "openhands"]
 
 
-def test_kiro_setup_readiness_does_not_require_native_hooks(
+def test_snapshot_accepts_superset_active_roster(tmp_path: Path) -> None:
+    lock = {
+        "version": 2,
+        "connectors": {
+            "amp": _entry("amp", tmp_path),
+            "codex": _entry("codex", tmp_path),
+            "kiro": {
+                "connector": "kiro",
+                "raw_agent_version": "kiro-cli 2.22.0",
+                "compatibility_status": "not-gated",
+                "hook_fail_mode": "open",
+            },
+        },
+    }
+    state = {
+        "version": 3,
+        "names": ["amp", "codex", "kiro"],
+        "inactive_names": ["claudecode", "opencode"],
+    }
+    assert cmd_setup._connector_runtime_snapshot_ready(
+        state,
+        2,
+        lock,
+        2,
+        expected={"amp", "codex", "kiro"},
+        previous_state_marker=1,
+        previous_lock_marker=1,
+    )
+    missing = cmd_setup._connector_runtime_snapshot_failure(
+        state,
+        2,
+        lock,
+        2,
+        expected={"amp", "claudecode", "codex", "kiro"},
+        previous_state_marker=1,
+        previous_lock_marker=1,
+    )
+    assert not missing
+    assert (missing.connector, missing.invariant) == ("claudecode", "roster")
+
+
+def test_kiro_setup_readiness_accepts_installed_native_hooks(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     cfg = _config(tmp_path)
+    hook_path = tmp_path / "kiro-hooks" / "defenseclaw.json"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_text(
+        '{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse"}]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connectors": {
+                    "kiro": {
+                        "connector": "kiro",
+                        "compatibility_status": "not-gated",
+                        "hook_fail_mode": "open",
+                        "locations": {"hook_config_paths": [str(hook_path)]},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
     _patch_registration_ready(monkeypatch, {"hook_fail_mode": "open"})
     monkeypatch.setattr(
         fail_mode,
@@ -756,3 +819,46 @@ def test_kiro_setup_readiness_does_not_require_native_hooks(
 
     assert readiness
     assert (readiness.connector, readiness.invariant) == ("kiro", "ready")
+
+
+class TestLockContractFailureDetail:
+    """An agent that updates past its last reviewed hook contract is not a
+    corrupt lock. The gate reported both as "protected lock contract is
+    invalid", which sent the operator looking for tampering instead of at the
+    version they had just upgraded -- and because the gate covers the whole
+    desired roster, the message surfaced while setting up an unrelated
+    connector.
+    """
+
+    def test_ungated_version_names_the_version_and_the_fix(self) -> None:
+        entry = {
+            "connector": "devin",
+            "raw_agent_version": "9999.1.1",
+            "normalized_agent_version": "9999.1.1",
+            "compatibility_status": "unknown",
+            "compatibility_reason": "no hook contract matches normalized agent version",
+            "hook_fail_mode": "open",
+        }
+        invariant = connector_lock_contract_invariant("devin", entry)
+        assert invariant, "precondition: an ungated version must fail the invariant"
+        detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
+        assert "9999.1.1" in detail
+        assert "no reviewed hook contract" in detail
+        assert "hook_contracts.json" in detail or "active roster" in detail
+        assert "invalid" not in detail
+
+    def test_malformed_entry_still_reads_as_invalid(self) -> None:
+        # A lock whose recorded connector does not match, or whose fields are
+        # nonsense, is a genuine integrity failure and must keep saying so.
+        for entry in ({"connector": "cursor"}, {"connector": "devin", "compatibility_status": "bogus"}, None):
+            invariant = connector_lock_contract_invariant("devin", entry)
+            assert invariant, f"precondition: {entry!r} must fail the invariant"
+            detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
+            assert detail == f"protected lock {invariant} is invalid"
+
+    def test_supported_version_is_not_reached(self) -> None:
+        # Sanity: a connector whose version resolves to a real contract does
+        # not fail the invariant at all, so no detail is produced.
+        compatibility = resolve_connector_contract("codex", "0.125.0")
+        if not (compatibility.contract and compatibility.supported):
+            pytest.skip("codex 0.125.0 is no longer covered by a pinned contract")
