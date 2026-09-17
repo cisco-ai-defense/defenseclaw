@@ -145,7 +145,7 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		if mode != string(acp.ModeAction) {
 			verdict.Action, verdict.WouldBlock = "allow", true
 		}
-		a.recordACPEvaluationV8(r.Context(), req, verdict, agent.ConnectorID, profileName, time.Since(started))
+		a.recordACPEvaluationV8(r.Context(), req, verdict, nil, agent.ConnectorID, profileName, time.Since(started))
 		a.writeJSON(w, http.StatusOK, verdict)
 		return
 	}
@@ -180,12 +180,21 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		Action: verdict.Action, RawAction: verdict.RawAction, Severity: verdict.Severity,
 		Reason: verdict.Reason, WouldBlock: verdict.WouldBlock,
 	}
-	a.recordACPEvaluationV8(r.Context(), req, result, agent.ConnectorID, profileName, time.Since(started))
+	a.recordACPEvaluationV8(r.Context(), req, result, verdict.Findings, agent.ConnectorID, profileName, time.Since(started))
 	a.writeJSON(w, http.StatusOK, result)
 }
 
+// findings is carried separately from verdict because acp.Verdict is the wire
+// type sent back to the guard, which needs only the decision. Telemetry does
+// need them: DefenseClawGuardrailRuleIds and
+// DefenseClawGuardrailFindingCount are both derived from
+// guardrailEventRequest.Findings, so omitting them published every ACP
+// evaluation as rule_ids absent / finding_count 0 while the reason named the
+// rule that matched -- a SIEM rolling up either attribute saw no ACP findings
+// at all, and the hook lane reported them for identical content.
 func (a *APIServer) recordACPEvaluationV8(
-	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, connector, profile string, elapsed time.Duration,
+	ctx context.Context, req acp.Evaluation, verdict acp.Verdict, findings []string,
+	connector, profile string, elapsed time.Duration,
 ) {
 	action := strings.ToLower(strings.TrimSpace(verdict.Action))
 	if action == "confirm" {
@@ -205,7 +214,8 @@ func (a *APIServer) recordACPEvaluationV8(
 	facts, err := newAPIGuardrailEventV8Facts(ctx, connector, guardrailEventRequest{
 		EvaluationID: uuid.NewString(), Direction: direction, Action: action,
 		RawAction: verdict.RawAction, WouldBlock: verdict.WouldBlock, Severity: severity,
-		Reason: verdict.Reason, ElapsedMs: float64(elapsed) / float64(time.Millisecond),
+		Reason: verdict.Reason, Findings: findings,
+		ElapsedMs: float64(elapsed) / float64(time.Millisecond),
 	})
 	if err != nil {
 		return

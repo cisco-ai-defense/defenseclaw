@@ -6,6 +6,8 @@ package gateway
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,7 +28,8 @@ func TestACPEvaluationEmitsGuardrailV8Attributes(t *testing.T) {
 	api.recordACPEvaluationV8(t.Context(), acp.Evaluation{
 		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
 		Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
-	}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"}, "kiro", "kiro-only", 12*time.Millisecond)
+	}, acp.Verdict{Action: "allow", RawAction: "block", WouldBlock: true, Severity: "HIGH", Reason: "test policy"},
+		nil, "kiro", "kiro-only", 12*time.Millisecond)
 
 	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
 	if len(events) != 1 {
@@ -115,5 +118,64 @@ func TestNewAPIGuardrailEventV8FactsRejectsInvalidSourceFacts(t *testing.T) {
 				t.Fatalf("invalid guardrail event facts accepted: %+v", test.request)
 			}
 		})
+	}
+}
+
+// rule_ids and finding_count are both derived from the request's Findings, so
+// an ACP evaluation that omitted them published every block as "no findings"
+// while its reason named the rule that matched. A SIEM rolling up either
+// attribute saw zero ACP findings even though the hook lane reported them for
+// identical content.
+func TestACPEvaluationPublishesMatchedFindings(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	api.recordACPEvaluationV8(t.Context(), acp.Evaluation{
+		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
+		Method: "session/prompt", Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt,
+	}, acp.Verdict{
+		Action: "block", RawAction: "block", Severity: "CRITICAL",
+		Reason: "matched: TRUST-IGNORE-PREVIOUS:Ignore previous instructions",
+	}, []string{
+		"TRUST-IGNORE-PREVIOUS:Ignore previous instructions",
+		"TRUST-JAILBREAK:Jailbreak attempt",
+	}, "kiro", "kiro-only", 3*time.Millisecond)
+
+	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+	body := events[0].Body
+	if count, _ := body["defenseclaw.guardrail.finding_count"].(float64); int(count) != 2 {
+		t.Errorf("finding_count = %#v, want 2 (body=%v)", body["defenseclaw.guardrail.finding_count"], body)
+	}
+	raw, ok := body["defenseclaw.guardrail.rule_ids"]
+	if !ok {
+		t.Fatalf("rule_ids is absent; a named reason without rule ids is unqueryable (body=%v)", body)
+	}
+	rendered := fmt.Sprint(raw)
+	for _, want := range []string{"TRUST-IGNORE-PREVIOUS", "TRUST-JAILBREAK"} {
+		if !strings.Contains(rendered, want) {
+			t.Errorf("rule_ids %v is missing %q", raw, want)
+		}
+	}
+}
+
+// A profile-denied method is a policy veto, not a scanner match. It must not
+// invent a finding to justify itself.
+func TestACPDeniedMethodPublishesNoFindings(t *testing.T) {
+	api, capture := newGuardrailEventV8TestAPI(t)
+	api.recordACPEvaluationV8(t.Context(), acp.Evaluation{
+		ClientID: "zed", AgentID: "kiro", Profile: "kiro-only",
+		Method: "fs/write_text_file", Direction: acp.ClientToAgent, Surface: acp.SurfaceFilesystem,
+	}, acp.Verdict{
+		Action: "block", RawAction: "block", Severity: "HIGH",
+		Reason: "method denied by ACP profile",
+	}, nil, "kiro", "kiro-only", time.Millisecond)
+
+	events := readStoredGuardrailEventsV8(t, capture.store.DatabasePath())
+	if len(events) != 1 {
+		t.Fatalf("stored events = %d, want 1", len(events))
+	}
+	if count, _ := events[0].Body["defenseclaw.guardrail.finding_count"].(float64); int(count) != 0 {
+		t.Errorf("finding_count = %#v, want 0", events[0].Body["defenseclaw.guardrail.finding_count"])
 	}
 }
