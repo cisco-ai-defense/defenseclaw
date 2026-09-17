@@ -1996,6 +1996,18 @@ func agentHookTrustedActionTool(connectorName, toolName, platformName string) st
 			return "shell"
 		}
 	}
+	// Kiro names its shell tool execute_bash (kiro.dev/docs/hooks/types:
+	// built-ins are fs_read, fs_write, execute_bash, use_aws, and "shell" is
+	// a documented alias). ActionFacts recognizes bash / powershell / shell
+	// and the generic execution names, so an unmapped execute_bash parsed to
+	// no command facts at all: every command rule stayed an unproven
+	// candidate and a CRITICAL finding still returned raw_action=allow on
+	// every platform. This is a name alias, not a capability grant -- the
+	// argument schema is the same {"command": "..."} shell shape.
+	if strings.EqualFold(strings.TrimSpace(connectorName), "kiro") &&
+		strings.EqualFold(strings.TrimSpace(toolName), "execute_bash") {
+		return "shell"
+	}
 	return toolName
 }
 
