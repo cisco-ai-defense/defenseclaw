@@ -159,8 +159,16 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), inspectScanTimeout)
 	defer cancel()
+	// Scan the frame's strings, not the marshalled envelope. Content rules
+	// anchor on prose boundaries, and inside raw JSON every value is preceded
+	// by a quote, so envelope scanning makes detection depend on whether a
+	// rule's boundary alternation happens to admit `"`. See InspectableText.
+	content := acp.InspectableText(req.Payload)
+	if content == "" {
+		content = string(req.Payload)
+	}
 	verdict := a.inspectMessageContent(ctx, &ToolInspectRequest{
-		Tool: "message", Content: string(req.Payload), Direction: direction,
+		Tool: "message", Content: content, Direction: direction,
 		Connector: agent.ConnectorID, contentScope: ruleContentScopeUntrusted,
 	})
 	if verdict == nil {
