@@ -117,8 +117,15 @@ type agentHookRequest struct {
 	ToolArgsProjectionUncertain bool
 	Content                     string
 	Direction                   string
-	Payload                     map[string]interface{}
-	toolChain                   *toolChainHookCapture
+	// HookSurface names the connector-owned hook config that invoked this
+	// request, for connectors that install more than one with differing veto
+	// contracts. Setup marks each config's command and the bridge forwards
+	// the marker out-of-band, so the raw stdin body stays unchanged for
+	// audit. Empty when the connector installs a single config, or when the
+	// config predates the marker.
+	HookSurface string
+	Payload     map[string]interface{}
+	toolChain   *toolChainHookCapture
 }
 
 type agentHookResponse struct {
@@ -269,6 +276,13 @@ func (a *APIServer) handleAgentHook(connectorName string) http.HandlerFunc {
 			return
 		}
 		req.CWD = sanitizeHookCWD(req.CWD)
+		// Kiro installs two hook configs with different veto contracts and
+		// they are indistinguishable by release version, because v3 is a flag
+		// on the 2.x binary rather than a new release. Setup marks the
+		// .kiro/hooks command, so the request states which config invoked it.
+		if connectorName == "kiro" {
+			req.HookSurface = strings.TrimSpace(r.Header.Get("X-DefenseClaw-Kiro-Surface"))
+		}
 		// tokenAuth wraps this handler in APIServer.Run, so reaching this point
 		// proves the connector hook route authenticated the request. A fresh
 		// SessionStart is the last authoritative recovery signal before a
@@ -1843,6 +1857,15 @@ func (a *APIServer) evaluateAgentHook(ctx context.Context, req agentHookRequest)
 	verdict := &ToolInspectVerdict{Action: "allow", Severity: "NONE", Findings: []string{}}
 	var assetDecisions []runtimeAssetDecision
 	profile := a.hookProfileForConnector(req.ConnectorName)
+	// Resolve Kiro's veto surface from the hook config that invoked us. The
+	// declared capability is the .kiro/hooks contract; a request from the CLI
+	// 2.x agent-hook config narrows to what 2.x honors. Replacing the slice
+	// on this local copy covers both consumers below -- the enforcement-
+	// capable flag that gates the trusted-action proof, and
+	// mapHookActionForProfile -- without mutating the registry's profile.
+	if req.ConnectorName == "kiro" {
+		profile.Capabilities.BlockEvents = connector.KiroBlockEventsForSurface(req.HookSurface)
+	}
 	toolCallRoute := profile.ToolCallLifecycle.RouteForEvent(req.HookEventName)
 	structuredToolEvent := toolCallRoute == connector.ToolEventRouteStructuredAction ||
 		(profile.ToolCallLifecycle.Version == 0 &&

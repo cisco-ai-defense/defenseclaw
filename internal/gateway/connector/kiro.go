@@ -61,11 +61,12 @@ func (c *KiroConnector) Setup(ctx context.Context, opts SetupOpts) error {
 		return fmt.Errorf("kiro hook script: %w", err)
 	}
 	command := c.hookCommand(opts)
+	v3Command := c.hookCommandForV3Surface(opts)
 	for _, path := range c.hookConfigPaths(opts) {
 		if err := captureManagedFileBackup(opts.DataDir, c.Name(), kiroBackupLogicalName(path), path); err != nil {
 			return fmt.Errorf("kiro capture hook backup %s: %w", path, err)
 		}
-		if err := patchKiroV3Hooks(path, command); err != nil {
+		if err := patchKiroV3Hooks(path, v3Command); err != nil {
 			return fmt.Errorf("kiro hook config %s: %w", path, err)
 		}
 		if err := updateManagedFileBackupPostHash(opts.DataDir, c.Name(), kiroBackupLogicalName(path), path); err != nil {
@@ -215,24 +216,56 @@ func (c *KiroConnector) HookCapabilities(opts SetupOpts) HookCapability {
 		// location. ~/.kiro/hooks/defenseclaw.json is still written and
 		// tracked so teardown can reclaim it, but Kiro never reads it, so
 		// claiming a user scope here reports enforcement that cannot happen.
-		Scope:       "workspace",
-		ConfigPath:  kiroHooksPath(opts),
-		BlockEvents: kiroBlockEvents(opts.AgentVersion),
+		Scope:      "workspace",
+		ConfigPath: kiroHooksPath(opts),
+		// The declared surface is what the v3 hook config honors. Requests
+		// arriving from the CLI 2.x agent-hook config are narrowed
+		// per-request by KiroBlockEventsForSurface, because the two configs
+		// are indistinguishable by release version.
+		BlockEvents: KiroBlockEventsForSurface(KiroHookSurfaceV3),
 	}
 }
 
-// kiroBlockEvents narrows the veto surface to what the detected Kiro release
-// actually honors. CLI 2.x documents exit 2 as a block for preToolUse only;
-// every other trigger treats it as a failed hook whose stderr becomes a
-// warning, so claiming a UserPromptSubmit block there would report enforcement
-// that never happened. The v1 hook schema (Kiro IDE 1.x, CLI 3.x) added
-// prompt-submit blocking, and an unknown version is an IDE-or-newer install.
-func kiroBlockEvents(agentVersion string) []string {
-	normalized := NormalizeAgentVersion("kiro", agentVersion)
-	if normalized != "" && compareVersion(normalized, "3.0.0") < 0 {
-		return []string{"PreToolUse"}
+// Kiro hook surfaces. DefenseClaw installs two hook configs and each one is
+// read by a different Kiro surface with a different veto contract:
+//
+//	KiroHookSurfaceV3  .kiro/hooks/*.json, read by Kiro IDE and `kiro-cli --v3`
+//	KiroHookSurfaceV2  ~/.kiro/agents/<agent>.json, read by bare `kiro-cli`
+//
+// The marker travels on the installed hook command so each request states
+// which config invoked it. It is NOT derivable from the release: v3 ships as
+// a flag on the 2.x binary ("Try it out with: kiro-cli --v3. V3 runs
+// alongside your existing 2.x install" -- kiro.dev/docs/cli/v3), so
+// `kiro-cli --version` reports 2.x for both surfaces and a version
+// comparison can never answer the question. An earlier build compared
+// against 3.0.0 and therefore disabled prompt blocking for every user on
+// the latest CLI, with no future release that would re-enable it.
+const (
+	KiroHookSurfaceV2 = "v2"
+	KiroHookSurfaceV3 = "v3"
+)
+
+// KiroBlockEventsForSurface returns the events the named surface honors as a
+// veto, so action mode blocks everywhere Kiro will act on it and nowhere it
+// will not.
+//
+//   - v3 / IDE: "Exit code 2: Block execution (PreToolUse, UserPromptSubmit,
+//     PreTaskExec only)" (kiro.dev/docs/hooks/actions). DefenseClaw installs
+//     no PreTaskExecution hook, so it claims the two it installs.
+//   - CLI 2.x: "Exit code 2: (preToolUse only) Block tool execution" and
+//     "Other exit codes: Hook failed. STDERR is shown as a warning"
+//     (kiro.dev/docs/cli/2x-reference). Its trigger table lists
+//     userPromptSubmit as "Not evaluated".
+//
+// An unset or unrecognized marker resolves to the 2.x set. That is the
+// conservative direction: a hook config written by an older DefenseClaw
+// carries no marker, and reporting a block Kiro silently ignores is worse
+// than reporting a would-block it honors. Re-running setup adds the marker.
+func KiroBlockEventsForSurface(surface string) []string {
+	if strings.EqualFold(strings.TrimSpace(surface), KiroHookSurfaceV3) {
+		return []string{"UserPromptSubmit", "PreToolUse"}
 	}
-	return []string{"UserPromptSubmit", "PreToolUse"}
+	return []string{"PreToolUse"}
 }
 
 func (c *KiroConnector) HookProfile(opts SetupOpts) HookProfile {
@@ -270,6 +303,16 @@ func (c *KiroConnector) HookScripts(opts SetupOpts) []string {
 func (c *KiroConnector) hookCommand(opts SetupOpts) string {
 	unixCommand := filepath.Join(opts.DataDir, "hooks", kiroHookScriptName)
 	return hookInvocationCommandFor(runtime.GOOS, c.Name(), unixCommand)
+}
+
+// hookCommandForV3Surface marks the .kiro/hooks command so the gateway can
+// tell which config invoked the hook. Only the v3 config is marked: the CLI
+// 2.x agent-hook entry is matched by exact command equality when setup
+// reconciles or teardown removes it (managedHookCommandEntry), so appending
+// an argument there would orphan DefenseClaw's own entry. An absent marker
+// already resolves to the 2.x veto surface, which is what that config is.
+func (c *KiroConnector) hookCommandForV3Surface(opts SetupOpts) string {
+	return c.hookCommand(opts) + " --hook-surface " + KiroHookSurfaceV3
 }
 
 func (c *KiroConnector) hookConfigPaths(opts SetupOpts) []string {

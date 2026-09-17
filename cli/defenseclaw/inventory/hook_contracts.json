@@ -25,7 +25,7 @@
         ]
       },
       "notes": [
-        "block_events describes the v1 hook schema (Kiro IDE 1.x, CLI 3.x). CLI 2.x honors exit 2 on preToolUse only, so the connector narrows its veto surface to PreToolUse when it detects a 2.x release.",
+        "block_events is resolved per request from the hook config that invoked the hook, not from the release. Setup marks the .kiro/hooks command with `--hook-surface v3`; that surface blocks on PreToolUse and UserPromptSubmit (kiro.dev/docs/hooks/actions). The CLI 2.x agent-hook config stays unmarked and blocks on PreToolUse only -- 2.x shows a non-zero exit on any other trigger as a warning (kiro.dev/docs/cli/2x-reference). Version probing cannot decide this: v3 is the `--v3` flag on the 2.x binary, so `kiro-cli --version` reports 2.x for both surfaces. An unmarked request resolves to the 2.x set.",
         "The ACP guard is an optional second enforcement path and is versioned independently from Kiro native hooks.",
         "Kiro IDE and Kiro CLI share .kiro/hooks; DefenseClaw exposes one Kiro connector for either install.",
         "Native hooks are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root (kiro.dev/docs/hooks documents no user-level location), so <workspace>/.kiro/hooks/defenseclaw.json is what enforces. The ~/.kiro/hooks/defenseclaw.json copy is written and tracked for teardown but Kiro never reads it, so a global-only install enforces nothing and doctor fails it. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x; built-in kiro_default cannot be overlaid. Certification remains live=false until official-client evidence is recorded.",
