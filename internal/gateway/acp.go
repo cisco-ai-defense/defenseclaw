@@ -314,6 +314,13 @@ func (a *APIServer) authenticateACPSignedRequest(r *http.Request) (*http.Request
 		if len(body) != 0 {
 			return r, "", "", false
 		}
+		// The challenge is a bodiless POST, so defenseclaw-acp sends it with
+		// no Content-Type -- but it still traverses apiCSRFProtect on the way
+		// to the handler, which rejects any non-JSON mutation with 415. Declare
+		// JSON here, after the request MAC is verified, for the same reason the
+		// evaluation branch below does: a browser cannot forge a signed ACP
+		// request, so the CSRF gate has nothing left to protect on this route.
+		r.Header.Set("Content-Type", "application/json")
 	} else {
 		challengeNonce := strings.TrimSpace(r.Header.Get(acp.AuthChallengeNonceHeader))
 		serverNonce := strings.TrimSpace(r.Header.Get(acp.AuthServerNonceHeader))

@@ -350,7 +350,7 @@ func TestACPSignedEvaluatorRoundTripEnterprise(t *testing.T) {
 }
 
 func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
-	return api.tokenAuth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	return api.tokenAuth(api.apiCSRFProtect(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/acp/challenge":
 			api.handleACPChallenge(w, r)
@@ -359,7 +359,7 @@ func acpAuthenticatedTestHandler(api *APIServer) http.Handler {
 		default:
 			http.NotFound(w, r)
 		}
-	}))
+	})))
 }
 
 func writePrivateACPToken(t *testing.T, token string) string {
