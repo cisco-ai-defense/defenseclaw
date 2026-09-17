@@ -90,6 +90,7 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
             "opencode",
             "amp",
             "omnigent",
+            "kiro",
             "none",
         ],
         case_sensitive=False,

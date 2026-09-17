@@ -72,6 +72,8 @@ def test_tui_label_maps_have_explicit_brand_cases() -> None:
     assert catalog_friendly_name("opencode") == "OpenCode"
     assert overview_friendly_name("omnigent") == "OmniGent"
     assert catalog_friendly_name("omnigent") == "OmniGent"
+    assert overview_friendly_name("kiro") == "Kiro"
+    assert catalog_friendly_name("kiro") == "Kiro"
 
 
 def test_command_palette_offers_setup_for_every_active_connector() -> None:

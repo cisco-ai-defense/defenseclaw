@@ -6,7 +6,7 @@
   "connectors": {
     "kiro": {
       "kind": "acp-with-native-hook-defense-in-depth",
-      "compatibility_gate": "acp-contract",
+      "compatibility_gate": "not-gated",
       "version_probe": "kiro-cli --version",
       "contracts": [],
       "native_hook_inventory": {

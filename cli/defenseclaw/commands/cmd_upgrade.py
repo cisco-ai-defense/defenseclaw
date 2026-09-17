@@ -171,6 +171,7 @@ _NATIVE_WINDOWS_INSTALLER_CONNECTORS = frozenset(
         "devin",
         "geminicli",
         "hermes",
+        "kiro",
         "omnigent",
         "opencode",
         "windsurf",

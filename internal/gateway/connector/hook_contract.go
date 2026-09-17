@@ -101,6 +101,14 @@ var proxyConnectorsWithoutHookGate = map[string]bool{
 	"zeptoclaw": true,
 }
 
+// catalogedOnlyConnectorsWithoutHookGate are regular connectors whose native
+// hooks are inventoried but not installed. ACP (or another separately
+// versioned surface) is the enforcement path; empty hook contracts must not
+// fail action-mode setup as "unknown".
+var catalogedOnlyConnectorsWithoutHookGate = map[string]bool{
+	"kiro": true,
+}
+
 var copilotLegacyHookEvents = []string{
 	"sessionStart",
 	"sessionEnd",
@@ -1069,6 +1077,16 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			NormalizedVersion: NormalizeAgentVersion(name, raw),
 			Status:            HookCompatibilityNotGated,
 			Reason:            "proxy/chat connector; no hook contract gate",
+		}
+	}
+	if catalogedOnlyConnectorsWithoutHookGate[name] {
+		raw := strings.TrimSpace(rawVersion)
+		return HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: NormalizeAgentVersion(name, raw),
+			Status:            HookCompatibilityNotGated,
+			Reason:            "connector has no hook contract gate",
 		}
 	}
 	contracts := hookContractsForOS(name, goos)

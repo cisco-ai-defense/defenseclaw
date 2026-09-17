@@ -46,6 +46,7 @@ CONNECTORS: tuple[str, ...] = (
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 )
 
 # Connectors that participate in the gateway proxy / guardrail stack.

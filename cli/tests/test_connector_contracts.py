@@ -115,6 +115,13 @@ class TestConnectorContractManifest(unittest.TestCase):
             self.assertEqual(compat.status, STATUS_NOT_GATED)
             self.assertTrue(compat.supported)
 
+    def test_kiro_is_not_hook_gated(self) -> None:
+        compat = resolve_connector_contract("kiro", "kiro-cli 2.22.0")
+        self.assertEqual(compat.status, STATUS_NOT_GATED)
+        self.assertTrue(compat.supported)
+        self.assertIsNone(compat.contract)
+        self.assertIn("no hook contract gate", compat.reason)
+
     def test_openclaw_transport_advisory_starts_at_2026_6_8(self) -> None:
         self.assertFalse(openclaw_needs_interception_advisory("2026.4.15"))
         self.assertTrue(openclaw_needs_interception_advisory("2026.6.8"))

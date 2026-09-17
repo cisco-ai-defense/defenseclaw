@@ -80,7 +80,7 @@ COSIGN_BIN=""
 # Selectable connectors. Retired names may remain recognized by lifecycle
 # cleanup code but must not appear here. The "none" pseudo-value means "lay
 # binaries only — pick a connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent none)
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent kiro none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -783,6 +783,7 @@ connector_display_name() {
         opencode) echo "OpenCode" ;;
         amp) echo "Amp" ;;
         omnigent) echo "OmniGent" ;;
+        kiro) echo "Kiro" ;;
         *) echo "$1" ;;
     esac
 }

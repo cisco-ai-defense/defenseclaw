@@ -612,8 +612,9 @@ _source-dev-install: _source-install-dev-preflight
 	@./scripts/source-install-preflight.sh dev-publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
-	@python3 ./scripts/source-install-publish.py regular \
-		"$(CURDIR)/$(ACP_GUARD)$(EXE)" "$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
+	@./scripts/source-install-preflight.sh dev-publish-acp \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@./scripts/source-install-preflight.sh dev-claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
@@ -673,8 +674,9 @@ gateway-install: _source-install-preflight cli-install
 	@./scripts/source-install-preflight.sh publish-gateway \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
-	@python3 ./scripts/source-install-publish.py regular \
-		"$(CURDIR)/$(ACP_GUARD)$(EXE)" "$(INSTALL_DIR)/$(ACP_GUARD)$(EXE)"
+	@./scripts/source-install-preflight.sh publish-acp \
+		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
+		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"
 	@./scripts/source-install-preflight.sh claim \
 		"$(CURDIR)" "$(INSTALL_DIR)" "$(VENV_BIN)" \
 		"defenseclaw$(EXE)" "$(GATEWAY)$(EXE)"

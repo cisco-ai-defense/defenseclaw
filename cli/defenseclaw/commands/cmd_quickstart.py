@@ -122,6 +122,7 @@ import click
             "opencode",
             "amp",
             "omnigent",
+            "kiro",
         ],
         case_sensitive=False,
     ),

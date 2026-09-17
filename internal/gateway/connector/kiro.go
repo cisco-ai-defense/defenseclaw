@@ -5,17 +5,15 @@ package connector
 
 import (
 	"context"
-	"errors"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
 )
 
-// KiroConnector represents Kiro's ACP-native security surface. The stdio
-// mediator, rather than an LLM proxy or guessed hook file, is authoritative.
-// Native Kiro v2/v3 hooks remain a separately versioned defense-in-depth
-// contract and are not required for ACP enforcement.
+// KiroConnector is the regular Kiro CLI connector. Native ACP support is
+// available through defenseclaw-acp; native Kiro v2/v3 hooks remain a
+// separately versioned defense-in-depth contract.
 type KiroConnector struct {
 	gatewayToken string
 	masterKey    string
@@ -25,22 +23,24 @@ type KiroConnector struct {
 func NewKiroConnector() *KiroConnector { return &KiroConnector{} }
 func (*KiroConnector) Name() string    { return "kiro" }
 func (*KiroConnector) Description() string {
-	return "Kiro CLI ACP agent guarded through the local defenseclaw-acp stdio mediator"
+	return "Kiro CLI connector with native ACP support through the local defenseclaw-acp stdio mediator"
 }
 func (*KiroConnector) ToolInspectionMode() ToolInspectionMode { return ToolModeBoth }
 func (*KiroConnector) SubprocessPolicy() SubprocessPolicy     { return SubprocessNone }
 
 func (*KiroConnector) Setup(_ context.Context, opts SetupOpts) error {
 	locks, err := filepath.Glob(filepath.Join(opts.DataDir, "acp", "*-kiro.contract-lock.json"))
-	if err != nil || len(locks) == 0 {
-		return errors.New("Kiro is configured through `defenseclaw acp setup --client <zed|jetbrains> --agent kiro`; no ACP contract lock is installed")
+	if err != nil {
+		return err
 	}
 	for _, lock := range locks {
 		if info, statErr := os.Lstat(lock); statErr == nil && info.Mode().IsRegular() {
 			return nil
 		}
 	}
-	return errors.New("Kiro ACP contract locks are not regular files")
+	// Kiro is a regular connector. ACP locks are optional extra enforcement
+	// configured through `defenseclaw acp setup --agent kiro`.
+	return nil
 }
 
 func (*KiroConnector) Teardown(context.Context, SetupOpts) error { return nil }

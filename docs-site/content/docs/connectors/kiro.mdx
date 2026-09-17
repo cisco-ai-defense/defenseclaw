@@ -3,9 +3,10 @@ title: Kiro
 description: Use Kiro CLI through DefenseClaw's ACP guard in Zed or JetBrains.
 ---
 
-Kiro is DefenseClaw's first ACP-first connector. The authoritative enforcement
-path is `kiro-cli acp` behind `defenseclaw-acp`; native Kiro hooks are
-cataloged separately as future defense in depth.
+Kiro is a regular DefenseClaw connector with native ACP support. First-run
+and `defenseclaw setup kiro` activate it like the other CLI connectors. The
+ACP enforcement path is `kiro-cli acp` behind `defenseclaw-acp`; native Kiro
+hooks are cataloged separately as future defense in depth.
 
 ```bash
 defenseclaw acp setup --client zed --agent kiro
@@ -26,7 +27,7 @@ authentication use a fresh nonce-bound HMAC exchange.
 | Platform | Status | Setup and enforcement boundary |
 | --- | --- | --- |
 | macOS and Linux | **Supported** | Configure through `defenseclaw acp setup`; the shipped guard mediates Kiro's ACP stdio transport. |
-| Native Windows x64 | **Supported** | The native installer ships `defenseclaw-acp.exe`; configure it through the ACP CLI/TUI rather than ordinary hook setup. |
+| Native Windows x64 | **Supported** | Ordinary connector setup plus the shipped `defenseclaw-acp.exe` ACP guard. |
 | Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release remains x64-certified only. |
 
 See the [ACP guard guide](/docs/acp-guard) for architecture, guarantees,

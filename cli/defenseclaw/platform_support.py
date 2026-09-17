@@ -44,7 +44,9 @@ NOT_CERTIFIED: SupportStatus = "not_certified"
 UNSUPPORTED: SupportStatus = "unsupported"
 
 PROXY_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
-ACP_ONLY_CONNECTORS: frozenset[str] = frozenset({"kiro"})
+# Kept as an empty set so taxonomy tests can still subtract ACP-only names.
+# Kiro is a regular connector with native ACP support, not an ACP-only agent.
+ACP_ONLY_CONNECTORS: frozenset[str] = frozenset()
 DEPRECATED_CONNECTORS: frozenset[str] = frozenset({"geminicli", "windsurf"})
 
 _DEPRECATED_REASONS: dict[str, str] = {

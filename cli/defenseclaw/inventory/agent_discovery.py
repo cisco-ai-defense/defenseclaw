@@ -783,6 +783,7 @@ DISCOVERY_PRECEDENCE: tuple[str, ...] = (
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 )
 
 # Keep deprecated names in connector_paths.KNOWN_CONNECTORS so exact legacy
@@ -915,6 +916,15 @@ _SPECS: dict[str, _AgentSpec] = {
     "omnigent": _AgentSpec(
         ("~/.omnigent/config.yaml",),
         "omnigent",
+        ("--version",),
+    ),
+    "kiro": _AgentSpec(
+        (
+            "~/.kiro/settings/cli.json",
+            "~/.kiro/settings/mcp.json",
+            ".kiro/settings/mcp.json",
+        ),
+        "kiro-cli",
         ("--version",),
     ),
 }

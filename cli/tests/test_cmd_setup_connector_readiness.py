@@ -99,6 +99,21 @@ def test_contract_lock_accepts_exact_eleven(connector: str, tmp_path: Path) -> N
     assert connector_lock_contract_invariant(connector, _entry(connector, tmp_path)) == ""
 
 
+def test_contract_lock_accepts_kiro_not_gated_without_hook_paths() -> None:
+    assert (
+        connector_lock_contract_invariant(
+            "kiro",
+            {
+                "connector": "kiro",
+                "raw_agent_version": "kiro-cli 2.22.0",
+                "compatibility_status": "not-gated",
+                "hook_fail_mode": "open",
+            },
+        )
+        == ""
+    )
+
+
 @pytest.mark.parametrize("connector", ("antigravity",))
 def test_contract_lock_accepts_go_omitted_unversioned_fields(connector: str, tmp_path: Path) -> None:
     entry = _entry(connector, tmp_path)
@@ -191,7 +206,11 @@ def test_opencode_protected_executable_requires_exact_sst_location(monkeypatch, 
 
 def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) == set(TEN_CONNECTORS)
+    assert set(TEN_CONNECTORS) <= set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS)
+    assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) - set(TEN_CONNECTORS) == {
+        "kiro",
+        "openhands",
+    }
     config_paths: dict[str, str] = {}
     runtime_paths: dict[str, list[str]] = {}
     for connector in TEN_CONNECTORS:
@@ -243,7 +262,7 @@ def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path
         lambda *_args: SimpleNamespace(errors=(), disable_all_hooks=False),
     )
 
-    expected_labels = set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS.values())
+    expected_labels = {cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[name] for name in TEN_CONNECTORS}
     observed_labels: set[str] = set()
     for connector in TEN_CONNECTORS:
         result = cmd_doctor._DoctorResult(passive=True, quiet=True)
@@ -700,3 +719,40 @@ def test_runtime_state_accepts_omitted_empty_active_roster() -> None:
     assert cmd_setup._connector_runtime_state_sets(
         {"version": 3, "names": None, "inactive_names": ["cursor"]}
     ) is None
+
+
+def test_wait_targets_keep_prior_active_and_the_focus_connector(tmp_path: Path) -> None:
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "names": ["amp", "codex", "openhands"],
+                "inactive_names": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cmd_setup._hook_runtime_wait_targets(
+        ["amp", "claudecode", "codex", "kiro", "openhands", "opencode"],
+        str(tmp_path),
+        "kiro",
+    ) == ["amp", "codex", "kiro", "openhands"]
+
+
+def test_kiro_setup_readiness_does_not_require_native_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(tmp_path)
+    _patch_registration_ready(monkeypatch, {"hook_fail_mode": "open"})
+    monkeypatch.setattr(
+        fail_mode,
+        "connector_fail_mode_report",
+        lambda *_args, **_kwargs: {"configured": "open", "desired": "open", "effective": "open"},
+    )
+
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "kiro")
+
+    assert readiness
+    assert (readiness.connector, readiness.invariant) == ("kiro", "ready")

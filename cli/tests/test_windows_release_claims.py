@@ -350,6 +350,7 @@ def test_connector_matrix_delegates_current_support_to_the_website() -> None:
         "hermes",
         "openhands",
         "omnigent",
+        "kiro",
         "openclaw",
         "zeptoclaw",
     ):

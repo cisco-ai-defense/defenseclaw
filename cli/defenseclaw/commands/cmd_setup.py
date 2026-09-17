@@ -4225,6 +4225,7 @@ _CONNECTOR_NAMES_FALLBACK = [
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 ]
 
 
@@ -4380,6 +4381,12 @@ _CONNECTOR_META: dict[str, dict[str, str]] = {
         "tool_mode": "both",
         "subprocess_policy": "none",
     },
+    "kiro": {
+        "label": "Kiro",
+        "description": "Kiro CLI connector with native ACP support; native hooks remain cataloged defense in depth",
+        "tool_mode": "both",
+        "subprocess_policy": "none",
+    },
 }
 
 
@@ -4531,6 +4538,11 @@ _CONNECTOR_CHANGE_SURFACES: dict[str, tuple[str, ...]] = {
         "~/.defenseclaw/hooks/defenseclaw_omnigent_policy.py",
         "OmniGent Python environment defenseclaw_omnigent.pth import-path file",
         "Optional native OTLP uses documented process environment variables; shell startup files are not modified",
+    ),
+    "kiro": (
+        "~/.kiro/settings/cli.json and ~/.kiro/settings/mcp.json are discovery-only",
+        "Native Kiro hooks are inventoried but not installed in this release",
+        "ACP enforcement is configured with `defenseclaw acp setup --agent kiro`",
     ),
 }
 
@@ -4891,7 +4903,7 @@ def _check_connector_version_supported_for_setup(
 
     if compatibility.status == STATUS_NOT_GATED:
         if emit:
-            ux.ok(f"{label}: version {version_display}; proxy/chat connector has no hook contract gate.")
+            ux.ok(f"{label}: version {version_display}; connector has no hook contract gate.")
             if connector == "openclaw" and openclaw_needs_interception_advisory(raw_version):
                 ux.warn(
                     f"{label}: {version_display} is in the OpenClaw ≥2026.6.8 transport range. "
@@ -7822,6 +7834,7 @@ def _restored_inactive_connector_bindings(
         "cursor",
         "devin",
         "hermes",
+        "kiro",
         "omnigent",
         "opencode",
     }
@@ -11056,6 +11069,7 @@ for _observability_connector in (
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 ):
     setup.add_command(_make_observability_setup_command(_observability_connector))
 
@@ -11112,6 +11126,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }
 )
 
@@ -12618,13 +12633,18 @@ def _restart_services(
             if name and normalize_connector(name) in _HOOK_ENFORCED_CONNECTORS
         }
     )
-    connector_state_before = (
-        _active_connector_state_marker(data_dir) if wait_for_connector_ready and hook_targets else None
+    wait_targets = (
+        _hook_runtime_wait_targets(hook_targets, data_dir, connector)
+        if wait_for_connector_ready and hook_targets
+        else []
     )
-    if wait_for_connector_ready and hook_targets:
+    connector_state_before = (
+        _active_connector_state_marker(data_dir) if wait_for_connector_ready and wait_targets else None
+    )
+    if wait_for_connector_ready and wait_targets:
         hook_contract_lock_before, hook_contract_publications_before = _hook_contract_lock_progress_baseline(
             data_dir,
-            set(hook_targets),
+            set(wait_targets),
         )
     else:
         hook_contract_lock_before, hook_contract_publications_before = None, {}
@@ -12649,12 +12669,12 @@ def _restart_services(
 
     connector_registration_verified = False
     connector_runtime_pending_reload = False
-    if wait_for_connector_ready and hook_targets and gateway_restarted:
-        readiness_label = "DefenseClaw gateway registration" if "omnigent" in hook_targets else "connector runtime"
+    if wait_for_connector_ready and wait_targets and gateway_restarted:
+        readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
         readiness = _wait_for_connector_runtime(
             data_dir,
-            hook_targets,
+            wait_targets,
             connector_state_before,
             hook_contract_lock_before,
             previous_lock_publications=hook_contract_publications_before,
@@ -12666,7 +12686,7 @@ def _restart_services(
             if not _wait_for_defense_gateway_api(
                 data_dir,
                 previous_generation=gateway_generation_before,
-                expected_connectors=hook_targets,
+                expected_connectors=wait_targets,
             ):
                 readiness = _ConnectorRuntimeReadiness(
                     False,
@@ -12783,6 +12803,34 @@ def _fail_if_restart_failed(failed: list[str]) -> None:
 
 def _active_connector_state_marker(data_dir: str) -> int | None:
     return _regular_file_marker(os.path.join(data_dir, "active_connector.json"))
+
+
+def _load_active_connector_names(data_dir: str) -> set[str]:
+    try:
+        state, _marker = _read_stable_regular_json(os.path.join(data_dir, "active_connector.json"))
+    except (OSError, ValueError):
+        return set()
+    runtime_sets = _connector_runtime_state_sets(state)
+    if runtime_sets is None:
+        return set()
+    active, _inactive = runtime_sets
+    return set(active)
+
+
+def _hook_runtime_wait_targets(hook_targets: list[str], data_dir: str, focus: str) -> list[str]:
+    """Wait only for connectors this restart can actually prove.
+
+    Isolated gateway boot skips connectors whose hook contract is unknown.
+    Requiring the full desired roster then hangs setup on those skips. Keep
+    every previously-active hook connector plus the connector this command
+    is applying.
+    """
+
+    wanted = _load_active_connector_names(data_dir) & set(hook_targets)
+    focus_name = normalize_connector(focus) if focus else ""
+    if focus_name in hook_targets:
+        wanted.add(focus_name)
+    return sorted(wanted)
 
 
 def _hook_contract_lock_marker(data_dir: str) -> int | None:

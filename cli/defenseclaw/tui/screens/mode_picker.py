@@ -71,6 +71,7 @@ MODE_PICKER_CHOICES: tuple[ModeChoice, ...] = (
     ModeChoice("opencode", "OpenCode", "e", False, "auto-loaded JS bridge plugin; tool.execute.before blocking"),
     ModeChoice("amp", "Amp", "i", False, "synchronous TypeScript policy plugin; native confirm/block"),
     ModeChoice("omnigent", "OmniGent", "m", False, "custom policy ALLOW/ASK/DENY + optional native OTLP"),
+    ModeChoice("kiro", "Kiro", "r", False, "Kiro CLI with native ACP support; native hooks cataloged only"),
 )
 
 

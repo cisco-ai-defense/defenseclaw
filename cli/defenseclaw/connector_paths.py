@@ -110,6 +110,7 @@ KNOWN_CONNECTORS: tuple[str, ...] = (
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 )
 """Allow-list of recognized agent-framework connector names.
 
@@ -161,6 +162,7 @@ HOOK_ONLY_CONNECTORS: frozenset[str] = frozenset(
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }
 )
 """Connectors added through lifecycle hook surfaces.

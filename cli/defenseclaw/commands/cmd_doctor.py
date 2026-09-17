@@ -5336,6 +5336,13 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_antigravity_hooks(cfg, r)
     elif connector == "omnigent":
         _check_omnigent_policy_health(cfg, r)
+    elif connector == "kiro":
+        _emit(
+            "pass",
+            "Kiro ACP",
+            "native hooks are cataloged-only; configure ACP with `defenseclaw acp setup --agent kiro`",
+            r=r,
+        )
     elif connector in _HOOK_HEALTH_FALLBACK:
         # Cursor / OpenCode use the lock-file-driven health row;
         # Windows-native connectors with richer contracts dispatch above.
@@ -5366,6 +5373,8 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "amp": "Amp policy plugin",
     "hermes": "Hermes hooks (fail-open)",
     "omnigent": "OmniGent policy",
+    "openhands": "OpenHands hooks",
+    "kiro": "Kiro ACP",
 }
 
 
@@ -5919,6 +5928,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }
 )
 
@@ -9195,6 +9205,7 @@ _CONNECTOR_LABELS = {
     "opencode": "OpenCode",
     "amp": "Amp",
     "omnigent": "OmniGent",
+    "kiro": "Kiro",
 }
 
 
@@ -9516,6 +9527,14 @@ def _check_hook_contract_lock(
 ) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
         _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        return
+    if connector == "kiro":
+        _emit(
+            "pass",
+            "Hook contract",
+            "not-gated; native hooks are cataloged-only and ACP is the enforcement path",
+            r=r,
+        )
         return
     data_dir = getattr(cfg, "data_dir", "") or ""
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
