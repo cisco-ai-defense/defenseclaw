@@ -1156,3 +1156,67 @@ func configContentHashForTest(raw []byte) string {
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
+
+// A hooks-only connector must never be reported as proxy-intercepted. This
+// used to come from a hardcoded name list in connectorModeFor, and Kiro was
+// missing from it: `defenseclaw-gateway status` showed "Data path: DefenseClaw
+// proxy" and "Enforcement: llm proxy" for Kiro in the same output whose
+// Guardrail subsystem reported "proxy_port: closed". The classification now
+// comes from the connector's declared traffic mode, so the list cannot drift
+// again.
+func TestConnectorModeMatchesDeclaredTrafficMode(t *testing.T) {
+	registry := sharedDefaultRegistry()
+	for _, name := range registry.Names() {
+		conn, ok := registry.Get(name)
+		if !ok {
+			continue
+		}
+		wantProxy := proxyShouldBindForConnector(conn, nil)
+		row := connectorModeFor(name, "action")
+		intercept, _ := row["proxy_intercept"].(bool)
+		if intercept != wantProxy {
+			t.Errorf("%s: proxy_intercept=%v, want %v (declared traffic mode)", name, intercept, wantProxy)
+		}
+		mode, _ := row["mode"].(string)
+		surface, _ := row["enforcement_surface"].(string)
+		if wantProxy {
+			if mode != "guardrail" || surface != "llm_proxy" {
+				t.Errorf("%s: mode=%q surface=%q, want guardrail/llm_proxy", name, mode, surface)
+			}
+			continue
+		}
+		if mode != "observability" {
+			t.Errorf("%s: mode=%q, want observability", name, mode)
+		}
+		if surface == "llm_proxy" {
+			t.Errorf("%s: hooks-only connector reports enforcement_surface=llm_proxy", name)
+		}
+		// A hooks-only connector in action mode must advertise that its
+		// hooks are what enforce, or the operator cannot tell whether
+		// anything is actually blocking.
+		row = connectorModeForConfig(nil, name)
+		if _, ok := row["hook_enforcement"]; !ok {
+			t.Errorf("%s: hook_enforcement is absent", name)
+		}
+	}
+}
+
+// Kiro specifically: it is an ordinary hook connector that also offers ACP.
+// Both paths must read as hook enforcement, never as a proxy data path.
+func TestKiroConnectorModeIsHooksOnly(t *testing.T) {
+	row := connectorModeForConfig(nil, "kiro")
+	for key, want := range map[string]interface{}{
+		"connector":           "kiro",
+		"mode":                "observability",
+		"enforcement_surface": "agent_lifecycle_hooks",
+		"proxy_intercept":     false,
+	} {
+		if got := row[key]; got != want {
+			t.Errorf("kiro %s = %#v, want %#v", key, got, want)
+		}
+	}
+	telemetry, _ := row["telemetry"].([]string)
+	if len(telemetry) == 0 {
+		t.Errorf("kiro telemetry = %#v, want at least hooks", row["telemetry"])
+	}
+}

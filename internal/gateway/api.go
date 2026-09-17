@@ -1413,32 +1413,40 @@ func connectorModeFor(name, policyMode string) map[string]interface{} {
 		policyMode = "observe"
 	}
 
-	switch name {
-	case "codex":
+	// Derive the data-path trio from the connector's declared traffic mode,
+	// through the same predicate the sidecar uses to decide whether to bind
+	// the proxy listener. It used to come from the name list below, and a
+	// connector missing from that list was reported as proxy-intercepted with
+	// enforcement_surface llm_proxy -- which is how Kiro, a hooks-only
+	// connector, showed up in `defenseclaw-gateway status` as "Data path:
+	// DefenseClaw proxy" in the same output whose Guardrail subsystem said
+	// "proxy_port: closed" and "the local guardrail proxy is not in the LLM
+	// data path". The list below now contributes only the telemetry channels
+	// and OmniGent's policy-API surface, which are genuinely per-connector.
+	if !connectorProxyBindsByName(name) {
 		mode = "observability"
 		intercept = false
 		surface = "agent_lifecycle_hooks"
+	}
+
+	switch name {
+	case "codex":
 		// codex telemetry always wires all three channels (hooks,
 		// the [otel.exporter.otlp-http] block, the notify bridge).
 		telemetry = []string{"hooks", "otel", "notify"}
 	case "claudecode":
-		mode = "observability"
-		intercept = false
-		surface = "agent_lifecycle_hooks"
 		// Claude Code uses hooks + the OTel env-block; no notify
 		// equivalent (Anthropic doesn't ship a turn-complete shim).
 		telemetry = []string{"hooks", "otel"}
-	case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
-		mode = "observability"
-		intercept = false
-		surface = "agent_lifecycle_hooks"
+	case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands",
+		"antigravity", "opencode", "amp", "kiro":
 		telemetry = []string{"hooks"}
 		if name == "geminicli" {
 			telemetry = append(telemetry, "otel")
 		}
 	case "omnigent":
-		mode = "observability"
-		intercept = false
+		// OmniGent enforces through its own policy API rather than the
+		// shared lifecycle-hook bridge, so it keeps a distinct surface.
 		surface = "omnigent_policy_api"
 		telemetry = []string{"policy-api"}
 	default:
@@ -4215,4 +4223,17 @@ func (a *APIServer) handleNetworkEgressIngest(w http.ResponseWriter, r *http.Req
 		return
 	}
 	a.writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// connectorProxyBindsByName reports whether the named connector puts the
+// DefenseClaw proxy in its LLM data path, resolved through the connector
+// registry so status can never disagree with what the sidecar actually binds.
+// An unknown or unregistered name keeps the conservative proxy default that
+// plugin connectors have always had.
+func connectorProxyBindsByName(name string) bool {
+	conn, ok := sharedDefaultRegistry().Get(strings.ToLower(strings.TrimSpace(name)))
+	if !ok {
+		return true
+	}
+	return proxyShouldBindForConnector(conn, nil)
 }
