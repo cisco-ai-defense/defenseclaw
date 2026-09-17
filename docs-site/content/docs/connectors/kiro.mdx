@@ -1,15 +1,40 @@
 ---
 title: Kiro
-description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. They share hooks; ACP is optional.
+description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. Each hook surface vetoes what Kiro honors there; ACP is an independent path.
 ---
 
 Kiro is a regular DefenseClaw connector. First-run and `defenseclaw setup kiro`
-activate it whether the operator has Kiro IDE, Kiro CLI, or both: those
-surfaces share `.kiro/hooks`, so DefenseClaw shows one Kiro row. The optional
-ACP path is `kiro-cli acp` behind `defenseclaw-acp` when the CLI is present.
-`defenseclaw setup kiro` installs native hooks and a CLI 2.x `defenseclaw`
-agent (`kiro-cli` cannot put hooks on built-in `kiro_default`). Restart the CLI
-or run `/agent swap defenseclaw` so `/hooks` lists them.
+activate it whether the operator has Kiro IDE, Kiro CLI, or both, so
+DefenseClaw shows one Kiro row. The optional ACP path is `kiro-cli acp` behind
+`defenseclaw-acp` when the CLI is present.
+
+`defenseclaw setup kiro` installs two hook configs, because Kiro has two hook
+surfaces: `.kiro/hooks/defenseclaw.json` for Kiro IDE and `kiro-cli --v3`, and
+a CLI 2.x `defenseclaw` agent for bare `kiro-cli` (`kiro-cli` cannot put hooks
+on built-in `kiro_default`). Restart the CLI or run `/agent swap defenseclaw`
+so `/hooks` lists them.
+
+## What each surface can veto
+
+In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a
+would-block where it does not:
+
+| Surface | Reads | Blocks on |
+| --- | --- | --- |
+| Kiro IDE, `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` and `UserPromptSubmit` |
+| `kiro-cli` (2.x) | `~/.kiro/agents/defenseclaw.json` | `PreToolUse` only |
+
+Kiro CLI 2.x documents exit code 2 as a block for `preToolUse` only; on any
+other trigger a non-zero exit is a failed hook whose stderr becomes a warning.
+The v1 hook schema adds `UserPromptSubmit`.
+
+<Callout type="info">
+This is resolved per request, from the hook config that invoked the hook —
+never from the version. v3 is not a release: it is the `--v3` flag on the 2.x
+binary, so `kiro-cli --version` reports 2.x for both surfaces. Setup marks the
+`.kiro/hooks` command with `--hook-surface v3` and the hook forwards that
+marker, so one host can run both surfaces with the correct veto on each.
+</Callout>
 
 <Callout type="warn">
 Kiro hooks are **workspace-scoped**. Kiro discovers hooks only from
@@ -45,5 +70,10 @@ authentication use a fresh nonce-bound HMAC exchange.
 | Native Windows x64 | **Supported** | Ordinary connector setup plus the shipped `defenseclaw-acp.exe` ACP guard. |
 | Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release remains x64-certified only. |
 
-See the [ACP guard guide](/docs/acp-guard) for architecture, guarantees,
-configuration, supported agents, and the direct-launch bypass boundary.
+The ACP guard is an independent enforcement path and needs none of the hook
+surface reasoning above: it vetoes prompts, output, permissions, filesystem,
+terminal, and extension methods at the protocol boundary regardless of which
+Kiro surface the editor launches. See the
+[ACP guard guide](/docs/acp-guard) for architecture, guarantees,
+configuration, supported agents, observability attributes, and the
+direct-launch bypass boundary.

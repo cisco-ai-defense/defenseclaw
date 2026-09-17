@@ -148,13 +148,50 @@ If central policy mode and the launched contract mode drift,
 the guard stops the session even when the old contract was observe-only; rerun
 setup to make an observe-to-action promotion explicit.
 
+## Observability
+
 Every guarded decision is emitted as a canonical
-`guardrail.evaluation.completed` v8 event. ACP dimensions include client,
-agent, method, direction, surface, profile, and protocol version. The event
-also keeps `defenseclaw.guardrail.raw_action`,
+`guardrail.evaluation.completed` v8 event carrying these ACP dimensions:
+
+| Attribute | Example |
+| --- | --- |
+| `defenseclaw.acp.client` | `zed` |
+| `defenseclaw.acp.agent` | `kiro` |
+| `defenseclaw.acp.method` | `session/prompt` |
+| `defenseclaw.acp.direction` | `client_to_agent`, `agent_to_client` |
+| `defenseclaw.acp.surface` | `prompt`, `output`, `permission`, `filesystem`, `terminal`, `tool`, `protocol` |
+| `defenseclaw.acp.profile` | `kiro-only` |
+| `defenseclaw.acp.protocol.version` | `schema-v1.21.0` |
+
+The event keeps `defenseclaw.guardrail.raw_action`,
 `defenseclaw.guardrail.effective_action`, and
-`defenseclaw.guardrail.would_block` distinct, so an observe-mode pass-through
-cannot be mistaken for an action-mode allow.
+`defenseclaw.guardrail.would_block` distinct, so an observe-mode
+pass-through cannot be mistaken for an action-mode allow. Matched rules are
+published in `defenseclaw.guardrail.rule_ids` with
+`defenseclaw.guardrail.finding_count`, alongside
+`defenseclaw.guardrail.reason` and `defenseclaw.security.severity`.
+
+A blocked prompt therefore looks like this:
+
+```json
+{
+  "defenseclaw.acp.client": "zed",
+  "defenseclaw.acp.agent": "kiro",
+  "defenseclaw.acp.method": "session/prompt",
+  "defenseclaw.acp.surface": "prompt",
+  "defenseclaw.guardrail.decision": "block",
+  "defenseclaw.guardrail.raw_action": "block",
+  "defenseclaw.guardrail.effective_action": "block",
+  "defenseclaw.guardrail.would_block": false,
+  "defenseclaw.guardrail.rule_ids": ["TRUST-IGNORE-PREVIOUS"],
+  "defenseclaw.guardrail.finding_count": 1,
+  "defenseclaw.security.severity": "CRITICAL"
+}
+```
+
+A profile-denied method blocks with `finding_count` 0 and no `rule_ids`: that
+veto comes from the allow-list, not a scanner match, and the event does not
+invent a finding to justify it.
 
 ## Configuration
 
@@ -201,8 +238,11 @@ upstream ACP Registry ID when one exists, and its DefenseClaw evidence level:
   and the upstream registry version/date used for review.
 - `internal/inventory/acp_certifications.json` defines evidence required before
   an integration can be called certified.
-- `cli/defenseclaw/inventory/hook_contracts.json` records Kiro native hooks as
-  cataloged defense in depth; they are not installed or certification-claimed.
+- `cli/defenseclaw/inventory/hook_contracts.json` records Kiro native hooks,
+  which are installed as an independent second enforcement path. Their veto
+  surface is resolved per request from the hook config that invoked them, not
+  from the release. See [Kiro](/docs/connectors/kiro); ACP needs none of that
+  and vetoes every surface in the table above on its own.
 - ACP adds no secret environment variable. Agent-owned credentials remain in
   their existing stores; the guard token is a private file referenced by argv.
 
