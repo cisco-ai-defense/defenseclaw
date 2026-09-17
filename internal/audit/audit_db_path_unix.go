@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
 func openAuditDBFileNoFollow(path string, create, _ bool) (*os.File, error) {
@@ -44,8 +46,7 @@ func validateAuditDBPlatformTrust(_ string, info os.FileInfo, directory, _ bool)
 		return errors.New("audit: database path ownership is unavailable")
 	}
 	owner := int(stat.Uid)
-	effectiveUser := os.Geteuid()
-	if owner != effectiveUser && !(directory && owner == 0) {
+	if !runtimeowner.Trusted(stat.Uid) {
 		return errors.New("audit: database path has an untrusted owner")
 	}
 	if info.Mode().Perm()&0o022 != 0 {

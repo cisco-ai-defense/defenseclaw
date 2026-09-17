@@ -64,7 +64,7 @@ _EXPECTED_CONTRACTS = {
     "copilot": frozenset({"copilot-hooks-v1", "copilot-hooks-v2"}),
     "devin": frozenset({"devin-hooks-v1"}),
     "antigravity": frozenset({"antigravity-hooks-v2"}),
-    "hermes": frozenset({"hermes-hooks-v1"}),
+    "hermes": frozenset({"hermes-hooks-v1", "hermes-hooks-v2"}),
 }
 _CODEX_HOOK_SPECS = {
     "SessionStart": ("session_start", "startup|resume|clear", 30),

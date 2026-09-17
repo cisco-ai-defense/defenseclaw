@@ -29,6 +29,7 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/observability"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
+	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/scoring"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/tactics"
 )
@@ -59,6 +60,24 @@ func TestRuntimeSeverityMapsEveryBand(t *testing.T) {
 	} {
 		if got := runtimeSeverity(band); got != want {
 			t.Errorf("runtimeSeverity(%q) = %s, want %s", band, got, want)
+		}
+	}
+}
+
+func TestRuntimeFindingMetadataMatchesBuiltSeverity(t *testing.T) {
+	t.Parallel()
+	adapter := &aiRuntimeV8Adapter{}
+	for _, eventName := range []observability.EventName{
+		"ai.runtime.finding",
+		"ai.runtime.activity",
+	} {
+		metadata, err := adapter.metadata(eventName, "medium")
+		if err != nil {
+			t.Fatalf("metadata(%s) error = %v", eventName, err)
+		}
+		severity, present := metadata.Severity()
+		if !present || severity != observability.SeverityMedium {
+			t.Fatalf("metadata(%s) severity = %s, %t; want medium, true", eventName, severity, present)
 		}
 	}
 }
@@ -145,6 +164,42 @@ func TestNilEmitterYieldsNoAdapter(t *testing.T) {
 	t.Parallel()
 	if adapter := newAIRuntimeV8Adapter(nil); adapter != nil {
 		t.Fatal("a nil emitter produced an adapter")
+	}
+}
+
+func TestRuntimeSnapshotEmitsUnattributedPlaneFinding(t *testing.T) {
+	t.Parallel()
+	capture := &endpointInventoryCapture{}
+	snapshot := sensor.Snapshot{
+		Degraded:                true,
+		ProcessesObserved:       632,
+		ConnectionsObserved:     104,
+		ConnectionsUnattributed: 0,
+		Findings: []sensor.Finding{{
+			FindingID: "run-0612d423097eb7f6",
+			Process:   "ollama",
+			Cmdline:   "/Applications/Ollama.app/Contents/Resources/ollama serve",
+			Score:     30,
+			Severity:  scoring.SeverityMedium,
+			Signals: []scoring.Signal{
+				{ID: "local_model_runtime", Weight: 15},
+				{ID: "local_model_server_port", Weight: 15},
+			},
+			Correlation: correlate.Result{
+				Verdict: correlate.VerdictAccounted,
+				Reason:  "discovery independently observed the same subject",
+			},
+		}},
+	}
+	if err := newAIRuntimeV8Adapter(capture).EmitSnapshot(t.Context(), snapshot); err != nil {
+		t.Fatalf("EmitSnapshot() error = %v", err)
+	}
+	records := capture.snapshot()
+	if len(records) != 1 {
+		t.Fatalf("emitted %d records, want one finding record", len(records))
+	}
+	if got := records[0].EventName(); got != observability.EventName(observability.TelemetryEventAIRuntimeFinding) {
+		t.Fatalf("event = %s, want ai.runtime.finding", got)
 	}
 }
 

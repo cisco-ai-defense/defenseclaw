@@ -1479,7 +1479,7 @@ func TestOmnigentReviewedVersionRangeIsOnlyV07(t *testing.T) {
 	for _, tc := range []struct {
 		version string
 		want    bool
-	}{{"0.6.99", false}, {"0.7.0", true}, {"0.7.99", true}, {"0.8.0", false}} {
+	}{{"0.6.99", false}, {"0.7.0", true}, {"0.7.99", true}, {"0.8.0", true}, {"0.13.0", true}, {"0.14.0", false}} {
 		if got := omnigentVersionInReviewedRange(tc.version); got != tc.want {
 			t.Errorf("omnigentVersionInReviewedRange(%q) = %v, want %v", tc.version, got, tc.want)
 		}

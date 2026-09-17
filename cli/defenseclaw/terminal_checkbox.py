@@ -131,16 +131,70 @@ def _render_non_redraw_status(
     return len(status)
 
 
+def _line_prompt_termios(termios_mod: object, attributes: list[object]) -> list[object] | None:
+    """Return a copy of *attributes* with cooked line-editing flags enabled.
+
+    Snapshot restore alone is not enough: if a prior ``getchar`` leak already
+    disabled echo before the picker started, replaying that snapshot leaves
+    the next ``click.prompt`` swallowing keystrokes. Force the flags the
+    following line prompt needs regardless of how raw the snapshot was.
+    """
+
+    if not isinstance(attributes, list) or len(attributes) < 4:
+        return None
+    iflag, lflag = attributes[0], attributes[3]
+    if not isinstance(iflag, int) or not isinstance(lflag, int):
+        return None
+    restored = list(attributes)
+    restored[0] = iflag | int(getattr(termios_mod, "ICRNL"))
+    restored[3] = lflag | int(
+        getattr(termios_mod, "ECHO")
+        | getattr(termios_mod, "ICANON")
+        | getattr(termios_mod, "ISIG")
+        | getattr(termios_mod, "IEXTEN")
+    )
+    return restored
+
+
+def restore_line_prompt_mode() -> None:
+    """Force cooked echo on the current stdin TTY.
+
+    Safe in a fresh process that inherited raw mode from an earlier
+    checkbox picker in the same terminal (``make all`` runs ``init``
+    then ``setup llm`` on one TTY). No-op on Windows, non-TTYs, and
+    when termios is unavailable.
+    """
+
+    if os.name == "nt":
+        return
+    try:
+        import termios
+
+        stdin = click.get_text_stream("stdin")
+        fd = stdin.fileno()
+        if not os.isatty(fd):
+            return
+        attributes = termios.tcgetattr(fd)
+        cooked = _line_prompt_termios(termios, attributes)
+        if cooked is None:
+            return
+        termios.tcsetattr(fd, termios.TCSANOW, cooked)
+    except (AttributeError, ImportError, OSError, ValueError):
+        return
+
+
 @contextmanager
 def _preserve_terminal_input_mode() -> Iterator[None]:
     """Restore the POSIX TTY mode after Click's raw key reader exits.
 
     ``click.getchar`` temporarily switches the terminal to raw mode for every
     checkbox keystroke. Some pseudoterminals can fail to restore one of the
-    input flags on that raw-to-cooked transition, most visibly ``ICRNL``. The
-    next line-oriented prompt then echoes Enter as ``^M`` instead of accepting
-    it. Snapshotting the mode around the complete picker gives us a second,
-    immediate restore at the boundary back to ordinary Click prompts.
+    input flags on that raw-to-cooked transition, most visibly ``ICRNL`` and
+    ``ECHO``. The next line-oriented prompt then either echoes Enter as
+    ``^M`` or accepts keystrokes without showing them. Snapshotting the mode
+    around the complete picker gives us a second restore at the boundary
+    back to ordinary Click prompts, and cooked echo/ICANON/ICRNL are forced
+    on even when that snapshot was already raw.
 
     Windows does not expose ``termios`` and already uses Click's console input
     implementation, so the guard intentionally becomes a no-op there.
@@ -172,6 +226,7 @@ def _preserve_terminal_input_mode() -> Iterator[None]:
                 # Do not mask the user's selection (or a Ctrl-C) merely
                 # because a terminal disappeared while the prompt was open.
                 pass
+        restore_line_prompt_mode()
 
 
 def prompt_checkbox_selection(

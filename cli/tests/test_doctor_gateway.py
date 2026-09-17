@@ -430,3 +430,47 @@ def test_pid_record_unverifiable_ancestor_is_unavailable_not_malformed(monkeypat
     assert record.status == "unavailable"
     assert "not owned by a trusted principal" in record.reason
     assert record.pid == 0
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX leaf-owner trust")
+def test_pid_record_accepts_root_owned_private_leaf(monkeypatch, tmp_path) -> None:
+    """A sudo-started gateway writes root-owned 0600 PID files into ~/.defenseclaw."""
+
+    path = tmp_path / "gateway.pid"
+    path.write_text('{"pid": 4242, "executable": "/bin/defenseclaw-gateway"}\n', encoding="utf-8")
+    os.chmod(path, 0o600)
+    real_lstat = os.lstat
+
+    def lstat_root_leaf(target, *args, **kwargs):
+        info = real_lstat(target, *args, **kwargs)
+        if os.fspath(target) == os.fspath(path):
+            fields = list(info)
+            fields[stat.ST_UID] = 0
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(doctor_gateway.os, "lstat", lstat_root_leaf)
+    status, problem = doctor_gateway._pid_record_integrity_error(os.fspath(path), lstat_root_leaf(path))
+    assert (status, problem) == ("ok", "")
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX leaf-owner trust")
+def test_pid_record_rejects_foreign_non_root_leaf(monkeypatch, tmp_path) -> None:
+    path = tmp_path / "gateway.pid"
+    path.write_text("4242", encoding="utf-8")
+    os.chmod(path, 0o600)
+    real_lstat = os.lstat
+
+    def lstat_foreign_leaf(target, *args, **kwargs):
+        info = real_lstat(target, *args, **kwargs)
+        if os.fspath(target) == os.fspath(path):
+            fields = list(info)
+            fields[stat.ST_UID] = info.st_uid + 4242
+            return os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(doctor_gateway.os, "lstat", lstat_foreign_leaf)
+    record = doctor_gateway.read_pid_record(os.fspath(path))
+    assert record.status == "denied"
+    assert "not owned by a trusted principal" in record.reason
+    assert record.pid == 0

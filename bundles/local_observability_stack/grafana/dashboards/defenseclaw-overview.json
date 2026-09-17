@@ -22,6 +22,13 @@
   "graphTooltip": 1,
   "links": [
     {
+      "title": "Blocked Events & Analysis",
+      "type": "link",
+      "url": "/d/defenseclaw-blocked-events?${__url_time_range}&${connector:queryparam}",
+      "icon": "external link",
+      "targetBlank": false
+    },
+    {
       "title": "Agent Activity (Live)",
       "type": "link",
       "url": "/d/defenseclaw-activity?${__url_time_range}&${connector:queryparam}",
@@ -762,7 +769,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__rate_interval]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }
@@ -995,7 +1002,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval]))",
+          "expr": "sum by (error_subsystem, error_code) (rate(defenseclaw_gateway_errors_total[$__rate_interval])) or on() vector(0)",
           "legendFormat": "{{error_subsystem}} / {{error_code}}",
           "refId": "A"
         }
@@ -1105,7 +1112,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"model[.].*|tool[.]invocation[.].*\" [$__rate_interval]))",
+          "expr": "sum by (event_name) (rate({service_name=\"defenseclaw\"} | json | __error__=\"\" | event_name=~\"model[.].*|tool[.]invocation[.].*\" [$__auto]))",
           "legendFormat": "{{event_name}}",
           "refId": "A"
         }

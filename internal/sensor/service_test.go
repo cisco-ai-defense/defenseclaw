@@ -117,12 +117,34 @@ func TestPlaneHealthIsReportedEvenWhenAPlaneIsNotRunning(t *testing.T) {
 		}
 	}
 	// Plane C is selected only through the host-plane opt-in, which this
-	// config does not set, so the snapshot must be degraded and say why.
-	if !snapshot.Degraded {
-		t.Error("a snapshot with plane C not running was not marked degraded")
+	// config does not set. It must remain visible with a reason, but an
+	// operator-selected omission is not a runtime degradation.
+	for _, reason := range snapshot.DegradedReasons {
+		if strings.Contains(strings.ToLower(reason), "not selected") {
+			t.Errorf("deselected plane was reported as degraded: %q", reason)
+		}
 	}
-	if len(snapshot.DegradedReasons) == 0 {
-		t.Error("a degraded snapshot carried no reasons")
+}
+
+func TestDeselectedUnavailablePlaneUsesDeselectionReason(t *testing.T) {
+	service := &Service{options: Options{
+		Config: config.AIRuntimeConfig{Enabled: true, Planes: []string{"a"}},
+		Platform: stubPlatform{capabilities: map[platform.Plane]platform.Capability{
+			platform.PlaneA: {Plane: platform.PlaneA, Available: true, Mechanism: "stub"},
+			platform.PlaneB: {Plane: platform.PlaneB, Available: true, Mechanism: "stub"},
+			platform.PlaneC: {
+				Plane: platform.PlaneC, Available: false, Mechanism: "eslogger",
+				Reason: "eslogger not found",
+			},
+		}},
+	}}
+
+	health := service.planeHealth(time.Now(), true, false)
+	if got := health[2].Reason; !strings.Contains(got, "not selected") {
+		t.Fatalf("deselected plane reason=%q, want explicit selection state", got)
+	}
+	if reasons := degradedReasonsFor(Snapshot{Planes: health}); len(reasons) != 0 {
+		t.Fatalf("deselected unavailable planes degraded health: %v", reasons)
 	}
 }
 

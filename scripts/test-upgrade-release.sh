@@ -2729,8 +2729,8 @@ manifest_path = stack / ".defenseclaw-bundle-manifest.json"
 bundle_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
 if bundle_manifest.get("bundle_version") != target_version:
     raise SystemExit("local bundle manifest is not stamped with the target version")
-if len(bundle_manifest.get("dashboard_uids", [])) != 14:
-    raise SystemExit("local bundle manifest does not contain all fourteen dashboards")
+if len(bundle_manifest.get("dashboard_uids", [])) != 16:
+    raise SystemExit("local bundle manifest does not contain all sixteen dashboards")
 if set(bundle_manifest.get("named_volumes", [])) != {
     "grafana-data",
     "loki-data",

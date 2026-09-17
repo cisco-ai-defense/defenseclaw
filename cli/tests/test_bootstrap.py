@@ -126,7 +126,7 @@ class BootstrapEnvTests(unittest.TestCase):
 
         with (
             patch(
-                "defenseclaw.file_permissions.open_regular_file_no_follow",
+                "defenseclaw.bootstrap.open_regular_file_no_follow",
                 return_value=17,
             ),
             patch.object(bootstrap.os, "name", "nt"),

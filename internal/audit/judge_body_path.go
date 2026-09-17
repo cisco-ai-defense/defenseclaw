@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 type judgeBodyPathHooks struct {
@@ -132,6 +134,9 @@ func prepareJudgeBodyDatabasePath(path string, hooks judgeBodyPathHooks) (*prepa
 			return fail(fmt.Errorf("judge_body: secure database file permissions: %w", err))
 		}
 	}
+	if err := safefile.ReclaimToDirectoryOwner(absolute); err != nil {
+		return fail(fmt.Errorf("judge_body: reclaim database ownership: %w", err))
+	}
 	if err := validatePinnedJudgeBodyLeaf(absolute, pinned); err != nil {
 		return fail(err)
 	}
@@ -188,6 +193,9 @@ func secureJudgeBodySQLiteSidecars(databasePath string, hooks judgeBodyPathHooks
 			} else if stillNeedsHardening {
 				return fmt.Errorf("judge_body: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
 			}
+		}
+		if err := safefile.ReclaimToDirectoryOwner(path); err != nil {
+			return fmt.Errorf("judge_body: reclaim SQLite sidecar %s ownership: %w", suffix, err)
 		}
 		after, err := os.Lstat(path)
 		if err != nil {

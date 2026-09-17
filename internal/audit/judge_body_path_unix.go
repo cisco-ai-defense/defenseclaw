@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
 func openJudgeBodyFileNoFollow(path string, create bool) (*os.File, error) {
@@ -36,9 +38,7 @@ func validateJudgeBodyPlatformTrust(_ string, info os.FileInfo, directory, _ boo
 		return errors.New("judge_body: database path ownership is unavailable")
 	}
 	owner := int(stat.Uid)
-	effectiveUser := os.Geteuid()
-	trustedOwner := owner == effectiveUser || directory && owner == 0
-	if !trustedOwner {
+	if !runtimeowner.Trusted(stat.Uid) {
 		return errors.New("judge_body: database path has an untrusted owner")
 	}
 	if info.Mode().Perm()&0o022 != 0 {

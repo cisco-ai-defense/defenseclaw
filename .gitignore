@@ -29,6 +29,12 @@ cmd/defenseclaw-enterprise-setup/payload/*
 *.swo
 *~
 
+# Local cross-agent DefenseClaw development-host skill.
+skills/defenseclaw-dev-host/
+.agents/skills/defenseclaw-dev-host
+.claude/skills/defenseclaw-dev-host
+.codex/skills/defenseclaw-dev-host
+
 # Go build and test artifacts
 bin/
 dist/

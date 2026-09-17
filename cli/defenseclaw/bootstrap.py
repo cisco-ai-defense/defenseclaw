@@ -51,6 +51,11 @@ from defenseclaw.connector_paths import (
     hermes_config_path,
     omnigent_config_path,
 )
+from defenseclaw.file_permissions import (
+    open_regular_file_no_follow,
+    root_owned_private_regular_file,
+    trusted_runtime_owner,
+)
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -234,9 +239,14 @@ def _fresh_migration_pending_path(data_dir: str) -> str:
 
 
 def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> bytes:
-    from defenseclaw.file_permissions import open_regular_file_no_follow
-
-    descriptor = open_regular_file_no_follow(path)
+    try:
+        descriptor = open_regular_file_no_follow(path)
+    except OSError:
+        if private and root_owned_private_regular_file(path):
+            raise OSError(
+                "fresh migration-state recovery evidence is root-owned from a sudo-started gateway"
+            ) from None
+        raise
     try:
         info = os.fstat(descriptor)
         # CPython 3.12 reports st_nlink as zero on Windows; the secure opener
@@ -244,7 +254,14 @@ def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> byt
         if (
             (os.name != "nt" and info.st_nlink != 1)
             or not 0 < info.st_size <= maximum
-            or (private and os.name != "nt" and (info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077))
+            or (
+                private
+                and os.name != "nt"
+                and (
+                    not trusted_runtime_owner(info.st_uid)
+                    or stat.S_IMODE(info.st_mode) & 0o077
+                )
+            )
         ):
             raise OSError("fresh migration-state recovery evidence is not a bounded private file")
         raw = b""
@@ -1307,6 +1324,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         )
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
+    elif signal is not None and getattr(signal, "version", ""):
+        record["reason"] = (
+            f"installed version {signal.version} is not covered by a known hook contract"
+        )
+        record["installed_version"] = signal.version
     return record
 
 

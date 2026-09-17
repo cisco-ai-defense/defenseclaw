@@ -70,6 +70,84 @@ def test_picker_restores_terminal_mode_before_following_line_prompt() -> None:
     assert current_mode == original_mode
 
 
+def test_picker_forces_echo_when_snapshot_was_already_raw() -> None:
+    """A leaked raw snapshot must not hide the next click.prompt."""
+
+    raw_mode = [0, 0, 0, 0, 0, 0, []]
+    current_mode = list(raw_mode)
+
+    def fake_tcgetattr(fd: int) -> list[object]:
+        assert fd == 42
+        return list(current_mode)
+
+    def fake_tcsetattr(fd: int, when: int, attributes: list[object]) -> None:
+        assert fd == 42
+        assert when == termios.TCSANOW
+        current_mode[:] = attributes
+
+    def raw_getchar() -> str:
+        current_mode[:] = [0, 0, 0, 0, 0, 0, []]
+        return "\r"
+
+    class FakeStdin:
+        @staticmethod
+        def fileno() -> int:
+            return 42
+
+    with (
+        patch.object(terminal_checkbox.click, "get_text_stream", return_value=FakeStdin()),
+        patch.object(terminal_checkbox.os, "isatty", return_value=True),
+        patch.object(termios, "tcgetattr", side_effect=fake_tcgetattr),
+        patch.object(termios, "tcsetattr", side_effect=fake_tcsetattr),
+    ):
+        selected = terminal_checkbox.prompt_checkbox_selection(
+            ["codex"],
+            default_selected=["codex"],
+            title="Select connectors",
+            empty_ok=False,
+            redraw=False,
+            getchar=raw_getchar,
+        )
+
+    assert selected == ["codex"]
+    assert current_mode[0] & termios.ICRNL
+    assert current_mode[3] & termios.ECHO
+    assert current_mode[3] & termios.ICANON
+    assert current_mode[3] & termios.ISIG
+    assert current_mode[3] & termios.IEXTEN
+
+
+def test_restore_line_prompt_mode_fixes_inherited_raw_tty() -> None:
+    """A later wizard in the same TTY must recover echo without a picker."""
+
+    current_mode = [0, 0, 0, 0, 0, 0, []]
+
+    def fake_tcgetattr(fd: int) -> list[object]:
+        assert fd == 42
+        return list(current_mode)
+
+    def fake_tcsetattr(fd: int, when: int, attributes: list[object]) -> None:
+        assert fd == 42
+        current_mode[:] = attributes
+
+    class FakeStdin:
+        @staticmethod
+        def fileno() -> int:
+            return 42
+
+    with (
+        patch.object(terminal_checkbox.click, "get_text_stream", return_value=FakeStdin()),
+        patch.object(terminal_checkbox.os, "isatty", return_value=True),
+        patch.object(termios, "tcgetattr", side_effect=fake_tcgetattr),
+        patch.object(termios, "tcsetattr", side_effect=fake_tcsetattr),
+    ):
+        terminal_checkbox.restore_line_prompt_mode()
+
+    assert current_mode[0] & termios.ICRNL
+    assert current_mode[3] & termios.ECHO
+    assert current_mode[3] & termios.ICANON
+
+
 def test_picker_restores_terminal_mode_when_interrupted() -> None:
     original_mode: list[object] = ["canonical-with-icrnl"]
     current_mode = list(original_mode)

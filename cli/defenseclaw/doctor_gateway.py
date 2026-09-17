@@ -48,6 +48,7 @@ from defenseclaw.file_permissions import (
     UnsafePathError,
     open_regular_file_no_follow,
     read_regular_file_no_follow,
+    trusted_runtime_owner,
 )
 from defenseclaw.safety import is_symlink
 
@@ -196,8 +197,11 @@ def _pid_record_integrity_error(path: str, info: os.stat_result) -> tuple[Eviden
             return "unavailable", "PID file ACL could not be verified"
     geteuid = getattr(os, "geteuid", None)
     current_uid = geteuid() if callable(geteuid) else info.st_uid
-    if info.st_uid != current_uid:
-        return "denied", "PID file is not owned by the current user"
+    # Root is a trusted writer of a user install (sudo gateway start).
+    # A foreign non-root owner is still untrusted. Group/other-writable
+    # leaves stay denied below so this does not widen the write set.
+    if not trusted_runtime_owner(info.st_uid, current_uid=current_uid):
+        return "denied", "PID file is not owned by a trusted principal"
     if stat.S_IMODE(info.st_mode) & 0o022:
         return "denied", "PID file is writable by another local principal"
     if sys.platform == "darwin":

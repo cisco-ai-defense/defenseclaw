@@ -14,6 +14,8 @@ import (
 	"runtime"
 	"strconv"
 	"syscall"
+
+	"github.com/defenseclaw/defenseclaw/internal/runtimeowner"
 )
 
 // Unix custody is represented by the existing owner/mode/ACL checks. Windows
@@ -172,7 +174,7 @@ func hookAPITrustedOwner(uid uint32) bool {
 	// temporarily dropping effective uid to the manifest-pinned target user;
 	// files that user just created must be validated against the effective uid.
 	// Accepting both preserves the unmanaged/setuid compatibility contract.
-	if hookAPITrustedRuntimeOwner(uid, os.Getuid(), os.Geteuid()) {
+	if runtimeowner.Trusted(uid) {
 		return true
 	}
 	serviceUser, err := user.Lookup("defenseclaw")
@@ -181,8 +183,4 @@ func hookAPITrustedOwner(uid uint32) bool {
 	}
 	serviceUID, err := strconv.ParseUint(serviceUser.Uid, 10, 32)
 	return err == nil && uid == uint32(serviceUID)
-}
-
-func hookAPITrustedRuntimeOwner(uid uint32, realUID, effectiveUID int) bool {
-	return uid == 0 || int(uid) == realUID || int(uid) == effectiveUID
 }

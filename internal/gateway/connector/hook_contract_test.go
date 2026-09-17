@@ -86,10 +86,13 @@ func TestPlatformHookContractsPreservePR655Bands(t *testing.T) {
 			{"copilot-hooks-v1", "1.0.18", "1.0.76", false, "v7", 13},
 			{"copilot-hooks-v2", "1.0.76", "", true, "v7", 14},
 		},
-		"hermes":      {{"hermes-hooks-v1", "0.19.0", "0.21.0", true, "v6", 23}},
+		"hermes": {
+			{"hermes-hooks-v1", "0.19.0", "0.21.0", false, "v6", 23},
+			{"hermes-hooks-v2", "0.21.0", "0.22.0", true, "v6", 23},
+		},
 		"antigravity": {{"antigravity-hooks-v2", "1.1.8", "", true, "v8", 5}},
 		"openhands":   {{"openhands-hooks-v1", "1.12.0", "", true, "v6", 6}},
-		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.18.20", false, "v7", 10}},
+		"opencode":    {{"opencode-hooks-v1", "1.18.10", "1.19.0", false, "v7", 10}},
 		"amp":         {{"amp-plugin-v1", "0.0.1785334225", "", true, "v2", 5}},
 		"geminicli":   {{"geminicli-hooks-v1", "0.26.0", "", true, "v6", 11}},
 	}
@@ -191,15 +194,22 @@ func TestHookContractResolution(t *testing.T) {
 		{"cursor_exact_agent_preview_pin", "cursor", "2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_exact_agent_preview_command_prefix", "cursor", "agent v2026.07.23-e383d2b", HookCompatibilityKnown, "cursor-hooks-v1", "2026.7.23"},
 		{"cursor_other_agent_build_unknown", "cursor", "cursor-agent 2026.07.23-deadbee", HookCompatibilityUnknown, "", "2026.7.23"},
-		{"cursor_desktop_version_not_agent_contract", "cursor", "cursor 3.13.21", HookCompatibilityUnknown, "", "3.13.21"},
+		{"cursor_later_agent_build_unknown", "cursor", "2026.08.31-4057e58", HookCompatibilityUnknown, "", "2026.8.31"},
+		{"cursor_desktop_reviewed_range", "cursor", "cursor 3.13.21", HookCompatibilityKnown, "cursor-hooks-v1", "3.13.21"},
+		{"cursor_desktop_current", "cursor", "3.19.13", HookCompatibilityKnown, "cursor-hooks-v1", "3.19.13"},
+		{"cursor_desktop_before_floor", "cursor", "cursor 2.3.99", HookCompatibilityUnknown, "", "2.3.99"},
+		{"cursor_desktop_at_ceiling", "cursor", "cursor 4.0.0", HookCompatibilityUnknown, "", "4.0.0"},
 		{"omnigent_before_proven_floor", "omnigent", "omnigent 0.6.99", HookCompatibilityUnknown, "", "0.6.99"},
 		{"omnigent_proven_floor", "omnigent", "omnigent 0.7.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.7.0"},
-		{"omnigent_after_reviewed_range", "omnigent", "omnigent 0.8.0", HookCompatibilityUnknown, "", "0.8.0"},
+		{"omnigent_reviewed_mid_range", "omnigent", "omnigent 0.8.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.8.0"},
+		{"omnigent_current_pin", "omnigent", "omnigent 0.13.0", HookCompatibilityKnown, "omnigent-custom-policy-v1", "0.13.0"},
+		{"omnigent_after_reviewed_range", "omnigent", "omnigent 0.14.0", HookCompatibilityUnknown, "", "0.14.0"},
 		{"omnigent_unversioned_requires_override", "omnigent", "", HookCompatibilityUnversioned, "omnigent-custom-policy-v1", ""},
 		{"opencode_reviewed_pin", "opencode", "opencode 1.18.10", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.10"},
 		{"opencode_previous_pin", "opencode", "opencode 1.18.11", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.11"},
-		{"opencode_current_pin", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
-		{"opencode_next_patch_unknown", "opencode", "opencode 1.18.20", HookCompatibilityUnknown, "", "1.18.20"},
+		{"opencode_previous_pin_11819", "opencode", "opencode 1.18.19", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.19"},
+		{"opencode_current_pin", "opencode", "opencode 1.18.31", HookCompatibilityKnown, "opencode-hooks-v1", "1.18.31"},
+		{"opencode_next_minor_unknown", "opencode", "opencode 1.19.0", HookCompatibilityUnknown, "", "1.19.0"},
 		{"opencode_unversioned_requires_override", "opencode", "", HookCompatibilityUnversioned, "opencode-hooks-v1", ""},
 		{"antigravity_before_documented_floor", "antigravity", "Antigravity CLI v1.1.7", HookCompatibilityUnknown, "", "1.1.7"},
 		{"antigravity_documented_minimum", "antigravity", "Antigravity CLI v1.1.8", HookCompatibilityKnown, "antigravity-hooks-v2", "1.1.8"},
@@ -486,8 +496,14 @@ func TestHermesHookContractV019V020ClassifiesAllValidEventsWithoutInventingBlock
 	if got := ResolveHookContract("hermes", "Hermes Agent v0.20.0 (2026.8.3)").Status; got != HookCompatibilityKnown {
 		t.Fatalf("Hermes 0.20 compatibility = %q, want known", got)
 	}
-	if got := ResolveHookContract("hermes", "0.21.0").Status; got != HookCompatibilityUnknown {
-		t.Fatalf("Hermes 0.21 compatibility = %q, want unknown beyond source-reviewed ceiling", got)
+	if got := ResolveHookContract("hermes", "0.21.0").Status; got != HookCompatibilityKnown {
+		t.Fatalf("Hermes 0.21 compatibility = %q, want known for hermes-hooks-v2", got)
+	}
+	if got := ResolveHookContract("hermes", "Hermes Agent v0.21.3 (2026.9.14)").Contract.ContractID; got != "hermes-hooks-v2" {
+		t.Fatalf("Hermes 0.21.3 contract = %q, want hermes-hooks-v2", got)
+	}
+	if got := ResolveHookContract("hermes", "0.22.0").Status; got != HookCompatibilityUnknown {
+		t.Fatalf("Hermes 0.22 compatibility = %q, want unknown beyond source-reviewed ceiling", got)
 	}
 	if len(contract.Events) != 23 {
 		t.Fatalf("Hermes event count = %d, want 23: %v", len(contract.Events), contract.Events)
@@ -525,8 +541,8 @@ func TestOmniGentV070ContractPreservesPostPhaseDenyWithoutPostPhaseAsk(t *testin
 	if contract.MinAgentVersion != "0.7.0" {
 		t.Fatalf("OmniGent minimum version = %q, want 0.7.0", contract.MinAgentVersion)
 	}
-	if contract.MaxAgentVersion != "0.8.0" {
-		t.Fatalf("OmniGent maximum version = %q, want exclusive 0.8.0", contract.MaxAgentVersion)
+	if contract.MaxAgentVersion != "0.14.0" {
+		t.Fatalf("OmniGent maximum version = %q, want exclusive 0.14.0", contract.MaxAgentVersion)
 	}
 	if got, want := contract.Events, []string{
 		"UserPromptSubmit", "PreToolUse", "PostToolUse",
@@ -1313,7 +1329,11 @@ func TestApplyHookContractUsesPinnedContractForUnknownVersion(t *testing.T) {
 func TestHookContractLockSaveLoadAndDrift(t *testing.T) {
 	dir := testenv.PrivateTempDir(t)
 	conn := NewHermesConnector()
-	opts := SetupOpts{DataDir: dir, APIAddr: "127.0.0.1:18970"}
+	opts := SetupOpts{
+		DataDir:      dir,
+		APIAddr:      "127.0.0.1:18970",
+		AgentVersion: "Hermes Agent v0.20.0 (2026.8.3)",
+	}
 	opts = prepareHermesSetupAdmissionFixture(t, opts)
 	if err := WriteHookScriptsForConnectorObjectWithOpts(filepath.Join(dir, "hooks"), opts, conn); err != nil {
 		t.Fatalf("write hooks: %v", err)
@@ -2125,6 +2145,31 @@ func TestHookContractDriftExcludesGeneratedArtifactChanges(t *testing.T) {
 	if !HookContractCompatibilityDrifted(previous, current) {
 		t.Fatal("agent version changes must remain compatibility drift")
 	}
+
+	t.Run("Cursor desktop and agent CLI share cursor-hooks-v1", func(t *testing.T) {
+		previous := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "2026.08.11-e8db854",
+			NormalizedAgentVersion: "2026.8.11",
+			ContractID:             "cursor-hooks-v1",
+		}
+		current := HookContractLockEntry{
+			Connector:              "cursor",
+			RawAgentVersion:        "3.19.13",
+			NormalizedAgentVersion: "3.19.13",
+			ContractID:             "cursor-hooks-v1",
+		}
+		if HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("Cursor Desktop vs Agent CLI must not count as contract drift when the contract id is unchanged")
+		}
+		if HookContractLockDrifted(previous, current) {
+			t.Fatal("Cursor Desktop vs Agent CLI must not count as lock drift when the contract id is unchanged")
+		}
+		current.ContractID = "cursor-hooks-v2"
+		if !HookContractCompatibilityDrifted(previous, current) {
+			t.Fatal("a real Cursor contract identity change must remain drift")
+		}
+	})
 	if !HookContractLockDrifted(previous, current) {
 		t.Fatal("agent version changes must remain lock drift")
 	}

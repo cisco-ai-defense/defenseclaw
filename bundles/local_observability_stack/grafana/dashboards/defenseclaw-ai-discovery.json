@@ -383,7 +383,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h]))",
+          "expr": "sum(increase(defenseclaw_ai_discovery_new_signals_total{source=~\"$source\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -435,7 +435,7 @@
       },
       "targets": [
         {
-          "expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h]))",
+          "expr": "sum(increase(defenseclaw_ai_discovery_gone_signals_total{source=~\"$source\"}[1h])) or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -471,7 +471,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{source=~\"$source\"}[5m])) * 60",
+          "expr": "sum(rate(defenseclaw_ai_discovery_errors_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }
@@ -523,7 +523,7 @@
       },
       "targets": [
         {
-          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{source=~\"$source\"}[5m])) * 60",
+          "expr": "sum(rate(defenseclaw_ai_discovery_files_scanned_total{source=~\"$source\"}[5m])) * 60 or vector(0)",
           "refId": "A",
           "instant": true
         }

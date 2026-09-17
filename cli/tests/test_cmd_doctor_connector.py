@@ -1091,6 +1091,43 @@ class TestCheckHookContractLock(unittest.TestCase):
         self.assertEqual(check["status"], "skip")
         self.assertEqual(check["label"], "Hook contract")
 
+    @unittest.skipIf(os.name == "nt", "POSIX sudo leftover naming")
+    def test_root_owned_lock_names_sudo_leftover(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            lock_path = os.path.join(tmp, "hook_contract_lock.json")
+            with open(lock_path, "w", encoding="utf-8") as fh:
+                fh.write("{}\n")
+            os.chmod(lock_path, 0o600)
+            real_lstat = os.lstat
+
+            def lstat_root(target, *args, **kwargs):
+                info = real_lstat(target, *args, **kwargs)
+                if os.path.abspath(os.fspath(target)) == os.path.abspath(lock_path):
+                    fields = list(info)
+                    fields[stat.ST_UID] = 0
+                    return os.stat_result(fields)
+                return info
+
+            r = _DoctorResult(quiet=True)
+            with (
+                patch("builtins.open", side_effect=PermissionError("denied")),
+                patch("defenseclaw.file_permissions.os.lstat", lstat_root),
+                patch("defenseclaw.file_permissions.os.geteuid", lambda: 501),
+            ):
+                _check_hook_contract_lock(self._cfg(tmp), "codex", r, platform_name="linux")
+
+        check = r.checks[-1]
+        self.assertEqual(check["status"], "fail")
+        self.assertEqual(check["label"], "Hook contract")
+        self.assertIn("root-owned from a sudo-started gateway", check["detail"])
+        self.assertIn("verified descriptor-bound ownership repair", check["detail"])
+        self.assertTrue(
+            check["detail"].startswith(
+                "hook_contract_lock.json is root-owned from a sudo-started gateway"
+            ),
+            check["detail"],
+        )
+
     def test_active_devin_without_lock_fails_with_setup_owner(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             r = _DoctorResult()
@@ -1386,7 +1423,10 @@ class TestCheckHookContractLock(unittest.TestCase):
             check = r.checks[-1]
             self.assertEqual(check["status"], "pass")
             self.assertIn("agent_cli=2026.07.23-e383d2b", check["detail"])
-            self.assertIn("desktop=3.14.7 (separate; not Agent CLI contract evidence)", check["detail"])
+            self.assertIn(
+                "desktop=3.14.7 (Desktop hook host; compared separately from Agent CLI date-hash pins)",
+                check["detail"],
+            )
 
     def test_discovered_version_drift_fails(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

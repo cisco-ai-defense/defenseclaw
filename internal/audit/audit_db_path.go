@@ -10,6 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 )
 
 // auditDBPathHooks provide deterministic fault/race injection without
@@ -266,6 +268,9 @@ func prepareAuditDatabasePath(path string, hooks auditDBPathHooks) (*preparedAud
 			return fail(fmt.Errorf("audit: secure database file permissions: %w", err))
 		}
 	}
+	if err := safefile.ReclaimToDirectoryOwner(absolute); err != nil {
+		return fail(fmt.Errorf("audit: reclaim database ownership: %w", err))
+	}
 	if err := validatePinnedAuditDBLeaf(absolute, pinned); err != nil {
 		return fail(err)
 	}
@@ -393,6 +398,9 @@ func pinAndSecureAuditDBSQLiteSidecars(
 					return retained, fmt.Errorf("audit: SQLite sidecar %s DACL remains noncanonical after hardening", suffix)
 				}
 			}
+		}
+		if err := safefile.ReclaimToDirectoryOwner(path); err != nil {
+			return retained, fmt.Errorf("audit: reclaim SQLite sidecar %s ownership: %w", suffix, err)
 		}
 		pinnedAfter, err := pinned.Stat()
 		if err != nil {

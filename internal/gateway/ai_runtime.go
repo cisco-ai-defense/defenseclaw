@@ -23,11 +23,14 @@ package gateway
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"log"
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/observability/pipeline"
 	"github.com/defenseclaw/defenseclaw/internal/sensor"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/acquire"
 	"github.com/defenseclaw/defenseclaw/internal/sensor/correlate"
@@ -184,7 +187,20 @@ func (s *Sidecar) runAIRuntime(ctx context.Context) error {
 			// destination being unreachable must not stop the sensor from
 			// observing; the snapshot the API serves is unaffected either way.
 			if adapter := newAIRuntimeV8Adapter(s.observabilityV8Emitter()); adapter != nil {
-				_ = adapter.EmitSnapshot(ctx, snapshot)
+				if err := adapter.EmitSnapshot(ctx, snapshot); err != nil {
+					// Do not render the error value: destination errors can wrap
+					// context from an operator's configuration. Pipeline codes are
+					// a closed, content-free vocabulary suitable for diagnostics.
+					errorCode := "unknown"
+					var pipelineErr *pipeline.Error
+					if errors.As(err, &pipelineErr) {
+						errorCode = string(pipelineErr.Code())
+					}
+					log.Printf(
+						"[ai-runtime] canonical snapshot emission failed (error_code=%s); dashboard data may be incomplete",
+						errorCode,
+					)
+				}
 			}
 		case <-ctx.Done():
 			// Bounded, not indefinite. Poll does not thread its context into

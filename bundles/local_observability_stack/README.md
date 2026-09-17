@@ -71,7 +71,7 @@ access-control boundary when exposed beyond loopback.
   local storage configuration.
 - [`grafana/provisioning/`](grafana/provisioning/): datasource and dashboard
   provisioning.
-- [`grafana/dashboards/`](grafana/dashboards/): the fourteen shipped dashboard
+- [`grafana/dashboards/`](grafana/dashboards/): the sixteen shipped dashboard
   JSON definitions.
 - [`bin/openclaw-observability-bridge`](bin/openclaw-observability-bridge):
   low-level bundle controller; [`run.sh`](run.sh) is its compatibility shim.

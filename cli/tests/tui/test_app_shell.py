@@ -68,6 +68,7 @@ from defenseclaw.tui.panels.overview import (
     SubsystemHealth,
 )
 from defenseclaw.tui.panels.registries import RegistriesPanelModel, RegistriesTab
+from defenseclaw.tui.panels.runtime import RuntimePanelModel
 from defenseclaw.tui.panels.setup import WIZARD_NAMES, SetupPanelModel
 from defenseclaw.tui.panels.skills import SkillRow, SkillsPanelModel
 from defenseclaw.tui.panels.tools import ToolsPanelModel
@@ -3686,6 +3687,116 @@ async def test_ai_discovery_disable_button_routes_to_command(monkeypatch) -> Non
         app._handle_ai_control("ai-disable")  # noqa: SLF001
         await pilot.pause()
         assert submitted == ["defenseclaw agent discovery disable --yes"]
+
+
+@pytest.mark.asyncio
+async def test_runtime_panel_exposes_action_bar() -> None:
+    """Runtime panel offers Enable Runtime when planes are off or incomplete."""
+
+    runtime_model = RuntimePanelModel()
+    runtime_model.set_snapshot({"enabled": False})
+    app = DefenseClawTUI(runtime_model=runtime_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        app.action_switch_panel("runtime")
+        await _wait_for_panel_render(app, "runtime")
+        await _wait_for_background(
+            lambda: not app.query_one("#runtime-enable", Button).has_class("hidden")
+            and app.query_one("#runtime-scan", Button).has_class("hidden")
+        )
+        assert app.active_panel == "runtime"
+        assert "OFF" in app.body_text
+        assert "HEALTHY" in app.body_text
+        assert app.query_one("#runtime-enable", Button).has_class("hidden") is False
+        assert app.query_one("#runtime-scan", Button).has_class("hidden") is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_bar_hides_enable_when_healthy() -> None:
+    """A complete, non-degraded snapshot hides Enable Runtime."""
+
+    runtime_model = RuntimePanelModel()
+    runtime_model.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-11T21:00:00Z",
+        "degraded": False,
+        "planes": [
+            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+            {"plane": "b", "name": "shadow egress", "available": True, "running": True, "mechanism": "lsof(8)"},
+            {"plane": "c", "name": "agent actions", "available": True, "running": True, "mechanism": "eslogger"},
+        ],
+    })
+    app = DefenseClawTUI(runtime_model=runtime_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        app.action_switch_panel("runtime")
+        await _wait_for_panel_render(app, "runtime")
+        await _wait_for_background(
+            lambda: app.query_one("#runtime-enable", Button).has_class("hidden")
+            and not app.query_one("#runtime-scan", Button).has_class("hidden")
+        )
+        assert "HEALTHY" in app.body_text
+        assert "DEGRADED" not in app.body_text
+        assert app.query_one("#runtime-enable", Button).has_class("hidden") is True
+        assert app.query_one("#runtime-permissions", Button).has_class("hidden") is True
+
+
+@pytest.mark.asyncio
+async def test_runtime_degraded_body_explains_idle_plane() -> None:
+    """DEGRADED is a colored badge with a next action, not a header token."""
+
+    runtime_model = RuntimePanelModel()
+    runtime_model.set_snapshot({
+        "enabled": True,
+        "scanned_at": "2026-09-11T21:25:46Z",
+        "degraded": True,
+        "degraded_reasons": ["shadow egress available but not running: connection table unreadable"],
+        "processes_observed": 772,
+        "connections_observed": 101,
+        "planes": [
+            {"plane": "a", "name": "inference heartbeat", "available": True, "running": True, "mechanism": "ps(1)"},
+            {"plane": "b", "name": "shadow egress", "available": True, "running": False,
+             "reason": "connection table unreadable"},
+            {"plane": "c", "name": "agent actions", "available": True, "running": False,
+             "reason": "not selected in ai_discovery.runtime.planes"},
+        ],
+    })
+    app = DefenseClawTUI(runtime_model=runtime_model)
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        app.action_switch_panel("runtime")
+        await _wait_for_panel_render(app, "runtime")
+        await _wait_for_background(
+            lambda: app.query_one("#runtime-enable", Button).has_class("hidden")
+            and not app.query_one("#runtime-permissions", Button).has_class("hidden")
+        )
+        assert "DEGRADED" in app.body_text
+        assert "partial" in app.body_text
+        assert "PLANES" in app.body_text
+        assert "COVERAGE" in app.body_text
+        assert "772" in app.body_text
+        assert app.query_one("#runtime-enable", Button).has_class("hidden") is True
+        assert app.query_one("#runtime-permissions", Button).has_class("hidden") is False
+
+
+@pytest.mark.asyncio
+async def test_runtime_enable_button_routes_to_command(monkeypatch) -> None:
+    """Clicking Enable Runtime turns on the user-level inference and egress planes."""
+
+    runtime_model = RuntimePanelModel()
+    runtime_model.set_snapshot({"enabled": False})
+    app = DefenseClawTUI(runtime_model=runtime_model)
+    submitted: list[str] = []
+
+    async with app.run_test(size=(180, 50)) as pilot:
+        app.action_switch_panel("runtime")
+        await _wait_for_panel_render(app, "runtime")
+        monkeypatch.setattr(app, "_submit_command_text", lambda text: submitted.append(text))
+        app._handle_runtime_control("runtime-enable")  # noqa: SLF001
+        await pilot.pause()
+        assert submitted == [
+            "defenseclaw agent discovery runtime enable --yes --no-enable-host-plane"
+        ]
 
 
 @pytest.mark.asyncio

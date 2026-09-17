@@ -1154,6 +1154,34 @@ attributes:
     overrides: {min: 0, max: 1000000}
     notes: On an unprivileged POSIX host this is how much of the machine's egress cannot be named, which is the difference between a quiet host and a blind sensor
   introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.host_plane_observations
+  type: int64
+  brief: Plane C kernel events classified into an AI-agent tactic during this cycle
+  examples: [27]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Counts lineage-gated host events that survived classification; zero remains meaningful when Plane C is running
+  introduced_in: telemetry-registry-v1
+- id: defenseclaw.ai.runtime.host_plane_gated
+  type: int64
+  brief: Plane C kernel events excluded because they were outside AI-agent lineage during this cycle
+  examples: [1450]
+  stability: stable
+  owner: defenseclaw
+  field_class: metadata
+  sensitivity: internal
+  cardinality: low
+  normalization:
+    id: numeric-range-v1
+    overrides: {min: 0, max: 1000000}
+    notes: Makes the host-plane lineage gate observable without exporting the excluded process or event content
+  introduced_in: telemetry-registry-v1
 - id: defenseclaw.ai.model.provenance.quantized
   type: boolean
   brief: Whether the discovered local model is positively identified as quantized
@@ -4458,6 +4486,10 @@ groups:
   - ref: defenseclaw.ai.runtime.connections_observed
     requirement_level: required
   - ref: defenseclaw.ai.runtime.connections_unattributed
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.host_plane_observations
+    requirement_level: required
+  - ref: defenseclaw.ai.runtime.host_plane_gated
     requirement_level: required
 - id: body.ai.runtime.finding
   type: body_group

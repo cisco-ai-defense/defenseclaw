@@ -316,6 +316,36 @@ def test_unverified_listener_is_rejected_before_tui_sends_the_token(
     assert requested is False
 
 
+def test_unverified_elevated_pid_never_receives_bearer_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requested = False
+
+    class ElevatedClient:
+        def __init__(self, **_kwargs: object) -> None:
+            pass
+
+        def status(self) -> dict[str, object]:
+            nonlocal requested
+            requested = True
+            return _status_payload(gateway_state="running")
+
+    monkeypatch.setattr("defenseclaw.gateway.OrchestratorClient", ElevatedClient)
+    monkeypatch.setattr(
+        "defenseclaw.commands.cmd_doctor._trusted_gateway_listener",
+        lambda _config: SimpleNamespace(
+            trusted=False,
+            pid=0,
+            detail="managed gateway PID record could not be verified",
+        ),
+    )
+    result = _fetch_gateway_health(_config())
+
+    assert requested is False
+    assert result.state == "error"
+    assert "unverified" in result.detail
+
+
 @pytest.mark.parametrize(
     ("platform", "api_bind", "expected_host"),
     (

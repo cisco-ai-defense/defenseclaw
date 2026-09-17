@@ -77,10 +77,10 @@ Discovery keeps installation and contract compatibility distinct. A healthy
 older client such as v0.17.0 is reported as
 `detected-but-unsupported-version`, never as absent. If action mode is
 requested, Setup prints the exact installed version and the
-`hermes-hooks-v1 >=0.19.0,<0.21.0` requirement, then saves Hermes in observe mode with
-upgrade guidance. The latest official release rechecked on 2026-08-04 is
-v0.20.0 (`v2026.8.3`); its source retains the identical reviewed 23-event
-shell-hook contract, but that source review is not packaged or real-client
+`hermes-hooks-v1 >=0.19.0,<0.21.0` or `hermes-hooks-v2 >=0.21.0,<0.22.0` requirement, then saves Hermes in observe mode with
+upgrade guidance. The latest official release rechecked on 2026-09-14 is
+v0.21.3 (`v2026.9.14`); its source keeps the same 23 claimed shell-hook
+events, but that source review is not packaged or real-client
 certification.
 
 <Callout type="warning" title="Reload Hermes before treating setup or disable as live">

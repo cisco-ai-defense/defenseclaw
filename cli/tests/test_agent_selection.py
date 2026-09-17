@@ -485,7 +485,9 @@ def test_windows_opencode_exact_image_rejects_lookalike_reparse_and_unsafe_acl(
         ("opencode 1.18.11", True),
         ("opencode 1.18.19", True),
         ("opencode 1.18.9", False),
-        ("opencode 1.18.20", False),
+        ("opencode 1.18.20", True),
+        ("opencode 1.18.31", True),
+        ("opencode 1.19.0", False),
     ],
 )
 def test_windows_opencode_selection_enforces_exact_validated_version_range(

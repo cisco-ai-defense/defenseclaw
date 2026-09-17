@@ -465,8 +465,8 @@ def _assert_dashboards(
     authored, errors = dashboards.static_audit(require_packaged=True)
     if errors:
         raise ContinuityError("static dashboard contract failed: " + "; ".join(errors))
-    if len(authored) != 14:
-        raise ContinuityError(f"dashboard count={len(authored)}, want 14")
+    if len(authored) != 16:
+        raise ContinuityError(f"dashboard count={len(authored)}, want 16")
     expected_uids = {dashboard["uid"] for _, dashboard in authored}
     search = dashboards.request_json(
         "http://127.0.0.1:3000/api/search",
@@ -492,7 +492,7 @@ def _assert_dashboards(
     )
     if inventory_errors:
         raise ContinuityError("live dashboard inventory failed: " + "; ".join(inventory_errors))
-    if len(inventory) != 14 or any(item["status_counts"]["error"] for item in inventory):
+    if len(inventory) != 16 or any(item["status_counts"]["error"] for item in inventory):
         raise ContinuityError("live dashboard inventory is incomplete or contains query errors")
     return {
         "uids": len(actual_uids),

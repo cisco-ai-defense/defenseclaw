@@ -383,7 +383,7 @@ def test_schema_version_mismatch_rescans(monkeypatch, tmp_path):
     (data_dir / ad.CACHE_FILENAME).write_text(
         json.dumps(
             {
-                "version": 999,
+                "version": ad.CACHE_SCHEMA_VERSION - 1,
                 "scanned_at": "2026-05-04T18:21:00Z",
                 "ttl_seconds": ad.CACHE_TTL_SECONDS,
                 "agents": {},
@@ -648,6 +648,7 @@ def test_claude_discovery_does_not_count_mcp_only_state_as_generic_config(
     state = home / ".claude.json"
     state.parent.mkdir(parents=True, exist_ok=True)
     state.write_text('{"mcpServers": {}}\n', encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
 
     signal = ad._scan_agent("claudecode")
@@ -707,6 +708,23 @@ def test_claude_discovery_falls_back_to_user_settings(monkeypatch, tmp_path):
 
     assert signal.configured is True
     assert signal.config_path == str(user_settings)
+
+
+def test_claude_global_discovery_ignores_unrelated_workspace_settings(
+    monkeypatch,
+    tmp_path,
+):
+    _pin_claude_home(monkeypatch, tmp_path / "default-home")
+    project_settings = tmp_path / ".claude" / "settings.json"
+    project_settings.parent.mkdir(parents=True)
+    project_settings.write_text("{}\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(ad.shutil, "which", lambda _name: None)
+
+    signal = ad._scan_agent("claudecode", include_workspace_config=False)
+
+    assert signal.configured is False
+    assert signal.config_path == ""
 
 
 def test_amp_discovery_reads_platform_managed_settings_without_mutating(
@@ -1796,7 +1814,7 @@ def test_devin_windows_discovery_rejects_gui_product_root(
     assert ad._path_key(str(binary)) not in tuple(map(ad._path_key, candidates))
 
 
-def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path):
+def test_cursor_discovery_prefers_desktop_over_agent_cli(monkeypatch, tmp_path):
     primary = tmp_path / "agent.exe"
     compatibility = tmp_path / "cursor-agent.exe"
     desktop = tmp_path / "cursor.cmd"
@@ -1814,8 +1832,38 @@ def test_cursor_discovery_prefers_primary_agent_entrypoint(monkeypatch, tmp_path
     resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
 
     assert tuple(map(ad._path_key, resolved)) == tuple(
-        map(ad._path_key, (str(primary), str(compatibility)))
+        map(ad._path_key, (str(desktop), str(primary), str(compatibility)))
     )
+
+
+def test_cursor_macos_prefers_desktop_app_over_path_agent(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    applications = tmp_path / "Applications"
+    desktop = (
+        applications
+        / "Cursor.app"
+        / "Contents"
+        / "Resources"
+        / "app"
+        / "bin"
+        / "cursor"
+    )
+    desktop.parent.mkdir(parents=True)
+    desktop.write_bytes(b"desktop cursor")
+    desktop.chmod(0o755)
+    agent_cli = tmp_path / "bin" / "agent"
+    agent_cli.parent.mkdir()
+    agent_cli.write_bytes(b"agent cli")
+    agent_cli.chmod(0o755)
+    monkeypatch.setattr(ad, "_macos_application_roots", lambda: (applications,))
+    monkeypatch.setattr(ad, "_which", lambda name: str(agent_cli) if name == "agent" else "")
+
+    resolved = ad._binary_candidates_for_agent("cursor", ad._SPECS["cursor"])
+
+    assert tuple(map(ad._path_key, resolved))[0] == ad._path_key(str(desktop))
 
 
 def test_cursor_windows_discovery_uses_official_token_bound_agent_root(

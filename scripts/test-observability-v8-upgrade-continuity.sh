@@ -551,8 +551,8 @@ manifest = json.loads(
 )
 if manifest.get("bundle_version") != target:
     raise SystemExit("installed local bundle is not target-stamped")
-if len(manifest.get("dashboard_uids", [])) != 14:
-    raise SystemExit("installed local bundle does not own all fourteen dashboards")
+if len(manifest.get("dashboard_uids", [])) != 16:
+    raise SystemExit("installed local bundle does not own all sixteen dashboards")
 if set(manifest.get("named_volumes", [])) != {
     "grafana-data", "loki-data", "prometheus-data", "tempo-data"
 }:

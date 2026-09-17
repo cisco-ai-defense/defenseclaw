@@ -737,7 +737,9 @@ func TestAlertAcknowledgementUnsignedOutcomeReportsAfterStoreRelease(t *testing.
 	}
 }
 
-func TestAlertAcknowledgementTargetEligibilityIsFindingScoped(t *testing.T) {
+func TestAlertAcknowledgementTargetEligibilityMatchesAlertQueue(t *testing.T) {
+	// Dismiss all uses the same eligibility as the Alerts queue, including
+	// HIGH platform.health rows and legacy *-failure actions.
 	store := newAlertProjectionStore(t)
 	writer := newAlertProjectionWriter(t, store)
 	if _, err := store.db.Exec(`INSERT INTO audit_events
@@ -760,8 +762,7 @@ func TestAlertAcknowledgementTargetEligibilityIsFindingScoped(t *testing.T) {
 	}
 
 	for _, alertID := range []string{
-		"missing", "legacy-auth", "legacy-config", "legacy-finding-none",
-		"legacy-finding-empty", "v8-health",
+		"missing", "legacy-config", "legacy-finding-none", "legacy-finding-empty",
 	} {
 		_, err := writer.ApplyAlertAcknowledgement(context.Background(), AlertAcknowledgementCommand{
 			OperationID: "reject-" + alertID, AlertID: alertID, Actor: "operator",
@@ -771,7 +772,9 @@ func TestAlertAcknowledgementTargetEligibilityIsFindingScoped(t *testing.T) {
 			t.Fatalf("target %q error = %v", alertID, err)
 		}
 	}
-	for _, alertID := range []string{"legacy-finding", "legacy-alert-action", "v8-finding"} {
+	for _, alertID := range []string{
+		"legacy-auth", "legacy-finding", "legacy-alert-action", "v8-finding", "v8-health",
+	} {
 		result, err := writer.ApplyAlertAcknowledgement(context.Background(), AlertAcknowledgementCommand{
 			OperationID: "accept-" + alertID, AlertID: alertID, Actor: "operator",
 			Disposition: AlertDispositionAcknowledged,
