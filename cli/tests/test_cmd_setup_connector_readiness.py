@@ -862,3 +862,88 @@ class TestLockContractFailureDetail:
         compatibility = resolve_connector_contract("codex", "0.125.0")
         if not (compatibility.contract and compatibility.supported):
             pytest.skip("codex 0.125.0 is no longer covered by a pinned contract")
+
+
+class TestUnconvergeablePeersAreSkipped:
+    """A peer that cannot converge must not block the connector being set up.
+
+    The readiness gate covers the whole desired roster. One agent that has
+    moved past its last reviewed hook contract used to fail -- or hang --
+    every `defenseclaw setup <other connector>` run, and the non-convergence
+    rollback then deleted that other connector's freshly written hook files.
+    """
+
+    def _lock(self, tmp_path: Path, entries: dict) -> str:
+        path = tmp_path / "hook_contract_lock.json"
+        path.write_text(json.dumps({"version": 2, "connectors": entries}), encoding="utf-8")
+        return str(path)
+
+    def _ungated_entry(self, connector: str) -> dict:
+        return {
+            "connector": connector,
+            "raw_agent_version": "9999.1.1",
+            "normalized_agent_version": "9999.1.1",
+            "compatibility_status": "unknown",
+            "hook_fail_mode": "open",
+        }
+
+    def test_peer_with_no_contract_is_skipped(self, tmp_path: Path) -> None:
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro"}
+        assert tolerated == frozenset({"devin"})
+
+    def test_the_setup_target_is_never_skipped(self, tmp_path: Path) -> None:
+        # If the connector being configured cannot converge, that is a real
+        # failure. Skipping it would report success for an unenforced agent.
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"devin"}, required={"devin"}
+        )
+        assert keep == {"devin"}
+        assert tolerated == frozenset()
+
+    def test_unpublished_peer_is_still_waited_for(self, tmp_path: Path) -> None:
+        # An absent entry is ordinary startup timing, not a permanent failure.
+        lock = self._lock(tmp_path, {})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro", "devin"}
+        assert tolerated == frozenset()
+
+    def test_unreadable_lock_does_not_tolerate_anything(self, tmp_path: Path) -> None:
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            str(tmp_path / "missing.json"), {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro", "devin"}
+        assert tolerated == frozenset()
+
+    def test_skipped_peer_keeps_its_lock_entry_without_failing_the_gate(self) -> None:
+        # The skipped peer's recorded authority is deliberately left in place;
+        # the coverage check must not then read it as an unexpected peer.
+        kiro = {
+            "connector": "kiro",
+            "compatibility_status": "not-gated",
+            "hook_fail_mode": "open",
+        }
+        lock = {"version": 2, "connectors": {"kiro": kiro, "devin": self._ungated_entry("devin")}}
+        assert cmd_setup._hook_contract_lock_entry_covers("kiro", kiro), "precondition: kiro entry is valid"
+        assert not cmd_setup._hook_contract_lock_covers(lock, {"kiro"}, set())
+        assert cmd_setup._hook_contract_lock_covers(
+            lock, {"kiro"}, set(), frozenset({"devin"})
+        )
+
+    def test_departed_peer_left_in_the_lock_is_also_skipped(self, tmp_path: Path) -> None:
+        # `guardrail disable --connector devin` drops devin from the roster
+        # but its lock entry survives until teardown reclaims it. Without
+        # this, disabling the broken connector turned an expected-peer
+        # failure into an unexpected-peer failure and still blocked setup.
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro"}, required={"kiro"}
+        )
+        assert keep == {"kiro"}
+        assert tolerated == frozenset({"devin"})

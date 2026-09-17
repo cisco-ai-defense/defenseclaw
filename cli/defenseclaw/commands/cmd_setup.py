@@ -5048,6 +5048,7 @@ def _record_windows_setup_agent_selections(
     connectors: list[str] | tuple[str, ...],
     *,
     _prior_snapshot: _SetupConfigSnapshot | None = None,
+    required: set[str] | None = None,
 ) -> _VerifiedSetupAgentSelections | None:
     """Refresh protected executable authority for native runtime inspection."""
 
@@ -5075,10 +5076,33 @@ def _record_windows_setup_agent_selections(
         if connector not in selections and connector not in selection_errors:
             selection_errors[connector] = "selection was not recorded"
     if selection_errors:
-        details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
-        raise click.ClickException(
-            f"cannot configure native hooks without a freshly verified selected agent executable ({details})"
+        # A peer's executable custody is not a prerequisite for the connector
+        # being configured. This roster is the whole additive set, so on macOS
+        # -- where the protected subset narrows to OpenHands -- a slow or
+        # failing `openhands --version` probe aborted every
+        # `defenseclaw setup <other connector>` run before a single hook file
+        # was written. Fail only for the connector this run is for, and report
+        # the peers that were skipped.
+        must_verify = {normalize_connector(name) for name in (required or set()) if name}
+        blocking = {
+            name: detail
+            for name, detail in selection_errors.items()
+            if not must_verify or normalize_connector(name) in must_verify
+        }
+        if blocking:
+            details = "; ".join(f"{name}: {detail}" for name, detail in sorted(blocking.items()))
+            raise click.ClickException(
+                f"cannot configure native hooks without a freshly verified selected agent executable ({details})"
+            )
+        for name, detail in sorted(selection_errors.items()):
+            ux.warn(f"skipping {name}: could not verify its executable ({detail})")
+        ux.subhead(
+            "Continuing with the rest of the roster. "
+            f"Re-run setup for {', '.join(sorted(selection_errors))} once its executable verifies."
         )
+        selected = tuple(name for name in selected if name not in selection_errors)
+        if not selected:
+            return None
     try:
         return _validate_setup_agent_selection_receipt(
             target_dir,
@@ -8675,6 +8699,7 @@ def _apply_hook_connector_setup(
                 getattr(app.cfg, "data_dir", None),
                 selection_roster,
                 _prior_snapshot=setup_snapshot,
+                required={normalize_connector(connector)} if connector else None,
             )
         except Exception as exc:
             try:
@@ -12680,6 +12705,9 @@ def _restart_services(
             hook_contract_lock_before,
             previous_lock_publications=hook_contract_publications_before,
             require_gateway_health=True,
+            # The connector this run is for must converge or fail; only its
+            # peers may be skipped.
+            required={normalize_connector(connector)} if connector else None,
         )
         if readiness:
             # Prove that the healthy API is the replacement generation, not an
@@ -12876,7 +12904,14 @@ def _hook_contract_lock_covers(
     lock: Any,
     expected: set[str],
     inactive: set[str] | None = None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> bool:
+    """``tolerated`` names peers the caller has already skipped.
+
+    A skipped peer keeps its lock entry -- setup must not silently delete one
+    connector's recorded authority while configuring another -- so its entry
+    would otherwise read as an unexpected peer and fail the whole gate.
+    """
     if not isinstance(lock, dict):
         return False
     version = lock.get("version")
@@ -12900,7 +12935,7 @@ def _hook_contract_lock_covers(
             if not name or name in actual:
                 return False
             actual.add(name)
-        if not expected.issubset(actual) or not (actual - expected).issubset(inactive):
+        if not expected.issubset(actual) or not (actual - expected).issubset(inactive | tolerated):
             return False
     for name in expected:
         if not _hook_contract_lock_entry_covers(name, entries.get(name)):
@@ -13024,6 +13059,7 @@ def _connector_runtime_snapshot_ready(
     expected: set[str],
     previous_state_marker: int | None,
     previous_lock_marker: int | None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> bool:
     runtime_sets = _connector_runtime_state_sets(state)
     if runtime_sets is None:
@@ -13035,7 +13071,7 @@ def _connector_runtime_snapshot_ready(
         expected.issubset(active)
         and state_fresh
         and lock_fresh
-        and _hook_contract_lock_covers(lock, expected, inactive)
+        and _hook_contract_lock_covers(lock, expected, inactive, tolerated)
     )
 
 
@@ -13078,6 +13114,7 @@ def _connector_runtime_snapshot_failure(
     expected: set[str],
     previous_state_marker: int | None,
     previous_lock_marker: int | None,
+    tolerated: frozenset[str] = frozenset(),
 ) -> _ConnectorRuntimeReadiness:
     runtime_sets = _connector_runtime_state_sets(state)
     if runtime_sets is None:
@@ -13103,7 +13140,7 @@ def _connector_runtime_snapshot_failure(
             return _ConnectorRuntimeReadiness(
                 False, name, invariant, _lock_contract_failure_detail(name, entries.get(name), invariant)
             )
-    extra = {normalize_connector(name) for name in entries if isinstance(name, str)} - expected
+    extra = {normalize_connector(name) for name in entries if isinstance(name, str)} - expected - tolerated
     if inactive is None and extra:
         peer = next(iter(sorted(extra)))
         return _ConnectorRuntimeReadiness(False, peer, "roster", "contract lock contains an unexpected connector")
@@ -13168,6 +13205,68 @@ def _new_gateway_health_is_terminal_failure(data_dir: str, generation: str | Non
     return isinstance(state, str) and state.strip().lower() in {"error", "stopped"}
 
 
+def _partition_unconvergeable_peers(
+    lock_path: str,
+    expected: set[str],
+    *,
+    required: set[str] | None,
+) -> tuple[set[str], frozenset[str]]:
+    """Split the desired roster into peers that can converge and ones that cannot.
+
+    A connector whose recorded lock entry already fails its contract invariant
+    cannot be made ready by waiting -- the most common cause is an agent that
+    updated past its last reviewed hook contract, which no amount of polling
+    fixes. Returning it in the skip set lets the rest of the roster converge.
+
+    Connectors in ``required`` are never skipped. Anything unreadable is left
+    in ``expected`` so a missing or malformed lock still fails the gate rather
+    than being quietly tolerated.
+    """
+
+    keep = set(expected)
+    must_keep = {normalize_connector(name) for name in (required or set()) if name}
+    try:
+        lock, _ = _read_stable_regular_json(lock_path)
+    except (OSError, ValueError):
+        return keep, frozenset()
+    entries = lock.get("connectors") if isinstance(lock, dict) else None
+    if not isinstance(entries, dict):
+        return keep, frozenset()
+    skipped: dict[str, str] = {}
+    for name in sorted(expected - must_keep):
+        entry = entries.get(name)
+        if entry is None:
+            # Not yet published. That is ordinary startup timing, not a
+            # permanent failure, so keep waiting for it.
+            continue
+        if invariant := connector_lock_contract_invariant(name, entry):
+            skipped[name] = _lock_contract_failure_detail(name, entry, invariant)
+    # A connector that has left the roster keeps its lock entry until its own
+    # teardown reclaims it. `defenseclaw guardrail disable --connector X`
+    # removes X from the roster immediately, so an unconvergeable X turns from
+    # an expected failure into an unexpected-peer failure and still blocks
+    # every other connector's setup. Tolerate the leftover entry on the same
+    # terms: only when it is the entry itself that cannot converge.
+    for raw_name in entries:
+        if not isinstance(raw_name, str) or not raw_name.strip():
+            continue
+        name = normalize_connector(raw_name)
+        if not name or name in expected or name in must_keep or name in skipped:
+            continue
+        if invariant := connector_lock_contract_invariant(name, entries[raw_name]):
+            skipped[name] = _lock_contract_failure_detail(name, entries[raw_name], invariant)
+    for name in skipped:
+        keep.discard(name)
+    if skipped:
+        click.echo()
+        for name, detail in sorted(skipped.items()):
+            ux.warn(f"skipping {name}: {detail}")
+        ux.subhead(
+            "Continuing with the rest of the roster. "
+            f"Re-run setup for {', '.join(sorted(skipped))} after fixing the above."
+        )
+    return keep, frozenset(skipped)
+
 def _wait_for_connector_runtime(
     data_dir: str,
     connectors: list[str],
@@ -13178,11 +13277,29 @@ def _wait_for_connector_runtime(
     previous_lock_publications: dict[str, str] | None = None,
     gateway_generation: str | None = None,
     require_gateway_health: bool = False,
+    required: set[str] | None = None,
 ) -> _ConnectorRuntimeReadiness:
     ordered = tuple(dict.fromkeys(normalize_connector(name) for name in connectors if name))
     expected = set(ordered)
     if not expected:
         return _ConnectorRuntimeReadiness(True)
+    # A peer that cannot converge must not block the connector being set up.
+    # This gate covers the whole desired roster, so one agent that has moved
+    # past its last reviewed hook contract used to fail -- or hang -- every
+    # `defenseclaw setup <other connector>` run, and the non-convergence
+    # rollback then deleted that other connector's freshly written hook files.
+    # Skip the peer loudly and converge on what can work. `required` (the
+    # connector this setup is for) is never skipped: if it cannot converge,
+    # that is a real failure and must stay one.
+    expected, tolerated = _partition_unconvergeable_peers(
+        os.path.join(data_dir, "hook_contract_lock.json"),
+        expected,
+        required=required,
+    )
+    if not expected:
+        return _ConnectorRuntimeReadiness(True)
+    must_converge = {normalize_connector(name) for name in (required or set()) if name}
+    ordered = tuple(name for name in ordered if name in expected)
     state_path = os.path.join(data_dir, "active_connector.json")
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")
     per_connector_budget = max(0.0, timeout)
@@ -13257,6 +13374,7 @@ def _wait_for_connector_runtime(
         results: queue.Queue[_ConnectorRuntimeReadiness] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
         current = [ordered[0]]
+        skipped_peers: set[str] = set()
 
         def worker() -> None:
             try:
@@ -13300,9 +13418,26 @@ def _wait_for_connector_runtime(
                                 failure.detail,
                             )
                             continue
+                        if must_converge and failure.connector not in must_converge:
+                            # A peer's own registration problem is not this
+                            # connector's failure. Report it and keep going so
+                            # the connector being set up can still converge,
+                            # instead of failing the transaction and rolling
+                            # back the hooks that were just written for it.
+                            ux.warn(
+                                f"skipping {failure.connector}: "
+                                f"{failure.invariant}: {failure.detail}"
+                            )
+                            skipped_peers.add(failure.connector)
+                            continue
                         results.put_nowait(failure)
                         return
                 if not cancelled.is_set() and time.monotonic() < deadline:
+                    if skipped_peers:
+                        ux.subhead(
+                            "Continuing with the rest of the roster. "
+                            f"Re-run setup for {', '.join(sorted(skipped_peers))} to fix the above."
+                        )
                     results.put_nowait(pending_reload or _ConnectorRuntimeReadiness(True))
             except Exception as exc:  # noqa: BLE001 - worker failures are bounded readiness evidence.
                 if not cancelled.is_set() and time.monotonic() < deadline:
@@ -13346,6 +13481,7 @@ def _wait_for_connector_runtime(
                 expected=expected,
                 previous_state_marker=previous_state_marker,
                 previous_lock_marker=previous_lock_marker,
+                tolerated=tolerated,
             )
             if not snapshot_ready:
                 last_failure = _connector_runtime_snapshot_failure(
@@ -13356,6 +13492,7 @@ def _wait_for_connector_runtime(
                     expected=expected,
                     previous_state_marker=previous_state_marker,
                     previous_lock_marker=previous_lock_marker,
+                    tolerated=tolerated,
                 )
             if snapshot_ready:
                 # The Windows native setup launcher publishes the complete roster

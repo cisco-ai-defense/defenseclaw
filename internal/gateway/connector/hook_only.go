@@ -6338,7 +6338,23 @@ func containsHookScript(raw interface{}, hookScripts ...string) bool {
 			}
 		}
 		if hooks, ok := v["hooks"]; ok {
-			return containsHookScript(hooks, hookScripts...)
+			if containsHookScript(hooks, hookScripts...) {
+				return true
+			}
+		}
+		// Event-keyed hook blocks -- Kiro CLI 2.x writes
+		// {"hooks": {"preToolUse": [{...}], ...}} -- put the entries one map
+		// level below "hooks". Walking only the "hooks" value stopped at that
+		// map, whose own keys are event names rather than "command", so a
+		// correctly registered agent config read as unregistered. Recurse
+		// through the remaining values so any nesting depth is reachable.
+		for key, value := range v {
+			if key == "hooks" {
+				continue
+			}
+			if containsHookScript(value, hookScripts...) {
+				return true
+			}
 		}
 	}
 	return false

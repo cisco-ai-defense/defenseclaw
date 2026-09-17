@@ -391,3 +391,40 @@ func kiroBackupLogicalName(path string) string {
 	cleaned := filepath.Clean(path)
 	return kiroV3HooksLogicalName + "-" + strings.ReplaceAll(cleaned, string(filepath.Separator), "_")
 }
+
+// ownedHookContractPresent proves Kiro's effective hook registration for the
+// sidecar's post-Setup verification.
+//
+// The generic config walker cannot answer this for Kiro. It matches a hook
+// command against the bare script path exactly, and Kiro's v3 entry carries
+// `--hook-surface v3` so the gateway can tell which config invoked the hook.
+// Under the generic check that argument read as "no DefenseClaw hook found",
+// so every Kiro setup was rolled back immediately after writing its files --
+// the connector never became active and `/hooks` stayed empty.
+//
+// Both surfaces must be registered for Kiro to be guarded: the v3 config that
+// Kiro IDE and `kiro-cli --v3` read, and the CLI 2.x agent config that bare
+// `kiro-cli` reads. Ownership uses kiroCommandOwned, the same argument-aware
+// predicate setup and teardown use, so the three agree by construction.
+func (c *KiroConnector) ownedHookContractPresent(opts SetupOpts) (bool, error) {
+	command := c.hookCommand(opts)
+	for _, path := range c.hookConfigPaths(opts) {
+		present, err := kiroV3FileReferencesHook(path, command)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, nil
+		}
+	}
+	for _, path := range c.agentConfigPaths(opts) {
+		present, err := kiroV2AgentReferencesHook(path, command)
+		if err != nil {
+			return false, err
+		}
+		if !present {
+			return false, nil
+		}
+	}
+	return true, nil
+}

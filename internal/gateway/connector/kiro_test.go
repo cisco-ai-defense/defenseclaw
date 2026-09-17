@@ -360,3 +360,75 @@ func fmtString(value interface{}) string {
 	s, _ := value.(string)
 	return s
 }
+
+// The sidecar verifies an effective hook registration right after Setup and
+// rolls the connector back when it reports none. Kiro failed that check, so
+// every setup wrote its hook files and immediately deleted them again --
+// `/hooks` stayed empty and the connector never became active, while the log
+// only said "setup completed without an effective hook registration".
+//
+// Two independent causes, one per surface:
+//   - v3: the generic config walker matches a hook command against the bare
+//     script path exactly, and Kiro's v3 entry carries --hook-surface v3.
+//   - v2: containsHookScript walked the "hooks" value but not the event keys
+//     beneath it, so Kiro 2.x's {"hooks": {"preToolUse": [...]}} never matched.
+func TestKiroSetupProducesEffectiveHookRegistration(t *testing.T) {
+	home := t.TempDir()
+	KiroHomeOverride = home
+	t.Cleanup(func() { KiroHomeOverride = "" })
+	opts := SetupOpts{DataDir: t.TempDir(), APIAddr: "127.0.0.1:18970"}
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("setup produced no effective hook registration; the sidecar would roll Kiro back")
+	}
+
+	// Both surfaces must count. Removing either one has to make the check
+	// fail, or a half-registered Kiro would report itself as guarded.
+	for _, path := range append(conn.hookConfigPaths(opts), conn.agentConfigPaths(opts)...) {
+		saved, readErr := os.ReadFile(path)
+		if readErr != nil {
+			t.Fatalf("read %s: %v", path, readErr)
+		}
+		if err := os.Remove(path); err != nil {
+			t.Fatalf("remove %s: %v", path, err)
+		}
+		present, err = OwnedHooksPresent(conn, opts)
+		if err != nil {
+			t.Fatalf("OwnedHooksPresent without %s: %v", path, err)
+		}
+		if present {
+			t.Errorf("registration still reports present without %s", path)
+		}
+		if err := os.WriteFile(path, saved, 0o600); err != nil {
+			t.Fatalf("restore %s: %v", path, err)
+		}
+	}
+}
+
+// containsHookScript is shared by every connector that stores hooks under
+// event keys, so pin the traversal directly.
+func TestContainsHookScriptWalksEventKeyedHookMaps(t *testing.T) {
+	script := "/data/hooks/kiro-hook.sh"
+	cfg := map[string]interface{}{
+		"name": "defenseclaw",
+		"hooks": map[string]interface{}{
+			"preToolUse": []interface{}{
+				map[string]interface{}{"command": script, "matcher": ".*"},
+			},
+		},
+	}
+	if !containsHookScript(cfg, script) {
+		t.Error("event-keyed hook map was not traversed")
+	}
+	if containsHookScript(cfg, "/data/hooks/other-hook.sh") {
+		t.Error("an unrelated script must not match")
+	}
+}
