@@ -2624,6 +2624,41 @@ class TestConnectorConfigFiles:
         assert os.path.join(str(fake_home), ".gemini", "config", "hooks.json") in files
         assert not any("antigravity-cli" in path for path in files)
 
+    def test_kiro_resolves_its_own_surfaces_not_openclaw(self, tmp_path, monkeypatch):
+        fake_home = tmp_path / "home"
+        (fake_home / ".kiro" / "settings").mkdir(parents=True)
+        (fake_home / ".kiro" / "settings" / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"kiro-user-server": {"command": "user-mcp"}}})
+        )
+        workspace = tmp_path / "ws"
+        (workspace / ".kiro" / "settings").mkdir(parents=True)
+        (workspace / ".kiro" / "settings" / "mcp.json").write_text(
+            json.dumps({"mcpServers": {"kiro-project-server": {"command": "project-mcp"}}})
+        )
+        monkeypatch.setattr("defenseclaw.connector_paths.Path.home", lambda: fake_home)
+
+        assert connector_paths.connector_home("kiro") == str(fake_home / ".kiro")
+        # Kiro manages neither surface; OpenClaw's directories must not leak in.
+        assert connector_paths.skill_dirs("kiro") == []
+        assert connector_paths.plugin_dirs("kiro") == []
+
+        files = connector_paths.connector_config_files("kiro", workspace_dir=str(workspace))
+        assert str(fake_home / ".kiro" / "hooks" / "defenseclaw.json") in files
+        assert str(fake_home / ".kiro" / "agents" / "defenseclaw.json") in files
+        assert str(fake_home / ".kiro" / "settings" / "cli.json") in files
+        assert str(workspace / ".kiro" / "hooks" / "defenseclaw.json") in files
+        assert not any(".openclaw" in path for path in files)
+
+        assert connector_paths.mcp_source_locations("kiro", workspace_dir=str(workspace)) == [
+            str(workspace / ".kiro" / "settings" / "mcp.json"),
+            str(fake_home / ".kiro" / "settings" / "mcp.json"),
+        ]
+        names = {
+            server.name
+            for server in connector_paths.mcp_servers("kiro", workspace_dir=str(workspace))
+        }
+        assert names == {"kiro-project-server", "kiro-user-server"}
+
     def test_omnigent_honors_config_home(self, tmp_path, monkeypatch):
         config_home = tmp_path / "isolated-omnigent"
         monkeypatch.delenv("OMNIGENT_CONFIG", raising=False)

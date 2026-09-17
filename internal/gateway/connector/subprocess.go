@@ -235,6 +235,7 @@ var connectorHookScripts = map[string][]string{
 	"devin":       {"devin-hook.sh"},
 	"geminicli":   {"geminicli-hook.sh"},
 	"hermes":      {"hermes-hook.sh"},
+	"kiro":        {"kiro-hook.sh"},
 	"openhands":   {"openhands-hook.sh"},
 	"windsurf":    {"windsurf-hook.sh"},
 }

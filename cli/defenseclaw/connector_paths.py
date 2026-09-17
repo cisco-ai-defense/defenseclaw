@@ -1577,6 +1577,10 @@ def connector_home(
         return _opencode_config_dir() or os.path.join(home, ".config", "opencode")
     if name == "omnigent":
         return _omnigent_config_home()
+    if name == "kiro":
+        # Kiro IDE and Kiro CLI share ~/.kiro; neither documents a config-home
+        # environment override.
+        return os.path.join(home, ".kiro")
     if name == "openclaw":
         if openclaw_home:
             return _expand(openclaw_home)
@@ -1670,6 +1674,16 @@ def connector_config_files(
         ]
     elif name == "omnigent":
         paths = [omnigent_config_path()]
+    elif name == "kiro":
+        kiro_root = connector_home("kiro")
+        paths = [
+            os.path.join(kiro_root, "hooks", "defenseclaw.json"),
+            os.path.join(kiro_root, "agents", "defenseclaw.json"),
+            os.path.join(kiro_root, "settings", "cli.json"),
+            os.path.join(kiro_root, "settings", "mcp.json"),
+            _workspace_path(workspace_dir, ".kiro", "hooks", "defenseclaw.json"),
+            _workspace_path(workspace_dir, ".kiro", "settings", "mcp.json"),
+        ]
     elif name == "cursor":
         paths = [
             os.path.join(home, ".cursor", "mcp.json"),
@@ -1878,6 +1892,11 @@ def skill_dirs(
         return _opencode_skill_dirs(workspace_dir)
     if name == "omnigent":
         return []
+    if name == "kiro":
+        # Kiro's reusable context lives in steering docs and specs, not a
+        # skills root. Returning [] keeps doctor from pointing an operator at
+        # OpenClaw's directories.
+        return []
     return _openclaw_skill_dirs(openclaw_home, openclaw_config)
 
 
@@ -1965,6 +1984,8 @@ def plugin_dirs(
     if name == "opencode":
         return []
     if name == "omnigent":
+        return []
+    if name == "kiro":
         return []
     return _openclaw_plugin_dirs(openclaw_home)
 
@@ -2190,6 +2211,12 @@ def mcp_servers(
         )
     if name == "omnigent":
         return []
+    if name == "kiro":
+        return _kiro_mcp_servers(
+            workspace_dir,
+            infer_from_cwd=infer,
+            diagnostic_sink=diagnostic_sink,
+        )
     return _openclaw_mcp_servers(
         openclaw_config,
         openclaw_bin_resolver=openclaw_bin_resolver,
@@ -2294,6 +2321,8 @@ def mcp_source_locations(
         return _dedup(_opencode_config_paths(workspace_dir, infer_from_cwd=infer))
     if name == "omnigent":
         return ["(omnigent exposes no MCP registry)"]
+    if name == "kiro":
+        return _dedup(_kiro_mcp_read_paths(workspace_dir, infer_from_cwd=infer))
     if name == "openclaw":
         return _dedup(
             [
@@ -3939,6 +3968,43 @@ def _cursor_mcp_servers(
     # Cursor documents both scopes but not a same-name winner, and extension
     # APIs may register dynamic servers without either file. Preserve every
     # local candidate instead of silently selecting the first one.
+    return entries
+
+
+def _kiro_mcp_read_paths(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+) -> list[str]:
+    paths: list[str] = []
+    project_mcp = _discovery_path(
+        workspace_dir, ".kiro", "settings", "mcp.json", infer_from_cwd=infer_from_cwd,
+    )
+    if project_mcp:
+        paths.append(project_mcp)
+    paths.append(os.path.join(connector_home("kiro"), "settings", "mcp.json"))
+    return paths
+
+
+def _kiro_mcp_servers(
+    workspace_dir: str | None = None,
+    *,
+    infer_from_cwd: bool = False,
+    diagnostic_sink: list[MCPSourceDiagnostic] | None = None,
+) -> list[MCPServerEntry]:
+    # Kiro documents workspace-then-user precedence for its two mcp.json
+    # files, but both scopes stay visible: a same-name server in either file
+    # is a registration an operator needs to see.
+    entries: list[MCPServerEntry] = []
+    paths = _kiro_mcp_read_paths(workspace_dir, infer_from_cwd=infer_from_cwd)
+    for index, path in enumerate(paths):
+        entries.extend(
+            _read_dotmcp_json(
+                path,
+                source_scope="project" if index == 0 and len(paths) > 1 else "user",
+                diagnostic_sink=diagnostic_sink,
+            )
+        )
     return entries
 
 

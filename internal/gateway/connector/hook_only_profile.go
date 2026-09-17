@@ -146,6 +146,13 @@ func hookOnlyProfileRespond(in HookRespondInput) HookRespondOutput {
 		return HookRespondOutput{}
 	case "antigravity":
 		output = antigravityHookOutputForProfile(in.Req.HookEventName, in.Action, in.RawAction, reason, in.AdditionalContext)
+	case "kiro":
+		// Kiro 2.x blocks PreToolUse with exit 2. CLI 3.x / IDE also
+		// accept decision=block. The shipped hook never prints stdout
+		// because Kiro appends it to agent context.
+		if in.Action == "block" {
+			output = map[string]interface{}{"decision": "block", "reason": reason}
+		}
 	case "omnigent":
 		// The installed Python policy reads the unified top-level action
 		// and translates allow/block/confirm to ALLOW/DENY/ASK. No nested

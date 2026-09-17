@@ -84,8 +84,9 @@ class ConnectorPlatformSupport:
 WINDOWS_CONNECTOR_SUPPORT: dict[str, ConnectorPlatformSupport] = {
     "kiro": ConnectorPlatformSupport(
         SUPPORTED,
-        "Kiro CLI ACP stdio mediation is supported on native Windows x64; "
-        "release certification requires official-client live evidence.",
+        "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on "
+        "native Windows x64 when kiro-cli is present. Release certification "
+        "requires official-client live evidence.",
     ),
     "codex": ConnectorPlatformSupport(
         SUPPORTED,

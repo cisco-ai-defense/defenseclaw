@@ -101,10 +101,9 @@ var proxyConnectorsWithoutHookGate = map[string]bool{
 	"zeptoclaw": true,
 }
 
-// catalogedOnlyConnectorsWithoutHookGate are regular connectors whose native
-// hooks are inventoried but not installed. ACP (or another separately
-// versioned surface) is the enforcement path; empty hook contracts must not
-// fail action-mode setup as "unknown".
+// catalogedOnlyConnectorsWithoutHookGate are regular connectors whose hook
+// contract is not version-gated. Empty hook contracts must not fail
+// action-mode setup as "unknown". Kiro still installs native hooks.
 var catalogedOnlyConnectorsWithoutHookGate = map[string]bool{
 	"kiro": true,
 }

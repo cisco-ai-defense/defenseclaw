@@ -68,7 +68,7 @@ var windowsConnectorSupport = map[string]PlatformSupport{
 	},
 	"kiro": {
 		Status: PlatformSupported,
-		Reason: "Kiro CLI ACP stdio mediation is supported on native Windows x64; release certification requires official-client live evidence.",
+		Reason: "Kiro IDE and Kiro CLI share hooks; ACP stdio mediation is supported on native Windows x64 when kiro-cli is present. Release certification requires official-client live evidence.",
 	},
 	"claudecode": {
 		Status: PlatformSupported,

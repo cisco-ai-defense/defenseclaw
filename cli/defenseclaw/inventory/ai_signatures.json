@@ -2255,26 +2255,40 @@
     },
     {
       "id": "kiro",
-      "name": "Kiro CLI",
+      "name": "Kiro",
       "vendor": "AWS",
-      "category": "ai_cli",
+      "category": "supported_connector",
       "confidence": 0.9,
       "specificity": 0.95,
       "supported_connector": "kiro",
       "binary_names": [
         "kiro-cli",
-        "kiro-cli.appimage"
+        "kiro-cli.appimage",
+        "kiro"
+      ],
+      "process_names": [
+        "kiro",
+        "Kiro",
+        "kiro-cli"
       ],
       "config_paths": [
         "~/.kiro/settings/cli.json",
         "~/.kiro/settings/mcp.json",
         "~/.kiro/agents",
+        "~/.kiro/hooks",
         ".kiro/settings/mcp.json",
-        ".kiro/agents"
+        ".kiro/agents",
+        ".kiro/hooks"
       ],
       "mcp_paths": [
         "~/.kiro/settings/mcp.json",
         ".kiro/settings/mcp.json"
+      ],
+      "application_names": [
+        "Kiro.app",
+        "Kiro",
+        "Kiro CLI.app",
+        "Kiro CLI"
       ]
     },
     {

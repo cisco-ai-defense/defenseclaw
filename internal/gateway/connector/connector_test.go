@@ -7398,8 +7398,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 14 {
-		t.Errorf("HookScripts() returned %d scripts, want 14", len(scripts))
+	if len(scripts) != 15 {
+		t.Errorf("HookScripts() returned %d scripts, want 15", len(scripts))
 	}
 }
 

@@ -74,7 +74,7 @@ var builtinCatalog = Catalog{
 		{ID: "jetbrains", Name: "JetBrains AI Assistant", Support: SupportCataloged, ConfigKind: "jetbrains-acp", SourceURL: "https://www.jetbrains.com/help/ai-assistant/acp.html"},
 	},
 	Agents: []Agent{
-		{ID: "kiro", Name: "Kiro CLI", Command: "kiro-cli", Args: []string{"acp"}, Support: SupportTested, ConnectorID: "kiro", Kind: "native", SourceURL: "https://kiro.dev/docs/cli/acp/"},
+		{ID: "kiro", Name: "Kiro", Command: "kiro-cli", Args: []string{"acp"}, Support: SupportTested, ConnectorID: "kiro", Kind: "native", SourceURL: "https://kiro.dev/docs/cli/acp/"},
 		{ID: "cursor", Name: "Cursor Agent", Command: "agent", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "cursor", Kind: "native", RegistryID: "cursor", SourceURL: "https://cursor.com/docs/cli/acp"},
 		{ID: "opencode", Name: "OpenCode", Command: "opencode", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "opencode", Kind: "native", RegistryID: "opencode", SourceURL: "https://opencode.ai/docs/cli/"},
 		{ID: "hermes", Name: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "hermes", Kind: "native", SourceURL: "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"},

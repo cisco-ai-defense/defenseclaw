@@ -926,6 +926,13 @@ _SPECS: dict[str, _AgentSpec] = {
         ),
         "kiro-cli",
         ("--version",),
+        # IDE and CLI share `.kiro/hooks`; show one connector for either binary.
+        ("kiro-cli", "kiro"),
+        ("kiro-cli", "kiro"),
+        (
+            "Kiro.app/Contents/Resources/app/bin/kiro",
+            "Kiro CLI.app/Contents/MacOS/kiro-cli",
+        ),
     ),
 }
 
@@ -1789,8 +1796,10 @@ def _version_for_agent_binary(
 ) -> tuple[str, str]:
     """Probe a CLI, or read metadata for a GUI that must not be launched."""
 
-    if name == "cursor" and _macos_app_bundle_for_binary(binary_path) is not None:
-        return _macos_app_version_for_binary(binary_path)
+    spec = _SPECS.get(name)
+    bundle_relatives = spec.macos_bundle_binaries if spec is not None else ()
+    if bundle_relatives and _macos_app_bundle_for_binary(binary_path, bundle_relatives) is not None:
+        return _macos_app_version_for_binary(binary_path, bundle_relatives)
 
     if name == "antigravity" and _is_windows_host():
         if not _is_canonical_antigravity_windows_binary(binary_path):
@@ -1915,10 +1924,13 @@ def _stable_binary_sha512(binary_path: str) -> str:
         os.close(fd)
 
 
-def _macos_app_version_for_binary(binary_path: str) -> tuple[str, str]:
-    """Read a Cursor app bundle's version without launching its executable."""
+def _macos_app_version_for_binary(
+    binary_path: str,
+    bundle_relatives: tuple[str, ...] = (),
+) -> tuple[str, str]:
+    """Read a known macOS app bundle's version without launching its executable."""
 
-    bundle = _macos_app_bundle_for_binary(binary_path)
+    bundle = _macos_app_bundle_for_binary(binary_path, bundle_relatives)
     if bundle is None:
         return "", "macOS application bundle is unavailable"
     info_path = bundle / "Contents" / "Info.plist"
@@ -2155,8 +2167,14 @@ def _macos_binary_candidates(spec: _AgentSpec) -> tuple[str, ...]:
     )
 
 
-def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:
-    """Resolve a known embedded Cursor CLI back to its application bundle."""
+_DEFAULT_MACOS_BUNDLE_BINARIES: tuple[str, ...] = ("Cursor.app/Contents/Resources/app/bin/cursor",)
+
+
+def _macos_app_bundle_for_binary(
+    binary_path: str,
+    bundle_relatives: tuple[str, ...] = (),
+) -> Path | None:
+    """Resolve a known embedded app CLI back to its application bundle."""
 
     if not _is_macos_host() or not binary_path:
         return None
@@ -2164,23 +2182,29 @@ def _macos_app_bundle_for_binary(binary_path: str) -> Path | None:
         candidate = os.path.realpath(os.path.abspath(binary_path))
     except (OSError, ValueError):
         return None
+    relatives = bundle_relatives or _DEFAULT_MACOS_BUNDLE_BINARIES
     for application_root in _macos_application_roots():
         try:
             root = os.path.realpath(os.path.abspath(os.fspath(application_root)))
-            bundle = os.path.realpath(os.path.join(root, "Cursor.app"))
-            expected = os.path.realpath(
-                os.path.join(bundle, "Contents", "Resources", "app", "bin", "cursor")
-            )
         except (OSError, ValueError):
             continue
-        # A symlinked bundle or embedded CLI must remain inside the resolved
-        # application root. This is the bundle equivalent of trusted-prefix
-        # validation and prevents passive metadata from blessing an app that
-        # escapes to an attacker-controlled location.
-        if not _path_is_within(bundle, root) or not _path_is_within(expected, bundle):
-            continue
-        if _path_key(candidate) == _path_key(expected):
-            return Path(bundle)
+        for relative in relatives:
+            relative_path = Path(relative)
+            if not relative_path.parts:
+                continue
+            try:
+                bundle = os.path.realpath(os.path.join(root, relative_path.parts[0]))
+                expected = os.path.realpath(os.path.join(root, relative))
+            except (OSError, ValueError):
+                continue
+            # A symlinked bundle or embedded CLI must remain inside the resolved
+            # application root. This is the bundle equivalent of trusted-prefix
+            # validation and prevents passive metadata from blessing an app that
+            # escapes to an attacker-controlled location.
+            if not _path_is_within(bundle, root) or not _path_is_within(expected, bundle):
+                continue
+            if _path_key(candidate) == _path_key(expected):
+                return Path(bundle)
     return None
 
 

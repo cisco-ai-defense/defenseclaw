@@ -11,7 +11,7 @@
         "macos": {"last_validated_version": "", "last_validated_at": "", "run_url": ""},
         "windows": {"last_validated_version": "", "last_validated_at": "", "run_url": ""}
       },
-      "notes": "ACP live evidence is tracked in acp_certifications.json. Native Kiro hooks remain cataloged defense in depth and are not certified here."
+      "notes": "ACP live evidence is tracked in acp_certifications.json. Kiro IDE and Kiro CLI share hooks and appear as one connector. Native hooks remain cataloged defense in depth and are not certified here."
     },
     "codex": {
       "version_probe": "codex --version",
