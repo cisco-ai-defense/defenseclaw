@@ -102,6 +102,8 @@ are not redistributed.
 | [Agentic RedTeam](https://github.com/Alkur123/agentic-redteam-benchmark) | Paired structured attack/benign sequences | Detect-only contextual truth |
 | [HF Agentic Red Team](https://huggingface.co/datasets/sh111111111111111/agentic_red_team) | Argument-bearing synthetic trajectories | Detector coverage and rule discovery |
 | [Terminal Wrench trajectories](https://huggingface.co/datasets/few-sh/terminal-wrench-trajectories) | Reward-hacking and legitimate terminal trajectories with literal actions | Exact atomic attack positives, benign FPR, and contextual abstention |
+| [Open-SWE-Traces](https://huggingface.co/datasets/nvidia/Open-SWE-Traces) | Software-engineering agent trajectories with literal tool calls | Benign finding FPR and bounded ActionFacts mining |
+| [Orchard](https://huggingface.co/datasets/microsoft/Orchard) | Verified software-engineering trajectories with literal tool calls | Benign finding FPR and bounded ActionFacts mining |
 | [Nemotron Agentic Terminal Pivot](https://huggingface.co/datasets/nvidia/Nemotron-RL-Agentic-Terminal-Pivot-v1) | Large English terminal-agent action and sequence corpus | Benign action/stateful FPR and block rate |
 | [Cochise](https://github.com/andreashappe/cochise) | Result-backed autonomous penetration-test trajectories | Executed remote endpoint-defense tampering with real arguments |
 | [ATBench](https://huggingface.co/datasets/AI45Research/ATBench), [ATBench-Codex](https://huggingface.co/datasets/AI45Research/ATBench-Codex), [ATBench-Claw](https://huggingface.co/datasets/AI45Research/ATBench-Claw) | Agent-trajectory safety stress | Benign atomic FPR and contextual chain abstention |
@@ -515,6 +517,59 @@ FPR estimate.
 - Atomic benchmark payloads can now carry a bounded authenticated
   `tool_resource_identity`, allowing the harness to exercise the same closed
   structured proof boundary used by runtime connectors.
+
+## Final ActionFacts end-of-data pass
+
+The final validation pass started from merged PR #872 commit
+`4321abd52204d9240b2dba84a6d04db801b06437`. Selection and acceptance gates
+were frozen before validation-miss inspection. It covered 1,301,557 cases in
+32 source-level runs; the table below uses only confusion-bearing rows, while
+unsupported, unresolved, and out-of-scope rows remain visible in the private
+receipt rather than being silently counted as benign.
+
+| Profile | Confusion-bearing rows | TP/TN/FP/FN | Detection/alert FPR | Precision | Recall | F1 | Benign blocks |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Default/balanced | 1,030,406 | 90/1,029,924/390/2 | 0.037853% | 18.7500% | 97.8261% | 31.4685% | 0/1,025,880 |
+| Permissive | 1,030,406 | 90/1,029,924/390/2 | 0.037853% | 18.7500% | 97.8261% | 31.4685% | 0/1,025,880 |
+| Strict | 1,030,406 | 90/1,029,883/431/2 | 0.041832% | 17.2745% | 97.8261% | 29.3638% | 4/1,025,880 |
+
+These are aggregate results over mixed source truth contracts, not a
+universal population estimate. The source-level default rows include 90
+exact positives and two exact-proof misses; the 390 benign findings are
+concentrated in ATBench, Nemotron, Open-SWE-Traces, Orchard, and Terminal
+Wrench. No source gained a default benign hard block.
+
+The retained change is deliberately small: the exact source-archive proof
+now excludes normalized `localhost`, `.localhost`, and loopback address
+literals when the destination fact is otherwise a single-host unknown. Public
+literal destinations remain eligible, and dynamic, malformed, unsupported,
+ambiguous, mixed, or unresolved destinations abstain. Structured multipart
+ActionFacts from issue #873 was already present in the #872 base, so it was
+not broadened. On the paired OpenGuardrails regression, 12,480 base/candidate
+profile rows had zero key or semantic differences. The reviewed release binary
+is 117,816,608 bytes versus 117,816,400 bytes for the exact #872 build
+(+208 bytes, +0.000177%), with no material package-size increase.
+
+The separate non-gating near-miss lane contains 383 metadata-only validation
+rows selected because the baseline already emitted a finding. Its 100%
+selection-conditioned finding rate is review yield, not an unbiased FPR
+estimate; promotion requires independent adjudication and a fresh frozen
+benchmark gate. Payload values, labels, sample identifiers, and predictions
+are not published.
+
+For contextual-judge reproducibility, the published Gemma4 reference on the
+same 100-attack/20-benign matrix reports 94/100 attack detections, 1/20
+benign alerts, 0/20 benign blocks, 1/511 benign hook alerts, 1,146 calls,
+3,078,420 tokens, and $0.4158. The GPT-OSS-20B canonical production-path
+attempt made the same 1,146 calls but hit the Bifrost/Bedrock integration
+failure, so it has no quality score or promotion claim. A separate direct
+Bedrock development diagnostic had 404 valid labels out of 478 selected
+events; it remains non-authoritative and did not change deterministic rules.
+
+No individual held-out payload, label, or prediction was opened for this
+pass. Held-out evidence was not used for selection or tuning, and the
+reported deterministic result does not claim sealed or unbiased holdout
+status.
 
 ## Reproduce the evaluation
 
