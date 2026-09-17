@@ -150,19 +150,67 @@ function Invoke-ProtectedEnvironmentProbe {
             # independently catches PS 5.1 Add-Type, struct-layout, entry-point,
             # and native buffer-management regressions on a real Windows host.
             $nativePath = Initialize-DefenseClawBootstrapNativePath
+            foreach ($case in @(
+                [pscustomobject]@{
+                    Name = 'local/domain user'
+                    SID = 'S-1-5-21-1000-2000-3000-1001'
+                    Accepted = $true
+                },
+                [pscustomobject]@{
+                    Name = 'Microsoft Entra ID user'
+                    SID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
+                    Accepted = $true
+                },
+                [pscustomobject]@{
+                    Name = 'truncated Microsoft Entra ID user'
+                    SID = 'S-1-12-1-1111111111-2222222222-3333333333'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'LocalSystem'
+                    SID = 'S-1-5-18'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'LocalService'
+                    SID = 'S-1-5-19'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'NetworkService'
+                    SID = 'S-1-5-20'
+                    Accepted = $false
+                },
+                [pscustomobject]@{
+                    Name = 'NT SERVICE'
+                    SID = 'S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464'
+                    Accepted = $false
+                }
+            )) {
+                $parsed = [Security.Principal.SecurityIdentifier]::new($case.SID)
+                $nativeAccepted = [bool]$nativePath::IsInteractiveUserSID($parsed)
+                $scriptAccepted = [bool](
+                    Test-DefenseClawInteractiveUserSID -SID $parsed
+                )
+                if ($nativeAccepted -ne [bool]$case.Accepted -or
+                    $scriptAccepted -ne [bool]$case.Accepted) {
+                    throw (
+                        "interactive SID classification mismatch for $($case.Name): " +
+                        "native=$nativeAccepted script=$scriptAccepted " +
+                        "expected=$($case.Accepted)"
+                    )
+                }
+            }
             $activeSessionSIDs = @($nativePath::GetActiveSessionSIDs())
             $canonicalActiveSessionSIDs = @(
                 foreach ($activeSessionSID in $activeSessionSIDs) {
-                    $canonical = [Security.Principal.SecurityIdentifier]::new(
+                    $parsed = [Security.Principal.SecurityIdentifier]::new(
                         [string]$activeSessionSID
-                    ).Value
-                    if (-not $canonical.StartsWith(
-                            'S-1-5-21-',
-                            [StringComparison]::OrdinalIgnoreCase
-                        )) {
-                        throw "native WTS discovery returned a non-user SID: $canonical"
+                    )
+                    if (-not $nativePath::IsInteractiveUserSID($parsed)) {
+                        throw "native WTS discovery returned a non-user SID: $($parsed.Value)"
                     }
-                    $canonical
+                    $parsed.Value
                 }
             )
             $orderedUniqueActiveSessionSIDs = @(
@@ -702,7 +750,7 @@ function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
     $disconnectedHome = [IO.Path]::Combine($fixtureRoot, 'disconnected')
     [void][IO.Directory]::CreateDirectory($activeHome)
     [void][IO.Directory]::CreateDirectory($disconnectedHome)
-    $activeSID = 'S-1-5-21-1000-2000-3000-1001'
+    $activeSID = 'S-1-12-1-1111111111-2222222222-3333333333-4000000000'
     $disconnectedSID = 'S-1-5-21-1000-2000-3000-1002'
     try {
         $profiles = @(
@@ -722,6 +770,9 @@ function Invoke-RenderedEnterpriseTargetsActiveSessionProbe {
             -Profiles $profiles `
             -ActiveSessionSIDs @(
                 $activeSID,
+                'S-1-5-18',
+                'S-1-5-19',
+                'S-1-5-20',
                 'not-a-sid'
             ) `
             -DeferInactiveProfiles

@@ -10,3 +10,10 @@ import "github.com/defenseclaw/defenseclaw/internal/safefile"
 func writeEnterpriseHookProtectedFile(path string, data []byte) error {
 	return safefile.Write(path, data)
 }
+
+// writeEnterpriseHookAdminOnlyFile mirrors the Windows-only variant on non-
+// Windows hosts. Off-Windows there is no AdminFile SDDL to enforce, so the
+// implementation folds into safefile.Write like the protected-file variant.
+func writeEnterpriseHookAdminOnlyFile(path string, data []byte) error {
+	return safefile.Write(path, data)
+}

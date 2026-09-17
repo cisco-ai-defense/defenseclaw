@@ -96,7 +96,8 @@ func newEnterpriseWindowsEnumerateCommand() *cobra.Command {
 		Use:   "enumerate",
 		Short: "Publish Windows managed-enterprise hook enrollment on every tick",
 		Long: `Walk HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion\ProfileList to
-discover local user profiles, filter to interactive users (S-1-5-21-…), and
+discover local user profiles, filter to local/domain (S-1-5-21-…) and Microsoft
+Entra ID (S-1-12-1-…) interactive users, and
 publish an updated hook-guardian targets.yaml.
 
 Two modes:

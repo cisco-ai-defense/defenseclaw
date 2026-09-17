@@ -461,12 +461,22 @@ func TestStore_GetCounts_IncludesBlockedEgress(t *testing.T) {
 	}
 }
 
-// TestStore_GetCounts_AlertsUseActiveActionableSemantics pins the IPC
-// ActiveAlerts surface to the same semantic queue operators see and can
-// acknowledge. High-severity audit telemetry alone is not an alert.
-func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
-	store, cleanup := newTestStore(t)
-	defer cleanup()
+// TestStore_GetCounts_ActiveAlertsCountsEveryEnforcedConnectorHookBlock pins
+// the AVC counter to the durable connector-hook enforcement fact and restores
+// 26.7.3 semantics: any block the connector actually enforced counts,
+// regardless of whether AID or a local ordered rule / MCP-asset policy /
+// judge originated the verdict. Finding, health, egress, deny, allow,
+// alert-action, gateway-source, and legacy-summary events still do not
+// inflate the tile.
+func TestStore_GetCounts_ActiveAlertsCountsEveryEnforcedConnectorHookBlock(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
 
 	// Unrelated high-severity telemetry must not inflate ActiveAlerts.
 	if err := store.LogEvent(Event{
@@ -492,8 +502,7 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 		t.Fatalf("LogEvent hook NONE: %v", err)
 	}
 
-	// Real blocks from hooks remain actionable even though their outer
-	// severity is INFO.
+	// Legacy hook summaries are not the durable AI Defense block fact.
 	if err := store.LogEvent(Event{
 		ID:       "hook-high",
 		Action:   "connector-hook",
@@ -525,17 +534,46 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("LogEvent hook CRITICAL: %v", err)
 	}
+	// Severity on a legacy hook summary remains irrelevant.
+	if err := store.LogEvent(Event{
+		ID:       "hook-low",
+		Action:   "connector-hook",
+		Target:   "PreToolUse",
+		Severity: "INFO",
+		Details:  "connector=cursor action=block mode=action severity=LOW",
+		Enforced: true,
+		Structured: map[string]any{
+			"schema":   "defenseclaw.hook.v1",
+			"severity": "LOW",
+			"action":   "block",
+		},
+	}); err != nil {
+		t.Fatalf("LogEvent hook LOW: %v", err)
+	}
 	if err := store.LogEvent(Event{
 		ID: "legacy-finding", Action: "scan-finding", Target: "skill:test", Severity: "HIGH",
 	}); err != nil {
 		t.Fatalf("LogEvent legacy finding: %v", err)
+	}
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, enforced
+	) VALUES
+		('canonical-hook-block', ?, 'connector-hook', 'gateway',
+		 'connector=codex action=block mode=action severity=HIGH', 'INFO',
+		 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 1),
+		('canonical-hook-clean', ?, 'connector-hook', 'gateway',
+		 'connector=codex action=allow mode=action severity=NONE', 'INFO',
+		 'guardrail.evaluation', 'legacy.audit.connector.hook', '{}', 0)`,
+		stamp, stamp); err != nil {
+		t.Fatalf("insert canonical hook fixtures: %v", err)
 	}
 	if err := store.LogEvent(Event{
 		ID: "reviewed-finding", Action: "scan-finding", Target: "skill:reviewed", Severity: "CRITICAL",
 	}); err != nil {
 		t.Fatalf("LogEvent reviewed finding: %v", err)
 	}
-	stamp := time.Now().UTC().Format(time.RFC3339Nano)
 	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
 		alert_id, disposition, actor, disposition_at, projection_version,
 		source, source_event_id, updated_at
@@ -545,17 +583,23 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	}
 	if _, err := store.db.Exec(`INSERT INTO audit_events (
 		id, timestamp, action, actor, details, severity, bucket, event_name,
-		payload_json
+		payload_json, source, enforced
 	) VALUES
 		('canonical-deny', ?, 'enforcement', 'gateway', '', 'INFO',
 		 'enforcement.action', 'action.applied',
-		 '{"defenseclaw.enforcement.effective_action":"deny"}'),
+		 '{"defenseclaw.enforcement.effective_action":"deny"}', 'connector', 1),
+		('canonical-medium-block', ?, 'enforcement', 'gateway.hook.aid.enforcement', '', 'MEDIUM',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('local-policy-block', ?, 'enforcement', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
 		('health-error', ?, 'sink-failure', 'gateway', '', 'ERROR',
-		 'platform.health', 'destination.export_failed', '{}'),
+		 'platform.health', 'destination.export_failed', '{}', 'gateway', 0),
 		('detection-only', ?, 'scan-finding', 'scanner', '', 'HIGH',
 		 'security.finding', 'finding.observed',
-		 '{"defenseclaw.finding.tags":["secret","detection-only"]}')`,
-		stamp, stamp, stamp); err != nil {
+		 '{"defenseclaw.finding.tags":["secret","detection-only"]}', 'scanner', 0)`,
+		stamp, stamp, stamp, stamp, stamp); err != nil {
 		t.Fatalf("insert canonical alert fixtures: %v", err)
 	}
 
@@ -563,12 +607,83 @@ func TestStore_GetCounts_AlertsUseActiveActionableSemantics(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetCounts: %v", err)
 	}
-	// Two enforced hooks, one legacy finding, one canonical deny, and one
-	// important health failure. Clean/unrelated/detection-only/reviewed rows
-	// are excluded.
-	if counts.Alerts != 5 {
-		t.Errorf("Alerts = %d, want 5 active actionable alerts", counts.Alerts)
+	// Both connector-sourced enforced enforcement.block.applied rows count
+	// (26.7.3 parity): canonical-medium-block (AID actor) and
+	// local-policy-block (local actor). Locally assigned severity remains
+	// immaterial; deny-action, health, findings, and legacy hook summaries
+	// still do not inflate the count.
+	if counts.Alerts != 2 {
+		t.Errorf("Alerts = %d, want 2 enforced connector-hook blocks", counts.Alerts)
 	}
+}
+
+func TestStore_GetCounts_ActiveAlertsCountsAIDHookBlockUntilAcknowledged(t *testing.T) {
+	store, err := NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+
+	assertAlerts := func(want int) {
+		t.Helper()
+		counts, countErr := store.GetCounts()
+		if countErr != nil {
+			t.Fatal(countErr)
+		}
+		if counts.Alerts != want {
+			t.Fatalf("ActiveAlerts = %d, want %d", counts.Alerts, want)
+		}
+	}
+	assertAlerts(0)
+
+	stamp := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := store.db.Exec(`INSERT INTO audit_events (
+		id, timestamp, action, actor, details, severity, bucket, event_name,
+		payload_json, source, enforced
+	) VALUES
+		('high-finding', ?, 'scan-finding', 'scanner', '', 'HIGH',
+		 'security.finding', 'finding.observed', '{}', 'scanner', 0),
+		('aid-hook-block', ?, 'block', 'gateway.hook.aid.enforcement', '', 'INFO',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('local-hook-block', ?, 'block', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('ambiguous-legacy-hook-block', ?, 'block', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 1),
+		('medium-allow', ?, 'allow', 'gateway', '', 'MEDIUM',
+		 'enforcement.action', 'enforcement.allow.applied',
+		 '{"defenseclaw.enforcement.effective_action":"allow"}', 'connector', 0),
+		('connector-alert', ?, 'alert', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.alert.applied',
+		 '{"defenseclaw.enforcement.effective_action":"alert"}', 'connector', 1),
+		('gateway-block', ?, 'block', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'gateway', 1),
+		('unenforced-connector-block', ?, 'block', 'gateway', '', 'HIGH',
+		 'enforcement.action', 'enforcement.block.applied',
+		 '{"defenseclaw.enforcement.effective_action":"block"}', 'connector', 0)`,
+		stamp, stamp, stamp, stamp, stamp, stamp, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	// All three connector-sourced enforced enforcement.block.applied rows count
+	// (26.7.3 parity): aid-hook-block, local-hook-block, and
+	// ambiguous-legacy-hook-block. Findings, advisory (deny/allow/alert)
+	// actions, gateway-sourced rows, and unenforced rows are still excluded.
+	assertAlerts(3)
+
+	if _, err := store.db.Exec(`INSERT INTO alert_acknowledgement_projection (
+		alert_id, disposition, actor, disposition_at, projection_version,
+		source, source_event_id, updated_at
+	) VALUES ('aid-hook-block', 'acknowledged', 'test', ?, 1, 'modern',
+		'ack-aid-hook-block', ?)`, stamp, stamp); err != nil {
+		t.Fatal(err)
+	}
+	assertAlerts(2)
 }
 
 // --- Logger ---

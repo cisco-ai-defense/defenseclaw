@@ -515,6 +515,9 @@ func verifyWindowsClaudeUserRuntimeReadOnly(
 		!sameWindowsEnterprisePath(lock.Locations.HookConfigPaths[0], policyPath) {
 		return lock, fmt.Errorf("enterprise hooks: managed Claude hook contract lock does not identify the active administrator policy")
 	}
+	if err := connector.ValidateWindowsManagedHookContractGatewayServiceBinding(lock); err != nil {
+		return lock, fmt.Errorf("enterprise hooks: managed Claude gateway binding: %w", err)
+	}
 	current, err := connector.NewHookContractLockEntryForMode(
 		setup,
 		conn,
