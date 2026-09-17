@@ -53,7 +53,7 @@ evidence has not been recorded.
 | --- | --- | --- | --- |
 | [Claude Code](/docs/connectors/claudecode) | **Supported** | **Supported** | Direct executable hooks; Git for Windows is optional and WSL is outside the native contract. |
 | [Codex](/docs/connectors/codex) | **Supported** | **Supported** | Event-bound system PowerShell bridge to the packaged hook executable plus native OTLP; no resumable native ask response. |
-| [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector with native ACP via the shipped stdio guard; native hooks are inventory-only defense in depth. |
+| [Kiro](/docs/connectors/kiro) | **Supported** | **Supported** | Regular connector: workspace-scoped native hooks in `.kiro/hooks` for Kiro IDE and `kiro-cli --v3`, a CLI 2.x agent config for bare `kiro-cli`, plus optional ACP via the shipped stdio guard. |
 | [Amp](/docs/connectors/amp) | **Supported** | **Supported** | Owner-only TypeScript system-policy plugin; no shell hook or native OTLP exporter. |
 | [Cursor](/docs/connectors/cursor) | **Supported** | **Supported** | Managed PowerShell adapter; DefenseClaw does not enable Cursor's native ask response. |
 | [Devin](/docs/connectors/devin) | **Supported** | **Supported** | Exact same-user CLI `3000.4.25` hook admission; its separate native `devin acp` entry point is cataloged for the shared guard, while cloud Devin, proxy, and native OTLP remain excluded. |

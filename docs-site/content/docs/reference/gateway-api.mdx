@@ -182,7 +182,11 @@ X-DefenseClaw-Client: cli
   enablement; `hook_enforcement` is true for a non-proxy connector in action
   mode; `enforcement_surface` identifies the proxy, lifecycle-hook, or OmniGent
   policy API path; `telemetry` lists reported wiring channels; and
-  `proxy_intercept` is true only for proxy connectors.
+  `proxy_intercept` is true only for proxy connectors. `mode`,
+  `enforcement_surface`, and `proxy_intercept` are derived from the
+  connector's declared LLM traffic mode, through the same predicate the
+  sidecar uses to decide whether to bind the proxy listener, so this array
+  cannot disagree with what is actually in the data path.
   `defenseclaw-gateway status` renders its per-connector **"Connector Mode"**
   section directly from this array.
 
