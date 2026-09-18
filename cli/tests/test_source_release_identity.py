@@ -630,6 +630,66 @@ def test_same_source_identity_allows_rebuild_and_refreshes_marker(tmp_path: Path
 
 
 @pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_same_source_identity_allows_acp_rebuild(tmp_path: Path) -> None:
+    repo, install_dir, _source_gateway, _installed_gateway = _source_install_fixture(tmp_path)
+    source_acp = repo / "defenseclaw-acp"
+    installed_acp = install_dir / "defenseclaw-acp"
+    _write_executable(source_acp, b"acp-v1\n")
+    _write_executable(installed_acp, b"acp-v1\n")
+
+    claimed = _preflight(tmp_path, repo, install_dir, "claim")
+    assert claimed.returncode == 0, claimed.stdout + claimed.stderr
+    source_acp.write_bytes(b"acp-v2\n")
+    source_acp.chmod(0o755)
+
+    published = _preflight(tmp_path, repo, install_dir, "publish-acp")
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_acp.read_bytes() == b"acp-v2\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX executables")
+def test_unowned_acp_refuses_before_mutation(tmp_path: Path) -> None:
+    repo = _copy_source_fixture(tmp_path)
+    install_dir = tmp_path / "home/.local/bin"
+    install_dir.mkdir(parents=True)
+    _write_executable(repo / ".venv/bin/defenseclaw", b"source cli\n")
+    _write_executable(repo / "defenseclaw-gateway", b"source gateway\n")
+    _write_executable(repo / "defenseclaw-acp", b"source acp\n")
+    installed_acp = install_dir / "defenseclaw-acp"
+    _write_executable(installed_acp, b"foreign acp\n")
+
+    completed = _preflight(tmp_path, repo, install_dir, "publish-acp")
+
+    assert completed.returncode != 0
+    assert "unowned ACP guard already exists" in completed.stdout + completed.stderr
+    assert "No installed files or services were changed" in completed.stdout + completed.stderr
+    assert installed_acp.read_bytes() == b"foreign acp\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
+def test_make_all_dev_reclaim_replaces_existing_acp(tmp_path: Path) -> None:
+    repo, install_dir, source_gateway, installed_gateway = _source_install_fixture(tmp_path)
+    source_acp = repo / "defenseclaw-acp"
+    installed_acp = install_dir / "defenseclaw-acp"
+    source_gateway.write_bytes(b"gateway-v2\n")
+    source_gateway.chmod(0o755)
+    _write_executable(source_acp, b"acp-v2\n")
+    _write_executable(installed_acp, b"acp-v1\n")
+    (tmp_path / "home/.defenseclaw").mkdir()
+
+    published = _preflight(
+        tmp_path,
+        repo,
+        install_dir,
+        "publish-acp",
+        dev_reclaim=True,
+    )
+    assert published.returncode == 0, published.stdout + published.stderr
+    assert installed_acp.read_bytes() == b"acp-v2\n"
+    assert installed_gateway.read_bytes() == b"gateway-v1\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="source ownership uses POSIX symlinks")
 def test_source_checkout_alias_claims_the_canonical_root(tmp_path: Path) -> None:
     repo, install_dir, _source_gateway, installed_gateway = _source_install_fixture(tmp_path)
     alias = tmp_path / "checkout-alias"
@@ -836,6 +896,7 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     ).read_text(encoding="utf-8")
     assert "source-install-preflight.sh dev-check" in makefile
     assert "source-install-preflight.sh dev-publish-gateway" in makefile
+    assert "source-install-preflight.sh dev-publish-acp" in makefile
     assert "source-install-preflight.sh dev-claim" in makefile
     assert "install: _source-install-preflight" in makefile
     cli_start = makefile.index("\ncli-install:") + 1
@@ -847,7 +908,9 @@ def test_source_preflight_runs_before_dependency_install_or_make_mutations() -> 
     assert "$(MAKE) --no-print-directory pycli" in cli_install
     assert gateway_install.startswith("gateway-install: _source-install-preflight cli-install\n")
     assert "$(MAKE) --no-print-directory gateway" in gateway_install
+    assert "source-install-preflight.sh publish-acp" in gateway_install
     assert "source-install-preflight.sh claim" in gateway_install
+    assert 'source-install-publish.py regular \\\n\t\t"$(CURDIR)/$(ACP_GUARD)$(EXE)"' not in makefile
     assert "plugin-install: _source-install-preflight gateway-install" in makefile
     assert "SOURCE_PLUGIN_INSTALL_TARGET = $(if $(filter openclaw,$(CONNECTOR)),plugin-install" in makefile
 

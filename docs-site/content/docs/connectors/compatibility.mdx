@@ -50,6 +50,7 @@ rollout holds. Existing policy defaults are unchanged.
 | <ConnectorLabel id="opencode" /> | hook contract | `>=1.18.10, <1.19.0` (source-reviewed; current pin `1.18.31`) | `opencode-hooks-v1` / `v7` | tool_call, tool_result |
 | <ConnectorLabel id="amp" /> | plugin contract | `>=0.0.1785334225` | `amp-plugin-v1` / `v2` | prompt, tool_call, tool_result, event_content |
 | <ConnectorLabel id="omnigent" /> | hook contract | `>=0.7.0,<0.14.0` / pinned custom-policy API | `omnigent-custom-policy-v1` / `v1` | prompt, tool_call, tool_result |
+| <ConnectorLabel id="kiro" /> | not gated | Kiro IDE and `kiro-cli --v3` read `.kiro/hooks/*.json` (workspace); `kiro-cli` 2.x reads its agent config | native hooks on both surfaces plus optional ACP contract lock | prompt, tool_call, tool_result; ACP adds permission, filesystem, terminal |
 
 Open-ended contracts leave `max_exclusive` empty until an upstream release
 publishes a breaking hook change. Bounded contracts stop setup from claiming

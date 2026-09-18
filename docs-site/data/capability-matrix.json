@@ -251,7 +251,27 @@
         "scope": "user,workspace"
       },
       "hilt": "Can block documented events but has no native resumable human-approval surface; confirm verdicts fall back explicitly.",
-      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. Cloud Devin, proxy/ACP transport, native OTLP, closed-beta plugins, and managed higher-layer enforcement are excluded."
+      "notes": "The native devin-hooks-v1 contract registers eight lifecycle events in user config.json or project .devin/hooks.v1.json. Exit 2 blocks; every other hook error fails open. Session and turn correlation use session_id and prompt_id, but Devin publishes no stable per-tool invocation ID, so paired tool state is detection-only. Restricted Mode disables hooks and agents. The separate native devin acp entry point is cataloged for the shared DefenseClaw ACP guard but is not certified; cloud Devin, proxy transport, native OTLP, closed-beta plugins, and managed higher-layer enforcement are excluded."
+    },
+    {
+      "id": "kiro",
+      "label": "Kiro",
+      "windowsSupport": "supported",
+      "windowsNote": "The defenseclaw-acp stdio mediator is platform-neutral; packaged Windows x64 evidence is required before release certification.",
+      "summary": "Kiro IDE and Kiro CLI share native hooks; ACP adds an optional mediated stdio path.",
+      "family": "hooks",
+      "toolInspection": "pre-execution + response-scan",
+      "subprocessPolicy": "none",
+      "hooks": {
+        "canBlock": true,
+        "canAskNative": false,
+        "askEvents": [],
+        "blockEvents": ["UserPromptSubmit", "PreToolUse"],
+        "supportsFailClosed": true,
+        "scope": "workspace"
+      },
+      "hilt": "Kiro has no native ask verdict; policy confirms are recorded and downgraded to alerts. ACP permission requests stay native client interactions and may be denied before the client displays them.",
+      "notes": "Native hooks are the enforcement boundary and are workspace-scoped: Kiro loads only .kiro/hooks/*.json relative to the project root, so a project-local defenseclaw.json is required and the user-global ~/.kiro/hooks copy is inert. A CLI 2.x defenseclaw agent carries the same hooks for kiro-cli 2.x. defenseclaw-acp remains an optional second surface configured with `defenseclaw acp setup --agent kiro`."
     },
     {
       "id": "zeptoclaw",

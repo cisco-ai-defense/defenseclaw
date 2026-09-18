@@ -682,30 +682,41 @@ PY
         # architecture inside every protected gateway. Cross-build all six
         # payloads so prepare-only cannot report green with placeholder bytes
         # that the release workflow's verify-runtime gate would reject.
-        local fixture_os fixture_arch fixture_stage canonical_archive
+        local fixture_os fixture_arch fixture_stage canonical_archive gateway_name acp_name
         for fixture_os in darwin linux windows; do
             for fixture_arch in amd64 arm64; do
                 fixture_stage="${WORKDIR}/gateway-${fixture_os}-${fixture_arch}"
                 mkdir -p "${fixture_stage}"
+                gateway_name="defenseclaw"
+                acp_name="defenseclaw-acp"
+                if [[ "${fixture_os}" == "windows" ]]; then
+                    gateway_name="defenseclaw.exe"
+                    acp_name="defenseclaw-acp.exe"
+                fi
                 (
                     cd "${build_root}"
                     CGO_ENABLED=0 GOOS="${fixture_os}" GOARCH="${fixture_arch}" \
                         go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
-                        -o "${fixture_stage}/defenseclaw" ./cmd/defenseclaw
+                        -o "${fixture_stage}/${gateway_name}" ./cmd/defenseclaw
+                    CGO_ENABLED=0 GOOS="${fixture_os}" GOARCH="${fixture_arch}" \
+                        go build -ldflags "-s -w -X main.version=${TARGET_VERSION}" \
+                        -o "${fixture_stage}/${acp_name}" ./cmd/defenseclaw-acp
                 )
                 if [[ "${fixture_os}" == "windows" ]]; then
                     canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_windows_${fixture_arch}.zip"
-                    python3 - "${fixture_stage}/defenseclaw" "${canonical_archive}" <<'PY'
+                    python3 - "${fixture_stage}/${gateway_name}" "${fixture_stage}/${acp_name}" "${canonical_archive}" <<'PY'
 import sys
 import zipfile
 
-source, destination = sys.argv[1:]
+gateway, acp, destination = sys.argv[1:]
 with zipfile.ZipFile(destination, mode="w", compression=zipfile.ZIP_DEFLATED) as archive:
-    archive.write(source, arcname="defenseclaw.exe")
+    archive.write(gateway, arcname="defenseclaw.exe")
+    archive.write(acp, arcname="defenseclaw-acp.exe")
 PY
                 else
                     canonical_archive="${out}/defenseclaw_${TARGET_VERSION}_${fixture_os}_${fixture_arch}.tar.gz"
-                    tar -czf "${canonical_archive}" -C "${fixture_stage}" defenseclaw
+                    tar -czf "${canonical_archive}" -C "${fixture_stage}" \
+                        defenseclaw defenseclaw-acp
                 fi
                 printf '%s\n' '{}' > "${canonical_archive}.sbom.json"
             done

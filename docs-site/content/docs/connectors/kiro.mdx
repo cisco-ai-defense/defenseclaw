@@ -1,0 +1,79 @@
+---
+title: Kiro
+description: Use Kiro IDE or Kiro CLI through one DefenseClaw connector. Each hook surface vetoes what Kiro honors there; ACP is an independent path.
+---
+
+Kiro is a regular DefenseClaw connector. First-run and `defenseclaw setup kiro`
+activate it whether the operator has Kiro IDE, Kiro CLI, or both, so
+DefenseClaw shows one Kiro row. The optional ACP path is `kiro-cli acp` behind
+`defenseclaw-acp` when the CLI is present.
+
+`defenseclaw setup kiro` installs two hook configs, because Kiro has two hook
+surfaces: `.kiro/hooks/defenseclaw.json` for Kiro IDE and `kiro-cli --v3`, and
+a CLI 2.x `defenseclaw` agent for bare `kiro-cli` (`kiro-cli` cannot put hooks
+on built-in `kiro_default`). Restart the CLI or run `/agent swap defenseclaw`
+so `/hooks` lists them.
+
+## What each surface can veto
+
+In action mode DefenseClaw vetoes wherever Kiro honors the veto, and records a
+would-block where it does not:
+
+| Surface | Reads | Blocks on |
+| --- | --- | --- |
+| Kiro IDE, `kiro-cli --v3` | `.kiro/hooks/*.json` | `PreToolUse` and `UserPromptSubmit` |
+| `kiro-cli` (2.x) | `~/.kiro/agents/defenseclaw.json` | `PreToolUse` only |
+
+Kiro CLI 2.x documents exit code 2 as a block for `preToolUse` only; on any
+other trigger a non-zero exit is a failed hook whose stderr becomes a warning.
+The v1 hook schema adds `UserPromptSubmit`.
+
+<Callout type="info">
+This is resolved per request, from the hook config that invoked the hook —
+never from the version. v3 is not a release: it is the `--v3` flag on the 2.x
+binary, so `kiro-cli --version` reports 2.x for both surfaces. Setup marks the
+`.kiro/hooks` command with `--hook-surface v3` and the hook forwards that
+marker, so one host can run both surfaces with the correct veto on each.
+</Callout>
+
+<Callout type="warn">
+Kiro hooks are **workspace-scoped**. Kiro discovers hooks only from
+`.kiro/hooks/*.json` relative to the project root and documents no user-level
+location, so the enforcing file is `<workspace>/.kiro/hooks/defenseclaw.json`.
+Setup also writes `~/.kiro/hooks/defenseclaw.json` so teardown can reclaim it,
+but Kiro never reads that copy: a global-only install blocks nothing, even
+though the connector reports healthy and the gateway keeps recording findings.
+Set `claw.workspace_dir` to the project root before running setup, and confirm
+with `defenseclaw doctor` — the `Connector scope [kiro]` check fails when no
+project-local hook file exists.
+</Callout>
+
+```bash
+defenseclaw acp setup --client zed --agent kiro
+# after reviewing observe-mode evidence
+defenseclaw acp setup --client zed --agent kiro --activate
+```
+
+The guard and setup path are supported on macOS, Linux, and native Windows;
+actual editor availability and official-client certification remain separate
+claims in the ACP inventory. Use `--client jetbrains` for JetBrains AI
+Assistant. Setup resolves absolute executables, pins their digests, preserves
+foreign editor settings, and never places the ACP scoped token in the editor's
+JSON. The guard also never sends that token over loopback: request and verdict
+authentication use a fresh nonce-bound HMAC exchange.
+
+## Platform support
+
+| Platform | Status | Setup and enforcement boundary |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | Configure through `defenseclaw acp setup`; the shipped guard mediates Kiro's ACP stdio transport. |
+| Native Windows x64 | **Supported** | Ordinary connector setup plus the shipped `defenseclaw-acp.exe` ACP guard. |
+| Windows ARM64 | **Not certified** | The guard cross-compiles, but the native Windows release remains x64-certified only. |
+
+The ACP guard is an independent enforcement path and needs none of the hook
+surface reasoning above: it vetoes prompts, output, permissions, filesystem,
+terminal, and extension methods at the protocol boundary regardless of which
+Kiro surface the editor launches. See the
+[ACP guard guide](/docs/acp-guard) for architecture, guarantees,
+configuration, supported agents, observability attributes, and the
+direct-launch bypass boundary.

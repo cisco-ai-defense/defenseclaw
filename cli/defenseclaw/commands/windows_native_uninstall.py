@@ -483,6 +483,7 @@ def _validate_install_state(
             "devin",
             "geminicli",
             "hermes",
+            "kiro",
             "omnigent",
             "windsurf",
             "opencode",

@@ -119,6 +119,84 @@ type AgentConfig struct {
 	Name string `mapstructure:"name" yaml:"name,omitempty"`
 }
 
+// ACPConfig controls the local stdio ACP guard. It contains no executable
+// commands or secrets: agent entry points are selected from the compiled ACP
+// catalog (or supplied explicitly to defenseclaw-acp), and credentials stay in
+// permission-restricted token files.
+type ACPConfig struct {
+	Enabled        bool                  `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Mode           string                `mapstructure:"mode" yaml:"mode,omitempty"`
+	DefaultProfile string                `mapstructure:"default_profile" yaml:"default_profile,omitempty"`
+	Clients        map[string]ACPBinding `mapstructure:"clients" yaml:"clients,omitempty"`
+	Agents         map[string]ACPBinding `mapstructure:"agents" yaml:"agents,omitempty"`
+	// Bindings carries per-pair policy keyed "<client>/<agent>", the same
+	// identifier `defenseclaw acp status` already prints. Clients and Agents
+	// each hold exactly one profile, and evaluation used to require both of
+	// those pins to equal the profile being evaluated, which made the profile
+	// global across the whole client x agent matrix: giving a second agent its
+	// own profile took it offline in every client pinned to a different one,
+	// in both directions. That also made `--activate` all-or-nothing, since
+	// promoting one pair promoted every pair sharing the profile, defeating
+	// the observe-then-activate rollout the CLI is built around.
+	//
+	// A present entry decides the profile for that pair alone. Absent, the
+	// Clients/Agents pins continue to decide it exactly as before, so an
+	// existing config behaves identically.
+	Bindings map[string]ACPBinding `mapstructure:"bindings" yaml:"bindings,omitempty"`
+	Profiles map[string]ACPProfile `mapstructure:"profiles" yaml:"profiles,omitempty"`
+}
+
+// ACPBindingKey is the canonical "<client>/<agent>" key for ACPConfig.Bindings.
+func ACPBindingKey(client, agent string) string {
+	return strings.ToLower(strings.TrimSpace(client)) + "/" + strings.ToLower(strings.TrimSpace(agent))
+}
+
+// ACPBindingFor returns the per-pair binding for one client/agent pair.
+func (c ACPConfig) ACPBindingFor(client, agent string) (ACPBinding, bool) {
+	if len(c.Bindings) == 0 {
+		return ACPBinding{}, false
+	}
+	binding, ok := c.Bindings[ACPBindingKey(client, agent)]
+	return binding, ok
+}
+
+// ACPProfileForPair resolves the profile name that governs one pair.
+//
+// Most specific wins: an explicit per-pair binding, then the agent pin, then
+// the client pin, then default_profile. The caller still validates that the
+// resolved name exists and admits the pair.
+func (c ACPConfig) ACPProfileForPair(client, agent string) string {
+	if binding, ok := c.ACPBindingFor(client, agent); ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Agents[agent]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Clients[client]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	return strings.TrimSpace(c.DefaultProfile)
+}
+
+type ACPBinding struct {
+	Enabled bool   `mapstructure:"enabled" yaml:"enabled,omitempty"`
+	Profile string `mapstructure:"profile" yaml:"profile,omitempty"`
+}
+
+type ACPProfile struct {
+	Mode           string   `mapstructure:"mode" yaml:"mode,omitempty" json:"mode,omitempty"`
+	FailMode       string   `mapstructure:"fail_mode" yaml:"fail_mode,omitempty" json:"fail_mode,omitempty"`
+	AllowedClients []string `mapstructure:"allowed_clients" yaml:"allowed_clients,omitempty" json:"allowed_clients,omitempty"`
+	AllowedAgents  []string `mapstructure:"allowed_agents" yaml:"allowed_agents,omitempty" json:"allowed_agents,omitempty"`
+	DeniedMethods  []string `mapstructure:"denied_methods" yaml:"denied_methods,omitempty" json:"denied_methods,omitempty"`
+}
+
 // CurrentConfigVersion is the last compatibility-decoder version used by the
 // explicit release upgrader. The strict target runtime is schema v8 and is
 // loaded through LoadRuntimeV8FromBytes plus the observability-v8 compiler; do
@@ -199,6 +277,7 @@ type Config struct {
 	DiscoverySource string                     `mapstructure:"discovery_source" yaml:"discovery_source,omitempty"`
 	Claw            ClawConfig                 `mapstructure:"claw"             yaml:"claw"`
 	Agent           AgentConfig                `mapstructure:"agent"            yaml:"agent,omitempty"`
+	ACP             ACPConfig                  `mapstructure:"acp"              yaml:"acp,omitempty"`
 	InspectLLM      InspectLLMConfig           `mapstructure:"inspect_llm"      yaml:"inspect_llm,omitempty"`
 	CiscoAIDefense  CiscoAIDefenseConfig       `mapstructure:"cisco_ai_defense" yaml:"cisco_ai_defense"`
 	Scanners        ScannersConfig             `mapstructure:"scanners"         yaml:"scanners"`
@@ -2894,6 +2973,12 @@ func loadConfigSource(
 			ReportConfigLoadError(context.Background(), "plugin_actions_invalid")
 		}
 		return nil, err
+	}
+	if err := cfg.ACP.Validate(); err != nil {
+		if ReportConfigLoadError != nil {
+			ReportConfigLoadError(context.Background(), "acp_invalid")
+		}
+		return nil, fmt.Errorf("config: acp: %w", err)
 	}
 
 	if err := cfg.Guardrail.Validate(); err != nil {

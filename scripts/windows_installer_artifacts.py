@@ -1079,11 +1079,12 @@ def build_sbom(args: argparse.Namespace) -> dict:
         payload_files[required["gateway_archive"]],
         "./expanded/gateway",
         component_packages[required["gateway_archive"]],
-        required=("defenseclaw.exe", "defenseclaw-hook.exe"),
+        required=("defenseclaw.exe", "defenseclaw-hook.exe", "defenseclaw-acp.exe"),
     )
     for member, display_name in (
         ("defenseclaw.exe", "DefenseClaw gateway executable"),
         ("defenseclaw-hook.exe", "DefenseClaw hook executable"),
+        ("defenseclaw-acp.exe", "DefenseClaw ACP guard executable"),
     ):
         file_id, sha256, _ = gateway_entries[member]
         package_id = document.add_package(
@@ -1098,7 +1099,12 @@ def build_sbom(args: argparse.Namespace) -> dict:
         )
         document.contains_file(package_id, file_id)
         document.relate(package_id, "EXPANDED_FROM_ARCHIVE", component_packages[required["gateway_archive"]])
-        go_component_packages["hook" if member == "defenseclaw-hook.exe" else "gateway"] = package_id
+        component = {
+            "defenseclaw.exe": "gateway",
+            "defenseclaw-hook.exe": "hook",
+            "defenseclaw-acp.exe": "acp-guard",
+        }[member]
+        go_component_packages[component] = package_id
 
     for prop, prefix in (
         ("wheel", "./expanded/wheels/defenseclaw"),

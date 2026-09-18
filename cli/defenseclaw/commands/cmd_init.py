@@ -90,6 +90,7 @@ _WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
             "opencode",
             "amp",
             "omnigent",
+            "kiro",
             "none",
         ],
         case_sensitive=False,
@@ -2073,6 +2074,34 @@ def _render_first_run_report(report, renderer) -> None:
     for cmd in report.next_commands[:5]:
         renderer.echo(f"  {cmd}")
     renderer.echo("  Adding another agent later: defenseclaw setup <connector>")
+    if summary := _unguarded_acp_summary():
+        renderer.echo(f"  Unguarded ACP agents found ({summary}): defenseclaw setup acp")
+
+
+def _unguarded_acp_summary() -> str:
+    """Name the editors that are launching an ACP agent unmediated.
+
+    First-run is the one moment the operator is definitely looking, and an
+    editor that already launches an ACP agent directly is exactly the traffic
+    the guard exists to mediate. Nothing surfaced it before, so it stayed
+    invisible until someone thought to run `acp setup` for a pair they had to
+    already know about.
+
+    Detection is advisory: any failure here must not affect the first-run
+    result, so the line is simply omitted.
+    """
+
+    try:
+        from defenseclaw.commands.cmd_acp import _detect_acp_clients
+
+        clients = sorted(
+            record["client"]
+            for record in _detect_acp_clients()
+            if record.get("adoptable") or record.get("client_registry")
+        )
+    except Exception:  # noqa: BLE001 - advisory hint only.
+        return ""
+    return ", ".join(clients)
 
 
 def _seed_rego_policies(policy_dir: str) -> None:

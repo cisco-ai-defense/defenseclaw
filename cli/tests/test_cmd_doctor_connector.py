@@ -3467,3 +3467,50 @@ class TestPluginRegistryRequiredFixer(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestKiroConnectorScopeRequiresWorkspace(unittest.TestCase):
+    """Kiro discovers hooks only from ``.kiro/hooks/*.json`` relative to the
+    project root and documents no user-level location, so a global-only
+    install enforces nothing. Reporting that as a pass is how an operator
+    ends up believing an unguarded Kiro is guarded: the connector reports
+    healthy and the gateway keeps recording findings, but no hook ever runs.
+    """
+
+    def _cfg(self, workspace: str) -> MagicMock:
+        cfg = MagicMock()
+        cfg.skill_dirs.return_value = []
+        cfg.plugin_dirs.return_value = []
+        cfg.mcp_servers.return_value = []
+        cfg.guardrail.effective_mode.return_value = "action"
+        cfg.guardrail.effective_hook_fail_mode.return_value = "open"
+        cfg.guardrail.effective_rule_pack_dir.return_value = ""
+        cfg.connector_workspace_dir.return_value = workspace
+        cfg.data_dir = ""
+        return cfg
+
+    def _scope_row(self, connector: str, workspace: str) -> dict:
+        r = _DoctorResult()
+        _check_connector_inventory(self._cfg(workspace), connector, r)
+        rows = [c for c in r.checks if c["label"] == "Connector scope"]
+        self.assertEqual(len(rows), 1, "expected exactly one scope row")
+        return rows[0]
+
+    def test_kiro_without_workspace_fails(self) -> None:
+        row = self._scope_row("kiro", "")
+        self.assertEqual(row["status"], "fail")
+        self.assertIn("project root", row["detail"])
+        self.assertEqual(row["reason_code"], "kiro_hooks_not_workspace_scoped")
+        self.assertIn("claw.workspace_dir", row["remediation"])
+
+    def test_kiro_with_workspace_passes(self) -> None:
+        row = self._scope_row("kiro", "/repo")
+        self.assertEqual(row["status"], "pass")
+        self.assertIn("/repo", row["detail"])
+
+    def test_other_connectors_keep_global_scope_pass(self) -> None:
+        # The requirement is Kiro's, not a global policy change: a
+        # user-scoped connector must still report a clean global install.
+        row = self._scope_row("codex", "")
+        self.assertEqual(row["status"], "pass")
+        self.assertEqual(row["detail"], "global user config")

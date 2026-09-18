@@ -125,7 +125,7 @@ Each row corresponds to one prompt in the animation. **Default** shows what pres
 | Prompt (default) | Flag equivalent | Note |
 | --- | --- | --- |
 | **Which agent framework?** *(default: previous selection or auto-detected)* | `--connector` / `--agent` | Explicitly selects the connector being configured. Accepts `claudecode`, `codex`, `cursor`, `devin`, `copilot`, `hermes`, `openhands`, `antigravity`, `opencode`, `amp`, `omnigent`, `openclaw`, `zeptoclaw`. |
-| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Devin, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, and OmniGent all have one-line hook or policy setup aliases. |
+| **Direct-to-upstream quick setup** *(default: observe)* | `defenseclaw setup <connector> --mode observe\|action` | Claude Code, Codex, Cursor, Devin, Copilot CLI, Hermes, OpenHands, Antigravity, OpenCode, Amp, Kiro, and OmniGent all have one-line hook or policy setup aliases. |
 | **Enable guardrail?** *(default: Y)* | implicit when `--connector` is set | Pass `--disable` to roll the guardrail back. |
 | **Select mode** *(default: observe)* | `--mode observe\|action` | `observe` logs; `action` enforces. |
 | **Select hook fail mode** *(default: current config; closed on a fresh install)* | **interactive-only here** | Change later with `defenseclaw guardrail fail-mode <open\|closed>`. Only asked on first setup or when `--mode` changes. |

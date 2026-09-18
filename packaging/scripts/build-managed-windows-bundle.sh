@@ -24,7 +24,7 @@
 #   3. Snapshot internal/managed/cloudreg/provider_cisco.go + go.mod + go.sum,
 #      apply the private overlay over the OSS stub, run `go get` to pin the
 #      cmid pseudo-version.
-#   4. Cross-build defenseclaw.exe, defenseclaw-hook.exe, and the isolated
+#   4. Cross-build defenseclaw.exe, defenseclaw-acp.exe, defenseclaw-hook.exe, and the isolated
 #      defenseclaw-cmid-broker.exe with
 #      GOOS=windows GOARCH=amd64 -tags cmid.
 #   5. Stamp VERSIONINFO / icon on all three PE binaries via
@@ -262,6 +262,7 @@ GATEWAY_EXE="${STAGE_DIR}/defenseclaw.exe"
 HOOK_EXE="${STAGE_DIR}/defenseclaw-hook.exe"
 BROKER_EXE="${STAGE_DIR}/defenseclaw-cmid-broker.exe"
 SENSOR_HELPER_EXE="${STAGE_DIR}/defenseclaw-sensor-helper.exe"
+ACP_EXE="${STAGE_DIR}/defenseclaw-acp.exe"
 # main.commit defaults to "unknown", which the enterprise Setup builder's
 # Assert-DefenseClawBinaryIdentity rejects. Stamp the exact HEAD sha we
 # derived above so identity verification passes.
@@ -271,6 +272,7 @@ LDFLAGS_BROKER="-s -w -buildid=defenseclaw-cmid-broker-${VERSION}-windows-amd64 
 # -H=windowsgui for the same reason the broker uses it: this runs under the
 # SCM with no console, and a console subsystem binary flashes a window.
 LDFLAGS_SENSOR_HELPER="-s -w -buildid=defenseclaw-sensor-helper-${VERSION}-windows-amd64 -H=windowsgui -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
+LDFLAGS_ACP="-s -w -buildid=defenseclaw-acp-${VERSION}-windows-amd64 -X main.version=${VERSION} -X main.commit=${SOURCE_COMMIT}"
 ICON_PATH="${REPO_ROOT}/macos/DefenseClawMac/DefenseClawMac/Assets.xcassets/AppIcon.appiconset/icon_256.png"
 
 echo "==> building defenseclaw.exe (windows/amd64 tags=cmid)"
@@ -282,6 +284,16 @@ echo "==> stamping defenseclaw.exe VERSIONINFO / icon"
 ( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
     -target windows_amd64 -executable "${GATEWAY_EXE}" \
     -component gateway -version "${VERSION}" -icon "${ICON_PATH}" )
+
+echo "==> building defenseclaw-acp.exe (windows/amd64)"
+( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
+    go build -trimpath -buildvcs=false \
+    -ldflags "${LDFLAGS_ACP}" -o "${ACP_EXE}" ./cmd/defenseclaw-acp )
+
+echo "==> stamping defenseclaw-acp.exe VERSIONINFO / icon"
+( cd "${REPO_ROOT}" && go run ./internal/tools/windowsresources \
+    -target windows_amd64 -executable "${ACP_EXE}" \
+    -component acp-guard -version "${VERSION}" -icon "${ICON_PATH}" )
 
 echo "==> building defenseclaw-hook.exe (windows/amd64 tags=cmid)"
 ( cd "${REPO_ROOT}" && GOOS=windows GOARCH=amd64 CGO_ENABLED=0 \
@@ -348,6 +360,7 @@ echo "==> staging kit payload"
 # scripts/check-assemble-parity.sh enforces the two assembler ends.
 EXPECTED_PAYLOAD_NAMES=(
     DefenseClawEnterprise.psm1
+    defenseclaw-acp.exe
     defenseclaw-cmid-broker.exe
     defenseclaw-gateway.exe
     defenseclaw-hook.exe
@@ -364,6 +377,7 @@ EXPECTED_PAYLOAD_NAMES=(
 # GATEWAY_EXE/HOOK_EXE.
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw.exe"
 cp "${GATEWAY_EXE}"                                      "${KIT_DIR}/payload/defenseclaw-gateway.exe"
+cp "${ACP_EXE}"                                          "${KIT_DIR}/payload/defenseclaw-acp.exe"
 cp "${HOOK_EXE}"                                         "${KIT_DIR}/payload/defenseclaw-hook.exe"
 cp "${BROKER_EXE}"                                       "${KIT_DIR}/payload/defenseclaw-cmid-broker.exe"
 cp "${SENSOR_HELPER_EXE}"                                "${KIT_DIR}/payload/defenseclaw-sensor-helper.exe"

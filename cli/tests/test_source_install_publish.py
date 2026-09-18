@@ -1325,3 +1325,43 @@ def test_exact_retirement_custody_entry_count_is_bounded(tmp_path: Path) -> None
     assert len(list(custody.iterdir())) == install_publish.MAX_CUSTODY_ENTRIES
     assert len(list(custody.glob("intent-*.json"))) == 1
     assert len(list(custody.glob("retired-*"))) == 1
+
+
+@pytest.mark.skipif(os.name == "nt", reason="descriptor-bound publisher is POSIX-only")
+def test_regular_replace_reclaims_completed_retirement_when_custody_is_full(
+    tmp_path: Path,
+) -> None:
+    install_dir = tmp_path / "bin"
+    install_dir.mkdir()
+    custody = install_dir / ".defenseclaw-install-custody"
+    destination = install_dir / "defenseclaw-acp"
+    source = tmp_path / "defenseclaw-acp"
+    payload = b"acp-v1\n"
+    source.write_bytes(payload)
+    source.chmod(0o755)
+    destination.write_bytes(payload)
+    destination.chmod(0o755)
+
+    for index in range((install_publish.MAX_CUSTODY_ENTRIES - 1) // 2):
+        retired = install_dir / f"prior-{index:03d}"
+        retired.write_bytes(f"prior-{index}\n".encode())
+        identity = install_publish.path_identity(retired)
+        assert install_publish.unlink_exact(retired, identity, custody_root=custody)
+
+    filled = len(list(custody.iterdir()))
+    assert filled + 2 > install_publish.MAX_CUSTODY_ENTRIES
+
+    replacement = b"acp-v2\n"
+    source.write_bytes(replacement)
+    source.chmod(0o755)
+    install_publish.publish_regular(
+        source,
+        destination,
+        hashlib.sha256(payload).hexdigest(),
+        expected_source=hashlib.sha256(replacement).hexdigest(),
+        custody_root=custody,
+    )
+
+    assert destination.read_bytes() == replacement
+    assert len(list(custody.iterdir())) <= install_publish.MAX_CUSTODY_ENTRIES
+    assert len(list(custody.glob("intent-*.json"))) == len(list(custody.glob("retired-*")))

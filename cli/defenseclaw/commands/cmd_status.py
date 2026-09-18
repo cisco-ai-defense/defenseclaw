@@ -390,6 +390,7 @@ _FRIENDLY_CONNECTOR_NAMES = {
     "opencode": "OpenCode",
     "amp": "Amp",
     "omnigent": "OmniGent",
+    "kiro": "Kiro",
 }
 _CURSOR_PRIORITY_CONFLICT_DISCLOSURE = "priority-conflict-detection=unavailable (none inferred)"
 

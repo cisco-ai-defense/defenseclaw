@@ -93,6 +93,7 @@ $ConnectorChoices = @(
     "omnigent",
     "opencode",
     "devin",
+    "kiro",
     "none"
 )
 $HookConnectors = @()

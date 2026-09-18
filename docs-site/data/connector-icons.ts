@@ -14,6 +14,7 @@ export const connectorIconDefinitions: Record<string, ConnectorIconDefinition> =
   cursor: { source: 'cursor.svg', target: 'cursor.svg', accent: '#57636d', monochrome: true },
   devin: { source: 'devin.svg', target: 'devin.svg', accent: '#0f172a', monochrome: true },
   hermes: { source: 'hermesagent.svg', target: 'hermes.svg', accent: '#ad7a1f', monochrome: true },
+  kiro: { source: 'kiro-color.svg', target: 'kiro.svg', accent: '#9046ff' },
   openclaw: { source: 'openclaw-color.svg', target: 'openclaw.svg', accent: '#ff4d4d' },
   opencode: { source: 'opencode.svg', target: 'opencode.svg', accent: '#52616b', monochrome: true },
   openhands: { source: 'openhands-color.svg', target: 'openhands.svg', accent: '#16a34a' },
