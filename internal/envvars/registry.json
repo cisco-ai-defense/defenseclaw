@@ -1420,7 +1420,7 @@
         },
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
-          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set"
+          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set; Set-DefenseClawSharedPathAcl also stops retrying a lost canonical-stamp race and rethrows on the first failure. The state-root ACL self-heal itself still runs when set, because re-stamping only hardens"
         },
         {
           "location": "packaging/macos/install.sh",

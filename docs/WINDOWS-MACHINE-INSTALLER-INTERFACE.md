@@ -177,6 +177,17 @@ DefenseClaw restart is needed for a region flip.
   `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` to make ancestor verdicts
   fatal again.
 
+  If AVC does not merely add an ACE but replaces the canonical DACL that
+  DefenseClaw stamps on its own state root, the installer repairs it
+  rather than failing: the stamp is retried, and the post-hardening
+  assertion re-stamps the canonical descriptor once and re-reads the path
+  before judging it. Both steps log the `managed_acl_self_heal` marker —
+  worth alerting on, since a host that emits it repeatedly has AVC and
+  DefenseClaw contending for the same DACL. What survives that repair is
+  still fatal if it means DefenseClaw itself lacks the rights it needs
+  (missing SYSTEM/Administrators/gateway rights); foreign *additional*
+  access remains advisory.
+
 - **Contents:** JSON with one meaningful key,
   `cisco_ai_defense_endpoint`, whose value is an HTTPS bare origin
   (no path, no query, no fragment, no userinfo). Both the shell

@@ -808,9 +808,15 @@ targets:
                 [string[]]$AllowedWriterSIDs,
                 [string[]]$AllowedReaderSIDs,
                 [hashtable]$RequiredRights,
+                [string[]]$AllowedOwnerSIDs,
                 [switch]$AllowInheritance,
                 [switch]$AllowUsersRead,
-                [switch]$RejectUntrustedRead
+                [switch]$RejectUntrustedRead,
+                # AIFW-34262: accepted and ignored so the mock keeps binding the
+                # real call sites, which pass these for the shared state root.
+                [switch]$AdvisoryUntrustedAccess,
+                [string]$SelfHealKind,
+                [string]$SelfHealGatewayServiceSID
             )
             if ($script:HarnessState.ContainsKey('purge_acl_invalid') -and
                 [bool]$script:HarnessState.purge_acl_invalid -and
