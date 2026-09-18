@@ -521,3 +521,211 @@ func TestACPSeveralAgentsInOneClientMustShareItsProfile(t *testing.T) {
 		}
 	}
 }
+
+// Per-pair bindings are what make observe-then-activate work on a shared
+// editor. Before them, clients[] and agents[] each held one profile and
+// evaluation required both pins to equal the evaluated profile, so promoting
+// one pair promoted every pair sharing that profile and giving a second agent
+// its own profile took it offline entirely.
+func TestACPPerPairBindingGivesEachPairItsOwnProfile(t *testing.T) {
+	cfg := &config.Config{ACP: config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "locked",
+		// The pins record only that each half is enabled.
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true}},
+		Agents: map[string]config.ACPBinding{
+			"kiro": {Enabled: true}, "devin": {Enabled: true}},
+		Bindings: map[string]config.ACPBinding{
+			"zed/kiro":  {Enabled: true, Profile: "locked"},
+			"zed/devin": {Enabled: true, Profile: "watch"},
+		},
+		Profiles: map[string]config.ACPProfile{
+			"locked": {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+			"watch":  {Mode: "observe", AllowedClients: []string{"zed"}, AllowedAgents: []string{"devin"}},
+		},
+	}}
+	// Same denied method on both profiles so the only difference is the mode.
+	for name, profile := range cfg.ACP.Profiles {
+		profile.DeniedMethods = []string{"session/prompt"}
+		cfg.ACP.Profiles[name] = profile
+	}
+
+	for _, tc := range []struct {
+		agent, profile, wantAction string
+		wantWouldBlock             bool
+	}{
+		// Action on its own pair: the denied method is a real veto.
+		{"kiro", "locked", "block", false},
+		// Observe on the other pair, in the same editor, at the same time.
+		{"devin", "watch", "allow", true},
+	} {
+		body, err := json.Marshal(acp.Evaluation{
+			Profile: tc.profile, Mode: acp.Mode(cfg.ACP.Profiles[tc.profile].Mode),
+			AgentID: tc.agent, ClientID: "zed",
+			Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+			Payload: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+		if response.Code != http.StatusOK {
+			t.Fatalf("zed/%s status=%d body=%s", tc.agent, response.Code, response.Body.String())
+		}
+		var verdict acp.Verdict
+		if err := json.Unmarshal(response.Body.Bytes(), &verdict); err != nil {
+			t.Fatal(err)
+		}
+		if verdict.Action != tc.wantAction || verdict.WouldBlock != tc.wantWouldBlock {
+			t.Errorf("zed/%s = action %q would_block %v, want %q/%v",
+				tc.agent, verdict.Action, verdict.WouldBlock, tc.wantAction, tc.wantWouldBlock)
+		}
+	}
+}
+
+func TestACPPerPairBindingBoundariesHold(t *testing.T) {
+	base := func() config.ACPConfig {
+		return config.ACPConfig{
+			Enabled: true, Mode: "action", DefaultProfile: "locked",
+			Clients:  map[string]config.ACPBinding{"zed": {Enabled: true}},
+			Agents:   map[string]config.ACPBinding{"kiro": {Enabled: true}},
+			Bindings: map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "locked"}},
+			Profiles: map[string]config.ACPProfile{"locked": {
+				Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}}},
+		}
+	}
+	evaluate := func(acpCfg config.ACPConfig, requested string) int {
+		body, err := json.Marshal(acp.Evaluation{
+			Profile: requested, Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+			Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+			Payload: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		(&APIServer{scannerCfg: &config.Config{ACP: acpCfg}}).handleACPEvaluate(response, request)
+		return response.Code
+	}
+
+	if code := evaluate(base(), "locked"); code != http.StatusOK {
+		t.Fatalf("baseline pair = %d, want 200", code)
+	}
+	// The guard's profile is pinned in its contract lock, so a request naming
+	// a profile this pair is not assigned is stale or forged.
+	if code := evaluate(base(), "watch"); code != http.StatusForbidden {
+		t.Errorf("mismatched requested profile = %d, want 403", code)
+	}
+	// Disabling either half still disables the pair: a per-pair binding adds
+	// policy, it does not grant a way around the client or agent switch.
+	disabledClient := base()
+	disabledClient.Clients["zed"] = config.ACPBinding{Enabled: false}
+	if code := evaluate(disabledClient, "locked"); code != http.StatusForbidden {
+		t.Errorf("disabled client = %d, want 403", code)
+	}
+	disabledAgent := base()
+	disabledAgent.Agents["kiro"] = config.ACPBinding{Enabled: false}
+	if code := evaluate(disabledAgent, "locked"); code != http.StatusForbidden {
+		t.Errorf("disabled agent = %d, want 403", code)
+	}
+	// Disabling just the pair leaves both halves usable elsewhere.
+	disabledPair := base()
+	disabledPair.Bindings["zed/kiro"] = config.ACPBinding{Enabled: false, Profile: "locked"}
+	if code := evaluate(disabledPair, "locked"); code != http.StatusForbidden {
+		t.Errorf("disabled pair = %d, want 403", code)
+	}
+	// The profile must still admit the pair.
+	outside := base()
+	outside.Profiles["locked"] = config.ACPProfile{
+		Mode: "action", AllowedClients: []string{"jetbrains"}, AllowedAgents: []string{"kiro"}}
+	if code := evaluate(outside, "locked"); code != http.StatusForbidden {
+		t.Errorf("client outside profile allow-list = %d, want 403", code)
+	}
+}
+
+// A managed credential is enrolled against one profile. Per-pair resolution
+// must not let a configuration change move that pair to a different profile
+// while the enrolled credential keeps working -- the credential is the
+// authority for what an enrollment may evaluate as.
+func TestACPManagedCredentialMustMatchThePairsResolvedProfile(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("managed credential authentication requires an installer-protected service tree on Windows")
+	}
+	dataDir := t.TempDir()
+	credential, err := acp.EnsureEnterpriseCredential(dataDir, "uid:501", "zed", "kiro", "locked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.Config{
+		DataDir: dataDir, DeploymentMode: "managed_enterprise",
+		ACP: config.ACPConfig{
+			Enabled: true, Mode: "action", DefaultProfile: "locked",
+			Clients:  map[string]config.ACPBinding{"zed": {Enabled: true}},
+			Agents:   map[string]config.ACPBinding{"kiro": {Enabled: true}},
+			Bindings: map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "locked"}},
+			Profiles: map[string]config.ACPProfile{
+				"locked": {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+				"watch":  {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+			},
+		},
+	}
+	evaluate := func(requested string) int {
+		body, err := json.Marshal(acp.Evaluation{
+			Profile: requested, Mode: acp.ModeAction, AgentID: "kiro", ClientID: "zed",
+			Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+			Payload: json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt","params":{}}`),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+		request = request.WithContext(withACPEnterpriseCredential(request.Context(), credential))
+		response := httptest.NewRecorder()
+		(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+		return response.Code
+	}
+
+	if code := evaluate("locked"); code != http.StatusOK {
+		t.Fatalf("enrolled profile = %d, want 200", code)
+	}
+	// Move the pair to a profile the credential was not enrolled against.
+	cfg.ACP.Bindings["zed/kiro"] = config.ACPBinding{Enabled: true, Profile: "watch"}
+	if code := evaluate("watch"); code != http.StatusForbidden {
+		t.Errorf("credential outside the pair's resolved profile = %d, want 403", code)
+	}
+}
+
+// Resolution has to agree with the Python implementation that writes the
+// config, so pin the precedence order directly.
+func TestACPProfileForPairPrecedence(t *testing.T) {
+	cfg := config.ACPConfig{
+		DefaultProfile: "fallback",
+		Clients:        map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "client-pin"}},
+		Agents:         map[string]config.ACPBinding{"kiro": {Enabled: true, Profile: "agent-pin"}},
+		Bindings:       map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "pair"}},
+	}
+	if got := cfg.ACPProfileForPair("zed", "kiro"); got != "pair" {
+		t.Errorf("pair binding should win, got %q", got)
+	}
+	cfg.Bindings = map[string]config.ACPBinding{"zed/kiro": {Enabled: true}}
+	if got := cfg.ACPProfileForPair("zed", "kiro"); got != "agent-pin" {
+		t.Errorf("a binding with no profile should fall through to the agent pin, got %q", got)
+	}
+	delete(cfg.Agents, "kiro")
+	cfg.Agents = map[string]config.ACPBinding{"kiro": {Enabled: true}}
+	if got := cfg.ACPProfileForPair("zed", "kiro"); got != "client-pin" {
+		t.Errorf("want the client pin, got %q", got)
+	}
+	cfg.Clients = map[string]config.ACPBinding{"zed": {Enabled: true}}
+	if got := cfg.ACPProfileForPair("zed", "kiro"); got != "fallback" {
+		t.Errorf("want default_profile, got %q", got)
+	}
+	// Lookup is case-insensitive on both halves so a request cannot miss a
+	// binding by capitalisation.
+	cfg.Bindings = map[string]config.ACPBinding{"zed/kiro": {Enabled: true, Profile: "pair"}}
+	if got := cfg.ACPProfileForPair("ZED", "Kiro"); got != "pair" {
+		t.Errorf("case-insensitive lookup failed, got %q", got)
+	}
+}

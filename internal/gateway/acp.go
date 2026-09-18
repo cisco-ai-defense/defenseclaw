@@ -110,15 +110,12 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP guard is not enabled"})
 		return
 	}
-	profileName, profile, ok := resolveACPProfile(cfg.ACP, req.Profile)
+	profileName, profile, ok := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
 	if !ok {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP profile is not configured"})
 		return
 	}
-	clientBinding, clientOK := cfg.ACP.Clients[req.ClientID]
-	agentBinding, agentOK := cfg.ACP.Agents[req.AgentID]
-	if !clientOK || !clientBinding.Enabled || clientBinding.Profile != profileName ||
-		!agentOK || !agentBinding.Enabled || agentBinding.Profile != profileName {
+	if !acpPairIsBound(cfg.ACP, req.ClientID, req.AgentID, profileName) {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP client or agent binding is disabled or pinned to another profile"})
 		return
 	}
@@ -225,6 +222,49 @@ func (a *APIServer) recordACPEvaluationV8(
 		direction: string(req.Direction), surface: string(req.Surface), profile: profile,
 	}
 	_ = a.emitGuardrailEventV8(ctx, facts)
+}
+
+// resolveACPProfileForPair resolves the profile governing one client/agent
+// pair and refuses a guard that asks for a different one.
+//
+// The guard carries its profile in argv, pinned into its contract lock at
+// setup, so a request naming a profile the configuration does not assign to
+// that pair is stale or forged and must not be evaluated under either name.
+func resolveACPProfileForPair(
+	cfg config.ACPConfig, client, agent, requested string,
+) (string, config.ACPProfile, bool) {
+	resolved := cfg.ACPProfileForPair(client, agent)
+	if resolved == "" {
+		resolved = "default"
+	}
+	if requested = strings.TrimSpace(requested); requested != "" && requested != resolved {
+		return "", config.ACPProfile{}, false
+	}
+	profile, ok := cfg.Profiles[resolved]
+	return resolved, profile, ok
+}
+
+// acpPairIsBound reports whether both halves of a pair are enabled and agree
+// with the resolved profile.
+//
+// A per-pair binding is the authority when present: it exists precisely so one
+// pair can use a profile the client or agent pin does not name, so requiring
+// the pins to match it would defeat it. The pins still have to admit the pair
+// at all, so disabling a client or an agent continues to disable every pair
+// that uses it.
+func acpPairIsBound(cfg config.ACPConfig, client, agent, profileName string) bool {
+	clientBinding, clientOK := cfg.Clients[client]
+	agentBinding, agentOK := cfg.Agents[agent]
+	if !clientOK || !clientBinding.Enabled || !agentOK || !agentBinding.Enabled {
+		return false
+	}
+	if pair, ok := cfg.ACPBindingFor(client, agent); ok {
+		if !pair.Enabled {
+			return false
+		}
+		return strings.TrimSpace(pair.Profile) == "" || strings.TrimSpace(pair.Profile) == profileName
+	}
+	return clientBinding.Profile == profileName && agentBinding.Profile == profileName
 }
 
 func effectiveACPMode(cfg config.ACPConfig, profileName string) string {

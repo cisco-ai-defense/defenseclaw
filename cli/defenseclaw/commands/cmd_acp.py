@@ -446,24 +446,32 @@ def setup_cmd(
         raise click.ClickException("--managed requires deployment_mode: managed_enterprise")
     if not managed and (runtime_data_dir or token_file):
         raise click.ClickException("--runtime-data-dir and --token-file are managed-enrollment options")
-    # A binding is intentionally single-profile. Silently moving an existing
-    # client or agent would change policy for every other entry using it.
-    for kind, name, binding in (
-        ("client", client, app.cfg.acp.clients.get(client)),
-        ("agent", agent, app.cfg.acp.agents.get(agent)),
-    ):
-        if binding is not None and binding.profile and binding.profile != profile:
-            raise click.ClickException(
-                f"{kind} {name} is already bound to profile {binding.profile}; remove it before rebinding"
-            )
+    # Policy is per pair. A client or agent pin may still be shared by other
+    # pairs, so this pair records its own binding and never rewrites a pin
+    # another pair depends on.
+    pair_key = app.cfg.acp.binding_key(client, agent)
     existing_profile = app.cfg.acp.profiles.get(profile)
-    profile_in_use = any(
-        binding.profile == profile for binding in (*app.cfg.acp.clients.values(), *app.cfg.acp.agents.values())
+    # Refuse only when the requested mode would change a profile that another
+    # pair is already using -- that pair did not ask to be promoted or demoted.
+    # Resolve every already-configured pair, not just the ones with an
+    # explicit binding. A pair that inherits this profile through its client
+    # or agent pin is affected by a mode change just as much, and looking only
+    # at `bindings` would silently promote or demote it.
+    other_pairs_using_profile = sorted(
+        f"{other_client}/{other_agent}"
+        for other_client, other_agent in _managed_pairs()
+        if app.cfg.acp.binding_key(other_client, other_agent) != pair_key
+        and app.cfg.acp.profile_for_pair(other_client, other_agent) == profile
     )
-    if existing_profile is not None and profile_in_use and existing_profile.mode and existing_profile.mode != mode:
+    if (
+        existing_profile is not None
+        and other_pairs_using_profile
+        and existing_profile.mode
+        and existing_profile.mode != mode
+    ):
         raise click.ClickException(
-            f"profile {profile} already uses {existing_profile.mode} mode; "
-            "choose another profile instead of changing other bindings"
+            f"profile {profile} is {existing_profile.mode} mode for {', '.join(other_pairs_using_profile)}; "
+            f"pass --profile <name> to give {pair_key} its own profile instead of changing theirs"
         )
     if managed:
         client_binding = app.cfg.acp.clients.get(client)
@@ -531,10 +539,30 @@ def setup_cmd(
         _refresh_client_contract_digests(data_dir, client, path)
         if not managed:
             app.cfg.acp.enabled = True
-            app.cfg.acp.mode = mode
-            app.cfg.acp.default_profile = profile
-            app.cfg.acp.clients[client] = ACPBinding(enabled=True, profile=profile)
-            app.cfg.acp.agents[agent] = ACPBinding(enabled=True, profile=profile)
+            # These two are global fallbacks, not this pair's policy. Writing
+            # them on every setup made a second pair in observe mode flip the
+            # default for pairs that inherit it, and left `acp.mode`
+            # describing whichever pair was configured last. Seed them from
+            # the first binding and leave them alone afterwards; this pair's
+            # own mode lives on its profile.
+            existing_pairs = {
+                app.cfg.acp.binding_key(other_client, other_agent)
+                for other_client, other_agent in _managed_pairs()
+            } - {pair_key}
+            if not existing_pairs:
+                # The first binding seeds both fallbacks; leaving
+                # default_profile at its dataclass default would point the
+                # last-resort lookup at a profile setup never created.
+                app.cfg.acp.mode = mode
+                app.cfg.acp.default_profile = profile
+            # The pair is the authority. The client and agent pins record
+            # only that each half is enabled; leaving their profile blank
+            # keeps them from dragging other pairs onto this profile.
+            app.cfg.acp.bindings[pair_key] = ACPBinding(enabled=True, profile=profile)
+            app.cfg.acp.clients.setdefault(client, ACPBinding(enabled=True, profile=""))
+            app.cfg.acp.agents.setdefault(agent, ACPBinding(enabled=True, profile=""))
+            app.cfg.acp.clients[client].enabled = True
+            app.cfg.acp.agents[agent].enabled = True
             profile_value = existing_profile or ACPProfile()
             profile_value.mode = mode
             profile_value.fail_mode = "closed" if activate else "open"
@@ -596,6 +624,9 @@ def remove_cmd(app: AppContext, client: str, agent: str, managed: bool, runtime_
         path = _remove_client_entry(client, agent)
         remaining = _managed_pairs()
         if not managed:
+            # The pair's own policy goes with the pair. The client and agent
+            # pins survive while any other pair still uses that half.
+            app.cfg.acp.bindings.pop(app.cfg.acp.binding_key(client, agent), None)
             if not any(pair_client == client for pair_client, _ in remaining):
                 app.cfg.acp.clients.pop(client, None)
             if not any(pair_agent == agent for _, pair_agent in remaining):
@@ -636,13 +667,25 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
-    bindings = {
-        f"{client}/{agent}": {
-            "healthy": not (problems := _verify_binding(data_dir, client, agent)),
+    bindings = {}
+    for client, agent in sorted(_managed_pairs()):
+        problems = _verify_binding(data_dir, client, agent)
+        profile = app.cfg.acp.profile_for_pair(client, agent)
+        resolved = app.cfg.acp.profiles.get(profile)
+        bindings[f"{client}/{agent}"] = {
+            "healthy": not problems,
             "problems": problems,
+            # Policy is per pair, so the resolved profile and its mode belong
+            # on the binding rather than only at the top level.
+            "profile": profile,
+            "mode": (resolved.mode if resolved else "") or app.cfg.acp.mode,
+            "profile_source": (
+                "binding"
+                if app.cfg.acp.bindings.get(app.cfg.acp.binding_key(client, agent), None) is not None
+                and app.cfg.acp.bindings[app.cfg.acp.binding_key(client, agent)].profile.strip()
+                else "inherited"
+            ),
         }
-        for client, agent in sorted(_managed_pairs())
-    }
     click.echo(
         json.dumps(
             {

@@ -122,68 +122,61 @@ The editor launches one `defenseclaw-acp` process per entry, so the two
 sessions are independent: separate stdio pipes, separate turn buffers, separate
 pending-ID accounting. A block in one does not interrupt the other.
 
-<Callout type="warn">
-**Every agent guarded in one client must use that client's profile.**
-`acp.clients` and `acp.agents` each pin exactly one profile, and evaluation
-requires the client pin and the agent pin to both equal the profile being
-evaluated. Pinning a second agent to a profile of its own therefore takes that
-agent offline in the shared editor -- in both directions, which is easy to
-misread as a broken binding:
-
-```text
-clients.zed.profile = kiro-only
-
-agents.kiro.profile  = kiro-only   → zed + kiro   evaluates
-agents.devin.profile = devin-only  → zed + devin  403 under devin-only  (client pin differs)
-                                   → zed + devin  403 under kiro-only   (agent pin differs)
-```
-
-The same constraint applies with the roles swapped. Give two clients their own
-profiles and the agent can only satisfy one of them:
-
-```text
-agents.kiro.profile = zed-p
-
-clients.zed.profile       = zed-p  → zed + kiro        evaluates
-clients.jetbrains.profile = jb-p   → jetbrains + kiro  403 under either profile
-```
-
-So across a whole client x agent matrix the profile is effectively global: the
-only arrangement in which every pair evaluates is one profile shared by every
-client and every agent. `allowed_clients` and `allowed_agents` are the only
-per-binding controls today.
-
-The guard fails closed on that 403 in action mode, so the refused agent stops
-working in that editor rather than running unguarded.
-</Callout>
-
-Give the shared client one profile and list both agents in it:
+Policy is **per pair**. Each `<client>/<agent>` binding resolves its own
+profile, so one editor can run one agent in action mode while another stays in
+observe:
 
 ```yaml
 acp:
   enabled: true
-  mode: action
-  default_profile: team
+  default_profile: locked
   clients:
-    zed: {enabled: true, profile: team}
+    zed: {enabled: true}          # the pin records only that the half is enabled
   agents:
-    kiro:  {enabled: true, profile: team}
-    devin: {enabled: true, profile: team}
+    kiro:  {enabled: true}
+    devin: {enabled: true}
+  bindings:
+    zed/kiro:  {enabled: true, profile: locked}   # action
+    zed/devin: {enabled: true, profile: watch}    # observe while it earns trust
   profiles:
-    team:
+    locked:
       mode: action
       fail_mode: closed
       allowed_clients: [zed]
-      allowed_agents: [kiro, devin]
+      allowed_agents: [kiro]
       denied_methods: [fs/write_text_file]
+    watch:
+      mode: observe
+      allowed_clients: [zed]
+      allowed_agents: [devin]
 ```
 
-Consequences worth planning around:
+`defenseclaw acp status` reports each binding's resolved profile and whether it
+came from the binding or was inherited:
 
-- **Mode and denied methods are per profile, so they are shared.** One editor
-  cannot run Kiro in action mode and Devin in observe mode. Promote or demote
-  both, or guard the second agent in a different editor, which has its own
-  client pin and can carry its own profile.
+```json
+"zed/kiro":  {"profile": "locked", "mode": "action",  "profile_source": "binding"}
+"zed/devin": {"profile": "watch",  "mode": "observe", "profile_source": "binding"}
+```
+
+Resolution is most-specific-first: the `bindings` entry, then the agent pin,
+then the client pin, then `default_profile`. A configuration with no
+`bindings` therefore behaves exactly as it did before they existed.
+
+Two boundaries a per-pair binding does **not** cross:
+
+- **Disabling a client or an agent still disables every pair that uses it.** A
+  binding adds policy; it is not a way around either switch.
+- **The resolved profile must still admit the pair** through
+  `allowed_clients` and `allowed_agents`.
+
+A request naming a profile the configuration does not assign to that pair is
+refused rather than evaluated under either name. The guard's profile is pinned
+into its contract lock at setup, so a mismatch means a stale or forged
+request.
+
+Other consequences worth planning around:
+
 - **`allowed_agents` is the "only these agents" control.** Removing an agent
   from the shared profile refuses its evaluations while leaving its editor
   entry in place; removing the entry with

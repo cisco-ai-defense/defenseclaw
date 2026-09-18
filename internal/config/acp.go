@@ -42,10 +42,17 @@ func (a *ACPConfig) Validate() error {
 	if a.Enabled && strings.TrimSpace(a.DefaultProfile) == "" {
 		return fmt.Errorf("default_profile is required when ACP is enabled")
 	}
-	if err := validateACPBindings("clients", a.Clients, a.Profiles); err != nil {
+	pinProfileRequired := len(a.Bindings) == 0
+	if err := validateACPBindings("clients", a.Clients, a.Profiles, pinProfileRequired); err != nil {
 		return err
 	}
-	if err := validateACPBindings("agents", a.Agents, a.Profiles); err != nil {
+	if err := validateACPBindings("agents", a.Agents, a.Profiles, pinProfileRequired); err != nil {
+		return err
+	}
+	if len(a.Bindings) > maxACPBindings {
+		return fmt.Errorf("ACP bindings are limited to %d entries", maxACPBindings)
+	}
+	if err := validateACPPairBindings(*a); err != nil {
 		return err
 	}
 
@@ -123,20 +130,73 @@ func validateACPStableName(field, value string) error {
 	return nil
 }
 
-func validateACPBindings(kind string, bindings map[string]ACPBinding, profiles map[string]ACPProfile) error {
+// validateACPBindings checks the client and agent pins.
+//
+// profileRequired is false once per-pair bindings exist: a pin then records
+// only that its half is enabled and the pair supplies the profile, so
+// demanding one here would reject every configuration the CLI writes.
+// Resolution still falls back to default_profile, which is itself required
+// whenever ACP is enabled, so an unset pin can never leave a pair without a
+// profile to resolve.
+func validateACPBindings(
+	kind string,
+	bindings map[string]ACPBinding,
+	profiles map[string]ACPProfile,
+	profileRequired bool,
+) error {
 	for _, name := range sortedACPKeys(bindings) {
 		if err := validateACPStableName(kind, name); err != nil {
 			return err
 		}
 		binding := bindings[name]
 		if binding.Profile == "" {
-			return fmt.Errorf("%s[%q].profile is required", kind, name)
+			if profileRequired {
+				return fmt.Errorf("%s[%q].profile is required", kind, name)
+			}
+			continue
 		}
 		if err := validateACPStableName(kind+" profile", binding.Profile); err != nil {
 			return err
 		}
 		if _, ok := profiles[binding.Profile]; !ok {
 			return fmt.Errorf("%s[%q].profile %q is not defined in profiles", kind, name, binding.Profile)
+		}
+	}
+	return nil
+}
+
+// validateACPPairBindings checks the per-pair bindings, whose keys are
+// "<client>/<agent>" rather than a single stable name, and whose halves must
+// both be configured. A pair naming a client or agent that is not present
+// would otherwise sit in the file looking effective while evaluation refuses
+// it for an unrelated-looking reason.
+func validateACPPairBindings(a ACPConfig) error {
+	for _, name := range sortedACPKeys(a.Bindings) {
+		client, agent, ok := strings.Cut(name, "/")
+		if !ok {
+			return fmt.Errorf("bindings[%q] must be \"<client>/<agent>\"", name)
+		}
+		if err := validateACPStableName("bindings client", client); err != nil {
+			return err
+		}
+		if err := validateACPStableName("bindings agent", agent); err != nil {
+			return err
+		}
+		if _, ok := a.Clients[client]; !ok {
+			return fmt.Errorf("bindings[%q] client %q is not defined in clients", name, client)
+		}
+		if _, ok := a.Agents[agent]; !ok {
+			return fmt.Errorf("bindings[%q] agent %q is not defined in agents", name, agent)
+		}
+		binding := a.Bindings[name]
+		if binding.Profile == "" {
+			continue
+		}
+		if err := validateACPStableName("bindings profile", binding.Profile); err != nil {
+			return err
+		}
+		if _, ok := a.Profiles[binding.Profile]; !ok {
+			return fmt.Errorf("bindings[%q].profile %q is not defined in profiles", name, binding.Profile)
 		}
 	}
 	return nil

@@ -5,6 +5,8 @@ package config
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -114,5 +116,97 @@ func TestACPConfigValidateRejectsAmbiguousPolicyValues(t *testing.T) {
 				t.Fatal("expected validation error")
 			}
 		})
+	}
+}
+
+// Per-pair bindings have to survive the real loader, not just the struct.
+// Go validation used to require a profile on every client and agent pin,
+// which would have rejected every configuration the CLI writes once it
+// started recording policy per pair -- the CLI would write a file the
+// gateway refused to load.
+func TestACPPerPairBindingsLoadFromFile(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.yaml")
+	if err := os.WriteFile(path, []byte(`config_version: 8
+acp:
+  enabled: true
+  mode: action
+  default_profile: locked
+  clients:
+    zed:
+      enabled: true
+  agents:
+    kiro:
+      enabled: true
+    devin:
+      enabled: true
+  bindings:
+    zed/kiro:
+      enabled: true
+      profile: locked
+    zed/devin:
+      enabled: true
+      profile: watch
+  profiles:
+    locked:
+      mode: action
+      allowed_clients: [zed]
+      allowed_agents: [kiro]
+    watch:
+      mode: observe
+      allowed_clients: [zed]
+      allowed_agents: [devin]
+`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if len(cfg.ACP.Bindings) != 2 {
+		t.Fatalf("bindings = %#v, want two entries", cfg.ACP.Bindings)
+	}
+	if got := cfg.ACP.ACPProfileForPair("zed", "kiro"); got != "locked" {
+		t.Errorf("zed/kiro resolved %q, want locked", got)
+	}
+	if got := cfg.ACP.ACPProfileForPair("zed", "devin"); got != "watch" {
+		t.Errorf("zed/devin resolved %q, want watch", got)
+	}
+}
+
+func TestACPPairBindingValidation(t *testing.T) {
+	base := func() *ACPConfig {
+		return &ACPConfig{
+			Enabled: true, Mode: "action", DefaultProfile: "locked",
+			Clients:  map[string]ACPBinding{"zed": {Enabled: true}},
+			Agents:   map[string]ACPBinding{"kiro": {Enabled: true}},
+			Bindings: map[string]ACPBinding{"zed/kiro": {Enabled: true, Profile: "locked"}},
+			Profiles: map[string]ACPProfile{"locked": {Mode: "action"}},
+		}
+	}
+	if err := base().Validate(); err != nil {
+		t.Fatalf("baseline per-pair config rejected: %v", err)
+	}
+
+	// A pin still needs a profile when there are no pair bindings, so the
+	// pre-per-pair contract is unchanged for configurations that predate it.
+	legacy := base()
+	legacy.Bindings = nil
+	if err := legacy.Validate(); err == nil {
+		t.Error("a pin with no profile and no pair bindings should still be rejected")
+	}
+
+	for name, mutate := range map[string]func(*ACPConfig){
+		"unknown profile":   func(c *ACPConfig) { c.Bindings["zed/kiro"] = ACPBinding{Enabled: true, Profile: "nope"} },
+		"unknown client":    func(c *ACPConfig) { c.Bindings["other/kiro"] = ACPBinding{Enabled: true} },
+		"unknown agent":     func(c *ACPConfig) { c.Bindings["zed/other"] = ACPBinding{Enabled: true} },
+		"missing separator": func(c *ACPConfig) { c.Bindings["zedkiro"] = ACPBinding{Enabled: true} },
+		"uppercase half":    func(c *ACPConfig) { c.Bindings["Zed/kiro"] = ACPBinding{Enabled: true} },
+	} {
+		cfg := base()
+		mutate(cfg)
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("%s should be rejected", name)
+		}
 	}
 }

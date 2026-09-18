@@ -557,3 +557,101 @@ def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch
         assert json.loads(again.output)["adopted"] == []
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_second_pair_in_another_mode_does_not_repoint_global_fallbacks(tmp_path, monkeypatch):
+    """Per-pair setup must not promote or demote pairs it was not asked about.
+
+    `acp.mode` and `acp.default_profile` are global fallbacks. Writing them on
+    every setup meant configuring a second pair in observe mode flipped the
+    default out from under any pair that inherits it, and left `acp.mode`
+    describing whichever pair happened to be configured last.
+    """
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "guard")
+    kiro = _binary(tmp_path / "kiro-cli")
+    agent_binary = _binary(tmp_path / "agent")
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="probe"):
+            first = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+                 "--agent-binary", kiro, "--profile", "locked", "--activate", "--json-output"],
+                obj=app,
+            )
+            assert first.exit_code == 0, first.output
+            assert app.cfg.acp.mode == "action"
+            assert app.cfg.acp.default_profile == "locked"
+
+            second = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "cursor", "--guard-binary", guard,
+                 "--agent-binary", agent_binary, "--profile", "watch", "--json-output"],
+                obj=app,
+            )
+            assert second.exit_code == 0, second.output
+
+        # The observe pair did not drag the global fallbacks with it.
+        assert app.cfg.acp.mode == "action"
+        assert app.cfg.acp.default_profile == "locked"
+        # Each pair carries its own profile, and each profile its own mode.
+        assert app.cfg.acp.bindings["zed/kiro"].profile == "locked"
+        assert app.cfg.acp.bindings["zed/cursor"].profile == "watch"
+        assert app.cfg.acp.profiles["locked"].mode == "action"
+        assert app.cfg.acp.profiles["watch"].mode == "observe"
+        assert app.cfg.acp.profile_for_pair("zed", "kiro") == "locked"
+        assert app.cfg.acp.profile_for_pair("zed", "cursor") == "watch"
+        # The shared pins stay profile-free so neither pair pulls the other.
+        assert app.cfg.acp.clients["zed"].profile == ""
+        assert app.cfg.acp.clients["zed"].enabled is True
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_activating_a_profile_another_pair_resolves_through_a_pin_is_refused(tmp_path, monkeypatch):
+    """The mode-conflict check must see pairs that inherit, not only bindings.
+
+    A pair configured before per-pair bindings existed resolves its profile
+    through the client/agent pin. Looking only at `bindings` would let a later
+    `--activate` flip that shared profile's mode and silently promote it.
+    """
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "guard")
+    kiro = _binary(tmp_path / "kiro-cli")
+    agent_binary = _binary(tmp_path / "agent")
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="probe"):
+            first = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+                 "--agent-binary", kiro, "--profile", "shared", "--json-output"],
+                obj=app,
+            )
+            assert first.exit_code == 0, first.output
+            # Simulate a pre-per-pair config: the pair resolves through pins.
+            app.cfg.acp.bindings.pop("zed/kiro")
+            app.cfg.acp.clients["zed"].profile = "shared"
+            app.cfg.acp.agents["kiro"].profile = "shared"
+            assert app.cfg.acp.profile_for_pair("zed", "kiro") == "shared"
+
+            clash = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "cursor", "--guard-binary", guard,
+                 "--agent-binary", agent_binary, "--profile", "shared", "--activate", "--json-output"],
+                obj=app,
+            )
+        assert clash.exit_code != 0
+        assert "zed/kiro" in clash.output
+        assert "--profile" in clash.output
+        # kiro was not promoted behind the operator's back.
+        assert app.cfg.acp.profiles["shared"].mode == "observe"
+    finally:
+        cleanup_app(app, db_path, data_dir)

@@ -577,7 +577,29 @@ class ACPConfig:
     default_profile: str = "default"
     clients: dict[str, ACPBinding] = field(default_factory=dict)
     agents: dict[str, ACPBinding] = field(default_factory=dict)
+    # Per-pair policy keyed "<client>/<agent>". Mirrors ACPConfig.Bindings in
+    # internal/config/config.go: a present entry decides the profile for that
+    # pair alone, so one editor can run one agent in action mode while another
+    # stays in observe. Absent, the clients/agents pins decide it as before.
+    bindings: dict[str, ACPBinding] = field(default_factory=dict)
     profiles: dict[str, ACPProfile] = field(default_factory=dict)
+
+    def binding_key(self, client: str, agent: str) -> str:
+        return f"{client.strip().lower()}/{agent.strip().lower()}"
+
+    def profile_for_pair(self, client: str, agent: str) -> str:
+        """Most specific wins: pair, then agent pin, then client pin, then default."""
+
+        pair = self.bindings.get(self.binding_key(client, agent))
+        if pair is not None and pair.profile.strip():
+            return pair.profile.strip()
+        agent_binding = self.agents.get(agent)
+        if agent_binding is not None and agent_binding.profile.strip():
+            return agent_binding.profile.strip()
+        client_binding = self.clients.get(client)
+        if client_binding is not None and client_binding.profile.strip():
+            return client_binding.profile.strip()
+        return self.default_profile.strip()
 
 
 # Canonical LLM environment variables. Mirrors internal/config/config.go.
@@ -3120,7 +3142,24 @@ def _config_to_dict(cfg: Config) -> dict[str, Any]:
                 config_reload["mode"] = mode
     acp = d.get("acp")
     if isinstance(acp, dict):
-        if not acp.get("enabled") and not acp.get("clients") and not acp.get("agents") and not acp.get("profiles"):
+        # Mirror Go's ``yaml:"profile,omitempty"``. An unset pin means "this
+        # half is enabled, the pair decides the profile", and the canonical
+        # schema's stable-name pattern rejects the empty string, so the key
+        # has to be absent rather than blank.
+        for section in ("clients", "agents", "bindings"):
+            entries = acp.get(section)
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if isinstance(entry, dict) and not str(entry.get("profile", "")).strip():
+                    entry.pop("profile", None)
+        if (
+            not acp.get("enabled")
+            and not acp.get("clients")
+            and not acp.get("agents")
+            and not acp.get("bindings")
+            and not acp.get("profiles")
+        ):
             d.pop("acp", None)
     _strip_empty_llm(d, "llm")
     scanners = d.get("scanners") or {}
@@ -3375,6 +3414,7 @@ _AUTHORITATIVE_MODELED_DICT_PATHS: frozenset[str] = frozenset(
         "observability.connectors",
         "acp.clients",
         "acp.agents",
+        "acp.bindings",
         "acp.profiles",
     }
 )
@@ -4667,6 +4707,7 @@ def _merge_acp(raw: Any) -> ACPConfig:
         default_profile=str(raw.get("default_profile", "default")),
         clients=_bindings(raw.get("clients")),
         agents=_bindings(raw.get("agents")),
+        bindings=_bindings(raw.get("bindings")),
         profiles=profiles,
     )
 

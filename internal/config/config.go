@@ -129,7 +129,59 @@ type ACPConfig struct {
 	DefaultProfile string                `mapstructure:"default_profile" yaml:"default_profile,omitempty"`
 	Clients        map[string]ACPBinding `mapstructure:"clients" yaml:"clients,omitempty"`
 	Agents         map[string]ACPBinding `mapstructure:"agents" yaml:"agents,omitempty"`
-	Profiles       map[string]ACPProfile `mapstructure:"profiles" yaml:"profiles,omitempty"`
+	// Bindings carries per-pair policy keyed "<client>/<agent>", the same
+	// identifier `defenseclaw acp status` already prints. Clients and Agents
+	// each hold exactly one profile, and evaluation used to require both of
+	// those pins to equal the profile being evaluated, which made the profile
+	// global across the whole client x agent matrix: giving a second agent its
+	// own profile took it offline in every client pinned to a different one,
+	// in both directions. That also made `--activate` all-or-nothing, since
+	// promoting one pair promoted every pair sharing the profile, defeating
+	// the observe-then-activate rollout the CLI is built around.
+	//
+	// A present entry decides the profile for that pair alone. Absent, the
+	// Clients/Agents pins continue to decide it exactly as before, so an
+	// existing config behaves identically.
+	Bindings map[string]ACPBinding `mapstructure:"bindings" yaml:"bindings,omitempty"`
+	Profiles map[string]ACPProfile `mapstructure:"profiles" yaml:"profiles,omitempty"`
+}
+
+// ACPBindingKey is the canonical "<client>/<agent>" key for ACPConfig.Bindings.
+func ACPBindingKey(client, agent string) string {
+	return strings.ToLower(strings.TrimSpace(client)) + "/" + strings.ToLower(strings.TrimSpace(agent))
+}
+
+// ACPBindingFor returns the per-pair binding for one client/agent pair.
+func (c ACPConfig) ACPBindingFor(client, agent string) (ACPBinding, bool) {
+	if len(c.Bindings) == 0 {
+		return ACPBinding{}, false
+	}
+	binding, ok := c.Bindings[ACPBindingKey(client, agent)]
+	return binding, ok
+}
+
+// ACPProfileForPair resolves the profile name that governs one pair.
+//
+// Most specific wins: an explicit per-pair binding, then the agent pin, then
+// the client pin, then default_profile. The caller still validates that the
+// resolved name exists and admits the pair.
+func (c ACPConfig) ACPProfileForPair(client, agent string) string {
+	if binding, ok := c.ACPBindingFor(client, agent); ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Agents[agent]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	if binding, ok := c.Clients[client]; ok {
+		if profile := strings.TrimSpace(binding.Profile); profile != "" {
+			return profile
+		}
+	}
+	return strings.TrimSpace(c.DefaultProfile)
 }
 
 type ACPBinding struct {
