@@ -18,6 +18,8 @@ package gateway
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,6 +29,51 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
+
+func TestEvaluateClaudeCodeHook_AIDMonitorAllowsAndRetainsRawAlert(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"is_safe": false,
+			"action": "Allow",
+			"classifications": ["PRIVACY_VIOLATION"],
+			"rules": [{"rule_name":"PII","classification":"PRIVACY_VIOLATION"}]
+		}`))
+	}))
+	t.Cleanup(server.Close)
+
+	cfg := &config.Config{}
+	cfg.Guardrail.Mode = "action"
+	cfg.Guardrail.Connector = "claudecode"
+	api := &APIServer{
+		scannerCfg: cfg,
+		ciscoInspector: &CiscoInspectClient{
+			apiKey:   "test-key",
+			endpoint: server.URL,
+			client:   server.Client(),
+		},
+	}
+
+	resp := api.evaluateClaudeCodeHook(t.Context(), claudeCodeHookRequest{
+		HookEventName: "UserPromptSubmit",
+		Prompt:        "ordinary prompt",
+	})
+
+	if calls != 1 {
+		t.Fatalf("AI Defense calls = %d, want 1", calls)
+	}
+	if resp.Action != "allow" {
+		t.Errorf("Action = %q, want allow", resp.Action)
+	}
+	if resp.RawAction != "alert" {
+		t.Errorf("RawAction = %q, want alert", resp.RawAction)
+	}
+	if resp.Severity != "MEDIUM" {
+		t.Errorf("Severity = %q, want MEDIUM", resp.Severity)
+	}
+}
 
 // TestEvaluateClaudeCodeHook_ActiveConnectorImpliesEnabled documents the
 // invariant that selecting the claudecode connector is the only opt-in

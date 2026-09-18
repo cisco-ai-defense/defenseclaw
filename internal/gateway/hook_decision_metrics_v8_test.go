@@ -305,6 +305,52 @@ func TestHookDecisionEnforcedBlockEmitsCanonicalActiveAlertFact(t *testing.T) {
 	}
 }
 
+func TestHookDecisionAIDMonitorExportsEffectiveAllowAndRawAlert(t *testing.T) {
+	capture := &hookDecisionRecordCapture{}
+	api := &APIServer{observabilityV8: capture}
+	ctx := audit.ContextWithEnvelope(t.Context(), audit.CorrelationEnvelope{
+		RequestID: "request-aid-monitor",
+		SessionID: "session-aid-monitor",
+	})
+
+	api.emitHookDecisionObservabilityV8(ctx, agentHookRequest{
+		ConnectorName: "claudecode",
+		HookEventName: "UserPromptSubmit",
+		SessionID:     "session-aid-monitor",
+	}, agentHookResponse{
+		Action:    "allow",
+		RawAction: "alert",
+		Severity:  "MEDIUM",
+		Mode:      "action",
+		RuleIDs:   []string{"CISCO-PRIVACY-VIOLATION"},
+	}, HookAuditEnvelope{}, false)
+
+	if len(capture.records) != 1 {
+		t.Fatalf("records = %d, want 1", len(capture.records))
+	}
+	record := capture.records[0]
+	if record.Outcome() != observability.OutcomeAllowed {
+		t.Errorf("outcome = %q, want %q", record.Outcome(), observability.OutcomeAllowed)
+	}
+	body, present := record.Body()
+	if !present {
+		t.Fatal("hook decision body is absent")
+	}
+	fields, err := body.Object()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := fields["defenseclaw.guardrail.effective_action"]; got != "allow" {
+		t.Errorf("effective_action = %v, want allow", got)
+	}
+	if got := fields["defenseclaw.guardrail.raw_action"]; got != "alert" {
+		t.Errorf("raw_action = %v, want alert", got)
+	}
+	if got := fields["defenseclaw.guardrail.enforced"]; got != false {
+		t.Errorf("enforced = %v, want false", got)
+	}
+}
+
 func TestFinalizedBlockPersistsAuditAndActiveAlertBeforeNotification(t *testing.T) {
 	fixture := newSidecarV8BootstrapFixture(t, 8, "")
 	dispatcher, notifications := newWiringDispatcher()

@@ -294,7 +294,7 @@ func TestAuthenticatedHookToolChainHonorsProfileActionAfterSuccess(t *testing.T)
 		wantRawAction  string
 		wantWouldBlock bool
 	}{
-		{name: "default alerts", wantAction: "alert"},
+		{name: "default alerts", wantAction: "allow", wantRawAction: "alert"},
 		{name: "strict blocks", rulePackDir: filepath.Join(policiesRoot, "strict"), wantAction: "block"},
 		{
 			name: "strict observe reports without blocking", mode: "observe",

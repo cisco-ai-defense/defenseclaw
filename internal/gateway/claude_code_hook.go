@@ -211,11 +211,15 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	} else if mode != "action" && rawAction == "block" {
 		action = "allow"
 	}
-	if mode != "action" && (rawAction == "alert" || rawAction == "confirm") {
+	// Claude Code's hook response contract has no alert action. Preserve the
+	// advisory verdict in RawAction for telemetry, but let the agent continue.
+	// Confirm is only representable by Claude's native ask response on
+	// PreToolUse; on every other hook surface it is advisory as well.
+	if rawAction == "alert" {
 		action = "allow"
 	}
-	if mode == "action" && rawAction == "confirm" && req.HookEventName != "PreToolUse" {
-		action = "alert"
+	if rawAction == "confirm" && (mode != "action" || req.HookEventName != "PreToolUse") {
+		action = "allow"
 	}
 	aiDefenseEnforced := verdict.aiDefenseBlock && action == "block"
 	for _, asset := range assetDecisions {

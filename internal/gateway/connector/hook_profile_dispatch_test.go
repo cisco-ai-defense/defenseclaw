@@ -217,7 +217,7 @@ func TestCodexProfileMapVerdict(t *testing.T) {
 }
 
 // TestClaudeCodeProfileMapVerdict covers Claude Code's "can enforce"
-// gate plus the chat-side-ask demote rule.
+// gate plus advisory alert and non-native confirm projection.
 func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 	caps := HookCapability{
 		CanBlock:     true,
@@ -241,8 +241,9 @@ func TestClaudeCodeProfileMapVerdict(t *testing.T) {
 		{"post_tool_batch_is_advisory", "block", "PostToolBatch", "action", nil, "allow", true},
 		{"policy_config_change_is_advisory", "block", "ConfigChange", "action", map[string]interface{}{"source": "policy_settings"}, "allow", true},
 		{"user_config_change_is_enforceable", "block", "ConfigChange", "action", map[string]interface{}{"source": "user_settings"}, "block", false},
+		{"action_alert_is_advisory", "alert", "UserPromptSubmit", "action", nil, "allow", false},
 		{"action_confirm_ask_event", "confirm", "PreToolUse", "action", nil, "confirm", false},
-		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", nil, "alert", false},
+		{"action_confirm_non_ask_event", "confirm", "PostToolUse", "action", nil, "allow", false},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
