@@ -461,3 +461,63 @@ func TestACPEvaluateScansFrameTextNotEnvelope(t *testing.T) {
 		t.Fatalf("verdict = %+v, want block (envelope scanning hides prose-anchored rules)", verdict)
 	}
 }
+
+// Several guarded agents can share one editor, but they must share that
+// editor's profile. clients[] and agents[] each pin exactly one profile, and
+// evaluation requires both pins to equal the evaluated profile, so pinning a
+// second agent to its own profile takes that agent offline in every client
+// whose profile differs -- in both directions, which is easy to misread as a
+// broken binding rather than a policy conflict.
+func TestACPSeveralAgentsInOneClientMustShareItsProfile(t *testing.T) {
+	frame := json.RawMessage(`{"jsonrpc":"2.0","id":1,"method":"session/prompt",` +
+		`"params":{"sessionId":"s","prompt":[{"type":"text","text":"hello"}]}}`)
+	evaluate := func(cfg *config.Config, agent, profile string) int {
+		body, err := json.Marshal(acp.Evaluation{
+			Profile: profile, Mode: acp.ModeAction, AgentID: agent, ClientID: "zed",
+			Direction: acp.ClientToAgent, Surface: acp.SurfacePrompt, Method: "session/prompt",
+			Payload: frame,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := httptest.NewRequest(http.MethodPost, "/api/v1/acp/evaluate", bytes.NewReader(body))
+		response := httptest.NewRecorder()
+		(&APIServer{scannerCfg: cfg}).handleACPEvaluate(response, request)
+		return response.Code
+	}
+
+	shared := &config.Config{ACP: config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "team",
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "team"}},
+		Agents: map[string]config.ACPBinding{
+			"kiro": {Enabled: true, Profile: "team"}, "devin": {Enabled: true, Profile: "team"}},
+		Profiles: map[string]config.ACPProfile{"team": {
+			Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro", "devin"}}},
+	}}
+	for _, agent := range []string{"kiro", "devin"} {
+		if code := evaluate(shared, agent, "team"); code != http.StatusOK {
+			t.Errorf("zed+%s on the shared profile = %d, want 200", agent, code)
+		}
+	}
+
+	split := &config.Config{ACP: config.ACPConfig{
+		Enabled: true, Mode: "action", DefaultProfile: "kiro-only",
+		Clients: map[string]config.ACPBinding{"zed": {Enabled: true, Profile: "kiro-only"}},
+		Agents: map[string]config.ACPBinding{
+			"kiro": {Enabled: true, Profile: "kiro-only"}, "devin": {Enabled: true, Profile: "devin-only"}},
+		Profiles: map[string]config.ACPProfile{
+			"kiro-only":  {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"kiro"}},
+			"devin-only": {Mode: "action", AllowedClients: []string{"zed"}, AllowedAgents: []string{"devin"}}},
+	}}
+	if code := evaluate(split, "kiro", "kiro-only"); code != http.StatusOK {
+		t.Errorf("the agent matching the client's profile = %d, want 200", code)
+	}
+	// Neither the agent's own profile nor the client's resolves: one pin
+	// always disagrees, so the mismatch is refused rather than silently
+	// evaluated under whichever profile was named.
+	for _, profile := range []string{"devin-only", "kiro-only"} {
+		if code := evaluate(split, "devin", profile); code != http.StatusForbidden {
+			t.Errorf("zed+devin under %q = %d, want 403", profile, code)
+		}
+	}
+}

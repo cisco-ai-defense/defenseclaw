@@ -54,6 +54,83 @@ preserves unrelated JSON keys and foreign agent entries. It writes one
 `DefenseClaw · Kiro` entry, a mode-0600 scoped token, and a runtime contract
 lock. A failed config write rolls all three changes back.
 
+## Several guarded agents in one editor
+
+Nothing stops an operator from guarding more than one agent in the same
+editor. Run setup once per agent:
+
+```bash
+defenseclaw acp setup --client zed --agent kiro
+defenseclaw acp setup --client zed --agent devin
+```
+
+Each run writes its own entry (`DefenseClaw · Kiro`, `DefenseClaw · Devin`),
+leaves the other entries and every foreign agent server untouched, and pins its
+own runtime contract lock at `<data-dir>/acp/<client>-<agent>.contract-lock.json`.
+The editor launches one `defenseclaw-acp` process per entry, so the two
+sessions are independent: separate stdio pipes, separate turn buffers, separate
+pending-ID accounting. A block in one does not interrupt the other.
+
+<Callout type="warn">
+**Every agent guarded in one client must use that client's profile.**
+`acp.clients` and `acp.agents` each pin exactly one profile, and evaluation
+requires the client pin and the agent pin to both equal the profile being
+evaluated. Pinning a second agent to a profile of its own therefore takes that
+agent offline in the shared editor -- in both directions, which is easy to
+misread as a broken binding:
+
+```text
+clients.zed.profile = kiro-only
+
+agents.kiro.profile  = kiro-only   → zed + kiro   evaluates
+agents.devin.profile = devin-only  → zed + devin  403 under devin-only  (client pin differs)
+                                   → zed + devin  403 under kiro-only   (agent pin differs)
+```
+
+The guard fails closed on that 403 in action mode, so Devin stops working in
+Zed rather than running unguarded.
+</Callout>
+
+Give the shared client one profile and list both agents in it:
+
+```yaml
+acp:
+  enabled: true
+  mode: action
+  default_profile: team
+  clients:
+    zed: {enabled: true, profile: team}
+  agents:
+    kiro:  {enabled: true, profile: team}
+    devin: {enabled: true, profile: team}
+  profiles:
+    team:
+      mode: action
+      fail_mode: closed
+      allowed_clients: [zed]
+      allowed_agents: [kiro, devin]
+      denied_methods: [fs/write_text_file]
+```
+
+Consequences worth planning around:
+
+- **Mode and denied methods are per profile, so they are shared.** One editor
+  cannot run Kiro in action mode and Devin in observe mode. Promote or demote
+  both, or guard the second agent in a different editor, which has its own
+  client pin and can carry its own profile.
+- **`allowed_agents` is the "only these agents" control.** Removing an agent
+  from the shared profile refuses its evaluations while leaving its editor
+  entry in place; removing the entry with
+  `defenseclaw acp remove --client zed --agent devin` also reclaims its
+  contract lock.
+- **In normal user mode the agents share one scoped token**, the private file
+  named by argv. Managed enterprise enrollment instead mints one credential per
+  principal + client + agent + profile, so two agents in one editor hold two
+  distinct bearers and revoking one leaves the other working.
+- **Each binding's digests are pinned separately.** Upgrading the guard rebinds
+  every matching user-owned lock in one transaction; a stale digest on one
+  binding fails that binding closed without disturbing the other.
+
 ## Managed enterprise enrollment
 
 Managed deployments keep ACP policy and credential authority in the protected
@@ -246,28 +323,27 @@ upstream ACP Registry ID when one exists, and its DefenseClaw evidence level:
 - ACP adds no secret environment variable. Agent-owned credentials remain in
   their existing stores; the guard token is a private file referenced by argv.
 
-| DefenseClaw connector | ACP form | Entry point | Evidence level |
-| --- | --- | --- | --- |
-| Kiro | Native | `kiro-cli acp` | Tested with the official Kiro CLI and Zed |
-| Cursor | Native | `agent acp` | Cataloged |
-| OpenCode | Native | `opencode acp` | Cataloged |
-| Hermes | Native | `hermes acp` | Cataloged |
-| GitHub Copilot CLI | Native, public preview | `copilot --acp --stdio` | Cataloged |
-| OpenHands | Native, experimental | `openhands acp` | Cataloged |
-| Gemini CLI | Native | `gemini --acp` | Cataloged |
-| Devin | Native | `devin acp` | Cataloged |
-| OpenClaw | Gateway-backed bridge | `openclaw acp` | Cataloged |
-| Amp | Community bridge | `amp-acp` | Cataloged |
-| Google Antigravity | Vendor companion server | `agy_acp_server` | Cataloged |
-| Claude Code | Community bridge | `claude-agent-acp` | Cataloged |
-| Codex CLI | Community bridge | `codex-acp` | Cataloged |
-| OmniGent, ZeptoClaw | None cataloged | — | No ACP claim |
+| DefenseClaw connector | ACP form | Entry point |
+| --- | --- | --- |
+| Kiro | Native | `kiro-cli acp` |
+| Cursor | Native | `agent acp` |
+| OpenCode | Native | `opencode acp` |
+| Hermes | Native | `hermes acp` |
+| GitHub Copilot CLI | Native, public preview | `copilot --acp --stdio` |
+| OpenHands | Native, experimental | `openhands acp` |
+| Devin | Native | `devin acp` |
+| OpenClaw | Gateway-backed bridge | `openclaw acp` |
+| Amp | Community bridge | `amp-acp` |
+| Google Antigravity | Vendor companion server | `agy_acp_server` |
+| Claude Code | Community bridge | `claude-agent-acp` |
+| Codex CLI | Community bridge | `codex-acp` |
+| OmniGent, ZeptoClaw | None cataloged | — |
 
-`cataloged` means the entry point was checked against primary documentation or
+Listing an entry point means it was checked against primary documentation or
 the upstream ACP Registry. It does not mean DefenseClaw has executed that
-client/agent pair. `tested` and `certified` are separate evidence states in
-`acp_certifications.json`; the CLI never silently upgrades one based on a live
-upstream registry response.
+client/agent pair. Per-integration evidence states live in
+`acp_certifications.json`, and the CLI never silently upgrades one based on a
+live upstream registry response.
 
 The CLI uses the packaged registry as its only executable inventory. It does
 not download or execute commands from the network registry during setup. Every
