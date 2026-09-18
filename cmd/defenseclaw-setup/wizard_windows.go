@@ -220,7 +220,6 @@ var (
 		{Label: "Devin CLI", Value: "devin"},
 		{Label: "OmniGent (native degraded)", Value: "omnigent"},
 		{Label: "OpenCode", Value: "opencode"},
-		{Label: "Kiro", Value: "kiro"},
 	}
 	wizardModeChoices = []wizardChoice{
 		{Label: "Observe", Value: "observe"},
