@@ -5594,6 +5594,20 @@ func TestNormalizeCiscoResponse(t *testing.T) {
 		}
 	})
 
+	t.Run("monitor finding remains advisory", func(t *testing.T) {
+		v := normalizeCiscoResponse(map[string]interface{}{
+			"is_safe":         false,
+			"action":          "Allow",
+			"classifications": []interface{}{"PRIVACY_VIOLATION"},
+		})
+		if v.Action != "alert" {
+			t.Errorf("action = %q, want alert", v.Action)
+		}
+		if v.Severity != "MEDIUM" {
+			t.Errorf("severity = %q, want MEDIUM", v.Severity)
+		}
+	})
+
 	t.Run("untrusted labels use fixed identity", func(t *testing.T) {
 		marker := "producer-label-" + strings.Repeat("z", 40)
 		v := normalizeCiscoResponse(map[string]interface{}{
