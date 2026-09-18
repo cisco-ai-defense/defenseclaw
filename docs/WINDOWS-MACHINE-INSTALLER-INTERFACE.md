@@ -169,8 +169,13 @@ DefenseClaw restart is needed for a region flip.
   service SID needs Read on the file (grantable via inheritance from
   the parent directory). This matches every other DefenseClaw managed
   artifact — [`internal/managed/trust_windows.go`](../internal/managed/trust_windows.go)
-  refuses to load a file whose ancestor chain is world- or user-
-  writable.
+  refuses to load a file that is itself world- or user-writable. Since
+  AIFW-34262 a world- or user-writable **ancestor** of that file logs a
+  `managed_trust_ancestor_advisory` warning and the load continues: the
+  Cisco Secure Client tree above the managed roots is AVC's to ACL, and a
+  transient grant there must not fail a load or an install. Pin
+  `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` to make ancestor verdicts
+  fatal again.
 
 - **Contents:** JSON with one meaningful key,
   `cisco_ai_defense_endpoint`, whose value is an HTTPS bare origin
@@ -194,8 +199,8 @@ DefenseClaw restart is needed for a region flip.
   falls through to `cisco_ai_defense.endpoint` from `config.yaml`.
 
 - **Runtime trust check:** at every `ConfigManager` reload the gateway
-  re-validates the file (owner, no reparse point, ancestor chain admin-
-  owned) via `managed.ValidateTrustedFilePath` before parsing. A file
+  re-validates the file (owner, no reparse point, and the ancestor chain
+  as an advisory) via `managed.ValidateTrustedFilePath` before parsing. A file
   that fails the check is rejected as if it were malformed — the current
   in-memory endpoint is kept and an error is logged. When the DefenseClaw
   gateway is not running elevated (dev boxes, unit tests, opensource

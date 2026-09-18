@@ -283,6 +283,28 @@ create_install_directory_no_replace() {
   chmod "${mode}" "${path}"
 }
 
+# AIFW-34262: permission verdicts on a *shared* install parent are advisory.
+# That directory belongs to whoever created it (Cisco Secure Client / AVC on a
+# managed host), it is re-ACLed on that installer's schedule, and DefenseClaw's
+# own directories below it are created and locked down by this script. Failing
+# here aborts the install for a condition we do not own and cannot repair.
+# Export DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1 to make them fatal again;
+# the Go-side pin of the same name is managed.TrustStrictAncestorsEnv.
+trust_strict_ancestors() {
+  case "$(printf '%s' "${DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS:-}" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+trust_ancestor_verdict() {
+  local reason="$1"
+  if trust_strict_ancestors; then
+    die "${reason}"
+  fi
+  warn "managed_trust_ancestor_advisory: ${reason}; continuing (permissions are owned by the platform installer)"
+}
+
 ensure_shared_install_parent() {
   local path="$1"
   if [[ -e "${path}" || -L "${path}" ]]; then
@@ -298,9 +320,9 @@ ensure_shared_install_parent() {
   mode="$(stat -f '%Lp' "${path}")" \
     || die "cannot inspect shared install parent mode: ${path}"
   [[ "${owner}" == "0" ]] \
-    || die "shared install parent is not root-owned: ${path}"
+    || trust_ancestor_verdict "shared install parent is not root-owned: ${path}"
   (( (8#${mode} & 8#022) == 0 )) \
-    || die "shared install parent is group/other writable: ${path} (${mode})"
+    || trust_ancestor_verdict "shared install parent is group/other writable: ${path} (${mode})"
   acl_output="$(ls -lde -- "${path}")" \
     || die "cannot inspect shared install parent ACL: ${path}"
   while IFS= read -r acl_line; do
@@ -314,7 +336,7 @@ ensure_shared_install_parent() {
     for permission in "${acl_permissions[@]}"; do
       case "${permission}" in
         write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
-          die "shared install parent has a write-capable ACL: ${path}"
+          trust_ancestor_verdict "shared install parent has a write-capable ACL: ${path}"
           ;;
       esac
     done

@@ -53,6 +53,85 @@ func TestValidateTrustedRuntimeDirRejectsWritableDirectory(t *testing.T) {
 	}
 }
 
+// AIFW-34262: the directories above the managed roots are maintained by the
+// platform installer, so their owner/mode verdicts warn instead of failing.
+func TestValidateTrustedElementsRelaxAncestorVerdicts(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o777); err != nil {
+		t.Fatalf("chmod temp dir: %v", err)
+	}
+
+	t.Run("runtime dir ancestor", func(t *testing.T) {
+		captured := captureTrustAdvisories(t)
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", true); err != nil {
+			t.Fatalf("ancestor runtime dir was fatal: %v", err)
+		}
+		if len(*captured) == 0 {
+			t.Fatal("relaxed ancestor runtime dir did not warn")
+		}
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", false); err == nil {
+			t.Fatal("named runtime dir accepted a world-writable directory")
+		}
+	})
+
+	t.Run("config path ancestor", func(t *testing.T) {
+		captured := captureTrustAdvisories(t)
+		if err := validateTrustedPathElement(dir, true, "managed config", true); err != nil {
+			t.Fatalf("ancestor config directory was fatal: %v", err)
+		}
+		if len(*captured) == 0 {
+			t.Fatal("relaxed ancestor config directory did not warn")
+		}
+		if err := validateTrustedPathElement(dir, true, "managed config", false); err == nil {
+			t.Fatal("named config directory accepted a world-writable directory")
+		}
+	})
+
+	t.Run("strict pin restores refusal", func(t *testing.T) {
+		t.Setenv(TrustStrictAncestorsEnv, "1")
+		if err := validateTrustedRuntimeDirElement(dir, "managed data_dir", true); err == nil {
+			t.Fatal("strict pin accepted a world-writable ancestor")
+		}
+		if err := validateTrustedPathElement(dir, true, "managed config", true); err == nil {
+			t.Fatal("strict pin accepted a world-writable ancestor")
+		}
+	})
+}
+
+func TestValidateTrustedFilePathContinuesPastUntrustedAncestor(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("a root-owned leaf under an untrusted ancestor requires root")
+	}
+	parent := t.TempDir()
+	if err := os.Chmod(parent, 0o777); err != nil {
+		t.Fatalf("chmod parent: %v", err)
+	}
+	path := filepath.Join(parent, "authorization.json")
+	if err := os.WriteFile(path, []byte("{}"), 0o600); err != nil {
+		t.Fatalf("write authorization: %v", err)
+	}
+
+	captured := captureTrustAdvisories(t)
+	if err := ValidateTrustedFilePath(path, "managed authorization"); err != nil {
+		t.Fatalf("ValidateTrustedFilePath error = %v, want the ancestor verdict to be advisory", err)
+	}
+	found := false
+	for _, advisory := range *captured {
+		if strings.Contains(advisory, parent) && strings.Contains(advisory, "group/other writable") {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("advisories = %v, want a warning for %s", *captured, parent)
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	if err := ValidateTrustedFilePath(path, "managed authorization"); err == nil {
+		t.Fatal("strict pin accepted a world-writable ancestor")
+	}
+}
+
 func TestValidateTrustedFilePathRejectsEmptyPath(t *testing.T) {
 	err := ValidateTrustedFilePath("", "managed authorization")
 	if err == nil || !strings.Contains(err.Error(), "path is empty") {

@@ -62,10 +62,10 @@ func TestRejectUntrustedWindowsWriteACEsAllowsOnlyExactServiceSID(t *testing.T) 
 	if dacl == nil {
 		t.Fatal("test descriptor has no DACL")
 	}
-	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", dacl, serviceSID, false); err != nil {
+	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", "managed runtime dir", dacl, serviceSID, windowsTrustLeaf); err != nil {
 		t.Fatalf("exact service SID rejected: %v", err)
 	}
-	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", dacl, otherServiceSID, false); err == nil {
+	if err := rejectUntrustedWindowsWriteACEsWithWriter("runtime", "managed runtime dir", dacl, otherServiceSID, windowsTrustLeaf); err == nil {
 		t.Fatal("foreign service SID write ACE was accepted")
 	}
 	if err := rejectUntrustedWindowsWriteACEs("config", dacl); err == nil {
@@ -199,6 +199,11 @@ func TestRejectUntrustedWindowsWriteACEs(t *testing.T) {
 	}
 }
 
+// The mask boundary is asserted with windowsTrustNamedDir, which narrows the
+// mask without downgrading verdicts. windowsTrustAncestor applies the same
+// classification but turns the verdict into an advisory (AIFW-34262); that
+// downgrade is covered by TestWindowsAncestorScopeDowngradesReplacementRights
+// so this test measures the classification itself, not the kill switch.
 func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -227,7 +232,7 @@ func TestWindowsAncestorAllowsCreateOnlyButRejectsReplacementRights(t *testing.T
 			if dacl == nil {
 				t.Fatal("test descriptor has no DACL")
 			}
-			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
+			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", "managed ancestor", dacl, nil, windowsTrustNamedDir)
 			if test.wantErr && err == nil {
 				t.Fatal("ancestor replacement rights accepted")
 			}
@@ -264,7 +269,7 @@ func TestWindowsAncestorHoldsEveryoneToTheLeafRule(t *testing.T) {
 			if dacl == nil {
 				t.Fatal("test descriptor has no DACL")
 			}
-			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", dacl, nil, true)
+			err = rejectUntrustedWindowsWriteACEsWithWriter("ancestor", "managed ancestor", dacl, nil, windowsTrustNamedDir)
 			if test.wantErr && err == nil {
 				t.Fatal("world-wide ancestor write grant accepted")
 			}
@@ -272,6 +277,48 @@ func TestWindowsAncestorHoldsEveryoneToTheLeafRule(t *testing.T) {
 				t.Fatalf("stock BUILTIN\\Users ancestor grant rejected: %v", err)
 			}
 		})
+	}
+}
+
+// windowsTrustNamedDir and windowsTrustAncestor share one mask rule and differ
+// only in whether the verdict is fatal. A directory DefenseClaw created and
+// ACLed itself (hook-guardian manifests, managed policy, namespace purge) must
+// still refuse an untrusted replacement grant; only the shared Cisco Secure
+// Client parents above it are advisory.
+func TestWindowsAncestorScopeDowngradesReplacementRights(t *testing.T) {
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;BU)(A;;GA;;;BA)")
+	if err != nil {
+		t.Fatalf("SecurityDescriptorFromString: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if dacl == nil {
+		t.Fatal("test descriptor has no DACL")
+	}
+
+	if err := rejectUntrustedWindowsWriteACEsWithWriter(
+		"named", "managed directory ancestor", dacl, nil, windowsTrustNamedDir,
+	); err == nil {
+		t.Fatal("named directory accepted an untrusted replacement grant")
+	}
+
+	advisories := captureTrustAdvisories(t)
+	if err := rejectUntrustedWindowsWriteACEsWithWriter(
+		"parent", "managed directory ancestor", dacl, nil, windowsTrustAncestor,
+	); err != nil {
+		t.Fatalf("ancestor scope refused instead of warning: %v", err)
+	}
+	if len(*advisories) != 1 {
+		t.Fatalf("advisories = %v, want exactly one", *advisories)
+	}
+
+	t.Setenv(TrustStrictAncestorsEnv, "1")
+	if err := rejectUntrustedWindowsWriteACEsWithWriter(
+		"parent", "managed directory ancestor", dacl, nil, windowsTrustAncestor,
+	); err == nil {
+		t.Fatal("strict pin did not restore the fatal ancestor verdict")
 	}
 }
 

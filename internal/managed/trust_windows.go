@@ -29,8 +29,8 @@ func ValidateTrustedConfigPath(path string) error {
 
 // ValidateTrustedFilePath is the Windows counterpart of the unix
 // trust_unix.go implementation and is INTENTIONALLY NOT byte-for-byte
-// equivalent. The leaf (clean, ancestor=false) is checked with the full
-// strict write mask — same as unix — but ancestor directories are
+// equivalent. The leaf (clean, windowsTrustLeaf) is checked with the
+// full strict write mask — same as unix — but ancestor directories are
 // checked with the narrower WindowsAncestorReplaceAccess mask (see its
 // docstring). That relaxation is load-bearing on Windows: stock OS
 // defaults grant BUILTIN\Users add-file and write-EA/attributes on
@@ -39,10 +39,20 @@ func ValidateTrustedConfigPath(path string) error {
 // ancestors would reject every legitimate Windows install.
 //
 // Callers that need a strictly-strict ancestor check (no relaxation)
-// must build their own walk with ancestor=false at every element; no
+// must build their own walk with windowsTrustLeaf at every element; no
 // caller currently does. When adding one, do NOT quietly extend this
 // function — introduce a distinct entry point so the semantic split
 // stays visible at the call site.
+//
+// Since AIFW-34262 the ancestor pass is advisory as well as narrower: an
+// untrusted ancestor owner, a null ancestor DACL, or a write-like ancestor
+// ACE emits a TrustAdvisoryMarker warning and the walk continues, because
+// the permissions on the shared Cisco Secure Client tree above the managed
+// roots belong to the platform installer, not to DefenseClaw. Structural
+// failures (missing element, symlink, reparse point, wrong type, non-NTFS
+// mount, security-descriptor API errors) stay fatal at every element, and
+// the named leaf keeps every verdict fatal. Pin TrustStrictAncestorsEnv to
+// make the ancestor verdicts fatal again.
 func ValidateTrustedFilePath(path, label string) error {
 	if label == "" {
 		label = "managed file"
@@ -57,11 +67,11 @@ func ValidateTrustedFilePath(path, label string) error {
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, false); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, nil, windowsTrustLeaf); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, true); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustAncestor); err != nil {
 			return err
 		}
 	}
@@ -70,7 +80,7 @@ func ValidateTrustedFilePath(path, label string) error {
 		true,
 		label,
 		nil,
-		true,
+		windowsTrustAncestor,
 	)
 }
 
@@ -84,6 +94,14 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 // its parents. This accepts stock Windows known-folder create-child grants,
 // while still rejecting DELETE_CHILD, DELETE, WRITE_DAC, WRITE_OWNER, generic
 // write, reparse points, non-NTFS mounts, and untrusted owners.
+//
+// The named directory keeps every verdict FATAL. Callers use this as a
+// pre-write and pre-delete guard on directories DefenseClaw itself creates and
+// ACLs below the state root (hook-guardian manifests, managed policy, namespace
+// purge), so an untrusted write ACE there is real breakage, not AVC's drift on
+// the shared tree. Only its parents are advisory, which is what AIFW-34262
+// needed: the untrusted grant lands on ...\Cisco Secure Client\DefenseClaw, one
+// level above every directory named here.
 func ValidateTrustedDirectoryAncestor(path, label string) error {
 	if label == "" {
 		label = "managed directory ancestor"
@@ -99,13 +117,11 @@ func ValidateTrustedDirectoryAncestor(path, label string) error {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		if err := validateTrustedWindowsPathElementWithWriter(
-			cur,
-			true,
-			label,
-			nil,
-			true,
-		); err != nil {
+		scope := windowsTrustAncestor
+		if cur == clean {
+			scope = windowsTrustNamedDir
+		}
+		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, nil, scope); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -147,11 +163,11 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 	if _, err := winpath.ValidateFixedNTFSMountedPath(clean); err != nil {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
-	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, serviceSID, false); err != nil {
+	if err := validateTrustedWindowsPathElementWithWriter(clean, false, label, serviceSID, windowsTrustLeaf); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, true); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsTrustAncestor); err != nil {
 			return err
 		}
 	}
@@ -160,7 +176,7 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 		true,
 		label,
 		serviceSID,
-		true,
+		windowsTrustAncestor,
 	)
 }
 
@@ -179,8 +195,11 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		ancestor := cur != clean
-		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, allowedWriter, ancestor); err != nil {
+		scope := windowsTrustAncestor
+		if cur == clean {
+			scope = windowsTrustLeaf
+		}
+		if err := validateTrustedWindowsPathElementWithWriter(cur, true, label, allowedWriter, scope); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -190,8 +209,40 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 	return nil
 }
 
+// windowsTrustScope carries the two INDEPENDENT relaxations that apply when a
+// managed path is walked. They used to be one `ancestor bool`, which silently
+// coupled them: any element that needed the narrower mask also lost the ability
+// to fail. Keep them separate so each call site states exactly what it wants.
+//
+//   - narrowMask evaluates allow ACEs with WindowsAncestorReplaceAccess instead
+//     of the full write-like mask. Required for stock Windows known-folder
+//     grants (BUILTIN\Users add-file and write-EA/attributes on roots such as
+//     C:\ProgramData), none of which can replace an existing protected child.
+//   - advisory downgrades owner/DACL *verdicts* to a TrustAdvisoryMarker warning
+//     and continues the walk (AIFW-34262). Structural and API failures are never
+//     downgraded, and TrustStrictAncestorsEnv restores fatality.
+type windowsTrustScope struct {
+	narrowMask bool
+	advisory   bool
+}
+
+var (
+	// windowsTrustLeaf is the named artifact a caller asked about: strictest
+	// mask, every verdict fatal.
+	windowsTrustLeaf = windowsTrustScope{}
+	// windowsTrustNamedDir is a named directory that legitimately carries stock
+	// create-child grants but is still DefenseClaw-owned, so its verdicts stay
+	// fatal. Used for the directory ValidateTrustedDirectoryAncestor was asked
+	// about, which callers rely on as a pre-write / pre-delete guard.
+	windowsTrustNamedDir = windowsTrustScope{narrowMask: true}
+	// windowsTrustAncestor is a parent directory above the managed roots. Those
+	// live in the shared Cisco Secure Client tree that AVC owns and re-ACLs, so
+	// their verdicts are advisory.
+	windowsTrustAncestor = windowsTrustScope{narrowMask: true, advisory: true}
+)
+
 func validateTrustedWindowsPathElement(path string, wantDir bool, label string) error {
-	return validateTrustedWindowsPathElementWithWriter(path, wantDir, label, nil, false)
+	return validateTrustedWindowsPathElementWithWriter(path, wantDir, label, nil, windowsTrustLeaf)
 }
 
 func validateTrustedWindowsPathElementWithWriter(
@@ -199,7 +250,7 @@ func validateTrustedWindowsPathElementWithWriter(
 	wantDir bool,
 	label string,
 	allowedWriter *windows.SID,
-	ancestor bool,
+	scope windowsTrustScope,
 ) error {
 	info, err := os.Lstat(path)
 	if err != nil {
@@ -241,30 +292,34 @@ func validateTrustedWindowsPathElementWithWriter(
 		if allowedWriter != nil {
 			expected = fmt.Sprintf("%s, or the pinned service SID %s", expected, sidString(allowedWriter))
 		}
-		return fmt.Errorf("%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected)
+		if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+			"%s: owner %s is not trusted for %s; expected %s", path, sidString(owner), label, expected,
+		)); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return fmt.Errorf("%s: inspect Windows DACL: %w", path, err)
 	}
 	if dacl == nil {
-		return fmt.Errorf("%s: null Windows DACL is not trusted", path)
+		return relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+			"%s: null Windows DACL is not trusted", path,
+		))
 	}
-	if err := rejectUntrustedWindowsWriteACEsWithWriter(path, dacl, allowedWriter, ancestor); err != nil {
-		return err
-	}
-	return nil
+	return rejectUntrustedWindowsWriteACEsWithWriter(path, label, dacl, allowedWriter, scope)
 }
 
 func rejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL) error {
-	return rejectUntrustedWindowsWriteACEsWithWriter(path, dacl, nil, false)
+	return rejectUntrustedWindowsWriteACEsWithWriter(path, "managed path", dacl, nil, windowsTrustLeaf)
 }
 
 func rejectUntrustedWindowsWriteACEsWithWriter(
 	path string,
+	label string,
 	dacl *windows.ACL,
 	allowedWriter *windows.SID,
-	ancestor bool,
+	scope windowsTrustScope,
 ) error {
 	const (
 		accessAllowedObjectACEType         = 0x5
@@ -281,21 +336,31 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 		switch ace.Header.AceType {
 		case accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
-			return fmt.Errorf("%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType)
+			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
+			)); err != nil {
+				return err
+			}
+			continue
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue
 		}
 		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
 		writeLike := windowsWriteLikeAccess(ace.Mask)
-		if ancestor && !windowsWorldSID(sid) {
+		if scope.narrowMask && !windowsWorldSID(sid) {
 			writeLike = WindowsAncestorReplaceAccess(ace.Mask)
 		}
 		if !writeLike {
 			continue
 		}
 		if !windowsTrustedOwner(sid) && !sameWindowsSID(sid, allowedWriter) {
-			return fmt.Errorf("%s: untrusted Windows principal %s has write-like access mask 0x%x", path, sidString(sid), uint32(ace.Mask))
+			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+				"%s: untrusted Windows principal %s has write-like access mask 0x%x",
+				path, sidString(sid), uint32(ace.Mask),
+			)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil

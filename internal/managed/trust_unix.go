@@ -43,15 +43,15 @@ func ValidateTrustedFilePath(path, label string) error {
 	if err != nil {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
-	if err := validateTrustedPathElement(clean, false, label); err != nil {
+	if err := validateTrustedPathElement(clean, false, label, false); err != nil {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedPathElement(dir, true, label); err != nil {
+		if err := validateTrustedPathElement(dir, true, label, true); err != nil {
 			return err
 		}
 	}
-	return validateTrustedPathElement(filepath.VolumeName(clean)+string(filepath.Separator), true, label)
+	return validateTrustedPathElement(filepath.VolumeName(clean)+string(filepath.Separator), true, label, true)
 }
 
 // ValidateTrustedRuntimeDir rejects managed_enterprise runtime directories that
@@ -71,7 +71,7 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		return fmt.Errorf("resolve %s path: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		if err := validateTrustedRuntimeDirElement(cur, label); err != nil {
+		if err := validateTrustedRuntimeDirElement(cur, label, cur != clean); err != nil {
 			return err
 		}
 		if cur == filepath.Dir(cur) {
@@ -117,11 +117,11 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedRuntimeDirElement(dir, label); err != nil {
+		if err := validateTrustedRuntimeDirElement(dir, label, true); err != nil {
 			return err
 		}
 	}
-	return validateTrustedRuntimeDirElement(filepath.VolumeName(clean)+string(filepath.Separator), label)
+	return validateTrustedRuntimeDirElement(filepath.VolumeName(clean)+string(filepath.Separator), label, true)
 }
 
 func validateTrustedRuntimeFileElement(path, label string) error {
@@ -151,7 +151,18 @@ func validateTrustedRuntimeFileElement(path, label string) error {
 	return nil
 }
 
-func validateTrustedPathElement(path string, wantDir bool, label string) error {
+// validateTrustedPathElement checks one element of a managed path. With
+// advisory=true the permission verdicts (mode bits, extended ACL, owner uid)
+// log a TrustAdvisoryMarker warning and the walk continues, because the
+// directories above the managed roots belong to the platform installer (Cisco
+// Secure Client) and its ACL maintenance must not fail a DefenseClaw install —
+// see AIFW-34262 and TrustStrictAncestorsEnv. Structural failures stay fatal at
+// every element, and the named leaf (advisory=false) keeps every verdict fatal.
+//
+// Unlike Windows there is no second, narrower ancestor rule here: unix has no
+// equivalent of the stock known-folder create-child grant, so advisory is the
+// only ancestor relaxation this platform needs.
+func validateTrustedPathElement(path string, wantDir bool, label string, advisory bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -166,9 +177,13 @@ func validateTrustedPathElement(path string, wantDir bool, label string) error {
 		return fmt.Errorf("%s: expected regular %s file", path, label)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm())
+		if err := relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
+			"%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm(),
+		)); err != nil {
+			return err
+		}
 	}
-	if err := validateTrustedPathACL(path); err != nil {
+	if err := relaxAncestorTrustJudgement(advisory, path, label, validateTrustedPathACL(path)); err != nil {
 		return err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
@@ -176,12 +191,17 @@ func validateTrustedPathElement(path string, wantDir bool, label string) error {
 		return fmt.Errorf("%s: cannot inspect file owner", path)
 	}
 	if st.Uid != 0 {
-		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, st.Uid, label)
+		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
+			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0", path, st.Uid, label,
+		))
 	}
 	return nil
 }
 
-func validateTrustedRuntimeDirElement(path string, label string) error {
+// validateTrustedRuntimeDirElement is validateTrustedPathElement for a runtime
+// directory, where the packaged defenseclaw service uid is a trusted owner. The
+// same advisory relaxation applies.
+func validateTrustedRuntimeDirElement(path string, label string, advisory bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return fmt.Errorf("%s: %w", path, err)
@@ -193,9 +213,13 @@ func validateTrustedRuntimeDirElement(path string, label string) error {
 		return fmt.Errorf("%s: expected directory in %s path", path, label)
 	}
 	if info.Mode().Perm()&0o022 != 0 {
-		return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm())
+		if err := relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
+			"%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm(),
+		)); err != nil {
+			return err
+		}
 	}
-	if err := validateTrustedPathACL(path); err != nil {
+	if err := relaxAncestorTrustJudgement(advisory, path, label, validateTrustedPathACL(path)); err != nil {
 		return err
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
@@ -203,7 +227,10 @@ func validateTrustedRuntimeDirElement(path string, label string) error {
 		return fmt.Errorf("%s: cannot inspect directory owner", path)
 	}
 	if !trustedRuntimeOwner(st.Uid) {
-		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, st.Uid, label)
+		return relaxAncestorTrustVerdict(advisory, path, label, fmt.Errorf(
+			"%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid",
+			path, st.Uid, label,
+		))
 	}
 	return nil
 }
