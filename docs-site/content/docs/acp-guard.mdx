@@ -87,8 +87,23 @@ agents.devin.profile = devin-only  → zed + devin  403 under devin-only  (clien
                                    → zed + devin  403 under kiro-only   (agent pin differs)
 ```
 
-The guard fails closed on that 403 in action mode, so Devin stops working in
-Zed rather than running unguarded.
+The same constraint applies with the roles swapped. Give two clients their own
+profiles and the agent can only satisfy one of them:
+
+```text
+agents.kiro.profile = zed-p
+
+clients.zed.profile       = zed-p  → zed + kiro        evaluates
+clients.jetbrains.profile = jb-p   → jetbrains + kiro  403 under either profile
+```
+
+So across a whole client x agent matrix the profile is effectively global: the
+only arrangement in which every pair evaluates is one profile shared by every
+client and every agent. `allowed_clients` and `allowed_agents` are the only
+per-binding controls today.
+
+The guard fails closed on that 403 in action mode, so the refused agent stops
+working in that editor rather than running unguarded.
 </Callout>
 
 Give the shared client one profile and list both agents in it:
