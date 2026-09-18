@@ -117,11 +117,13 @@ func claudeCodeProfileEventContent(payload map[string]interface{}) string {
 //   - rawAction=="block" + event-is-not-claude-enforceable →
 //     allow + wouldBlock=true (Claude Code's PostToolUse,
 //     PostToolBatch, SessionStart, etc. are observe-only by contract).
-//   - observe mode: any block/alert/confirm verdict demotes to
-//     allow; wouldBlock=true for the block case.
+//   - alert verdicts are advisory and always project to allow because
+//     Claude Code's hook response contract has no alert action.
+//   - observe mode: block/confirm verdicts demote to allow;
+//     wouldBlock=true for the block case.
 //   - action mode + rawAction=="confirm": stays confirm only on
 //     PreToolUse (the one event that surfaces a native ask);
-//     elsewhere demotes to alert.
+//     elsewhere demotes to allow while retaining rawAction=confirm.
 func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 	raw := normalizedGuardrailAction(in.RawAction)
 	if raw == "" {
@@ -130,6 +132,9 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 
 	if raw == "block" && !claudeCodeCanEnforceProfile(in) {
 		return HookVerdictOutput{Action: "allow", WouldBlock: true}
+	}
+	if raw == "alert" {
+		return HookVerdictOutput{Action: "allow", WouldBlock: false}
 	}
 
 	if in.Mode != "action" {
@@ -143,7 +148,7 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 		if in.Caps.CanAskNative && eventInProfile(in.Event, in.Caps.AskEvents) {
 			return HookVerdictOutput{Action: "confirm", WouldBlock: false}
 		}
-		return HookVerdictOutput{Action: "alert", WouldBlock: false}
+		return HookVerdictOutput{Action: "allow", WouldBlock: false}
 	default:
 		return HookVerdictOutput{Action: raw, WouldBlock: false}
 	}
