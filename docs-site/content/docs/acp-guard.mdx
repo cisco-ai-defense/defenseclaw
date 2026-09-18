@@ -54,6 +54,57 @@ preserves unrelated JSON keys and foreign agent entries. It writes one
 `DefenseClaw · Kiro` entry, a mode-0600 scoped token, and a runtime contract
 lock. A failed config write rolls all three changes back.
 
+## Finding what is already unguarded
+
+An editor may already be launching an ACP agent directly. That is exactly the
+traffic the guard exists to mediate, so DefenseClaw reads the clients it knows
+and says so rather than waiting to be asked about a specific pair:
+
+```bash
+defenseclaw acp detect
+```
+
+```text
+  zed — /Users/you/.config/zed/settings.json
+  guarded    DefenseClaw · Kiro
+  ⚠  UNGUARDED  cursor → launched from the client's own registry; replace with a guarded cursor entry
+  foreign    Something Else (left untouched)
+  installed but not configured here: devin, hermes, opencode
+```
+
+Each agent server falls into one class:
+
+| Class | Meaning |
+| --- | --- |
+| `guarded` | The entry launches `defenseclaw-acp` |
+| `adoptable` | A direct launch of a native catalog agent — the guard can wrap it |
+| `client_registry` | The client resolves and launches the agent itself, so there is no argv to wrap. Unmediated, and adoption cannot close it |
+| `foreign` | Not an ACP agent DefenseClaw knows. Never rewritten |
+
+Then take the adoptable ones over:
+
+```bash
+defenseclaw setup acp          # or: defenseclaw acp adopt
+```
+
+Adoption runs the same `acp setup` transaction per pair — same executable
+resolution, digest pinning and contract lock — and then points the entry you
+already had at the guard, keeping its key and its `env`. Your familiar picker
+entry stops reaching the agent unmediated; it does not sit beside a guarded
+duplicate, because that would leave a bypass the guard cannot see. Re-running
+finds nothing to adopt rather than wrapping twice. Adoption defaults to
+observe; pass `--activate` for action mode.
+
+First-run names the editors with unguarded agents and points here, so this is
+visible without knowing the command exists.
+
+<Callout type="warn">
+A `client_registry` entry cannot be adopted. DefenseClaw installs a guarded
+entry for the same agent when it has a native entry point, but the registry
+entry remains a way to launch that agent without the guard until you remove it
+in the client. `detect` keeps reporting it for exactly that reason.
+</Callout>
+
 ## Several guarded agents in one editor
 
 Nothing stops an operator from guarding more than one agent in the same
