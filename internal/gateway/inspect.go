@@ -78,6 +78,9 @@ type ToolInspectRequest struct {
 	// selects the connector generation; a mismatched assertion is rejected.
 	Connector     string `json:"connector,omitempty"`
 	MCPServerName string `json:"mcp_server_name,omitempty"`
+	// toolUseID is set by a connector adapter, never from the wire (see
+	// contentScope below).
+	toolUseID string
 	// contentScope is set only after a connector adapter derives content
 	// provenance from its typed hook payload. It is deliberately not accepted
 	// from the public inspect wire, where a caller could otherwise promote its
@@ -216,15 +219,39 @@ func (a *APIServer) managedAIDOnly() bool {
 // and the LLM judge are all skipped. When AID returns no verdict (unwired /
 // down / timeout / token failure — hookAIDInspect returns nil), the request
 // fails open with an explicit allow verdict.
+// aidToolCall is a tool invocation for the managed lane.
+type aidToolCall struct {
+	Name string
+	ID   string
+	Args json.RawMessage
+}
+
 func (a *APIServer) inspectManagedAIDOnly(ctx context.Context, toolName, content string) *ToolInspectVerdict {
+	return a.inspectManagedAIDOnlyCall(ctx, toolName, content, nil)
+}
+
+// inspectManagedAIDOnlyCall is the shared fail-open path: call is nil for
+// content, set for a tool invocation.
+func (a *APIServer) inspectManagedAIDOnlyCall(
+	ctx context.Context,
+	toolName, content string,
+	call *aidToolCall,
+) *ToolInspectVerdict {
 	failOpenReason := aidFailOpenUnavailable
-	if !managedAIDHookContentIsInspectable(toolName, content) {
+	if call == nil && !managedAIDHookContentIsInspectable(toolName, content) {
+		failOpenReason = aidFailOpenNoContent
+	} else if call != nil && len(call.Args) == 0 {
 		failOpenReason = aidFailOpenNoContent
 	} else if a == nil || a.ciscoInspector == nil || a.scannerCfg == nil ||
 		!a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
 		failOpenReason = aidFailOpenUnwired
 	}
-	aid := a.hookAIDInspect(ctx, toolName, content)
+	var aid *ScanVerdict
+	if call != nil {
+		aid = a.hookAIDInspectToolCall(ctx, *call)
+	} else {
+		aid = a.hookAIDInspect(ctx, toolName, content)
+	}
 	if aid == nil {
 		// Fail-open surface: managed_enterprise's local detectors are
 		// demoted, so a nil AID verdict means this inspection ends
@@ -379,6 +406,39 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 		body = fmt.Sprintf("Tool call: %s\n%s", toolName, content)
 	}
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
+}
+
+// hookAIDInspectToolCall sends a tool invocation in the chat schema's
+// tool-call shape: assistant role, arguments as a JSON string.
+func (a *APIServer) hookAIDInspectToolCall(ctx context.Context, call aidToolCall) *ScanVerdict {
+	if a == nil || a.ciscoInspector == nil {
+		return nil
+	}
+	if a.scannerCfg == nil || !a.scannerCfg.CiscoAIDefense.HookSurfaceEnabled() {
+		return nil
+	}
+	if len(call.Args) == 0 {
+		return nil
+	}
+	name := call.Name
+	if strings.TrimSpace(name) == "" {
+		name = "tool"
+	}
+	toolCalls, err := json.Marshal([]map[string]interface{}{{
+		"id":   call.ID,
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      name,
+			"arguments": string(call.Args),
+		},
+	}})
+	if err != nil {
+		return nil
+	}
+	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{
+		Role:      "assistant",
+		ToolCalls: toolCalls,
+	}})
 }
 
 // managedAIDHookContentIsInspectable applies text trimming only to the
@@ -605,6 +665,13 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 	// CodeGuard, and the judge lane; AID inspects the tool call directly
 	// and a nil AID verdict fails open. See inspectManagedAIDOnly.
 	if a.managedAIDOnly() {
+		if req.Direction == "tool_call" && len(req.Args) > 0 {
+			return a.inspectManagedAIDOnlyCall(ctx, req.Tool, "", &aidToolCall{
+				Name: req.Tool,
+				ID:   req.toolUseID,
+				Args: req.Args,
+			})
+		}
 		return a.inspectManagedAIDOnly(ctx, req.Tool, string(req.Args))
 	}
 
