@@ -165,7 +165,13 @@ func TestKiroSetupMigratesInvalidAgentStopKey(t *testing.T) {
 	KiroHomeOverride = home
 
 	dataDir := t.TempDir()
-	script := filepath.Join(dataDir, "hooks", kiroHookScriptName)
+	opts := SetupOpts{
+		DataDir:      dataDir,
+		APIAddr:      "127.0.0.1:18970",
+		APIToken:     "tok-test",
+		HookFailMode: "open",
+	}
+	conn := NewKiroConnector()
 	agentPath := filepath.Join(home, "agents", kiroManagedAgentName+".json")
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o700); err != nil {
 		t.Fatalf("mkdir agent: %v", err)
@@ -174,7 +180,7 @@ func TestKiroSetupMigratesInvalidAgentStopKey(t *testing.T) {
 		"name": "defenseclaw",
 		"hooks": map[string]interface{}{
 			"agentStop": []interface{}{map[string]interface{}{
-				"command": script, "description": "old", "matcher": ".*",
+				"command": conn.hookCommand(opts), "description": "old", "matcher": ".*",
 			}},
 		},
 	})
@@ -185,13 +191,6 @@ func TestKiroSetupMigratesInvalidAgentStopKey(t *testing.T) {
 		t.Fatalf("write stale agent: %v", err)
 	}
 
-	opts := SetupOpts{
-		DataDir:      dataDir,
-		APIAddr:      "127.0.0.1:18970",
-		APIToken:     "tok-test",
-		HookFailMode: "open",
-	}
-	conn := NewKiroConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
