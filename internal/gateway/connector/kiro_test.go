@@ -170,13 +170,18 @@ func TestKiroSetupMigratesInvalidAgentStopKey(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(agentPath), 0o700); err != nil {
 		t.Fatalf("mkdir agent: %v", err)
 	}
-	if err := os.WriteFile(agentPath, []byte(`{
-  "name": "defenseclaw",
-  "hooks": {
-    "agentStop": [{"command": "`+script+`", "description": "old", "matcher": ".*"}]
-  }
-}
-`), 0o600); err != nil {
+	stale, err := json.Marshal(map[string]interface{}{
+		"name": "defenseclaw",
+		"hooks": map[string]interface{}{
+			"agentStop": []interface{}{map[string]interface{}{
+				"command": script, "description": "old", "matcher": ".*",
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal stale agent: %v", err)
+	}
+	if err := os.WriteFile(agentPath, stale, 0o600); err != nil {
 		t.Fatalf("write stale agent: %v", err)
 	}
 
@@ -186,10 +191,11 @@ func TestKiroSetupMigratesInvalidAgentStopKey(t *testing.T) {
 		APIToken:     "tok-test",
 		HookFailMode: "open",
 	}
-	if err := NewKiroConnector().Setup(context.Background(), opts); err != nil {
+	conn := NewKiroConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
 	}
-	assertKiroV2AgentHooks(t, agentPath, script)
+	assertKiroV2AgentHooks(t, agentPath, conn.hookCommand(opts))
 }
 
 func TestKiroHookCapabilitiesPointAtInstalledFiles(t *testing.T) {
