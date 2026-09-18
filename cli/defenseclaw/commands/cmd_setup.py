@@ -528,6 +528,13 @@ from defenseclaw.commands.cmd_setup_provider import provider  # noqa: E402
 
 setup.add_command(provider)
 
+# `defenseclaw setup acp` is the discovery-first entry point: it finds
+# unguarded ACP agents and routes them through the guard, where
+# `defenseclaw acp setup` requires the operator to already know the pair.
+from defenseclaw.commands.cmd_acp import adopt_cmd as _acp_adopt_cmd  # noqa: E402
+
+setup.add_command(_acp_adopt_cmd, name="acp")
+
 
 # Local LLM providers that run on-box and don't require an API key.
 # This is intentionally a *subset* of ``_LOCAL_LLM_PROVIDERS`` in

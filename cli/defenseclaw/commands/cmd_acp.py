@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import copy
 import hashlib
+import io
 import json
 import os
 import secrets
@@ -18,6 +20,7 @@ from typing import Any
 
 import click
 
+from defenseclaw import ux
 from defenseclaw.acp_catalog import ACP_AGENT_ENTRY_POINTS, ACP_CLIENT_IDS, ACP_REGISTRY
 from defenseclaw.config import ACPBinding, ACPProfile
 from defenseclaw.connector_paths import _normalize_jsonc
@@ -671,3 +674,300 @@ def verify_cmd(app: AppContext, client: str, agent: str, runtime_data_dir: Path 
     if problems:
         raise click.ClickException("ACP binding verification failed: " + "; ".join(problems))
     click.echo(f"Verified {client}/{agent}: editor entry and executable digests match")
+
+
+# --- ACP discovery and takeover -------------------------------------------
+#
+# `acp setup` requires the operator to already know which client and which
+# agent they want guarded. That is the wrong starting point for someone who
+# just installed DefenseClaw: the editor may already be launching an ACP agent
+# directly, which is exactly the traffic the guard exists to mediate, and
+# nothing surfaced it. These helpers read the clients DefenseClaw knows, say
+# what is guarded and what is not, and can route an existing direct entry
+# through the guard without the operator naming anything.
+
+_GUARD_BASENAMES = {"defenseclaw-acp", "defenseclaw-acp.exe"}
+
+
+def _entry_basename(command: str) -> str:
+    name = Path(str(command or "")).name.lower()
+    return name[:-4] if name.endswith(".exe") else name
+
+
+def _entry_is_guarded(entry: dict[str, Any]) -> bool:
+    return _entry_basename(str(entry.get("command", ""))) in {
+        base.removesuffix(".exe") for base in _GUARD_BASENAMES
+    }
+
+
+def _agent_for_entry(entry: dict[str, Any]) -> str:
+    """Return the catalog agent a direct client entry launches, if any.
+
+    Matching is by executable basename plus a catalog-argument prefix, so an
+    operator who added their own flags after the ACP subcommand is still
+    recognised. An unrecognised entry is never rewritten -- a foreign agent
+    server stays exactly as the operator left it.
+    """
+
+    command = _entry_basename(str(entry.get("command", "")))
+    if not command:
+        return ""
+    raw_args = entry.get("args")
+    args = [str(value) for value in raw_args] if isinstance(raw_args, list) else []
+    for agent, (catalog_command, catalog_args) in sorted(_AGENTS.items()):
+        if command != _entry_basename(catalog_command):
+            continue
+        if list(catalog_args) == args[: len(catalog_args)]:
+            return agent
+    return ""
+
+
+def _guarded_entry_agent(entry_name: str) -> str:
+    """Recover the agent id from a DefenseClaw-managed entry name."""
+
+    for agent in sorted(_AGENTS):
+        if entry_name == _managed_name(agent):
+            return agent
+    return ""
+
+
+def _registry_entry_agent(entry_name: str) -> str:
+    """Best-effort agent id for a client-registry entry name.
+
+    Client registries name their entries themselves ("cursor", "claude-acp"),
+    so this is a name match rather than an argv match. It is used only to say
+    whether DefenseClaw has a native entry point that could replace it.
+    """
+
+    candidate = entry_name.strip().lower().removesuffix("-acp")
+    return candidate if candidate in _AGENTS else ""
+
+
+def _detect_acp_clients() -> list[dict[str, Any]]:
+    """Report every known client's ACP posture without changing anything."""
+
+    findings: list[dict[str, Any]] = []
+    for client in sorted(_CLIENTS):
+        try:
+            path = _client_path(client)
+        except click.ClickException:
+            continue
+        record: dict[str, Any] = {
+            "client": client,
+            "config_path": str(path),
+            "config_present": path.exists(),
+            "guarded": [],
+            "adoptable": [],
+            "client_registry": [],
+            "foreign": [],
+        }
+        if path.exists():
+            try:
+                document = _read_json_object(path)
+            except click.ClickException as exc:
+                record["error"] = str(exc)
+                findings.append(record)
+                continue
+            servers = document.get("agent_servers")
+            if isinstance(servers, dict):
+                for name, entry in sorted(servers.items()):
+                    if not isinstance(entry, dict):
+                        continue
+                    if _entry_is_guarded(entry):
+                        record["guarded"].append({"entry": name, "agent": _guarded_entry_agent(name)})
+                        continue
+                    if agent := _agent_for_entry(entry):
+                        record["adoptable"].append({"entry": name, "agent": agent})
+                    elif str(entry.get("type", "")) == "registry" and not entry.get("command"):
+                        # The client resolves and launches this agent from its
+                        # own registry, so there is no argv for the guard to
+                        # wrap. It is still an unmediated ACP path, and saying
+                        # "foreign, left untouched" would understate that.
+                        record["client_registry"].append(
+                            {"entry": name, "agent": _registry_entry_agent(name)}
+                        )
+                    else:
+                        record["foreign"].append({"entry": name})
+        # Native agents installed on this host with no entry in this client.
+        accounted = {item.get("agent") for item in (*record["adoptable"], *record["guarded"])}
+        accounted |= {item.get("agent") for item in record["client_registry"]}
+        record["installable"] = sorted(
+            agent
+            for agent, (command, _args) in _AGENTS.items()
+            if agent not in accounted and shutil.which(command)
+        )
+        findings.append(record)
+    return findings
+
+
+def _point_entry_at_guard(client: str, entry_name: str, guard: str, args: list[str]) -> None:
+    """Route an existing client entry through the guard, in place.
+
+    The entry keeps its key and its `env`, so the operator's own picker entry
+    keeps working and simply stops reaching the agent unmediated. Leaving the
+    direct entry behind instead would preserve a bypass that the guard cannot
+    see, which is the opposite of taking over.
+    """
+
+    path = _client_path(client)
+    document = _read_json_object(path)
+    servers = document.get("agent_servers")
+    if not isinstance(servers, dict):
+        return
+    entry = servers.get(entry_name)
+    if not isinstance(entry, dict):
+        return
+    entry["command"] = guard
+    entry["args"] = args
+    if client == "zed":
+        entry["type"] = "custom"
+    servers[entry_name] = entry
+    _write_json(path, document)
+
+
+@acp_cmd.command("detect")
+@click.option("--json-output", "json_output", is_flag=True)
+def detect_cmd(json_output: bool) -> None:
+    """Report which ACP clients are guarded, unguarded, or unconfigured."""
+    findings = _detect_acp_clients()
+    if json_output:
+        click.echo(json.dumps({"clients": findings}, indent=2, sort_keys=True))
+        return
+    for record in findings:
+        ux.subhead(f"{record['client']} — {record['config_path']}")
+        if error := record.get("error"):
+            ux.warn(f"  unreadable: {error}")
+            continue
+        if not record["config_present"]:
+            click.echo("  no client configuration yet")
+        for item in record["guarded"]:
+            click.echo(f"  guarded    {item['entry']}")
+        for item in record["adoptable"]:
+            ux.warn(f"  UNGUARDED  {item['entry']} → launches {item['agent']} directly")
+        for item in record["client_registry"]:
+            detail = f"  UNGUARDED  {item['entry']} → launched from the client's own registry"
+            if item.get("agent"):
+                detail += f"; replace with a guarded {item['agent']} entry"
+            else:
+                detail += "; DefenseClaw has no native entry point for it"
+            ux.warn(detail)
+        for item in record["foreign"]:
+            click.echo(f"  foreign    {item['entry']} (left untouched)")
+        if record["installable"]:
+            click.echo(f"  installed but not configured here: {', '.join(record['installable'])}")
+    if any(record["adoptable"] for record in findings):
+        ux.subhead("Route the unguarded entries through DefenseClaw with: defenseclaw setup acp")
+
+
+@acp_cmd.command("adopt")
+@click.option("--client", type=click.Choice(sorted(_CLIENTS)), default=None, help="Limit to one client.")
+@click.option("--profile", default="default", show_default=True)
+@click.option("--guard-binary", default="defenseclaw-acp", show_default=True)
+@click.option("--activate", is_flag=True, help="Enable action mode; adoption otherwise observes only.")
+@click.option("--yes", "assume_yes", is_flag=True, help="Adopt without the confirmation prompt.")
+@click.option("--json-output", "json_output", is_flag=True)
+@click.pass_context
+def adopt_cmd(
+    ctx: click.Context,
+    client: str | None,
+    profile: str,
+    guard_binary: str,
+    activate: bool,
+    assume_yes: bool,
+    json_output: bool,
+) -> None:
+    """Find unguarded ACP agents and route them through DefenseClaw.
+
+    Adoption reuses `acp setup` for every pair it finds, so the transactional
+    write, executable resolution, digest pinning and contract lock are
+    identical to configuring the pair by hand. It then points the entry the
+    operator already had at the guard, keeping that entry's key and `env`, so
+    the familiar picker entry stops reaching the agent unmediated instead of
+    sitting beside a guarded duplicate as a silent bypass.
+    """
+
+    findings = [record for record in _detect_acp_clients() if client is None or record["client"] == client]
+    planned = [
+        (record["client"], item["entry"], item["agent"])
+        for record in findings
+        for item in record["adoptable"]
+    ]
+    # A client-registry entry has no argv to wrap, so the most adoption can do
+    # is install a guarded entry beside it and report the remaining bypass.
+    registry_pairs = [
+        (record["client"], item["entry"], item["agent"])
+        for record in findings
+        for item in record["client_registry"]
+        if item.get("agent")
+    ]
+
+    if not planned and not registry_pairs:
+        if json_output:
+            click.echo(json.dumps({"adopted": [], "guarded_beside_registry": []}, indent=2, sort_keys=True))
+        else:
+            ux.subhead("No unguarded ACP agents found. Nothing to adopt.")
+        return
+
+    if not json_output:
+        for target_client, entry, agent in planned:
+            click.echo(f"  take over  {target_client}: {entry} → guarded {agent}")
+        for target_client, entry, agent in registry_pairs:
+            click.echo(f"  add guard  {target_client}: guarded {agent} beside registry entry {entry}")
+        mode = "action" if activate else "observe"
+        ux.subhead(f"Mode: {mode}. Profile: {profile}.")
+    if not assume_yes and not json_output and not click.confirm("Proceed?", default=True):
+        raise click.Abort()
+
+    guard = _resolve_executable(guard_binary, "DefenseClaw ACP guard")
+
+    def _invoke_setup(target_client: str, agent: str) -> None:
+        """Run `acp setup` for one pair without its output.
+
+        Adoption owns the operator-facing summary, and with --json-output it
+        must emit exactly one document; letting each reused setup call print
+        its own would make the result unparseable.
+        """
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            ctx.invoke(
+                setup_cmd,
+                client=target_client,
+                agent=agent,
+                profile=profile,
+                guard_binary=guard_binary,
+                agent_binary="",
+                activate=activate,
+                managed=False,
+                runtime_data_dir=None,
+                token_file=None,
+                json_output=True,
+            )
+
+    adopted: list[dict[str, str]] = []
+    for target_client, entry, agent in planned:
+        _invoke_setup(target_client, agent)
+        # Reuse the exact argv setup just wrote for the managed entry so the
+        # adopted entry cannot drift from it.
+        managed = _read_json_object(_client_path(target_client)).get("agent_servers", {})
+        written = managed.get(_managed_name(agent)) if isinstance(managed, dict) else None
+        if isinstance(written, dict) and entry != _managed_name(agent):
+            args = [str(value) for value in written.get("args", [])]
+            _point_entry_at_guard(target_client, entry, guard, args)
+        adopted.append({"client": target_client, "entry": entry, "agent": agent})
+
+    beside: list[dict[str, str]] = []
+    for target_client, entry, agent in registry_pairs:
+        _invoke_setup(target_client, agent)
+        beside.append({"client": target_client, "registry_entry": entry, "agent": agent})
+
+    if json_output:
+        click.echo(json.dumps({"adopted": adopted, "guarded_beside_registry": beside}, indent=2, sort_keys=True))
+        return
+    for item in adopted:
+        ux.ok(f"{item['client']}: {item['entry']} now launches DefenseClaw · {item['agent']}")
+    for item in beside:
+        ux.ok(f"{item['client']}: guarded {item['agent']} entry installed")
+        ux.warn(
+            f"  {item['client']} still has registry entry {item['registry_entry']}, which launches "
+            f"{item['agent']} without the guard. Remove it in the client to close that bypass."
+        )

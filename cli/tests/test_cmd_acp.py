@@ -41,20 +41,40 @@ def _zed_settings(tmp_path: Path) -> Path:
     return tmp_path / ".config" / "zed" / "settings.json"
 
 
-def test_catalog_exposes_connector_coverage_and_bridge_inventory():
+def test_catalog_exposes_native_only_connector_coverage():
     result = CliRunner().invoke(acp_cmd, ["catalog"])
     assert result.exit_code == 0, result.output
     catalog = json.loads(result.output)
     assert catalog["protocol"]["release"] == "schema-v1.21.0"
-    assert any(
-        row["connector_id"] == "codex" and row["acp_support"] == "bridge" for row in catalog["connector_coverage"]
-    )
     assert catalog["environment_variables"] == []
     canonical = json.loads((Path(__file__).parents[2] / "internal" / "inventory" / "acp_registry.json").read_text())
     assert catalog == canonical
     assert set(ACP_AGENT_ENTRY_POINTS) == {agent["id"] for agent in catalog["agents"]}
     assert any(agent["id"] == "devin" and agent["kind"] == "native" for agent in catalog["agents"])
-    assert any(agent["id"] == "amp" and agent["kind"] == "bridge" for agent in catalog["agents"])
+
+    # The guard admits native vendor ACP modes only. A bridge, companion
+    # server or gateway-backed shim would put a process DefenseClaw does not
+    # control inside the security boundary, so none may reappear in the
+    # catalog, and the connectors that used to reach ACP that way must report
+    # no ACP claim rather than pointing at an agent that is gone.
+    assert {agent["kind"] for agent in catalog["agents"]} == {"native"}
+    assert {agent["id"] for agent in catalog["agents"]} == {
+        "kiro",
+        "cursor",
+        "opencode",
+        "hermes",
+        "copilot",
+        "devin",
+    }
+    agent_ids = {agent["id"] for agent in catalog["agents"]}
+    for row in catalog["connector_coverage"]:
+        if row["acp_support"] == "none":
+            assert "agent_id" not in row, row
+        else:
+            assert row["agent_id"] in agent_ids, row
+    retired = {"codex", "claudecode", "amp", "antigravity", "openclaw", "openhands", "geminicli"}
+    reporting_none = {row["connector_id"] for row in catalog["connector_coverage"] if row["acp_support"] == "none"}
+    assert retired <= reporting_none
 
 
 def test_token_secures_parent_directory_before_file_creation(tmp_path):
@@ -450,5 +470,90 @@ def test_remove_reports_one_rollback_failure_and_continues_restoring(tmp_path, m
         assert restore_calls >= 2
         assert "rollback problems:" in result.output
         assert lock.read_bytes() == lock_before
+    finally:
+        cleanup_app(app, db_path, data_dir)
+
+
+def test_detect_classifies_guarded_direct_and_client_registry_entries(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_text(
+        json.dumps(
+            {
+                "agent_servers": {
+                    # Already guarded.
+                    "DefenseClaw · Kiro": {"command": "/opt/bin/defenseclaw-acp", "args": []},
+                    # A direct launch of a native agent: wrappable.
+                    "My Cursor": {"command": "/usr/local/bin/agent", "args": ["acp", "--verbose"]},
+                    # Resolved by the client's own registry: unguarded, but no
+                    # argv exists for the guard to wrap.
+                    "cursor": {"type": "registry"},
+                    # Not an ACP agent DefenseClaw knows.
+                    "Something Else": {"command": "unrelated-binary", "args": []},
+                }
+            }
+        )
+    )
+    result = CliRunner().invoke(acp_cmd, ["detect", "--json-output"])
+    assert result.exit_code == 0, result.output
+    zed = next(item for item in json.loads(result.output)["clients"] if item["client"] == "zed")
+
+    assert [item["entry"] for item in zed["guarded"]] == ["DefenseClaw · Kiro"]
+    assert [(item["entry"], item["agent"]) for item in zed["adoptable"]] == [("My Cursor", "cursor")]
+    assert [item["entry"] for item in zed["client_registry"]] == ["cursor"]
+    assert [item["entry"] for item in zed["foreign"]] == ["Something Else"]
+    # kiro is already guarded and cursor is accounted for, so neither is
+    # offered as "installed but not configured here".
+    assert "kiro" not in zed["installable"]
+    assert "cursor" not in zed["installable"]
+
+
+def test_adopt_points_the_operators_own_entry_at_the_guard(tmp_path, monkeypatch):
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    guard = _binary(tmp_path / "defenseclaw-acp")
+    agent = _binary(tmp_path / "kiro-cli")
+    settings.write_text(
+        json.dumps(
+            {
+                "agent_servers": {
+                    "Kiro": {"command": agent, "args": ["acp"], "env": {"KEEP": "me"}},
+                    "Foreign": {"command": "other", "args": []},
+                }
+            }
+        )
+    )
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="kiro-cli 2.22.0"):
+            result = CliRunner().invoke(
+                acp_cmd,
+                ["adopt", "--client", "zed", "--guard-binary", guard, "--yes", "--json-output"],
+                obj=app,
+            )
+        assert result.exit_code == 0, result.output
+        adopted = json.loads(result.output)["adopted"]
+        assert adopted == [{"agent": "kiro", "client": "zed", "entry": "Kiro"}]
+
+        servers = json.loads(settings.read_text())["agent_servers"]
+        # The operator's own entry now launches the guard, keeps its key and
+        # its env, and carries the same argv the managed entry got.
+        assert servers["Kiro"]["command"] == guard
+        assert servers["Kiro"]["env"] == {"KEEP": "me"}
+        assert servers["Kiro"]["args"] == servers["DefenseClaw · Kiro"]["args"]
+        # The wrapped agent is the one that was already configured (compare
+        # basenames: macOS resolves the temp path through /private).
+        assert any(str(value).endswith("kiro-cli") for value in servers["Kiro"]["args"])
+        # No unguarded path to the agent is left behind, and foreign entries
+        # are untouched.
+        assert servers["Foreign"] == {"command": "other", "args": []}
+        assert app.cfg.acp.mode == "observe"
+
+        # Re-running finds nothing to adopt rather than double-wrapping.
+        again = CliRunner().invoke(acp_cmd, ["adopt", "--client", "zed", "--yes", "--json-output"], obj=app)
+        assert again.exit_code == 0, again.output
+        assert json.loads(again.output)["adopted"] == []
     finally:
         cleanup_app(app, db_path, data_dir)
