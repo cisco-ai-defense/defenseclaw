@@ -287,10 +287,20 @@ func (c *CiscoDefenseClawInspectClient) Inspect(ctx context.Context, messages []
 	// both from the bearer token.
 	chatMsgs := make([]map[string]interface{}, len(messages))
 	for i, m := range messages {
-		chatMsgs[i] = map[string]interface{}{
+		msg := map[string]interface{}{
 			"role":    m.Role,
 			"content": map[string]interface{}{"text": m.Content},
 		}
+		if len(m.ToolCalls) > 0 {
+			msg["tool_calls"] = m.ToolCalls
+		}
+		if m.ToolCallID != "" {
+			msg["tool_call_id"] = m.ToolCallID
+		}
+		if m.Name != "" {
+			msg["name"] = m.Name
+		}
+		chatMsgs[i] = msg
 	}
 	// The defense_claw endpoint's cloud-side tenant is the authoritative
 	// source of the enabled-rules catalog for managed calls. Sending our

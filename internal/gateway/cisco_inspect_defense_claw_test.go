@@ -356,3 +356,90 @@ func TestDefenseClawInspect_EmptyEndpointReturnsNil(t *testing.T) {
 		t.Fatalf("expected nil client when endpoint is empty, got %#v", c)
 	}
 }
+
+// Pins the PreToolUse wire shape: assistant role, tool_calls array, arguments
+// as a JSON string.
+func TestDefenseClawInspect_ToolCallWireShape(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	c := NewCiscoDefenseClawInspectClient(&config.CiscoAIDefenseConfig{
+		Endpoint:  srv.URL,
+		TimeoutMs: 3000,
+	}, newFakeCloudProvider("cmid-token-1"))
+	if c == nil {
+		t.Fatal("expected non-nil client")
+	}
+
+	args := `{"command": "rm -rf / --no-preserve-root", "description": "Clean up"}`
+	toolCalls, err := json.Marshal([]map[string]interface{}{{
+		"id":   "toolu_01U3wpX2FhpFTW2sozkYKVYr",
+		"type": "function",
+		"function": map[string]interface{}{
+			"name":      "Bash",
+			"arguments": args,
+		},
+	}})
+	if err != nil {
+		t.Fatalf("marshal tool calls: %v", err)
+	}
+	if v := c.Inspect(t.Context(), []ChatMessage{
+		{Role: "assistant", ToolCalls: toolCalls},
+	}); v == nil {
+		t.Fatal("expected non-nil verdict on 200 response")
+	}
+
+	var payload struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			ToolCalls []struct {
+				ID       string `json:"id"`
+				Type     string `json:"type"`
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("unmarshal body: %v (body=%s)", err, gotBody)
+	}
+	if len(payload.Messages) != 1 {
+		t.Fatalf("messages = %d, want 1", len(payload.Messages))
+	}
+	msg := payload.Messages[0]
+	if msg.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", msg.Role)
+	}
+	if len(msg.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %d, want 1 (body=%s)", len(msg.ToolCalls), gotBody)
+	}
+	call := msg.ToolCalls[0]
+	if call.ID != "toolu_01U3wpX2FhpFTW2sozkYKVYr" {
+		t.Errorf("tool call id = %q", call.ID)
+	}
+	if call.Type != "function" {
+		t.Errorf("tool call type = %q, want function", call.Type)
+	}
+	if call.Function.Name != "Bash" {
+		t.Errorf("function name = %q, want Bash", call.Function.Name)
+	}
+	if call.Function.Arguments != args {
+		t.Errorf("arguments = %q, want %q", call.Function.Arguments, args)
+	}
+	var parsed struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(call.Function.Arguments), &parsed); err != nil {
+		t.Fatalf("arguments is not parseable JSON: %v", err)
+	}
+	if parsed.Command != "rm -rf / --no-preserve-root" {
+		t.Errorf("arguments.command = %q", parsed.Command)
+	}
+}
