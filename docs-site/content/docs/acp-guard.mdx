@@ -345,14 +345,15 @@ upstream ACP Registry ID when one exists, and its DefenseClaw evidence level:
 | OpenCode | Native | `opencode acp` |
 | Hermes | Native | `hermes acp` |
 | GitHub Copilot CLI | Native, public preview | `copilot --acp --stdio` |
-| OpenHands | Native, experimental | `openhands acp` |
 | Devin | Native | `devin acp` |
-| OpenClaw | Gateway-backed bridge | `openclaw acp` |
-| Amp | Community bridge | `amp-acp` |
-| Google Antigravity | Vendor companion server | `agy_acp_server` |
-| Claude Code | Community bridge | `claude-agent-acp` |
-| Codex CLI | Community bridge | `codex-acp` |
-| OmniGent, ZeptoClaw | None cataloged | — |
+
+The guard supports **native ACP entry points only** — an agent the vendor
+ships with an ACP mode of its own. Community bridges, vendor companion
+servers, and gateway-backed shims are deliberately out of scope: each adds a
+third-party process between DefenseClaw and the agent whose argv, schema and
+release cadence DefenseClaw does not control, which is the wrong place for a
+security boundary to depend on. Every other DefenseClaw connector therefore
+reports no ACP claim and is guarded through its native hook surface instead.
 
 Listing an entry point means it was checked against primary documentation or
 the upstream ACP Registry. It does not mean DefenseClaw has executed that

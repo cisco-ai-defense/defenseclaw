@@ -78,7 +78,7 @@ receipt-bound teardown.
 | Proxy | OpenClaw, ZeptoClaw | DefenseClaw receives and forwards model traffic | Request/response policy in the proxy |
 | Hook | Claude Code, Codex, Amp, Cursor, Devin, GitHub Copilot CLI, OpenHands, Antigravity, Hermes, OpenCode, Kiro | Agent remains connected directly to its upstream | Only the blocking events declared by that connector's selected hook contract; Cursor action uses event-native deny from its user hook. Kiro also exposes native ACP. |
 | Custom policy | OmniGent | Agent remains connected directly to its upstream | Six in-process policy phases mapped to `ALLOW`, `ASK`, or `DENY` |
-| ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, OpenHands, and Devin; bridge modes for OpenClaw, Amp, Antigravity, Claude, and Codex | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
+| ACP | Tested Kiro + Zed path; cataloged native modes for Cursor, Hermes, OpenCode, Copilot, and Devin. Native entry points only — no bridges | DefenseClaw mediates client ↔ agent JSON-RPC | Bidirectional prompt, output, approval, filesystem, terminal, and extension-method policy |
 
 Native ask is event-specific: OpenClaw (`before_tool_call`), Claude Code
 (`PreToolUse`), Copilot CLI (`preToolUse`), Antigravity (`PreToolUse` only),

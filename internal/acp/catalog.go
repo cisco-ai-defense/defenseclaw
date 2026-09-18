@@ -79,14 +79,7 @@ var builtinCatalog = Catalog{
 		{ID: "opencode", Name: "OpenCode", Command: "opencode", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "opencode", Kind: "native", RegistryID: "opencode", SourceURL: "https://opencode.ai/docs/cli/"},
 		{ID: "hermes", Name: "Hermes Agent", Command: "hermes", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "hermes", Kind: "native", SourceURL: "https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/programmatic-integration.md"},
 		{ID: "copilot", Name: "GitHub Copilot CLI", Command: "copilot", Args: []string{"--acp", "--stdio"}, Support: SupportCataloged, ConnectorID: "copilot", Kind: "native", RegistryID: "github-copilot-cli", SourceURL: "https://docs.github.com/en/copilot/reference/copilot-cli-reference/acp-server"},
-		{ID: "openhands", Name: "OpenHands", Command: "openhands", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "openhands", Kind: "native", SourceURL: "https://docs.openhands.dev/openhands/usage/cli/ide/overview"},
-		{ID: "openclaw", Name: "OpenClaw", Command: "openclaw", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "openclaw", Kind: "bridge", SourceURL: "https://docs.openclaw.ai/cli/acp"},
-		{ID: "gemini", Name: "Gemini CLI", Command: "gemini", Args: []string{"--acp"}, Support: SupportCataloged, ConnectorID: "geminicli", Kind: "native", RegistryID: "gemini", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
 		{ID: "devin", Name: "Devin", Command: "devin", Args: []string{"acp"}, Support: SupportCataloged, ConnectorID: "devin", Kind: "native", RegistryID: "devin", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
-		{ID: "amp", Name: "Amp ACP bridge", Command: "amp-acp", Args: []string{}, Support: SupportCataloged, ConnectorID: "amp", Kind: "bridge", RegistryID: "amp-acp", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
-		{ID: "antigravity", Name: "Google Antigravity ACP server", Command: "agy_acp_server", Args: []string{}, Support: SupportCataloged, ConnectorID: "antigravity", Kind: "bridge", RegistryID: "antigravity-acp", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
-		{ID: "claude", Name: "Claude ACP bridge", Command: "claude-agent-acp", Args: []string{}, Support: SupportCataloged, ConnectorID: "claudecode", Kind: "bridge", RegistryID: "claude-acp", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
-		{ID: "codex", Name: "Codex ACP bridge", Command: "codex-acp", Args: []string{}, Support: SupportCataloged, ConnectorID: "codex", Kind: "bridge", RegistryID: "codex-acp", SourceURL: "https://agentclientprotocol.com/get-started/registry"},
 	},
 }
 
