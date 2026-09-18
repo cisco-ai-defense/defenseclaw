@@ -128,6 +128,22 @@ $script:TrustedInstallerSID = 'S-1-5-80-956008885-3418522649-1831038044-18532926
 $script:ServiceSDDL = 'D:P(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;SY)(A;;CCDCLCSWRPWPDTLOCRSDRCWDWO;;;BA)(A;;CCLCSWLORC;;;BU)'
 $script:ServiceDescription = 'Administrator-managed DefenseClaw service; standard users have query-only SCM access.'
 $script:ServiceFailureRestartQuiescenceSeconds = 65
+# AIFW-34262: ancestor permission verdicts are advisory by default. The managed
+# roots live under a Cisco Secure Client tree whose ACLs the platform installer
+# (AVC) owns and re-applies on its own schedule, so a third-party grant on a
+# shared parent must not fail an install: the transaction would abort after
+# quiesce had already disabled every service, and the rollback would trip the
+# same check. Set this env to 1/true/yes/on to make the verdicts fatal again;
+# the matching Go-side pin is managed.TrustStrictAncestorsEnv.
+$script:TrustStrictAncestorsEnv = 'DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS'
+$script:TrustAdvisoryMarker = 'managed_trust_ancestor_advisory'
+# AIFW-34262 self-heal: separate grep token for the repair path, because it says
+# something different from an ancestor advisory. An ancestor advisory means
+# "somebody else also has access to a directory we do not own"; this means "our
+# own canonical ACL on a shared managed path was overwritten and we re-stamped
+# it". Alert on this one: a host that emits it repeatedly has AVC and
+# DefenseClaw fighting over the same DACL.
+$script:AclSelfHealMarker = 'managed_acl_self_heal'
 $script:SchemaVersion = 1
 $script:AgentApplicationControlAttestationSchemaVersion = 2
 $script:AgentApplicationControlPrerequisite = 'wdac_or_applocker_approved_agent_client_rules'
@@ -1927,6 +1943,92 @@ function Test-DefenseClawReplacementRights {
     return (($rightsValue -band ($replacementMask -bor $genericReplacementMask)) -ne 0)
 }
 
+# The PowerShell counterpart of managed.PlatformInstallerOwnedRoots. The
+# AIFW-34262 advisory covers directories whose permissions belong to the Cisco
+# Secure Client installer (AVC), which shares and re-ACLs them on its own
+# schedule. Everything else - C:\, C:\ProgramData and C:\Program Files
+# themselves, any third-party prefix - has no other claimant, so an untrusted
+# owner or replacement grant there stays fatal exactly as it was before
+# AIFW-34262. C:\ProgramData\Cisco is always included, even if %ProgramData% is
+# redirected, so the canonical managed tree is never judged foreign.
+function Get-DefenseClawPlatformInstallerOwnedRoots {
+    $roots = [Collections.Generic.List[string]]::new()
+    $roots.Add('C:\ProgramData\Cisco')
+    foreach ($base in @($script:ProgramData, $script:ProgramFiles)) {
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            continue
+        }
+        $root = [IO.Path]::GetFullPath(
+            [IO.Path]::Combine($base, 'Cisco')
+        ).TrimEnd('\')
+        if (-not ($roots | Microsoft.PowerShell.Core\Where-Object {
+            [string]::Equals($_, $root, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            $roots.Add($root)
+        }
+    }
+    return $roots.ToArray()
+}
+
+function Test-DefenseClawPlatformInstallerOwnedPath {
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($root in Get-DefenseClawPlatformInstallerOwnedRoots) {
+        if ([string]::Equals($full, $root, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Test-DefenseClawTrustStrictAncestors {
+    $raw = [Environment]::GetEnvironmentVariable(
+        $script:TrustStrictAncestorsEnv,
+        'Process'
+    )
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $false
+    }
+    return ([string]$raw).Trim().ToLowerInvariant() -in @('1', 'true', 'yes', 'on')
+}
+
+# Emits a permission verdict about an ancestor of the managed roots as a
+# warning and lets the caller continue. AVC owns the ACLs on the shared Cisco
+# Secure Client tree, so we report what we saw instead of failing the install.
+function Write-DefenseClawTrustAdvisory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    Microsoft.PowerShell.Utility\Write-Warning -Message (
+        '{0}: ancestor {1} is not provably trusted, continuing (permissions are owned by the platform installer): {2}' -f
+        $script:TrustAdvisoryMarker,
+        $Path,
+        $Reason
+    )
+}
+
+# Emits one step of the shared-path ACL repair: the verdict that triggered a
+# re-stamp, a stamp attempt that did not hold, or a verdict that survived the
+# repair. Unlike Write-DefenseClawTrustAdvisory this is about a path DefenseClaw
+# does own, so it is worth alerting on even though it is not fatal.
+function Write-DefenseClawAclSelfHealAdvisory {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string]$Reason
+    )
+    Microsoft.PowerShell.Utility\Write-Warning -Message (
+        '{0}: managed path {1}: {2}' -f
+        $script:AclSelfHealMarker,
+        $Path,
+        $Reason
+    )
+}
+
 function Assert-DefenseClawTrustedAncestor {
     param([Parameter(Mandatory)][string]$Path)
     # 'C:' is drive-relative and resolves to the current directory on that drive.
@@ -1934,18 +2036,37 @@ function Assert-DefenseClawTrustedAncestor {
     if ($Path -match '^[A-Za-z]:$') {
         $Path = $Path + '\'
     }
+    # Structural checks stay fatal: a reparse point in an ancestor redirects the
+    # whole managed tree and no amount of AVC ACL maintenance makes that safe.
     Assert-DefenseClawNoReparsePath -Path $Path
+    # AIFW-34262: owner and DACL verdicts below are advisory when this ancestor
+    # is inside a platform-installer-owned root and the strict pin is not set.
+    # An ancestor outside those roots keeps every verdict fatal - see
+    # Test-DefenseClawPlatformInstallerOwnedPath and $script:TrustStrictAncestorsEnv.
+    # This mirrors the Go walks, which scope the same downgrade with
+    # managed.PlatformInstallerOwnedPath.
+    $strict = (Test-DefenseClawTrustStrictAncestors) -or
+        -not (Test-DefenseClawPlatformInstallerOwnedPath -Path $Path)
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::Access
     )
     if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
         -not $accessSDDL.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "managed path has an absent or null DACL: $Path"
+        $reason = "managed path has an absent or null DACL: $Path"
+        if ($strict) {
+            throw $reason
+        }
+        Write-DefenseClawTrustAdvisory -Path $Path -Reason $reason
+        return
     }
     $ownerSID = ConvertTo-DefenseClawSID -Identity $acl.Owner
     if ($ownerSID -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID)) {
-        throw "untrusted ancestor owner $ownerSID can replace managed content through: $Path"
+        $reason = "untrusted ancestor owner $ownerSID can replace managed content through: $Path"
+        if ($strict) {
+            throw $reason
+        }
+        Write-DefenseClawTrustAdvisory -Path $Path -Reason $reason
     }
     foreach ($rule in $acl.Access) {
         if ($rule.AccessControlType -ne [Security.AccessControl.AccessControlType]::Allow -or
@@ -1955,7 +2076,11 @@ function Assert-DefenseClawTrustedAncestor {
         $sid = ConvertTo-DefenseClawSID -Identity $rule.IdentityReference
         if ($sid -notin @($script:SystemSID, $script:AdministratorsSID, $script:TrustedInstallerSID) -and
             (Test-DefenseClawReplacementRights -Rights $rule.FileSystemRights)) {
-            throw "untrusted principal $sid can delete, rename, or retake an ancestor of managed content: $Path"
+            $reason = "untrusted principal $sid can delete, rename, or retake an ancestor of managed content: $Path"
+            if ($strict) {
+                throw $reason
+            }
+            Write-DefenseClawTrustAdvisory -Path $Path -Reason $reason
         }
     }
 }
@@ -3185,6 +3310,52 @@ function Set-DefenseClawPathAcl {
     Assert-DefenseClawCanonicalPathAcl -Path $Path -Expected $security
 }
 
+# AIFW-34262: Set-DefenseClawPathAcl stamps the canonical descriptor and then
+# demands exact equality with it. For a path inside the shared Cisco Secure
+# Client tree, AVC can re-apply its own ACLs in the window between those two
+# steps, and losing that race is not an install failure. Retry the stamp; if AVC
+# keeps winning, hand the verdict to the post-hardening Assert-DefenseClawPathAcl
+# for that path, which re-stamps once more and then judges the rights that
+# actually matter. Structural problems are not swallowed by that hand-off: the
+# assertion runs the same Assert-DefenseClawNoReparsePath as this does.
+#
+# Under the strict pin the first lost race is fatal, as before.
+function Set-DefenseClawSharedPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)]
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [string]$Kind,
+        [Parameter(Mandatory)][string]$GatewayServiceSID,
+        [ValidateRange(1, 10)][int]$Attempts = 3
+    )
+    for ($attempt = 1; $attempt -le $Attempts; $attempt++) {
+        try {
+            Set-DefenseClawPathAcl `
+                -Path $Path `
+                -Kind $Kind `
+                -GatewayServiceSID $GatewayServiceSID
+            return
+        }
+        catch {
+            if (Test-DefenseClawTrustStrictAncestors) {
+                throw
+            }
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Path `
+                -Reason (
+                    'canonical {0} ACL stamp attempt {1} of {2} did not hold: {3}' -f
+                    $Kind, $attempt, $Attempts, $_.Exception.Message
+                )
+            if ($attempt -lt $Attempts) {
+                # Retrying with no pause just loses the same race again: give the
+                # writer we are contending with time to finish its pass.
+                Microsoft.PowerShell.Utility\Start-Sleep -Milliseconds (250 * $attempt)
+            }
+        }
+    }
+}
+
 function Set-DefenseClawBootstrapRootAcl {
     param(
         [Parameter(Mandatory)][string]$Path,
@@ -3762,42 +3933,67 @@ function Test-DefenseClawReadLikeRights {
     return (($Rights -band $readLike) -ne 0)
 }
 
-function Assert-DefenseClawPathAcl {
+# Reads the DACL of $Path and returns every permission verdict against it, in
+# the order they were historically thrown, so an empty result means compliant.
+# Splitting the reading from the judging is what lets a caller repair the path
+# and read it again before deciding anything (see Assert-DefenseClawPathAcl).
+#
+# Each verdict carries a Kind, because the three mean very different things:
+#   Access   - a foreign principal can write or read, or the DACL inherits.
+#              Somebody else ALSO has access to a path we share with AVC.
+#   Contract - a null DACL, a foreign owner, or a non-canonical deny ACE. The
+#              canonical descriptor we stamped is not the one on disk.
+#   Rights   - a principal DefenseClaw depends on is missing rights it must
+#              have. WE do not have the access we need.
+#
+# Get-Acl failures are deliberately not verdicts: they propagate out of here so
+# an unreadable security descriptor can never be downgraded to a warning.
+function Get-DefenseClawPathAclVerdicts {
     param(
         [Parameter(Mandatory)][string]$Path,
         [Parameter(Mandatory)][string[]]$AllowedWriterSIDs,
         [string[]]$AllowedReaderSIDs = @(),
         [hashtable]$RequiredRights = @{},
-        [string[]]$AllowedOwnerSIDs = @(
-            $script:SystemSID,
-            $script:AdministratorsSID,
-            $script:TrustedInstallerSID
-        ),
+        [Parameter(Mandatory)][string[]]$AllowedOwnerSIDs,
         [switch]$AllowUsersRead,
         [switch]$RejectUntrustedRead,
         [switch]$AllowInheritance
     )
-    Assert-DefenseClawNoReparsePath -Path $Path
+    $verdicts = [Collections.Generic.List[object]]::new()
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::Access
     )
     if ([string]::IsNullOrWhiteSpace($accessSDDL) -or
         -not $accessSDDL.StartsWith('D:', [StringComparison]::OrdinalIgnoreCase)) {
-        throw "managed path has an absent or null DACL: $Path"
+        # Nothing below can be evaluated without a DACL to evaluate it against.
+        $verdicts.Add([pscustomobject]@{
+            Kind   = 'Contract'
+            Reason = "managed path has an absent or null DACL: $Path"
+        })
+        return $verdicts.ToArray()
     }
     $ownerSID = ConvertTo-DefenseClawSID -Identity $acl.Owner
     if ($ownerSID -notin $AllowedOwnerSIDs) {
-        throw "untrusted owner $ownerSID on managed path: $Path"
+        $verdicts.Add([pscustomobject]@{
+            Kind   = 'Contract'
+            Reason = "untrusted owner $ownerSID on managed path: $Path"
+        })
     }
     if (-not $AllowInheritance -and -not $acl.AreAccessRulesProtected) {
-        throw "managed DACL inherits from an ancestor: $Path"
+        $verdicts.Add([pscustomobject]@{
+            Kind   = 'Access'
+            Reason = "managed DACL inherits from an ancestor: $Path"
+        })
     }
     $grantedBySID = @{}
     foreach ($rule in $acl.Access) {
         if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Deny) {
             if ($RequiredRights.Count -gt 0) {
-                throw "managed path contains a non-canonical deny ACE for $($rule.IdentityReference): $Path"
+                $verdicts.Add([pscustomobject]@{
+                    Kind   = 'Contract'
+                    Reason = "managed path contains a non-canonical deny ACE for $($rule.IdentityReference): $Path"
+                })
             }
             continue
         }
@@ -3812,13 +4008,19 @@ function Assert-DefenseClawPathAcl {
             $grantedBySID[$sid] = $currentRights -bor $rule.FileSystemRights
         }
         if ((Test-DefenseClawWriteLikeRights -Rights $rule.FileSystemRights) -and $sid -notin $AllowedWriterSIDs) {
-            throw "untrusted principal $sid has write-like access to managed path: $Path"
+            $verdicts.Add([pscustomobject]@{
+                Kind   = 'Access'
+                Reason = "untrusted principal $sid has write-like access to managed path: $Path"
+            })
         }
         if ($RejectUntrustedRead -and
             (Test-DefenseClawReadLikeRights -Rights $rule.FileSystemRights) -and
             $sid -notin $AllowedReaderSIDs -and
             -not ($AllowUsersRead -and $sid -eq $script:UsersSID)) {
-            throw "untrusted principal $sid can read protected managed path: $Path"
+            $verdicts.Add([pscustomobject]@{
+                Kind   = 'Access'
+                Reason = "untrusted principal $sid can read protected managed path: $Path"
+            })
         }
     }
     foreach ($entry in $RequiredRights.GetEnumerator()) {
@@ -3831,8 +4033,130 @@ function Assert-DefenseClawPathAcl {
             [Security.AccessControl.FileSystemRights]0
         }
         if (($actual -band $required) -ne $required) {
-            throw "managed path is missing required rights for $sid (required=$required actual=$actual): $Path"
+            $verdicts.Add([pscustomobject]@{
+                Kind   = 'Rights'
+                Reason = "managed path is missing required rights for $sid (required=$required actual=$actual): $Path"
+            })
         }
+    }
+    return $verdicts.ToArray()
+}
+
+function Assert-DefenseClawPathAcl {
+    param(
+        [Parameter(Mandatory)][string]$Path,
+        [Parameter(Mandatory)][string[]]$AllowedWriterSIDs,
+        [string[]]$AllowedReaderSIDs = @(),
+        [hashtable]$RequiredRights = @{},
+        [string[]]$AllowedOwnerSIDs = @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ),
+        [switch]$AllowUsersRead,
+        [switch]$RejectUntrustedRead,
+        [switch]$AllowInheritance,
+        # AIFW-34262: for a directory DefenseClaw shares with the Cisco Secure
+        # Client tree (the state root), a foreign principal appearing in the
+        # DACL after we stamped the canonical one means AVC re-applied its own
+        # ACLs, not that our install is broken. Report those verdicts and
+        # continue instead of failing the transaction.
+        [switch]$AdvisoryUntrustedAccess,
+        # AIFW-34262 self-heal. When set, a broken canonical contract on this
+        # path - null DACL, foreign owner, deny ACE, or missing required rights -
+        # is repaired by re-stamping the canonical ACL for this Kind and reading
+        # the path again, instead of failing the transaction on the first
+        # reading. AVC re-ACLing a path we share is expected; losing our own
+        # stamp to it is recoverable, and re-applying it is strictly better than
+        # either aborting an install after quiesce or continuing blind on a
+        # state root where SYSTEM may have lost FullControl.
+        #
+        # This is a repair, not a relaxation, so it also runs under the strict
+        # pin - only the final downgrade to a warning is pin-gated.
+        [ValidateSet('InstallDirectory', 'InstallFile', 'ServiceInstallDirectory', 'ServiceInstallFile', 'StateDirectory', 'AdminDirectory', 'AdminFile', 'ConfigDirectory', 'ConfigFile', 'MachinePolicyFile', 'RuntimeDirectory', 'RuntimeFile', 'RuntimeSecretFile', 'AuthorizationDirectory', 'AuthorizationFile', 'LogDirectory', 'GatewayLogDirectory', 'ManagedIPCDirectory')]
+        [string]$SelfHealKind,
+        [string]$SelfHealGatewayServiceSID
+    )
+    $advisory = [bool]$AdvisoryUntrustedAccess -and -not (Test-DefenseClawTrustStrictAncestors)
+    Assert-DefenseClawNoReparsePath -Path $Path
+    $verdictArgs = @{
+        Path                = $Path
+        AllowedWriterSIDs   = $AllowedWriterSIDs
+        AllowedReaderSIDs   = $AllowedReaderSIDs
+        RequiredRights      = $RequiredRights
+        AllowedOwnerSIDs    = $AllowedOwnerSIDs
+        AllowUsersRead      = [bool]$AllowUsersRead
+        RejectUntrustedRead = [bool]$RejectUntrustedRead
+        AllowInheritance    = [bool]$AllowInheritance
+    }
+    $verdicts = @(Get-DefenseClawPathAclVerdicts @verdictArgs)
+    $selfHealed = $false
+    if (-not [string]::IsNullOrWhiteSpace($SelfHealKind)) {
+        $repairable = @(
+            $verdicts |
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights') }
+        )
+        if ($repairable.Count -gt 0) {
+            if ([string]::IsNullOrWhiteSpace($SelfHealGatewayServiceSID)) {
+                throw "-SelfHealKind requires -SelfHealGatewayServiceSID: $Path"
+            }
+            $selfHealed = $true
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Path `
+                -Reason (
+                    're-stamping the canonical {0} ACL after: {1}' -f
+                    $SelfHealKind, $repairable[0].Reason
+                )
+            try {
+                Set-DefenseClawPathAcl `
+                    -Path $Path `
+                    -Kind $SelfHealKind `
+                    -GatewayServiceSID $SelfHealGatewayServiceSID
+            }
+            catch {
+                # AVC can win the race again while we re-stamp. Whether that
+                # actually left us non-compliant is decided by the re-read
+                # below, not by the failure to write.
+                Write-DefenseClawAclSelfHealAdvisory `
+                    -Path $Path `
+                    -Reason "canonical ACL re-stamp did not hold: $($_.Exception.Message)"
+            }
+            $verdicts = @(Get-DefenseClawPathAclVerdicts @verdictArgs)
+        }
+    }
+    # A 'Rights' verdict is never downgraded. It is the one verdict that says
+    # DefenseClaw cannot operate on this path at all, as opposed to saying that
+    # somebody else can also reach it - and a host where re-stamping cannot give
+    # SYSTEM the rights it needs is broken in a way a warning would only hide.
+    #
+    # Log every downgraded verdict before throwing, so a fatal one does not cost
+    # the surrounding context in a DART, and throw the FIRST fatal verdict in
+    # reading order so the message a non-advisory caller sees is exactly the one
+    # it saw before this function was split in two.
+    $fatal = $null
+    foreach ($verdict in $verdicts) {
+        $downgradable = switch ($verdict.Kind) {
+            'Access' { $advisory }
+            'Contract' { $advisory -and $selfHealed }
+            default { $false }
+        }
+        if (-not $downgradable) {
+            if ($null -eq $fatal) {
+                $fatal = [string]$verdict.Reason
+            }
+            continue
+        }
+        if ($verdict.Kind -eq 'Access') {
+            Write-DefenseClawTrustAdvisory -Path $Path -Reason $verdict.Reason
+        }
+        else {
+            Write-DefenseClawAclSelfHealAdvisory `
+                -Path $Path `
+                -Reason "verdict survived the canonical ACL re-stamp: $($verdict.Reason)"
+        }
+    }
+    if ($null -ne $fatal) {
+        throw $fatal
     }
 }
 
@@ -5725,7 +6049,10 @@ function Set-DefenseClawManagedAcls {
             -LiteralPath $Layout.ManagedIPCDirectory) {
         throw "managed IPC path is occupied by a non-directory: $($Layout.ManagedIPCDirectory)"
     }
-    Set-DefenseClawPathAcl -Path $Layout.StateRoot -Kind StateDirectory -GatewayServiceSID $gatewaySID
+    # The state root is the only one of these that shares a parent with the rest
+    # of the Cisco Secure Client tree, so it is the only one AVC can re-ACL out
+    # from under the stamp (AIFW-34262). Everything below it is ours alone.
+    Set-DefenseClawSharedPathAcl -Path $Layout.StateRoot -Kind StateDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.ConfigDirectory -Kind ConfigDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.GuardianDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
     Set-DefenseClawPathAcl -Path $Layout.InstallStateDirectory -Kind AdminDirectory -GatewayServiceSID $gatewaySID
@@ -15803,12 +16130,23 @@ function Assert-DefenseClawEnterpriseDeployment {
         ) `
         -RequiredRights $managedIPCDirectoryRights `
         -RejectUntrustedRead
+    # The state root is the one managed directory that lives directly inside the
+    # shared Cisco Secure Client data tree, so AVC can re-ACL it after we stamp
+    # the canonical DACL. Foreign access there is reported, not fatal
+    # (AIFW-34262); the required SYSTEM/Administrators/gateway rights below
+    # still have to be present.
+    # -SelfHealKind: if AVC replaced our canonical descriptor rather than merely
+    # adding an ACE to it, re-stamp it and read again before judging anything.
+    # $stateRights below still has to be satisfied after that repair.
     Assert-DefenseClawPathAcl `
         -Path $Layout.StateRoot `
         -AllowedWriterSIDs $adminWriters `
         -AllowedReaderSIDs $gatewayReaders `
         -RequiredRights $stateRights `
-        -RejectUntrustedRead
+        -RejectUntrustedRead `
+        -AdvisoryUntrustedAccess `
+        -SelfHealKind StateDirectory `
+        -SelfHealGatewayServiceSID $gatewaySID
     Assert-DefenseClawPathAcl `
         -Path $Layout.ConfigDirectory `
         -AllowedWriterSIDs $adminWriters `
@@ -16821,10 +17159,37 @@ function Set-DefenseClawPreservedStateAcls {
         [Parameter(Mandatory)][string]$GatewayServiceSID
     )
     $items = @(Microsoft.PowerShell.Management\Get-ChildItem -LiteralPath $Layout.StateRoot -Recurse -Force)
-    Set-DefenseClawPathAcl `
+    # Shared with the Cisco Secure Client tree, so tolerate a lost stamp race
+    # here the same way the install hardening does (AIFW-34262). Preserving
+    # state across an uninstall must not abort because AVC re-ACLed the root.
+    Set-DefenseClawSharedPathAcl `
         -Path $Layout.StateRoot `
         -Kind AdminDirectory `
         -GatewayServiceSID $GatewayServiceSID
+    # Set-DefenseClawSharedPathAcl swallows a lost stamp race, so nothing above
+    # proves the retained state root ended up administrator-only. Verify it the
+    # same way the install hardening does: foreign access AVC re-applied is an
+    # advisory, a lost canonical descriptor is re-stamped once and re-read, and
+    # only SYSTEM/Administrators still missing FullControl after that repair is
+    # fatal. Retained state that a standard user can rewrite would be inherited
+    # verbatim by the next install.
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.StateRoot `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -RejectUntrustedRead `
+        -AdvisoryUntrustedAccess `
+        -SelfHealKind AdminDirectory `
+        -SelfHealGatewayServiceSID $GatewayServiceSID
     foreach ($item in $items) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "refusing preserved-state ACL rewrite through reparse point: $($item.FullName)"

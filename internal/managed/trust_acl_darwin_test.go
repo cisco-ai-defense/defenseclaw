@@ -21,7 +21,7 @@ func TestValidateTrustedPathElementRejectsWriteCapableDarwinACL(t *testing.T) {
 	}
 	addDarwinACL(t, path, "everyone allow write,append,writeattr,writeextattr,writesecurity,chown")
 
-	err := validateTrustedPathElement(path, false, "managed config")
+	err := validateTrustedPathElement(path, false, "managed config", false)
 	if err == nil || !strings.Contains(err.Error(), "write-capable macOS ACL") {
 		t.Fatalf("validateTrustedPathElement error = %v, want ACL refusal", err)
 	}
@@ -31,7 +31,7 @@ func TestValidateTrustedRuntimeDirElementRejectsWriteCapableDarwinACL(t *testing
 	path := t.TempDir()
 	addDarwinACL(t, path, "everyone allow add_file,add_subdirectory,delete_child,writeattr,writeextattr,writesecurity,chown")
 
-	err := validateTrustedRuntimeDirElement(path, "managed data_dir")
+	err := validateTrustedRuntimeDirElement(path, "managed data_dir", false)
 	if err == nil || !strings.Contains(err.Error(), "write-capable macOS ACL") {
 		t.Fatalf("validateTrustedRuntimeDirElement error = %v, want ACL refusal", err)
 	}

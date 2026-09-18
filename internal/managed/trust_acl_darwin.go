@@ -40,13 +40,17 @@ func validateTrustedPathACL(path string) error {
 		}
 		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
 		if len(fields) == 0 {
+			// An allow entry with no permission list is malformed `ls -lde`
+			// output, not a judgement about the permissions themselves. Keep it
+			// a plain error so the ancestor downgrade cannot swallow an ACL this
+			// code failed to read (see relaxAncestorTrustJudgement).
 			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
 		}
 		for _, permission := range strings.Split(fields[0], ",") {
 			switch permission {
 			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
 				"writeattr", "writeextattr", "writesecurity", "chown":
-				return fmt.Errorf("%s has write-capable macOS ACL entry", path)
+				return newTrustVerdict("%s has write-capable macOS ACL entry", path)
 			}
 		}
 	}

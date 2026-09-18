@@ -169,8 +169,31 @@ DefenseClaw restart is needed for a region flip.
   service SID needs Read on the file (grantable via inheritance from
   the parent directory). This matches every other DefenseClaw managed
   artifact — [`internal/managed/trust_windows.go`](../internal/managed/trust_windows.go)
-  refuses to load a file whose ancestor chain is world- or user-
-  writable.
+  refuses to load a file that is itself world- or user-writable. Since
+  AIFW-34262 a world- or user-writable **ancestor** of that file logs a
+  `managed_trust_ancestor_advisory` warning and the load continues: the
+  Cisco Secure Client tree above the managed roots is AVC's to ACL, and a
+  transient grant there must not fail a load or an install. That downgrade
+  is scoped to the Cisco-owned roots (`%ProgramData%\Cisco`,
+  `%ProgramFiles%\Cisco`, `%ProgramFiles(x86)%\Cisco`, and always
+  `C:\ProgramData\Cisco` — `managed.PlatformInstallerOwnedRoots`); an
+  ancestor outside them keeps its verdicts fatal, since nobody else has a
+  claim on those permissions. Ancestors are always evaluated with the
+  narrower replacement mask so stock `BUILTIN\Users` create-child grants on
+  `C:\` and `C:\ProgramData` still pass. Pin
+  `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` to make the in-root
+  ancestor verdicts fatal again.
+
+  If AVC does not merely add an ACE but replaces the canonical DACL that
+  DefenseClaw stamps on its own state root, the installer repairs it
+  rather than failing: the stamp is retried, and the post-hardening
+  assertion re-stamps the canonical descriptor once and re-reads the path
+  before judging it. Both steps log the `managed_acl_self_heal` marker —
+  worth alerting on, since a host that emits it repeatedly has AVC and
+  DefenseClaw contending for the same DACL. What survives that repair is
+  still fatal if it means DefenseClaw itself lacks the rights it needs
+  (missing SYSTEM/Administrators/gateway rights); foreign *additional*
+  access remains advisory.
 
 - **Contents:** JSON with one meaningful key,
   `cisco_ai_defense_endpoint`, whose value is an HTTPS bare origin
@@ -194,8 +217,8 @@ DefenseClaw restart is needed for a region flip.
   falls through to `cisco_ai_defense.endpoint` from `config.yaml`.
 
 - **Runtime trust check:** at every `ConfigManager` reload the gateway
-  re-validates the file (owner, no reparse point, ancestor chain admin-
-  owned) via `managed.ValidateTrustedFilePath` before parsing. A file
+  re-validates the file (owner, no reparse point, and the ancestor chain
+  as an advisory) via `managed.ValidateTrustedFilePath` before parsing. A file
   that fails the check is rejected as if it were malformed — the current
   in-memory endpoint is kept and an error is logged. When the DefenseClaw
   gateway is not running elevated (dev boxes, unit tests, opensource

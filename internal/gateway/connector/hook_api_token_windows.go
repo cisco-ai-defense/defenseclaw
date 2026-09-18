@@ -68,7 +68,7 @@ func captureHookAPITokenPublishProtectionPlatform(
 	if dacl == nil {
 		return hookAPITokenPublishProtection{}, false, fmt.Errorf("null Windows DACL is not trusted for bound hook API token")
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs(file.Name(), dacl, false, true); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs(file.Name(), dacl, false, true, false); err != nil {
 		return hookAPITokenPublishProtection{}, false, err
 	}
 	control, _, err := descriptor.Control()
@@ -198,7 +198,7 @@ func hookAPITokenWindowsExactDACLFromSDDL(sddl string) (string, error) {
 }
 
 func hookAPIValidateOwner(path string, _ os.FileInfo) error {
-	return hookAPIValidateWindowsPathElement(path, false, true)
+	return hookAPIValidateWindowsPathElement(path, false, true, false)
 }
 
 // validateHookAPITokenBoundFileCustodyPlatform applies the hook-token custody
@@ -228,6 +228,9 @@ func validateHookAPITokenBoundFileCustodyPlatform(file *os.File) error {
 	return otlpWindowsRejectUntrustedReadACEs(file.Name(), dacl)
 }
 
+// hookAPITrustLabel names the trust walk in every advisory it emits.
+const hookAPITrustLabel = "hook API token path"
+
 func hookAPIValidateDirectory(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
@@ -235,7 +238,12 @@ func hookAPIValidateDirectory(path string) error {
 	clean := filepath.Clean(path)
 	protectChildren := true
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		if err := hookAPIValidateWindowsPathElement(cur, true, protectChildren); err != nil {
+		// AIFW-34262: AVC owns and re-ACLs the Cisco Secure Client tree that the
+		// managed data and hooks directories live under, so an untrusted grant on
+		// one of those ancestors is reported, not fatal. The named directory,
+		// ancestors outside that tree, and structural failures stay fatal.
+		advisory := cur != clean && managed.PlatformInstallerOwnedPath(cur)
+		if err := hookAPIValidateWindowsPathElement(cur, true, protectChildren, advisory); err != nil {
 			return err
 		}
 		protectChildren = false
@@ -250,10 +258,10 @@ func hookAPIValidateDirectoryElement(path string) error {
 	if !filepath.IsAbs(path) {
 		return fmt.Errorf("hook API token directory must be absolute: %q", path)
 	}
-	return hookAPIValidateWindowsPathElement(filepath.Clean(path), true, true)
+	return hookAPIValidateWindowsPathElement(filepath.Clean(path), true, true, false)
 }
 
-func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren bool) error {
+func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren, advisory bool) error {
 	info, err := os.Lstat(path)
 	if err != nil {
 		return err
@@ -295,19 +303,25 @@ func hookAPIValidateWindowsPathElement(path string, wantDir, protectChildren boo
 		return fmt.Errorf("inspect Windows owner for %s: %w", path, err)
 	}
 	if !hookAPIWindowsTrustedPrincipal(owner) {
-		return fmt.Errorf("owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path)
+		if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+			"owner %s is not trusted for hook API token path %s", hookAPIWindowsSIDString(owner), path,
+		)); err != nil {
+			return err
+		}
 	}
 	dacl, _, err := sd.DACL()
 	if err != nil {
 		return fmt.Errorf("inspect Windows DACL for %s: %w", path, err)
 	}
 	if dacl == nil {
-		return fmt.Errorf("null Windows DACL is not trusted: %s", path)
+		return managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+			"null Windows DACL is not trusted: %s", path,
+		))
 	}
-	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, wantDir, protectChildren)
+	return hookAPIRejectUntrustedWindowsWriteACEs(path, dacl, wantDir, protectChildren, advisory)
 }
 
-func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren bool) error {
+func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, wantDir, protectChildren, advisory bool) error {
 	const (
 		accessAllowedCompoundACEType       = 0x4
 		accessAllowedObjectACEType         = 0x5
@@ -332,7 +346,15 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		}
 		switch ace.Header.AceType {
 		case accessAllowedCompoundACEType, accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
-			return fmt.Errorf("unsupported Windows allow ACE type 0x%x on %s", ace.Header.AceType, path)
+			// A write-capable ACE whose layout this walk cannot parse: the SID
+			// does not start at ace.SidStart for these types, so there is no way
+			// to tell whether the grantee is trusted. That is a structural
+			// limitation, not a permission verdict about an AVC-owned ancestor,
+			// so the advisory downgrade must not apply — otherwise an attacker
+			// who can write a callback ACE on an ancestor gets a free pass.
+			return fmt.Errorf(
+				"unsupported Windows allow ACE type 0x%x on %s", ace.Header.AceType, path,
+			)
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue
@@ -348,7 +370,12 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 			continue
 		}
 		if !hookAPIWindowsTrustedPrincipal(sid) {
-			return fmt.Errorf("untrusted Windows principal %s has write-like access mask 0x%x on %s", hookAPIWindowsSIDString(sid), uint32(ace.Mask), path)
+			if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+				"untrusted Windows principal %s has write-like access mask 0x%x on %s",
+				hookAPIWindowsSIDString(sid), uint32(ace.Mask), path,
+			)); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
