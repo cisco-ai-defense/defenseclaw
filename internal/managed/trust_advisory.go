@@ -64,16 +64,22 @@ var ReportTrustAdvisory func(path, label, reason string)
 func PlatformInstallerOwnedRoots() []string {
 	switch runtime.GOOS {
 	case "windows":
-		roots := make([]string, 0, 3)
+		// The canonical per-machine tree is always recognised, not just when
+		// the environment is empty: a service started with a stripped or
+		// partially redirected environment (%ProgramFiles% set, %ProgramData%
+		// not) must still read `C:\ProgramData\Cisco` as installer-owned, or
+		// the managed state root itself would be judged foreign.
+		roots := make([]string, 0, 4)
+		roots = append(roots, `C:\ProgramData\Cisco`)
 		for _, envName := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
-			if base := os.Getenv(envName); base != "" {
-				roots = append(roots, filepath.Join(base, "Cisco"))
+			base := os.Getenv(envName)
+			if base == "" {
+				continue
 			}
-		}
-		if len(roots) == 0 {
-			// A service started with a stripped environment still has to
-			// recognise the canonical tree.
-			roots = append(roots, `C:\ProgramData\Cisco`)
+			root := filepath.Join(base, "Cisco")
+			if !containsInstallerOwnedRoot(roots, root) {
+				roots = append(roots, root)
+			}
 		}
 		return roots
 	case "darwin":
@@ -97,6 +103,24 @@ func PlatformInstallerOwnedPath(path string) bool {
 	clean := filepath.Clean(path)
 	for _, root := range PlatformInstallerOwnedRoots() {
 		if pathAtOrUnder(clean, filepath.Clean(root)) {
+			return true
+		}
+	}
+	return false
+}
+
+// containsInstallerOwnedRoot keeps PlatformInstallerOwnedRoots free of
+// duplicates when %ProgramData% resolves to the canonical location that is
+// always seeded, matching the case-insensitive comparison pathAtOrUnder uses.
+func containsInstallerOwnedRoot(roots []string, candidate string) bool {
+	for _, root := range roots {
+		if runtime.GOOS == "windows" {
+			if strings.EqualFold(root, candidate) {
+				return true
+			}
+			continue
+		}
+		if root == candidate {
 			return true
 		}
 	}
@@ -145,6 +169,13 @@ func NewTrustVerdict(format string, args ...any) error {
 // access mask on Windows (see windowsTrustScope): a caller can want stock
 // known-folder create-child grants tolerated while still refusing an untrusted
 // write ACE on the directory it is about to write into.
+//
+// This does NOT consult PlatformInstallerOwnedPath — deciding which elements are
+// eligible for the downgrade belongs to the walk, which is the only code that
+// knows an element's position. Every caller must pass advisory=true only for an
+// ancestor inside PlatformInstallerOwnedRoots; passing it for an arbitrary
+// ancestor would let a foreign writable directory above the artifact pass
+// validation.
 func relaxAncestorTrustVerdict(advisory bool, path, label string, verdict error) error {
 	if verdict == nil {
 		return nil

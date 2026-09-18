@@ -297,9 +297,23 @@ trust_strict_ancestors() {
   esac
 }
 
+# Mirrors managed.PlatformInstallerOwnedPath: only /opt/cisco and below is
+# ACLed by the Cisco Secure Client installer, so only there does a permission
+# verdict become an advisory. /opt itself has no other claimant, and the Go
+# trust walk in the gateway treats it the same way, so relaxing it here would
+# only move the failure from install time to first load.
+platform_installer_owned_path() {
+  local path="$1"
+  case "${path}" in
+    /opt/cisco|/opt/cisco/*|/Library/Logs/Cisco|/Library/Logs/Cisco/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
 trust_ancestor_verdict() {
-  local reason="$1"
-  if trust_strict_ancestors; then
+  local path="$1"
+  local reason="$2"
+  if trust_strict_ancestors || ! platform_installer_owned_path "${path}"; then
     die "${reason}"
   fi
   warn "managed_trust_ancestor_advisory: ${reason}; continuing (permissions are owned by the platform installer)"
@@ -320,9 +334,9 @@ ensure_shared_install_parent() {
   mode="$(stat -f '%Lp' "${path}")" \
     || die "cannot inspect shared install parent mode: ${path}"
   [[ "${owner}" == "0" ]] \
-    || trust_ancestor_verdict "shared install parent is not root-owned: ${path}"
+    || trust_ancestor_verdict "${path}" "shared install parent is not root-owned: ${path}"
   (( (8#${mode} & 8#022) == 0 )) \
-    || trust_ancestor_verdict "shared install parent is group/other writable: ${path} (${mode})"
+    || trust_ancestor_verdict "${path}" "shared install parent is group/other writable: ${path} (${mode})"
   acl_output="$(ls -lde -- "${path}")" \
     || die "cannot inspect shared install parent ACL: ${path}"
   while IFS= read -r acl_line; do
@@ -336,7 +350,7 @@ ensure_shared_install_parent() {
     for permission in "${acl_permissions[@]}"; do
       case "${permission}" in
         write|add_file|append|add_subdirectory|delete|delete_child|writeattr|writeextattr|writesecurity|chown)
-          trust_ancestor_verdict "shared install parent has a write-capable ACL: ${path}"
+          trust_ancestor_verdict "${path}" "shared install parent has a write-capable ACL: ${path}"
           ;;
       esac
     done

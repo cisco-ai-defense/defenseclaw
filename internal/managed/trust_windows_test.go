@@ -406,6 +406,109 @@ func TestValidateTrustedFilePathRejectsRawPerLogonDriveAliasToTrustedTree(t *tes
 	}
 }
 
+// An allow ACE type this walk cannot decode is a structural failure, not a
+// permission verdict: ace.Mask and ace.SidStart do not describe the grant, so
+// the advisory downgrade would turn "cannot evaluate" into "trusted".
+func TestWindowsUnsupportedAllowACETypesStayFatalInAdvisoryScope(t *testing.T) {
+	// (A;;GA;;;BA) with the ACE type byte rewritten to each unsupported allow
+	// type. Building the descriptor from SDDL and patching the header is the
+	// only way to get these types past GetAce.
+	descriptor, err := windows.SecurityDescriptorFromString("D:P(A;;GA;;;BA)")
+	if err != nil {
+		t.Fatalf("SecurityDescriptorFromString: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil {
+		t.Fatalf("DACL: %v", err)
+	}
+	if dacl == nil {
+		t.Fatal("test descriptor has no DACL")
+	}
+	var ace *windows.ACCESS_ALLOWED_ACE
+	if err := windows.GetAce(dacl, 0, &ace); err != nil {
+		t.Fatalf("GetAce: %v", err)
+	}
+	original := ace.Header.AceType
+
+	for name, aceType := range map[string]uint8{
+		"allow object":          0x5,
+		"allow callback":        0x9,
+		"allow callback object": 0xB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			ace.Header.AceType = aceType
+			t.Cleanup(func() { ace.Header.AceType = original })
+			for scopeName, scope := range map[string]windowsTrustScope{
+				"leaf":              windowsTrustLeaf,
+				"named dir":         windowsTrustNamedDir,
+				"advisory ancestor": windowsTrustAncestor,
+			} {
+				advisories := captureTrustAdvisories(t)
+				err := rejectUntrustedWindowsWriteACEsWithWriter(
+					`C:\ProgramData\Cisco`, "managed ancestor", dacl, nil, scope,
+				)
+				if err == nil || !strings.Contains(err.Error(), "unsupported allow ACE type") {
+					t.Fatalf("%s scope error = %v, want an unsupported-ACE refusal", scopeName, err)
+				}
+				if len(*advisories) != 0 {
+					t.Fatalf("%s scope advisories = %v, want none", scopeName, *advisories)
+				}
+			}
+		})
+	}
+}
+
+// The advisory downgrade is scoped to the platform installer's roots, so a
+// parent outside them keeps the pre-AIFW-34262 fatal verdict while retaining the
+// narrow mask that stock known-folder grants depend on.
+func TestWindowsAncestorScopeFollowsInstallerOwnedRoots(t *testing.T) {
+	inside := filepath.Join(`C:\ProgramData\Cisco`, "Cisco Secure Client", "DefenseClaw")
+	if scope := windowsAncestorScope(inside); !scope.advisory || !scope.narrowMask {
+		t.Errorf("windowsAncestorScope(%q) = %+v, want advisory and narrow-mask", inside, scope)
+	}
+	for _, outside := range []string{`C:\`, `C:\ProgramData`, os.TempDir()} {
+		scope := windowsAncestorScope(outside)
+		if scope.advisory {
+			t.Errorf("windowsAncestorScope(%q) is advisory outside the installer roots", outside)
+		}
+		if !scope.narrowMask {
+			t.Errorf("windowsAncestorScope(%q) lost the narrow ancestor mask", outside)
+		}
+	}
+}
+
+// A service started with a stripped or partially redirected environment still
+// has to recognise the canonical per-machine tree, or the managed state root
+// itself would be judged foreign and every ancestor verdict would turn fatal.
+func TestPlatformInstallerOwnedRootsAlwaysCoverCanonicalProgramData(t *testing.T) {
+	for name, env := range map[string]map[string]string{
+		"stripped":            {"ProgramData": "", "ProgramFiles": "", "ProgramFiles(x86)": ""},
+		"programdata missing": {"ProgramData": "", "ProgramFiles": `C:\Program Files`},
+		"programdata moved":   {"ProgramData": `D:\AppData`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			for key, value := range env {
+				t.Setenv(key, value)
+			}
+			if !PlatformInstallerOwnedPath(`C:\ProgramData\Cisco\Cisco Secure Client\DefenseClaw`) {
+				t.Fatalf("roots = %v, want the canonical tree covered", PlatformInstallerOwnedRoots())
+			}
+		})
+	}
+
+	t.Setenv("ProgramData", `C:\ProgramData`)
+	roots := PlatformInstallerOwnedRoots()
+	seen := 0
+	for _, root := range roots {
+		if strings.EqualFold(root, `C:\ProgramData\Cisco`) {
+			seen++
+		}
+	}
+	if seen != 1 {
+		t.Fatalf("roots = %v, want exactly one canonical ProgramData entry, got %d", roots, seen)
+	}
+}
+
 func unusedManagedTestDriveLetter() (string, bool) {
 	mask, err := windows.GetLogicalDrives()
 	if err != nil {

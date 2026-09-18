@@ -1402,7 +1402,7 @@
     {
       "name": "DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS",
       "category": "security_opt_out",
-      "purpose": "Restore fatal owner/DACL/permission verdicts for the directories ABOVE the managed roots. Unset (the default since AIFW-34262) those ancestor verdicts are advisory: an untrusted principal on a shared parent such as C:\\ProgramData\\Cisco\\Cisco Secure Client or /opt/cisco/secureclient logs a managed_trust_ancestor_advisory warning and the load, install, or rollback continues, because those directories are ACLed by the Cisco Secure Client installer (AVC), not by DefenseClaw. The managed paths themselves keep every verdict fatal either way.",
+      "purpose": "Restore fatal owner/DACL/permission verdicts for the directories ABOVE the managed roots. Unset (the default since AIFW-34262) those ancestor verdicts are advisory: an untrusted principal on a shared parent such as C:\\ProgramData\\Cisco\\Cisco Secure Client or /opt/cisco/secureclient logs a managed_trust_ancestor_advisory warning and the load, install, or rollback continues, because those directories are ACLed by the Cisco Secure Client installer (AVC), not by DefenseClaw. The advisory applies only inside those Cisco-owned roots: an ancestor anywhere else keeps its verdicts fatal. The managed paths themselves keep every verdict fatal either way.",
       "default": "unset (ancestor verdicts are advisory; managed paths themselves stay strict)",
       "accepted_values": [
         "1",
@@ -1416,15 +1416,15 @@
       "consumers": [
         {
           "location": "internal/managed/trust_advisory.go",
-          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it"
+          "description": "relaxAncestorTrustVerdict returns the verdict instead of warning when set; the Windows and unix trust walks route every ancestor owner/DACL/mode judgement through it. The walks only ask for the downgrade for ancestors inside PlatformInstallerOwnedRoots — an ancestor outside the Cisco tree (a temp, home, or third-party prefix) keeps its verdicts fatal regardless of this variable"
         },
         {
           "location": "packaging/windows/DefenseClawEnterprise.psm1",
-          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set; Set-DefenseClawSharedPathAcl also stops retrying a lost canonical-stamp race and rethrows on the first failure. The state-root ACL self-heal itself still runs when set, because re-stamping only hardens"
+          "description": "Assert-DefenseClawTrustedAncestor and the state-root ACL assertion throw instead of emitting Write-DefenseClawTrustAdvisory when set; Assert-DefenseClawTrustedAncestor also throws regardless of this variable for an ancestor outside Get-DefenseClawPlatformInstallerOwnedRoots (C:\\, C:\\ProgramData and C:\\Program Files themselves); Set-DefenseClawSharedPathAcl also stops retrying a lost canonical-stamp race and rethrows on the first failure. The state-root ACL self-heal itself still runs when set, because re-stamping only hardens"
         },
         {
           "location": "packaging/macos/install.sh",
-          "description": "ensure_shared_install_parent dies instead of warning on a non-root-owned, group/other-writable, or write-capable-ACL shared install parent"
+          "description": "ensure_shared_install_parent dies instead of warning on a non-root-owned, group/other-writable, or write-capable-ACL shared install parent. Only /opt/cisco and below is eligible for the warning at all (platform_installer_owned_path); /opt itself always dies, matching the Go walk that would otherwise reject it at first load"
         },
         {
           "location": "internal/gateway/connector/hook_api_token_unix.go",

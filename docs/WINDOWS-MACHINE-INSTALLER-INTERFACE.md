@@ -173,9 +173,16 @@ DefenseClaw restart is needed for a region flip.
   AIFW-34262 a world- or user-writable **ancestor** of that file logs a
   `managed_trust_ancestor_advisory` warning and the load continues: the
   Cisco Secure Client tree above the managed roots is AVC's to ACL, and a
-  transient grant there must not fail a load or an install. Pin
-  `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` to make ancestor verdicts
-  fatal again.
+  transient grant there must not fail a load or an install. That downgrade
+  is scoped to the Cisco-owned roots (`%ProgramData%\Cisco`,
+  `%ProgramFiles%\Cisco`, `%ProgramFiles(x86)%\Cisco`, and always
+  `C:\ProgramData\Cisco` — `managed.PlatformInstallerOwnedRoots`); an
+  ancestor outside them keeps its verdicts fatal, since nobody else has a
+  claim on those permissions. Ancestors are always evaluated with the
+  narrower replacement mask so stock `BUILTIN\Users` create-child grants on
+  `C:\` and `C:\ProgramData` still pass. Pin
+  `DEFENSECLAW_MANAGED_TRUST_STRICT_ANCESTORS=1` to make the in-root
+  ancestor verdicts fatal again.
 
   If AVC does not merely add an ACE but replaces the canonical DACL that
   DefenseClaw stamps on its own state root, the installer repairs it

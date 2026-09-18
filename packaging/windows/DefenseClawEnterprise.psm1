@@ -1943,6 +1943,48 @@ function Test-DefenseClawReplacementRights {
     return (($rightsValue -band ($replacementMask -bor $genericReplacementMask)) -ne 0)
 }
 
+# The PowerShell counterpart of managed.PlatformInstallerOwnedRoots. The
+# AIFW-34262 advisory covers directories whose permissions belong to the Cisco
+# Secure Client installer (AVC), which shares and re-ACLs them on its own
+# schedule. Everything else - C:\, C:\ProgramData and C:\Program Files
+# themselves, any third-party prefix - has no other claimant, so an untrusted
+# owner or replacement grant there stays fatal exactly as it was before
+# AIFW-34262. C:\ProgramData\Cisco is always included, even if %ProgramData% is
+# redirected, so the canonical managed tree is never judged foreign.
+function Get-DefenseClawPlatformInstallerOwnedRoots {
+    $roots = [Collections.Generic.List[string]]::new()
+    $roots.Add('C:\ProgramData\Cisco')
+    foreach ($base in @($script:ProgramData, $script:ProgramFiles)) {
+        if ([string]::IsNullOrWhiteSpace($base)) {
+            continue
+        }
+        $root = [IO.Path]::GetFullPath(
+            [IO.Path]::Combine($base, 'Cisco')
+        ).TrimEnd('\')
+        if (-not ($roots | Where-Object {
+            [string]::Equals($_, $root, [StringComparison]::OrdinalIgnoreCase)
+        })) {
+            $roots.Add($root)
+        }
+    }
+    return $roots.ToArray()
+}
+
+function Test-DefenseClawPlatformInstallerOwnedPath {
+    param([Parameter(Mandatory)][string]$Path)
+    if ([string]::IsNullOrWhiteSpace($Path)) {
+        return $false
+    }
+    $full = [IO.Path]::GetFullPath($Path).TrimEnd('\')
+    foreach ($root in Get-DefenseClawPlatformInstallerOwnedRoots) {
+        if ([string]::Equals($full, $root, [StringComparison]::OrdinalIgnoreCase) -or
+            $full.StartsWith($root + '\', [StringComparison]::OrdinalIgnoreCase)) {
+            return $true
+        }
+    }
+    return $false
+}
+
 function Test-DefenseClawTrustStrictAncestors {
     $raw = [Environment]::GetEnvironmentVariable(
         $script:TrustStrictAncestorsEnv,
@@ -1997,9 +2039,14 @@ function Assert-DefenseClawTrustedAncestor {
     # Structural checks stay fatal: a reparse point in an ancestor redirects the
     # whole managed tree and no amount of AVC ACL maintenance makes that safe.
     Assert-DefenseClawNoReparsePath -Path $Path
-    # AIFW-34262: owner and DACL verdicts below are advisory unless the strict
-    # pin is set. See $script:TrustStrictAncestorsEnv.
-    $strict = Test-DefenseClawTrustStrictAncestors
+    # AIFW-34262: owner and DACL verdicts below are advisory when this ancestor
+    # is inside a platform-installer-owned root and the strict pin is not set.
+    # An ancestor outside those roots keeps every verdict fatal - see
+    # Test-DefenseClawPlatformInstallerOwnedPath and $script:TrustStrictAncestorsEnv.
+    # This mirrors the Go walks, which scope the same downgrade with
+    # managed.PlatformInstallerOwnedPath.
+    $strict = (Test-DefenseClawTrustStrictAncestors) -or
+        -not (Test-DefenseClawPlatformInstallerOwnedPath -Path $Path)
     $acl = Microsoft.PowerShell.Security\Get-Acl -LiteralPath $Path
     $accessSDDL = $acl.GetSecurityDescriptorSddlForm(
         [Security.AccessControl.AccessControlSections]::Access
@@ -17116,6 +17163,30 @@ function Set-DefenseClawPreservedStateAcls {
         -Path $Layout.StateRoot `
         -Kind AdminDirectory `
         -GatewayServiceSID $GatewayServiceSID
+    # Set-DefenseClawSharedPathAcl swallows a lost stamp race, so nothing above
+    # proves the retained state root ended up administrator-only. Verify it the
+    # same way the install hardening does: foreign access AVC re-applied is an
+    # advisory, a lost canonical descriptor is re-stamped once and re-read, and
+    # only SYSTEM/Administrators still missing FullControl after that repair is
+    # fatal. Retained state that a standard user can rewrite would be inherited
+    # verbatim by the next install.
+    Assert-DefenseClawPathAcl `
+        -Path $Layout.StateRoot `
+        -AllowedWriterSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -AllowedReaderSIDs @(
+            $script:SystemSID,
+            $script:AdministratorsSID,
+            $script:TrustedInstallerSID
+        ) `
+        -RequiredRights (New-DefenseClawRequiredRights -Kind Admin) `
+        -RejectUntrustedRead `
+        -AdvisoryUntrustedAccess `
+        -SelfHealKind AdminDirectory `
+        -SelfHealGatewayServiceSID $GatewayServiceSID
     foreach ($item in $items) {
         if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
             throw "refusing preserved-state ACL rewrite through reparse point: $($item.FullName)"

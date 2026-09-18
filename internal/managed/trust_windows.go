@@ -71,16 +71,17 @@ func ValidateTrustedFilePath(path, label string) error {
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsTrustAncestor); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, nil, windowsAncestorScope(dir)); err != nil {
 			return err
 		}
 	}
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
 	return validateTrustedWindowsPathElementWithWriter(
-		filepath.VolumeName(clean)+string(filepath.Separator),
+		root,
 		true,
 		label,
 		nil,
-		windowsTrustAncestor,
+		windowsAncestorScope(root),
 	)
 }
 
@@ -117,7 +118,7 @@ func ValidateTrustedDirectoryAncestor(path, label string) error {
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		scope := windowsTrustAncestor
+		scope := windowsAncestorScope(cur)
 		if cur == clean {
 			scope = windowsTrustNamedDir
 		}
@@ -167,16 +168,17 @@ func ValidateTrustedServiceRuntimeFilePath(path, label, serviceAccount string) e
 		return err
 	}
 	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
-		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsTrustAncestor); err != nil {
+		if err := validateTrustedWindowsPathElementWithWriter(dir, true, label, serviceSID, windowsAncestorScope(dir)); err != nil {
 			return err
 		}
 	}
+	root := filepath.VolumeName(clean) + string(filepath.Separator)
 	return validateTrustedWindowsPathElementWithWriter(
-		filepath.VolumeName(clean)+string(filepath.Separator),
+		root,
 		true,
 		label,
 		serviceSID,
-		windowsTrustAncestor,
+		windowsAncestorScope(root),
 	)
 }
 
@@ -195,7 +197,7 @@ func validateTrustedWindowsRuntimeDir(path, label string, allowedWriter *windows
 		return fmt.Errorf("%s is not on a trusted mount-manager NTFS drive: %w", label, err)
 	}
 	for cur := clean; ; cur = filepath.Dir(cur) {
-		scope := windowsTrustAncestor
+		scope := windowsAncestorScope(cur)
 		if cur == clean {
 			scope = windowsTrustLeaf
 		}
@@ -235,11 +237,30 @@ var (
 	// fatal. Used for the directory ValidateTrustedDirectoryAncestor was asked
 	// about, which callers rely on as a pre-write / pre-delete guard.
 	windowsTrustNamedDir = windowsTrustScope{narrowMask: true}
-	// windowsTrustAncestor is a parent directory above the managed roots. Those
-	// live in the shared Cisco Secure Client tree that AVC owns and re-ACLs, so
-	// their verdicts are advisory.
+	// windowsTrustAncestor is a parent directory inside the platform installer's
+	// roots. Those live in the shared Cisco Secure Client tree that AVC owns and
+	// re-ACLs, so their verdicts are advisory.
 	windowsTrustAncestor = windowsTrustScope{narrowMask: true, advisory: true}
+	// windowsTrustForeignAncestor is a parent directory OUTSIDE the platform
+	// installer's roots: C:\, C:\ProgramData itself, or any temp/home prefix a
+	// test or a per-user install walks through. It keeps the narrow mask, because
+	// stock known-folder create-child grants are still legitimate there, but its
+	// verdicts stay fatal — no other installer has a claim on those permissions,
+	// so an untrusted owner or a replace-capable ACE means the artifact below can
+	// be swapped.
+	windowsTrustForeignAncestor = windowsTrustScope{narrowMask: true}
 )
+
+// windowsAncestorScope picks the ancestor scope from the ancestor's position:
+// advisory only inside PlatformInstallerOwnedRoots (AIFW-34262), fatal
+// everywhere else. Every ancestor walk in this file routes through here so the
+// allowlist cannot be forgotten at one call site.
+func windowsAncestorScope(path string) windowsTrustScope {
+	if PlatformInstallerOwnedPath(path) {
+		return windowsTrustAncestor
+	}
+	return windowsTrustForeignAncestor
+}
 
 func validateTrustedWindowsPathElement(path string, wantDir bool, label string) error {
 	return validateTrustedWindowsPathElementWithWriter(path, wantDir, label, nil, windowsTrustLeaf)
@@ -336,12 +357,15 @@ func rejectUntrustedWindowsWriteACEsWithWriter(
 		}
 		switch ace.Header.AceType {
 		case accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
-			if err := relaxAncestorTrustVerdict(scope.advisory, path, label, fmt.Errorf(
+			// Not a permission verdict: the ACE layout differs from
+			// ACCESS_ALLOWED_ACE, so ace.Mask and ace.SidStart cannot be read
+			// and this walk has no idea who was granted what. Advisory mode
+			// must not turn "cannot evaluate" into "trusted" — stock NTFS never
+			// carries these types, and AIFW-34262's grant was a plain
+			// ACCESS_ALLOWED_ACE, so keeping them fatal costs no install.
+			return fmt.Errorf(
 				"%s: unsupported allow ACE type 0x%x; refusing managed trust", path, ace.Header.AceType,
-			)); err != nil {
-				return err
-			}
-			continue
+			)
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue

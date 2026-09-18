@@ -534,6 +534,49 @@ func TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE(t *testing.T) {
 	}
 }
 
+// A write-capable ACE whose layout this walk cannot decode stays fatal even for
+// an AVC-owned ancestor: the advisory downgrade exists for verdicts about
+// permissions we did read, not for grants we could not evaluate at all.
+func TestHookAPITokenWindowsRejectsWriteCapableUnsupportedAllowACEEvenWhenAdvisory(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	for name, aceType := range map[string]uint8{
+		"allow compound":        0x4,
+		"allow object":          0x5,
+		"allow callback":        0x9,
+		"allow callback object": 0xB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+				AccessPermissions: windows.GENERIC_WRITE,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(everyone),
+				},
+			}}, nil)
+			if err != nil {
+				t.Fatalf("build DACL: %v", err)
+			}
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(acl, 0, &ace); err != nil {
+				t.Fatalf("get ACE: %v", err)
+			}
+			ace.Header.AceType = aceType
+
+			for _, advisory := range []bool{false, true} {
+				err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, false, false, advisory)
+				if err == nil || !strings.Contains(err.Error(), "unsupported Windows allow ACE type") {
+					t.Fatalf("advisory=%v error = %v, want an unsupported-ACE refusal", advisory, err)
+				}
+			}
+		})
+	}
+}
+
 func TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate(t *testing.T) {
 	creatorOwner, err := windows.CreateWellKnownSid(windows.WinCreatorOwnerSid)
 	if err != nil {

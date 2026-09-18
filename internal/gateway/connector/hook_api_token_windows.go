@@ -346,12 +346,15 @@ func hookAPIRejectUntrustedWindowsWriteACEs(path string, dacl *windows.ACL, want
 		}
 		switch ace.Header.AceType {
 		case accessAllowedCompoundACEType, accessAllowedObjectACEType, accessAllowedCallbackACEType, accessAllowedCallbackObjectACEType:
-			if err := managed.RelaxAncestorTrustVerdict(advisory, path, hookAPITrustLabel, fmt.Errorf(
+			// A write-capable ACE whose layout this walk cannot parse: the SID
+			// does not start at ace.SidStart for these types, so there is no way
+			// to tell whether the grantee is trusted. That is a structural
+			// limitation, not a permission verdict about an AVC-owned ancestor,
+			// so the advisory downgrade must not apply — otherwise an attacker
+			// who can write a callback ACE on an ancestor gets a free pass.
+			return fmt.Errorf(
 				"unsupported Windows allow ACE type 0x%x on %s", ace.Header.AceType, path,
-			)); err != nil {
-				return err
-			}
-			continue
+			)
 		case windows.ACCESS_ALLOWED_ACE_TYPE:
 		default:
 			continue
