@@ -49,15 +49,16 @@ func TestKiroSetupWritesV3AndDefaultAgentHooks(t *testing.T) {
 		t.Fatalf("hook script is missing the identity reader")
 	}
 
+	command := conn.hookCommand(opts)
 	for _, path := range []string{
 		filepath.Join(home, "hooks", kiroManagedHooksName),
 		filepath.Join(workspace, ".kiro", "hooks", kiroManagedHooksName),
 	} {
 		// The v3 config carries the surface marker; the 2.x agent config
 		// below must stay on the bare command.
-		assertKiroV3Hooks(t, path, script+" --hook-surface "+KiroHookSurfaceV3)
+		assertKiroV3Hooks(t, path, conn.hookCommandForV3Surface(opts))
 	}
-	assertKiroV2AgentHooks(t, filepath.Join(home, "agents", kiroManagedAgentName+".json"), script)
+	assertKiroV2AgentHooks(t, filepath.Join(home, "agents", kiroManagedAgentName+".json"), command)
 	assertKiroDefaultAgentSetting(t, filepath.Join(home, "settings", "cli.json"))
 
 	if err := conn.Teardown(context.Background(), opts); err != nil {
