@@ -655,3 +655,52 @@ def test_activating_a_profile_another_pair_resolves_through_a_pin_is_refused(tmp
         assert app.cfg.acp.profiles["shared"].mode == "observe"
     finally:
         cleanup_app(app, db_path, data_dir)
+
+
+def test_verify_reports_profile_drift_after_a_hand_edit(tmp_path, monkeypatch):
+    """Editing a pair's profile by hand must not read as healthy.
+
+    The guard carries its profile in argv, pinned into the contract lock at
+    setup, and the gateway refuses a request whose profile the configuration
+    no longer assigns to that pair. Without this check `verify` and `status`
+    kept reporting the binding healthy and the operator learned about it from
+    a dead editor session instead.
+    """
+
+    _isolate_client_config(monkeypatch, tmp_path)
+    app, data_dir, db_path = _app(tmp_path)
+    settings = _zed_settings(tmp_path)
+    settings.parent.mkdir(parents=True)
+    settings.write_text("{}")
+    guard = _binary(tmp_path / "guard")
+    kiro = _binary(tmp_path / "kiro-cli")
+    try:
+        with patch("defenseclaw.commands.cmd_acp._agent_version", return_value="probe"):
+            created = CliRunner().invoke(
+                acp_cmd,
+                ["setup", "--client", "zed", "--agent", "kiro", "--guard-binary", guard,
+                 "--agent-binary", kiro, "--profile", "locked", "--json-output"],
+                obj=app,
+            )
+        assert created.exit_code == 0, created.output
+        healthy = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert healthy.exit_code == 0, healthy.output
+
+        # Move the pair to a different profile without re-running setup.
+        app.cfg.acp.profiles["watch"] = app.cfg.acp.profiles["locked"]
+        app.cfg.acp.bindings["zed/kiro"] = ACPBinding(enabled=True, profile="watch")
+        drifted = CliRunner().invoke(acp_cmd, ["verify", "--client", "zed", "--agent", "kiro"], obj=app)
+        assert drifted.exit_code != 0
+        assert "no longer matches the configured" in drifted.output
+        assert "re-run acp setup" in drifted.output
+
+        # status surfaces it too, so the operator does not need to guess which
+        # binding to verify.
+        listed = CliRunner().invoke(acp_cmd, ["status"], obj=app)
+        assert listed.exit_code == 0, listed.output
+        binding = json.loads(listed.output)["bindings"]["zed/kiro"]
+        assert binding["healthy"] is False
+        assert binding["profile"] == "watch"
+        assert binding["profile_source"] == "binding"
+    finally:
+        cleanup_app(app, db_path, data_dir)

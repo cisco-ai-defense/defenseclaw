@@ -110,7 +110,16 @@ func (a *APIServer) handleACPEvaluate(w http.ResponseWriter, r *http.Request) {
 		a.writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "ACP guard is not enabled"})
 		return
 	}
-	profileName, profile, ok := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
+	profileName, profile, ok, matched := resolveACPProfileForPair(cfg.ACP, req.ClientID, req.AgentID, req.Profile)
+	if !matched {
+		// Distinguishable on purpose: a stale guard argv and an undefined
+		// profile need different fixes, and "not configured" sent operators
+		// looking for a missing profiles: entry that was present all along.
+		a.writeJSON(w, http.StatusForbidden, map[string]string{
+			"error": "ACP profile does not match the configured binding for this client and agent; re-run acp setup",
+		})
+		return
+	}
 	if !ok {
 		a.writeJSON(w, http.StatusForbidden, map[string]string{"error": "ACP profile is not configured"})
 		return
@@ -232,16 +241,16 @@ func (a *APIServer) recordACPEvaluationV8(
 // that pair is stale or forged and must not be evaluated under either name.
 func resolveACPProfileForPair(
 	cfg config.ACPConfig, client, agent, requested string,
-) (string, config.ACPProfile, bool) {
+) (name string, profile config.ACPProfile, defined bool, matched bool) {
 	resolved := cfg.ACPProfileForPair(client, agent)
 	if resolved == "" {
 		resolved = "default"
 	}
 	if requested = strings.TrimSpace(requested); requested != "" && requested != resolved {
-		return "", config.ACPProfile{}, false
+		return "", config.ACPProfile{}, false, false
 	}
-	profile, ok := cfg.Profiles[resolved]
-	return resolved, profile, ok
+	profile, defined = cfg.Profiles[resolved]
+	return resolved, profile, defined, true
 }
 
 // acpPairIsBound reports whether both halves of a pair are enabled and agree

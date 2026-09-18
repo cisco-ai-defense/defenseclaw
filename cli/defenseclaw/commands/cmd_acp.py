@@ -323,7 +323,18 @@ def _managed_guard_custody_is_trusted(path_value: str) -> bool:
         return False
 
 
-def _verify_binding(data_dir: str, client: str, agent: str) -> list[str]:
+def _verify_binding(
+    data_dir: str,
+    client: str,
+    agent: str,
+    acp_config: Any | None = None,
+) -> list[str]:
+    """Check one binding's editor entry, contract lock and pinned policy.
+
+    acp_config is optional so callers without configuration loaded keep the
+    previous file-only checks.
+    """
+
     problems: list[str] = []
     client_path = _client_path(client)
     document = _read_json_object(client_path)
@@ -373,6 +384,29 @@ def _verify_binding(data_dir: str, client: str, agent: str) -> list[str]:
             and _managed_guard_custody_is_trusted(path_value)
         ):
             problems.append(f"{key} executable digest has drifted")
+    # Policy drift. The guard carries its profile and mode in argv, pinned
+    # here at setup, and the gateway refuses a request whose profile the
+    # configuration no longer assigns to this pair. Editing
+    # acp.bindings["<client>/<agent>"].profile by hand therefore breaks the
+    # next session, and without this check `verify` and `status` would keep
+    # reporting the binding healthy until the operator hit a dead editor.
+    if acp_config is not None:
+        expected_profile = acp_config.profile_for_pair(client, agent)
+        locked_profile = lock.get("profile")
+        if isinstance(locked_profile, str) and locked_profile != expected_profile:
+            problems.append(
+                f"contract lock profile {locked_profile!r} no longer matches the configured "
+                f"{expected_profile!r} for {client}/{agent}; re-run acp setup"
+            )
+        else:
+            resolved = acp_config.profiles.get(expected_profile)
+            expected_mode = (resolved.mode if resolved else "") or acp_config.mode
+            locked_mode = lock.get("mode")
+            if isinstance(locked_mode, str) and expected_mode and locked_mode != expected_mode:
+                problems.append(
+                    f"contract lock mode {locked_mode!r} no longer matches profile "
+                    f"{expected_profile!r} mode {expected_mode!r}; re-run acp setup"
+                )
     if isinstance(entry, dict):
         args = entry.get("args")
         if (
@@ -669,7 +703,7 @@ def status_cmd(app: AppContext, runtime_data_dir: Path | None) -> None:
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
     bindings = {}
     for client, agent in sorted(_managed_pairs()):
-        problems = _verify_binding(data_dir, client, agent)
+        problems = _verify_binding(data_dir, client, agent, app.cfg.acp)
         profile = app.cfg.acp.profile_for_pair(client, agent)
         resolved = app.cfg.acp.profiles.get(profile)
         bindings[f"{client}/{agent}"] = {
@@ -713,7 +747,7 @@ def verify_cmd(app: AppContext, client: str, agent: str, runtime_data_dir: Path 
     if not app.cfg:
         raise click.ClickException("configuration is unavailable")
     data_dir = str((runtime_data_dir or Path(app.cfg.data_dir)).expanduser().resolve())
-    problems = _verify_binding(data_dir, client, agent)
+    problems = _verify_binding(data_dir, client, agent, app.cfg.acp)
     if problems:
         raise click.ClickException("ACP binding verification failed: " + "; ".join(problems))
     click.echo(f"Verified {client}/{agent}: editor entry and executable digests match")

@@ -173,7 +173,18 @@ Two boundaries a per-pair binding does **not** cross:
 A request naming a profile the configuration does not assign to that pair is
 refused rather than evaluated under either name. The guard's profile is pinned
 into its contract lock at setup, so a mismatch means a stale or forged
-request.
+request, and the refusal says so rather than reporting the profile as
+undefined.
+
+That makes editing a pair's profile by hand a two-step change: the guard keeps
+the profile pinned in its argv until setup rewrites it. `defenseclaw acp
+verify` and `defenseclaw acp status` report the drift instead of calling the
+binding healthy, so you find out before the next editor session fails closed:
+
+```text
+ACP binding verification failed: contract lock profile 'locked' no longer
+matches the configured 'watch' for zed/kiro; re-run acp setup
+```
 
 Other consequences worth planning around:
 
