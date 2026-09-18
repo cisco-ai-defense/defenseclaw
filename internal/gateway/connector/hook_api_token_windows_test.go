@@ -529,8 +529,51 @@ func TestHookAPITokenWindowsAllowsReadOnlyUnsupportedAllowACE(t *testing.T) {
 		t.Fatalf("get ACE: %v", err)
 	}
 	ace.Header.AceType = 0x5
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, false, true); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, false, true, false); err != nil {
 		t.Fatalf("read-only unsupported allow ACE was rejected: %v", err)
+	}
+}
+
+// A write-capable ACE whose layout this walk cannot decode stays fatal even for
+// an AVC-owned ancestor: the advisory downgrade exists for verdicts about
+// permissions we did read, not for grants we could not evaluate at all.
+func TestHookAPITokenWindowsRejectsWriteCapableUnsupportedAllowACEEvenWhenAdvisory(t *testing.T) {
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatalf("Everyone SID: %v", err)
+	}
+	for name, aceType := range map[string]uint8{
+		"allow compound":        0x4,
+		"allow object":          0x5,
+		"allow callback":        0x9,
+		"allow callback object": 0xB,
+	} {
+		t.Run(name, func(t *testing.T) {
+			acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{{
+				AccessPermissions: windows.GENERIC_WRITE,
+				AccessMode:        windows.GRANT_ACCESS,
+				Trustee: windows.TRUSTEE{
+					TrusteeForm:  windows.TRUSTEE_IS_SID,
+					TrusteeType:  windows.TRUSTEE_IS_WELL_KNOWN_GROUP,
+					TrusteeValue: windows.TrusteeValueFromSID(everyone),
+				},
+			}}, nil)
+			if err != nil {
+				t.Fatalf("build DACL: %v", err)
+			}
+			var ace *windows.ACCESS_ALLOWED_ACE
+			if err := windows.GetAce(acl, 0, &ace); err != nil {
+				t.Fatalf("get ACE: %v", err)
+			}
+			ace.Header.AceType = aceType
+
+			for _, advisory := range []bool{false, true} {
+				err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, false, false, advisory)
+				if err == nil || !strings.Contains(err.Error(), "unsupported Windows allow ACE type") {
+					t.Fatalf("advisory=%v error = %v, want an unsupported-ACE refusal", advisory, err)
+				}
+			}
+		})
 	}
 }
 
@@ -552,7 +595,7 @@ func TestHookAPITokenWindowsAllowsInheritOnlyCreatorOwnerTemplate(t *testing.T) 
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true, false); err != nil {
 		t.Fatalf("inherit-only Creator Owner template was rejected: %v", err)
 	}
 }
@@ -575,7 +618,7 @@ func TestHookAPITokenWindowsAllowsOwnerRightsACE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true, false); err != nil {
 		t.Fatalf("Owner Rights ACE was rejected after trusted-owner validation: %v", err)
 	}
 }
@@ -597,7 +640,7 @@ func TestHookAPITokenWindowsRejectsDirectCreatorOwnerACE(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("test", acl, true, true, false); err == nil {
 		t.Fatal("direct Creator Owner ACE was accepted")
 	}
 }
@@ -619,7 +662,7 @@ func TestHookAPITokenWindowsAllowsCreateChildOnSharedAncestor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err != nil {
 		t.Fatalf("shared ancestor create-child permission was rejected: %v", err)
 	}
 }
@@ -651,7 +694,7 @@ func TestHookAPITokenWindowsRejectsOrdinaryWriteOnSharedAncestor(t *testing.T) {
 			if err != nil {
 				t.Fatalf("build DACL: %v", err)
 			}
-			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err == nil {
 				t.Fatalf("shared ancestor accepted untrusted %s access", tc.name)
 			}
 		})
@@ -705,10 +748,10 @@ func TestHookAPITokenWindowsAllowsInheritOnlyTemplateOnSharedAncestor(t *testing
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err != nil {
 		t.Fatalf("shared ancestor inherit-only template was rejected: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("protected", acl, true, true); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("protected", acl, true, true, false); err == nil {
 		t.Fatal("protected directory inherit-only template was accepted")
 	}
 }
@@ -732,7 +775,7 @@ func TestHookAPITokenWindowsRejectsDeleteChildOnSharedAncestor(t *testing.T) {
 	if err != nil {
 		t.Fatalf("build DACL: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err == nil {
 		t.Fatal("shared ancestor delete-child permission was accepted")
 	}
 }
