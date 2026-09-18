@@ -12705,6 +12705,11 @@ def _restart_services(
     if wait_for_connector_ready and wait_targets and gateway_restarted:
         readiness_label = "DefenseClaw gateway registration" if "omnigent" in wait_targets else "connector runtime"
         click.echo(f"  {readiness_label}: waiting for verified setup...", nl=False)
+        readiness_kwargs: dict[str, Any] = {}
+        # The connector this run is for must converge or fail; only its
+        # peers may be skipped.
+        if len(wait_targets) > 1 and connector:
+            readiness_kwargs["required"] = {normalize_connector(connector)}
         readiness = _wait_for_connector_runtime(
             data_dir,
             wait_targets,
@@ -12712,9 +12717,7 @@ def _restart_services(
             hook_contract_lock_before,
             previous_lock_publications=hook_contract_publications_before,
             require_gateway_health=True,
-            # The connector this run is for must converge or fail; only its
-            # peers may be skipped.
-            required={normalize_connector(connector)} if connector else None,
+            **readiness_kwargs,
         )
         if readiness:
             # Prove that the healthy API is the replacement generation, not an
@@ -12862,8 +12865,10 @@ def _hook_runtime_wait_targets(hook_targets: list[str], data_dir: str, focus: st
     is applying.
     """
 
+    if not focus:
+        return sorted(hook_targets)
     wanted = _load_active_connector_names(data_dir) & set(hook_targets)
-    focus_name = normalize_connector(focus) if focus else ""
+    focus_name = normalize_connector(focus)
     if focus_name in hook_targets:
         wanted.add(focus_name)
     return sorted(wanted)
@@ -13232,6 +13237,8 @@ def _partition_unconvergeable_peers(
 
     keep = set(expected)
     must_keep = {normalize_connector(name) for name in (required or set()) if name}
+    if not must_keep:
+        return keep, frozenset()
     try:
         lock, _ = _read_stable_regular_json(lock_path)
     except (OSError, ValueError):

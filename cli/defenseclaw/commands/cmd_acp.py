@@ -854,7 +854,9 @@ def _detect_acp_clients() -> list[dict[str, Any]]:
                         record["guarded"].append({"entry": name, "agent": _guarded_entry_agent(name)})
                         continue
                     if agent := _agent_for_entry(entry):
-                        record["adoptable"].append({"entry": name, "agent": agent})
+                        record["adoptable"].append(
+                            {"entry": name, "agent": agent, "command": str(entry.get("command", ""))}
+                        )
                     elif str(entry.get("type", "")) == "registry" and not entry.get("command"):
                         # The client resolves and launches this agent from its
                         # own registry, so there is no argv for the guard to
@@ -965,7 +967,7 @@ def adopt_cmd(
 
     findings = [record for record in _detect_acp_clients() if client is None or record["client"] == client]
     planned = [
-        (record["client"], item["entry"], item["agent"])
+        (record["client"], item["entry"], item["agent"], item["command"])
         for record in findings
         for item in record["adoptable"]
     ]
@@ -986,7 +988,7 @@ def adopt_cmd(
         return
 
     if not json_output:
-        for target_client, entry, agent in planned:
+        for target_client, entry, agent, _command in planned:
             click.echo(f"  take over  {target_client}: {entry} → guarded {agent}")
         for target_client, entry, agent in registry_pairs:
             click.echo(f"  add guard  {target_client}: guarded {agent} beside registry entry {entry}")
@@ -997,7 +999,7 @@ def adopt_cmd(
 
     guard = _resolve_executable(guard_binary, "DefenseClaw ACP guard")
 
-    def _invoke_setup(target_client: str, agent: str) -> None:
+    def _invoke_setup(target_client: str, agent: str, agent_binary: str = "") -> None:
         """Run `acp setup` for one pair without its output.
 
         Adoption owns the operator-facing summary, and with --json-output it
@@ -1012,7 +1014,7 @@ def adopt_cmd(
                 agent=agent,
                 profile=profile,
                 guard_binary=guard_binary,
-                agent_binary="",
+                agent_binary=agent_binary,
                 activate=activate,
                 managed=False,
                 runtime_data_dir=None,
@@ -1021,8 +1023,8 @@ def adopt_cmd(
             )
 
     adopted: list[dict[str, str]] = []
-    for target_client, entry, agent in planned:
-        _invoke_setup(target_client, agent)
+    for target_client, entry, agent, agent_binary in planned:
+        _invoke_setup(target_client, agent, agent_binary)
         # Reuse the exact argv setup just wrote for the managed entry so the
         # adopted entry cannot drift from it.
         managed = _read_json_object(_client_path(target_client)).get("agent_servers", {})

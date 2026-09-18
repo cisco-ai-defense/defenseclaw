@@ -5058,6 +5058,11 @@ def set_mcp_server(
             "omnigent MCP configuration is unsupported and unverified by the "
             "DefenseClaw connector; only the custom policy bridge is installed.",
         )
+    if name_n == "kiro":
+        raise MCPWriteUnsupportedError(
+            "kiro MCP configuration is discovery-only in DefenseClaw. Configure MCP servers "
+            "with Kiro, then re-run `defenseclaw mcp scan`.",
+        )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(
             "zeptoclaw does not expose a programmatic MCP write surface. "
@@ -5157,6 +5162,11 @@ def unset_mcp_server(
         raise MCPWriteUnsupportedError(
             "omnigent MCP configuration is unsupported and unverified by the "
             "DefenseClaw connector; only the custom policy bridge is installed.",
+        )
+    if name_n == "kiro":
+        raise MCPWriteUnsupportedError(
+            "kiro MCP configuration is discovery-only in DefenseClaw. Remove MCP servers "
+            "with Kiro, then re-run `defenseclaw mcp scan`.",
         )
     if name_n == "zeptoclaw":
         raise MCPWriteUnsupportedError(

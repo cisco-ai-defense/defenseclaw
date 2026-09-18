@@ -662,7 +662,7 @@ def test_acp_wizard_defaults_to_observe_and_requires_explicit_action() -> None:
     fields = wizard_form_defs(SetupWizard.ACP_GUARD)
     assert wizard_field_value(fields, "Client") == "zed"
     assert wizard_field_value(fields, "Agent") == "kiro"
-    assert {"kiro", "devin", "amp", "antigravity", "codex", "claude"}.issubset(set(_wizard_options(fields, "Agent")))
+    assert set(_wizard_options(fields, "Agent")) == {"copilot", "cursor", "devin", "hermes", "kiro", "opencode"}
     assert build_wizard_args(SetupWizard.ACP_GUARD, fields) == (
         "acp",
         "setup",
