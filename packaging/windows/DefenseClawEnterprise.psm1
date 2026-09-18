@@ -1961,7 +1961,7 @@ function Get-DefenseClawPlatformInstallerOwnedRoots {
         $root = [IO.Path]::GetFullPath(
             [IO.Path]::Combine($base, 'Cisco')
         ).TrimEnd('\')
-        if (-not ($roots | Where-Object {
+        if (-not ($roots | Microsoft.PowerShell.Core\Where-Object {
             [string]::Equals($_, $root, [StringComparison]::OrdinalIgnoreCase)
         })) {
             $roots.Add($root)
@@ -4092,7 +4092,10 @@ function Assert-DefenseClawPathAcl {
     $verdicts = @(Get-DefenseClawPathAclVerdicts @verdictArgs)
     $selfHealed = $false
     if (-not [string]::IsNullOrWhiteSpace($SelfHealKind)) {
-        $repairable = @($verdicts | Where-Object { $_.Kind -in @('Contract', 'Rights') })
+        $repairable = @(
+            $verdicts |
+                Microsoft.PowerShell.Core\Where-Object { $_.Kind -in @('Contract', 'Rights') }
+        )
         if ($repairable.Count -gt 0) {
             if ([string]::IsNullOrWhiteSpace($SelfHealGatewayServiceSID)) {
                 throw "-SelfHealKind requires -SelfHealGatewayServiceSID: $Path"
