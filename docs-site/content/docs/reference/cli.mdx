@@ -17,7 +17,7 @@ Authoritative source for any flag is `defenseclaw <command> --help`. These group
 <Callout title="Command availability is platform-specific">
 A registered command or connector alias is not, by itself, a native Windows
 support claim. Native Windows supports Amp plus Codex, Claude Code, Cursor,
-Devin, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, and OmniGent.
+Devin, GitHub Copilot CLI, Antigravity, OpenCode, Hermes, Kiro, and OmniGent.
 Gemini CLI setup is deprecated on every platform; existing managed state remains
 removable; use `defenseclaw setup antigravity` for new Google agent setup.
 OpenHands, OpenClaw, and ZeptoClaw remain unavailable there. Some
@@ -111,6 +111,7 @@ Hook setup aliases (`setup codex`, `setup claude-code`, `setup hermes`, and the 
 | `defenseclaw setup openhands` | Hook setup alias for OpenHands on supported non-Windows platforms; it is unsupported in the native Windows release. Defaults to observe, pass `--mode action` to block hook-side. |
 | `defenseclaw setup antigravity` | Hook setup alias for Antigravity (`agy`); defaults to observe, pass `--mode action` to block hook-side. Native ask and deny are documented only for `PreToolUse`; no permission-bypass override is claimed. |
 | `defenseclaw setup opencode` | Hook setup alias for OpenCode; writes the auto-loaded bridge plugin. Defaults to observe, pass `--mode action` to block hook-side. |
+| `defenseclaw setup kiro` | Native hook alias for Kiro IDE and Kiro CLI; defaults to observe, pass `--mode action` to block hook-side. The `.kiro/hooks` surface (Kiro IDE and `kiro-cli --v3`) vetoes `PreToolUse` and `UserPromptSubmit`; the CLI 2.x agent config vetoes `PreToolUse` only. ACP is optional and configured separately with `defenseclaw acp setup --agent kiro`. |
 | `defenseclaw setup amp` | Direct-to-upstream system-policy setup for Amp; writes the TypeScript plugin. Defaults to observe; pass `--mode action` for synchronous `tool.call` execution gating and model-bound `tool.result` output gating. Native confirmation is available only in the active foreground thread; background confirmation falls back to safe rejection or withholding. |
 | `defenseclaw setup omnigent` | Hook setup alias for OmniGent; installs the custom Python policy bridge. Defaults to observe, pass `--mode action` for ALLOW/ASK/DENY enforcement. |
 | `defenseclaw setup openclaw` | Full guardrail alias for OpenClaw (proxy connector); unsupported in the native Windows release. |
