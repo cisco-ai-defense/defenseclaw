@@ -721,7 +721,7 @@ def test_runtime_state_accepts_omitted_empty_active_roster() -> None:
     ) is None
 
 
-def test_wait_targets_keep_prior_active_and_the_focus_connector(tmp_path: Path) -> None:
+def test_wait_targets_keep_the_complete_desired_roster(tmp_path: Path) -> None:
     (tmp_path / "active_connector.json").write_text(
         json.dumps(
             {
@@ -737,7 +737,7 @@ def test_wait_targets_keep_prior_active_and_the_focus_connector(tmp_path: Path) 
         ["amp", "claudecode", "codex", "kiro", "openhands", "opencode"],
         str(tmp_path),
         "kiro",
-    ) == ["amp", "codex", "kiro", "openhands"]
+    ) == ["amp", "claudecode", "codex", "kiro", "opencode", "openhands"]
 
 
 def test_snapshot_accepts_superset_active_roster(tmp_path: Path) -> None:

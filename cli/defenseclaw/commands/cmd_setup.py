@@ -12844,34 +12844,16 @@ def _active_connector_state_marker(data_dir: str) -> int | None:
     return _regular_file_marker(os.path.join(data_dir, "active_connector.json"))
 
 
-def _load_active_connector_names(data_dir: str) -> set[str]:
-    try:
-        state, _marker = _read_stable_regular_json(os.path.join(data_dir, "active_connector.json"))
-    except (OSError, ValueError):
-        return set()
-    runtime_sets = _connector_runtime_state_sets(state)
-    if runtime_sets is None:
-        return set()
-    active, _inactive = runtime_sets
-    return set(active)
-
-
 def _hook_runtime_wait_targets(hook_targets: list[str], data_dir: str, focus: str) -> list[str]:
-    """Wait only for connectors this restart can actually prove.
+    """Wait for the complete desired roster handed to this restart.
 
-    Isolated gateway boot skips connectors whose hook contract is unknown.
-    Requiring the full desired roster then hangs setup on those skips. Keep
-    every previously-active hook connector plus the connector this command
-    is applying.
+    The gateway publishes that roster atomically. Narrowing it with the prior
+    active-state file misclassifies newly staged connectors as unexpected lock
+    peers. Lock inspection separately partitions permanently unconvergeable
+    peers before polling.
     """
 
-    if not focus:
-        return sorted(hook_targets)
-    wanted = _load_active_connector_names(data_dir) & set(hook_targets)
-    focus_name = normalize_connector(focus)
-    if focus_name in hook_targets:
-        wanted.add(focus_name)
-    return sorted(wanted)
+    return sorted(set(hook_targets))
 
 
 def _hook_contract_lock_marker(data_dir: str) -> int | None:
