@@ -6,6 +6,7 @@ package managed
 
 import (
 	"errors"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -101,4 +102,50 @@ func captureTrustAdvisories(t *testing.T) *[]string {
 	}
 	t.Cleanup(func() { ReportTrustAdvisory = previous })
 	return &advisories
+}
+
+func TestPlatformInstallerOwnedPath(t *testing.T) {
+	roots := PlatformInstallerOwnedRoots()
+	if len(roots) == 0 {
+		t.Fatal("no platform installer roots for this GOOS")
+	}
+	for _, root := range roots {
+		if !PlatformInstallerOwnedPath(root) {
+			t.Errorf("PlatformInstallerOwnedPath(%q) = false for its own root", root)
+		}
+		child := filepath.Join(root, "Cisco Secure Client", "DefenseClaw")
+		if !PlatformInstallerOwnedPath(child) {
+			t.Errorf("PlatformInstallerOwnedPath(%q) = false, want true", child)
+		}
+		// A sibling that merely shares the root's prefix is not inside it.
+		if PlatformInstallerOwnedPath(root + "-evil") {
+			t.Errorf("PlatformInstallerOwnedPath(%q) = true for a prefix sibling", root+"-evil")
+		}
+		if parent := filepath.Dir(root); PlatformInstallerOwnedPath(parent) {
+			t.Errorf("PlatformInstallerOwnedPath(%q) = true for the root's own parent", parent)
+		}
+	}
+	if PlatformInstallerOwnedPath("") {
+		t.Error("empty path reported as platform-installer owned")
+	}
+}
+
+func TestRelaxAncestorTrustJudgementOnlyDowngradesTaggedVerdicts(t *testing.T) {
+	advisories := captureTrustAdvisories(t)
+	// A judgement from a helper that also reports exec failures.
+	if err := RelaxAncestorTrustJudgement(true, "/opt/cisco", "hook API token path",
+		NewTrustVerdict("/opt/cisco has write-capable macOS ACL entry")); err != nil {
+		t.Fatalf("tagged verdict was not downgraded: %v", err)
+	}
+	if len(*advisories) != 1 {
+		t.Fatalf("advisories = %v, want exactly one", *advisories)
+	}
+	// An exec/read failure from the same helper must survive.
+	execFailure := errors.New("inspect macOS ACL for /opt/cisco: signal: killed")
+	if err := RelaxAncestorTrustJudgement(true, "/opt/cisco", "hook API token path", execFailure); err == nil {
+		t.Fatal("exec failure was swallowed as an advisory")
+	}
+	if len(*advisories) != 1 {
+		t.Fatalf("exec failure emitted an advisory: %v", *advisories)
+	}
 }

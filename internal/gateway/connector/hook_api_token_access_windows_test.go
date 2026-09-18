@@ -40,10 +40,10 @@ func ancestorDACL(t *testing.T, sidType windows.WELL_KNOWN_SID_TYPE, mask window
 
 func TestHookAPIAncestorAcceptsStockProgramDataGrant(t *testing.T) {
 	acl := ancestorDACL(t, windows.WinBuiltinUsersSid, programDataUsersMask)
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err != nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err != nil {
 		t.Fatalf("stock C:\\ProgramData grant rejected; the gateway cannot start on a default Windows host: %v", err)
 	}
-	if err := hookAPIRejectUntrustedWindowsWriteACEs("token dir", acl, true, true); err == nil {
+	if err := hookAPIRejectUntrustedWindowsWriteACEs("token dir", acl, true, true, false); err == nil {
 		t.Fatal("token directory must still reject create and write-attribute rights")
 	}
 }
@@ -58,7 +58,7 @@ func TestHookAPIAncestorRejectsSameMaskForBroaderPrincipals(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			acl := ancestorDACL(t, sidType, programDataUsersMask)
-			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err == nil {
 				t.Fatal("ancestor accepted a write grant to a principal Windows does not grant by default")
 			}
 		})
@@ -76,7 +76,7 @@ func TestHookAPIAncestorRejectsReplacementRightsForUsers(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			acl := ancestorDACL(t, windows.WinBuiltinUsersSid, programDataUsersMask|mask)
-			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false); err == nil {
+			if err := hookAPIRejectUntrustedWindowsWriteACEs("ancestor", acl, true, false, false); err == nil {
 				t.Fatalf("ancestor accepted %s, which can replace a protected child", name)
 			}
 		})

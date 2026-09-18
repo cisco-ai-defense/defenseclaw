@@ -15,6 +15,8 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -46,6 +48,92 @@ const TrustAdvisoryMarker = "managed_trust_ancestor_advisory"
 // startup before any managed trust check runs, never swapped concurrently with
 // a check in flight. When nil the advisory goes to the standard logger.
 var ReportTrustAdvisory func(path, label, reason string)
+
+// PlatformInstallerOwnedRoots returns the directories whose permissions belong
+// to the Cisco Secure Client installer (AVC) rather than to DefenseClaw. AVC
+// creates them, shares them with other Cisco software, and re-ACLs them on its
+// own schedule, so a trust walk that crosses one of them cannot read foreign
+// access there as evidence of compromise (AIFW-34262).
+//
+// This is deliberately a path allowlist rather than a deployment-mode check.
+// The managed deployment mode is pinned by an environment variable on Windows
+// but comes from the protected config.yaml on macOS, so a mode gate would be
+// dead code on macOS; and a mode gate would also relax ancestors that have
+// nothing to do with Cisco (a temp or home directory above a runtime path),
+// which is the opposite of what is wanted.
+func PlatformInstallerOwnedRoots() []string {
+	switch runtime.GOOS {
+	case "windows":
+		roots := make([]string, 0, 3)
+		for _, envName := range []string{"ProgramData", "ProgramFiles", "ProgramFiles(x86)"} {
+			if base := os.Getenv(envName); base != "" {
+				roots = append(roots, filepath.Join(base, "Cisco"))
+			}
+		}
+		if len(roots) == 0 {
+			// A service started with a stripped environment still has to
+			// recognise the canonical tree.
+			roots = append(roots, `C:\ProgramData\Cisco`)
+		}
+		return roots
+	case "darwin":
+		// /opt/cisco covers the managed install prefix
+		// /opt/cisco/secureclient/defenseclaw; the logs root is shared with
+		// other Cisco software the same way.
+		return []string{"/opt/cisco", "/Library/Logs/Cisco"}
+	default:
+		return []string{"/opt/cisco"}
+	}
+}
+
+// PlatformInstallerOwnedPath reports whether path is at or below one of
+// PlatformInstallerOwnedRoots. Callers use it to decide whether an ancestor's
+// permission verdict should be advisory; it says nothing about the named path a
+// caller asked about, which always keeps its verdicts fatal.
+func PlatformInstallerOwnedPath(path string) bool {
+	if path == "" {
+		return false
+	}
+	clean := filepath.Clean(path)
+	for _, root := range PlatformInstallerOwnedRoots() {
+		if pathAtOrUnder(clean, filepath.Clean(root)) {
+			return true
+		}
+	}
+	return false
+}
+
+func pathAtOrUnder(path, root string) bool {
+	if runtime.GOOS == "windows" {
+		path, root = strings.ToLower(path), strings.ToLower(root)
+	}
+	return path == root || strings.HasPrefix(path, root+string(filepath.Separator))
+}
+
+// RelaxAncestorTrustVerdict is the exported form of relaxAncestorTrustVerdict
+// for trust walks that live outside this package. The gateway connector keeps
+// its own hook API token chain walk with a different owner model (it accepts the
+// invoking uid for unmanaged per-user installs), so it cannot call the managed
+// validators, but it crosses the same AVC-owned ancestors and needs the same
+// verdict downgrade. Pass advisory=false for the named path.
+func RelaxAncestorTrustVerdict(advisory bool, path, label string, verdict error) error {
+	return relaxAncestorTrustVerdict(advisory, path, label, verdict)
+}
+
+// RelaxAncestorTrustJudgement is the exported form of
+// relaxAncestorTrustJudgement: it downgrades only errors built with
+// NewTrustVerdict, so a helper that returns both permission judgements and
+// structural or exec failures keeps the latter fatal.
+func RelaxAncestorTrustJudgement(advisory bool, path, label string, err error) error {
+	return relaxAncestorTrustJudgement(advisory, path, label, err)
+}
+
+// NewTrustVerdict tags an error as a permission judgement, making it eligible
+// for the RelaxAncestorTrustJudgement downgrade. Errors built any other way are
+// treated as structural and stay fatal.
+func NewTrustVerdict(format string, args ...any) error {
+	return newTrustVerdict(format, args...)
+}
 
 // relaxAncestorTrustVerdict turns a permission verdict about an ancestor
 // directory into a warning when advisory is set. It returns verdict unchanged

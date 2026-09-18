@@ -13,6 +13,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 const hookAPIACLInspectionTimeout = 5 * time.Second
@@ -50,13 +52,13 @@ func hookAPIValidateDirectoryACLWithInspector(path string, timeout time.Duration
 		}
 		fields := strings.Fields(normalized[allowIndex+len(" allow "):])
 		if len(fields) == 0 {
-			return fmt.Errorf("cannot parse macOS allow ACL on %s", path)
+			return managed.NewTrustVerdict("cannot parse macOS allow ACL on %s", path)
 		}
 		for _, permission := range strings.Split(fields[0], ",") {
 			switch permission {
 			case "write", "add_file", "append", "add_subdirectory", "delete", "delete_child",
 				"writeattr", "writeextattr", "writesecurity", "chown":
-				return fmt.Errorf("%s has write-capable macOS ACL entry", path)
+				return managed.NewTrustVerdict("%s has write-capable macOS ACL entry", path)
 			}
 		}
 	}

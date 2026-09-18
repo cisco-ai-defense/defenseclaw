@@ -1425,6 +1425,14 @@
         {
           "location": "packaging/macos/install.sh",
           "description": "ensure_shared_install_parent dies instead of warning on a non-root-owned, group/other-writable, or write-capable-ACL shared install parent"
+        },
+        {
+          "location": "internal/gateway/connector/hook_api_token_unix.go",
+          "description": "hookAPIValidateDirectoryChain keeps ancestor mode/owner/ACL verdicts fatal when set; the relaxation applies only to ancestors inside managed.PlatformInstallerOwnedRoots"
+        },
+        {
+          "location": "internal/gateway/connector/hook_api_token_windows.go",
+          "description": "the same hook API token chain walk on Windows, scoped to ancestors under the Cisco tree in ProgramData/Program Files"
         }
       ],
       "since": "0.8.6",
