@@ -257,6 +257,11 @@ typedef struct {
     dclaw_canary_state_t    canary;
     dclaw_emergency_state_t emergency;
     dclaw_ipc_peer_t        ipc_peer;
+    /* Evaluation counters for heartbeat reporting */
+    uint32_t eval_allowed_count;
+    uint32_t eval_denied_count;
+    uint32_t eval_warned_count;
+    uint32_t eval_escalated_count;
     uint16_t                next_request_id;
     bool                    online;
     bool                    initialized;

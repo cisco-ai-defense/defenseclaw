@@ -37,17 +37,40 @@ typedef struct {
 #define ED25519_SIG_LEN  64
 #define ED25519_PUBKEY_LEN 32
 
-/* Placeholder Ed25519 verification.
- * In production: use TweetNaCl crypto_sign_verify_detached or mbedtls_pk_verify.
- * For Phase 1 dev: accepts any signature that starts with 0xED (marker byte). */
+/*
+ * Ed25519 signature verification.
+ * When DCLAW_HAS_MBEDTLS=1: uses TweetNaCl crypto_sign_ed25519_verify_detached.
+ * When DCLAW_HAS_MBEDTLS=0: stub for dev builds only.
+ */
+#if !defined(DCLAW_HAS_MBEDTLS) || DCLAW_HAS_MBEDTLS == 0
+
+#pragma message "Ed25519 verification is STUBBED — DO NOT USE IN PRODUCTION"
+
 static bool verify_ed25519(const uint8_t *message, size_t msg_len,
                            const uint8_t *signature,
                            const uint8_t *pubkey) {
     (void)message; (void)msg_len; (void)pubkey;
-    /* Production: crypto_sign_verify_detached(signature, message, msg_len, pubkey) == 0 */
     /* Dev stub: signature[0] == 0xED means "valid" for testing */
     return signature[0] == 0xED;
 }
+
+#else /* DCLAW_HAS_MBEDTLS == 1 */
+
+/* TweetNaCl Ed25519 verification — declaration for the inline/linked implementation */
+extern int crypto_sign_ed25519_verify_detached(const uint8_t *sig,
+                                               const uint8_t *msg,
+                                               uint64_t msg_len,
+                                               const uint8_t *pk);
+
+static bool verify_ed25519(const uint8_t *message, size_t msg_len,
+                           const uint8_t *signature,
+                           const uint8_t *pubkey) {
+    return crypto_sign_ed25519_verify_detached(signature, message,
+                                               (uint64_t)msg_len,
+                                               pubkey) == 0;
+}
+
+#endif /* DCLAW_HAS_MBEDTLS */
 
 /* OTA CA public key — pinned in firmware at build time */
 static const uint8_t ota_ca_pubkey[ED25519_PUBKEY_LEN] = {

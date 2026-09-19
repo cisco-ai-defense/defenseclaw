@@ -40,10 +40,12 @@ int dclaw_content_scan(const char *content, uint16_t content_len,
                        dclaw_scan_context_t *ctx);
 
 /**
- * Determine the worst action based on scan findings.
- * Returns ALLOW if no findings, BLOCK if any HIGH+, WARN if any MEDIUM+.
+ * Determine the worst action based on scan findings and content scope.
+ * USER_INPUT scope: BLOCK on MEDIUM+ findings (lower thresholds).
+ * TOOL_OUTPUT scope: BLOCK on HIGH+, WARN on MEDIUM+ (normal thresholds).
  */
-dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx);
+dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx,
+                                               dclaw_content_scope_t scope);
 
 /**
  * Initialize SSRF detection DFA tables (called once at agent init).

@@ -63,9 +63,15 @@ void dclaw_shutdown(void) {
     hal_shutdown();
 }
 
+extern int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size);
+
 void dclaw_get_health(uint8_t *out_heartbeat, uint8_t *out_len) {
-    (void)out_heartbeat;
-    *out_len = 0;
+    size_t len = 0;
+    if (dclaw_cbor_encode_heartbeat(out_heartbeat, &len, 32) == 0) {
+        *out_len = (uint8_t)len;
+    } else {
+        *out_len = 0;
+    }
 }
 
 static uint16_t compute_target_hash(const uint8_t *tool_hash) {
@@ -101,6 +107,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (dclaw_ipc_validate_request(req) != 0) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           target_hash, req->session_id);
+        g_state.eval_denied_count++;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT, DCLAW_VERDICT_SYNC);
     }
 
@@ -108,6 +115,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (!dclaw_rate_limit_check(req->cap_flags)) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT,
                           target_hash, req->session_id);
+        g_state.eval_denied_count++;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_RATE_LIMIT, DCLAW_VERDICT_SYNC);
     }
 
@@ -119,10 +127,11 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
             (dclaw_content_scope_t)req->content_scope :
             dclaw_infer_content_scope((dclaw_direction_t)req->direction);
         dclaw_content_scan(req->content, req->content_len, scope, &scan_ctx);
-        dclaw_action_t scan_action = dclaw_content_scan_worst_action(&scan_ctx);
+        dclaw_action_t scan_action = dclaw_content_scan_worst_action(&scan_ctx, scope);
         if (scan_action == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                               target_hash, req->session_id);
+            g_state.eval_denied_count++;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CONTENT_BLOCK,
                                 DCLAW_VERDICT_SYNC);
         }
@@ -133,6 +142,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (dclaw_policy_check_hash(req->tool_hash) == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY,
                           target_hash, req->session_id);
+        g_state.eval_denied_count++;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_HASH_DENY, DCLAW_VERDICT_SYNC);
     }
 
@@ -143,6 +153,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         if (dclaw_ssrf_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                               target_hash, req->session_id);
+            g_state.eval_denied_count++;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_SSRF_BLOCK,
                                 DCLAW_VERDICT_SYNC);
         }
@@ -150,6 +161,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         if (dclaw_policy_check_destination(req->destination) == DCLAW_ACTION_BLOCK) {
             dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY,
                               target_hash, req->session_id);
+            g_state.eval_denied_count++;
             return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_DEST_DENY, DCLAW_VERDICT_SYNC);
         }
     }
@@ -159,6 +171,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     if (seq_result == DCLAW_ACTION_BLOCK) {
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE,
                           target_hash, req->session_id);
+        g_state.eval_denied_count++;
         return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CAP_SEQUENCE, DCLAW_VERDICT_SYNC);
     }
 
@@ -166,6 +179,12 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
     dclaw_verdict_t cached;
     if (dclaw_cache_lookup(req->tool_hash, &cached)) {
         dclaw_audit_write(cached.action, cached.reason, target_hash, req->session_id);
+        switch (cached.action) {
+            case DCLAW_ACTION_ALLOW:    g_state.eval_allowed_count++;   break;
+            case DCLAW_ACTION_BLOCK:    g_state.eval_denied_count++;    break;
+            case DCLAW_ACTION_WARN:     g_state.eval_warned_count++;    break;
+            case DCLAW_ACTION_ESCALATE: g_state.eval_escalated_count++; break;
+        }
         return cached;
     }
 
@@ -175,6 +194,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
         /* Speculative: return PENDING, agent can proceed */
         dclaw_audit_write(DCLAW_ACTION_ESCALATE, DCLAW_REASON_CLOUD_BLOCK,
                           target_hash, req->session_id);
+        g_state.eval_escalated_count++;
         return make_verdict(DCLAW_ACTION_ALLOW, DCLAW_REASON_CLOUD_BLOCK, DCLAW_VERDICT_PENDING);
     }
 #endif
@@ -183,6 +203,7 @@ dclaw_verdict_t dclaw_evaluate(const dclaw_tool_request_t *req) {
      * For Phase 1 without cloud connected, default to BLOCK on timeout. */
     dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT,
                       target_hash, req->session_id);
+    g_state.eval_denied_count++;
     return make_verdict(DCLAW_ACTION_BLOCK, DCLAW_REASON_CLOUD_TIMEOUT, DCLAW_VERDICT_SYNC);
 }
 
@@ -193,5 +214,13 @@ dclaw_action_t dclaw_check_destination(const char *host, uint16_t port) {
 
 void dclaw_report_result(uint16_t session_id, const char *tool_name,
                          bool success, const char *output_summary) {
-    (void)session_id; (void)tool_name; (void)success; (void)output_summary;
+    (void)output_summary;
+    uint8_t dummy_hash[32] = {0};
+    if (tool_name) {
+        for (size_t i = 0; tool_name[i] && i < 32; i++)
+            dummy_hash[i] = (uint8_t)tool_name[i];
+    }
+    uint16_t target_hash = (uint16_t)(dummy_hash[0] | (dummy_hash[1] << 8));
+    dclaw_audit_write(success ? DCLAW_ACTION_ALLOW : DCLAW_ACTION_BLOCK,
+                      DCLAW_REASON_POLICY_TABLE, target_hash, session_id);
 }

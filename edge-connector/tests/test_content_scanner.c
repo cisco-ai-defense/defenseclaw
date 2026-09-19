@@ -25,7 +25,7 @@ static void test_no_findings_returns_allow(void) {
     memset(&ctx, 0, sizeof(ctx));
     ctx.finding_count = 0;
 
-    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx);
+    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_USER_INPUT);
     assert(action == DCLAW_ACTION_ALLOW);
     printf("  PASS: no findings returns ALLOW\n");
 }
@@ -214,7 +214,7 @@ static void test_high_severity_returns_block(void) {
     ctx.findings[0].severity = DCLAW_SEV_HIGH;
     ctx.findings[0].offset = 0;
 
-    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx);
+    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT);
     assert(action == DCLAW_ACTION_BLOCK);
     printf("  PASS: HIGH severity returns BLOCK\n");
 }
@@ -227,9 +227,9 @@ static void test_medium_severity_returns_warn(void) {
     ctx.findings[0].severity = DCLAW_SEV_MEDIUM;
     ctx.findings[0].offset = 0;
 
-    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx);
+    dclaw_action_t action = dclaw_content_scan_worst_action(&ctx, DCLAW_CONTENT_SCOPE_TOOL_OUTPUT);
     assert(action == DCLAW_ACTION_WARN);
-    printf("  PASS: MEDIUM severity returns WARN\n");
+    printf("  PASS: MEDIUM severity returns WARN (TOOL_OUTPUT scope)\n");
 }
 
 int main(void) {

@@ -9,6 +9,12 @@
 
 #include "defenseclaw.h"
 
+#ifdef __GNUC__
+#define DCLAW_UNUSED __attribute__((unused))
+#else
+#define DCLAW_UNUSED
+#endif
+
 /* === Severity Rules === */
 
 typedef struct {
@@ -16,12 +22,13 @@ typedef struct {
     uint8_t action;
 } dclaw_severity_rule_t;
 
+DCLAW_UNUSED
 static const dclaw_severity_rule_t severity_rules[] = {
     { 4, 1 },
     { 3, 1 },
     { 2, 2 },
 };
-static const size_t severity_rules_count = 3;
+DCLAW_UNUSED static const size_t severity_rules_count = 3;
 
 /* === Capability Sequence Rules === */
 
@@ -33,31 +40,35 @@ typedef struct {
     uint8_t action;
 } dclaw_sequence_rule_t;
 
+DCLAW_UNUSED
 static const dclaw_sequence_rule_t sequence_rules[] = {
     { .seq = {0x08, 0x04, 0x00, 0x00}, .seq_len = 2, .action = 1 },
     { .seq = {0x01, 0x10, 0x00, 0x00}, .seq_len = 2, .action = 2 },
     { .seq = {0x08, 0x20, 0x00, 0x00}, .seq_len = 2, .action = 1 },
     { .seq = {0x40, 0x08, 0x00, 0x00}, .seq_len = 2, .action = 2 },
 };
-static const size_t sequence_rules_count = 4;
+DCLAW_UNUSED static const size_t sequence_rules_count = 4;
 
 /* === Destination Allowlist === */
 
+DCLAW_UNUSED
 static const char *dest_allowlist[] = {
     "api.openai.com",
     "api.anthropic.com",
     "*.cisco.com",
 };
-static const size_t dest_allowlist_count = 3;
+DCLAW_UNUSED static const size_t dest_allowlist_count = 3;
 
 /* === Deny Hash List (sorted for binary search) === */
 
+DCLAW_UNUSED
 static const uint8_t deny_hashes[][32] = {
 };
-static const size_t deny_hashes_count = 0;
+DCLAW_UNUSED static const size_t deny_hashes_count = 0;
 
 /* === Escalation Mode Table === */
 
+DCLAW_UNUSED
 static const dclaw_escalation_entry_t escalation_table[] = {
     { 0x01, 1 },
     { 0x02, 0 },
@@ -67,15 +78,15 @@ static const dclaw_escalation_entry_t escalation_table[] = {
     { 0x20, 0 },
     { 0x40, 1 },
 };
-static const size_t escalation_table_count = 7;
+DCLAW_UNUSED static const size_t escalation_table_count = 7;
 
 /* === Canary Baseline === */
-static const uint16_t policy_canary_baseline_blocks_per_min = 5;
+DCLAW_UNUSED static const uint16_t policy_canary_baseline_blocks_per_min = 5;
 
 /* === Rate Limit Defaults === */
-static const uint16_t policy_rate_tool_calls_per_min = 60;
-static const uint16_t policy_rate_network_per_min = 30;
-static const uint16_t policy_rate_actuations_per_min = 10;
+DCLAW_UNUSED static const uint16_t policy_rate_tool_calls_per_min = 60;
+DCLAW_UNUSED static const uint16_t policy_rate_network_per_min = 30;
+DCLAW_UNUSED static const uint16_t policy_rate_actuations_per_min = 10;
 
 /* === Content Inspection Categories === */
 
@@ -86,6 +97,7 @@ typedef struct {
     uint8_t enabled;
 } dclaw_content_rule_t;
 
+DCLAW_UNUSED
 static const dclaw_content_rule_t content_rules[] = {
     { 1, 3, 1, 1 },
     { 2, 3, 1, 1 },
@@ -94,25 +106,25 @@ static const dclaw_content_rule_t content_rules[] = {
     { 5, 4, 1, 1 },
     { 6, 4, 1, 1 },
 };
-static const size_t content_rules_count = 6;
-static const uint8_t content_inspection_enabled = 1;
+DCLAW_UNUSED static const size_t content_rules_count = 6;
+DCLAW_UNUSED static const uint8_t content_inspection_enabled = 1;
 
 /* === SSRF Protection === */
-static const uint8_t ssrf_enabled = 1;
-static const uint8_t ssrf_block_private = 1;
-static const uint8_t ssrf_block_loopback = 1;
-static const uint8_t ssrf_block_link_local = 1;
-static const uint8_t ssrf_block_cloud_metadata = 1;
+DCLAW_UNUSED static const uint8_t ssrf_enabled = 1;
+DCLAW_UNUSED static const uint8_t ssrf_block_private = 1;
+DCLAW_UNUSED static const uint8_t ssrf_block_loopback = 1;
+DCLAW_UNUSED static const uint8_t ssrf_block_link_local = 1;
+DCLAW_UNUSED static const uint8_t ssrf_block_cloud_metadata = 1;
 
 /* === Cloud Escalation === */
-static const uint16_t escalation_max_payload = 1024;
-static const uint8_t escalation_include_content = 1;
-static const uint8_t escalation_include_findings = 1;
+DCLAW_UNUSED static const uint16_t escalation_max_payload = 1024;
+DCLAW_UNUSED static const uint8_t escalation_include_content = 1;
+DCLAW_UNUSED static const uint8_t escalation_include_findings = 1;
 
 /* === Trust Boundaries === */
-static const uint8_t trust_infer_from_context = 1;
-static const uint8_t trust_strict_user_input = 1;
-static const uint8_t trust_user_input_block_threshold = 2;
-static const uint8_t trust_system_block_threshold = 3;
+DCLAW_UNUSED static const uint8_t trust_infer_from_context = 1;
+DCLAW_UNUSED static const uint8_t trust_strict_user_input = 1;
+DCLAW_UNUSED static const uint8_t trust_user_input_block_threshold = 2;
+DCLAW_UNUSED static const uint8_t trust_system_block_threshold = 3;
 
 #endif /* DCLAW_POLICY_TABLES_H */

@@ -156,12 +156,19 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                     out->content_len = clen;
                     p = scan + 1;
                 } else {
-                    /* Skip unknown value */
+                    /* Skip unknown value - handle nested objects/arrays */
                     if (*p == '"') {
                         p = parse_string(p, val_buf, sizeof(val_buf));
                         if (!p) return -1;
                     } else {
-                        while (*p && *p != ',' && *p != '}') p++;
+                        int depth = 0;
+                        do {
+                            if (*p == '{' || *p == '[') depth++;
+                            else if (*p == '}' || *p == ']') { if (depth == 0) break; depth--; }
+                            else if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } }
+                            else if (depth == 0 && *p == ',') break;
+                            if (*p) p++;
+                        } while (*p && depth >= 0);
                     }
                 }
             }
@@ -172,7 +179,14 @@ int dclaw_ipc_parse_request(const char *json, size_t json_len,
                 p = parse_string(p, val_buf, sizeof(val_buf));
                 if (!p) return -1;
             } else {
-                while (*p && *p != ',' && *p != '}') p++;
+                int depth = 0;
+                do {
+                    if (*p == '{' || *p == '[') depth++;
+                    else if (*p == '}' || *p == ']') { if (depth == 0) break; depth--; }
+                    else if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } }
+                    else if (depth == 0 && *p == ',') break;
+                    if (*p) p++;
+                } while (*p && depth >= 0);
             }
         }
     }

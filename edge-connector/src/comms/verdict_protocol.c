@@ -24,14 +24,21 @@ extern int dclaw_cbor_decode_verdict_response(const uint8_t *buf, size_t len,
                                               uint8_t *reason, uint8_t *flags,
                                               uint32_t *server_ts, uint8_t *hmac_tag);
 
-/* Simple HMAC-SHA256 stub (replace with mbedtls_md_hmac in production).
- * Uses FNV-1a as a placeholder that gives deterministic 4-byte output. */
+/*
+ * Verdict HMAC computation.
+ * When DCLAW_HAS_MBEDTLS=1: real HMAC-SHA256 truncated to 4 bytes.
+ * When DCLAW_HAS_MBEDTLS=0: FNV-1a stub for dev builds only.
+ */
+#if !defined(DCLAW_HAS_MBEDTLS) || DCLAW_HAS_MBEDTLS == 0
+
+#pragma message "Verdict HMAC uses FNV-1a stub — DO NOT USE IN PRODUCTION"
+
 static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
                                  const char *session_id,
                                  uint16_t request_id, uint8_t action,
                                  const uint8_t *tool_hash,
                                  uint8_t *out_4bytes) {
-    /* HKDF step: session_key = hash(device_key || session_id) */
+    /* FNV-1a stub: deterministic 4-byte output for dev/test only */
     uint32_t h = 0x811c9dc5;
     for (size_t i = 0; i < key_len; i++) {
         h ^= device_key[i];
@@ -41,8 +48,6 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
         h ^= (uint8_t)*p;
         h *= 0x01000193;
     }
-
-    /* HMAC step: hash(session_key || request_id || action || tool_hash[0:8]) */
     h ^= (request_id & 0xFF);
     h *= 0x01000193;
     h ^= (request_id >> 8);
@@ -53,8 +58,79 @@ static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
         h ^= tool_hash[i];
         h *= 0x01000193;
     }
-
     memcpy(out_4bytes, &h, 4);
+}
+
+#else /* DCLAW_HAS_MBEDTLS == 1 */
+
+#include <mbedtls/md.h>
+
+static void compute_verdict_hmac(const uint8_t *device_key, size_t key_len,
+                                 const char *session_id,
+                                 uint16_t request_id, uint8_t action,
+                                 const uint8_t *tool_hash,
+                                 uint8_t *out_4bytes) {
+    /*
+     * Real HMAC-SHA256 truncated to 4 bytes.
+     * Input: HMAC-SHA256(device_key, session_id || request_id || action || tool_hash[0:8])
+     */
+    uint8_t hmac_full[32];
+    mbedtls_md_context_t ctx;
+    const mbedtls_md_info_t *md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+
+    mbedtls_md_init(&ctx);
+    mbedtls_md_setup(&ctx, md_info, 1 /* HMAC */);
+    mbedtls_md_hmac_starts(&ctx, device_key, key_len);
+
+    /* Feed: session_id (NUL-terminated string) */
+    mbedtls_md_hmac_update(&ctx, (const uint8_t *)session_id, strlen(session_id));
+
+    /* Feed: request_id (2 bytes, little-endian) */
+    uint8_t rid[2] = { (uint8_t)(request_id & 0xFF), (uint8_t)(request_id >> 8) };
+    mbedtls_md_hmac_update(&ctx, rid, 2);
+
+    /* Feed: action (1 byte) */
+    mbedtls_md_hmac_update(&ctx, &action, 1);
+
+    /* Feed: tool_hash[0:8] */
+    mbedtls_md_hmac_update(&ctx, tool_hash, 8);
+
+    mbedtls_md_hmac_finish(&ctx, hmac_full);
+    mbedtls_md_free(&ctx);
+
+    /* Truncate to 4 bytes */
+    memcpy(out_4bytes, hmac_full, 4);
+}
+
+#endif /* DCLAW_HAS_MBEDTLS */
+
+/* Constant-time comparison to prevent timing side-channels */
+static bool ct_compare(const uint8_t *a, const uint8_t *b, size_t len) {
+    volatile uint8_t diff = 0;
+    for (size_t i = 0; i < len; i++) {
+        diff |= a[i] ^ b[i];
+    }
+    return diff == 0;
+}
+
+/* Device key loaded once from HAL secure element */
+static uint8_t s_device_key[32];
+static size_t  s_device_key_len = 0;
+static bool    s_device_key_loaded = false;
+
+static const uint8_t *get_device_key(size_t *out_key_len) {
+    if (!s_device_key_loaded) {
+        s_device_key_len = 0;
+        if (hal_load_device_key(s_device_key, &s_device_key_len, sizeof(s_device_key)) != 0) {
+            /* Fallback: zero key — this will cause HMAC mismatches, which is safer
+             * than using a hardcoded key */
+            memset(s_device_key, 0, sizeof(s_device_key));
+            s_device_key_len = 16;
+        }
+        s_device_key_loaded = true;
+    }
+    *out_key_len = s_device_key_len;
+    return s_device_key;
 }
 
 /* Register a pending verdict request */
@@ -109,16 +185,14 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
 
     /* REQ-27: Verify HMAC tag */
     uint8_t expected_hmac[4];
-    /* In production: device_key would be loaded from secure element.
-     * For Phase 1 dev: use a placeholder key. */
-    uint8_t device_key[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                              0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    size_t key_len;
+    const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
 
-    compute_verdict_hmac(device_key, sizeof(device_key), session_id,
+    compute_verdict_hmac(device_key, key_len, session_id,
                          request_id, action, pending_tool_hash, expected_hmac);
 
-    if (memcmp(received_hmac, expected_hmac, 4) != 0) {
+    if (!ct_compare(received_hmac, expected_hmac, 4)) {
         /* REQ-29: HMAC verification failed */
         dclaw_audit_write(DCLAW_ACTION_BLOCK, DCLAW_REASON_INVALID_INPUT,
                           (uint16_t)(pending_tool_hash[0] | (pending_tool_hash[1] << 8)),
@@ -154,9 +228,9 @@ int dclaw_verdict_handle_response(const uint8_t *resp_buf, size_t resp_len,
 void dclaw_verdict_compute_expected_hmac(uint16_t request_id, uint8_t action,
                                          const uint8_t *tool_hash,
                                          uint8_t *out_hmac_4bytes) {
-    uint8_t device_key[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                              0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10};
+    size_t key_len;
+    const uint8_t *device_key = get_device_key(&key_len);
     const char *session_id = dclaw_mqtt_get_session_id();
-    compute_verdict_hmac(device_key, sizeof(device_key), session_id,
+    compute_verdict_hmac(device_key, key_len, session_id,
                          request_id, action, tool_hash, out_hmac_4bytes);
 }

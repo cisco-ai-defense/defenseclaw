@@ -284,8 +284,6 @@ static void scan_commands(const char *content, uint16_t content_len, dclaw_scan_
 int dclaw_content_scan(const char *content, uint16_t content_len,
                        dclaw_content_scope_t scope,
                        dclaw_scan_context_t *ctx) {
-    (void)scope; /* Scope-specific tuning can be added later */
-
     if (!ctx) {
         return 0;
     }
@@ -298,45 +296,74 @@ int dclaw_content_scan(const char *content, uint16_t content_len,
         return 0;
     }
 
+    /* SYSTEM scope: trusted content, skip scanning entirely */
+    if (scope == DCLAW_CONTENT_SCOPE_SYSTEM) {
+        return 0;
+    }
+
 #if DCLAW_CONTENT_SCAN
-    /* Run all category scanners */
-    scan_secrets(content, content_len, ctx);
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_pii(content, content_len, ctx);
-    }
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_credentials(content, content_len, ctx);
-    }
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_exfil(content, content_len, ctx);
-    }
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_injection(content, content_len, ctx);
-    }
-    if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
-        scan_commands(content, content_len, ctx);
+    if (scope == DCLAW_CONTENT_SCOPE_TOOL_OUTPUT) {
+        /* TOOL_OUTPUT scope: run SECRET, PII, CREDENTIAL categories only */
+        scan_secrets(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_pii(content, content_len, ctx);
+        }
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_credentials(content, content_len, ctx);
+        }
+    } else {
+        /* USER_INPUT scope (and UNKNOWN): run ALL category scanners */
+        scan_secrets(content, content_len, ctx);
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_pii(content, content_len, ctx);
+        }
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_credentials(content, content_len, ctx);
+        }
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_exfil(content, content_len, ctx);
+        }
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_injection(content, content_len, ctx);
+        }
+        if (ctx->finding_count < DCLAW_MAX_SCAN_FINDINGS) {
+            scan_commands(content, content_len, ctx);
+        }
     }
 #endif
 
     return ctx->finding_count;
 }
 
-dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx) {
+dclaw_action_t dclaw_content_scan_worst_action(const dclaw_scan_context_t *ctx,
+                                               dclaw_content_scope_t scope) {
     if (!ctx || ctx->finding_count == 0) {
         return DCLAW_ACTION_ALLOW;
     }
 
-    /* Check for HIGH or CRITICAL severity findings */
-    for (uint8_t i = 0; i < ctx->finding_count; i++) {
-        if (ctx->findings[i].severity >= DCLAW_SEV_HIGH) {
-            return DCLAW_ACTION_BLOCK;
+    if (scope == DCLAW_CONTENT_SCOPE_USER_INPUT) {
+        /* USER_INPUT: lower thresholds — block on MEDIUM+ findings */
+        for (uint8_t i = 0; i < ctx->finding_count; i++) {
+            if (ctx->findings[i].severity >= DCLAW_SEV_HIGH) {
+                return DCLAW_ACTION_BLOCK;
+            }
         }
-    }
-
-    /* Check for MEDIUM severity findings */
-    for (uint8_t i = 0; i < ctx->finding_count; i++) {
-        if (ctx->findings[i].severity >= DCLAW_SEV_MEDIUM) {
-            return DCLAW_ACTION_WARN;
+        for (uint8_t i = 0; i < ctx->finding_count; i++) {
+            if (ctx->findings[i].severity >= DCLAW_SEV_MEDIUM) {
+                return DCLAW_ACTION_BLOCK;
+            }
+        }
+    } else {
+        /* TOOL_OUTPUT / default: normal thresholds */
+        for (uint8_t i = 0; i < ctx->finding_count; i++) {
+            if (ctx->findings[i].severity >= DCLAW_SEV_HIGH) {
+                return DCLAW_ACTION_BLOCK;
+            }
+        }
+        for (uint8_t i = 0; i < ctx->finding_count; i++) {
+            if (ctx->findings[i].severity >= DCLAW_SEV_MEDIUM) {
+                return DCLAW_ACTION_WARN;
+            }
         }
     }
 
@@ -404,13 +431,30 @@ static bool parse_ipv4(const char *dest, uint8_t octets[4]) {
 }
 
 dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
+    /* NULL destination: caller must not invoke SSRF check for non-network tools */
     if (!dest) {
         return DCLAW_ACTION_ALLOW;
     }
 
-    /* Check for inline credentials (user:pass@host pattern) */
-    for (uint16_t i = 0; dest[i] != '\0'; i++) {
-        if (dest[i] == '@') {
+    /* REQ-61: Only allow http:// and https:// schemes */
+    if (strncmp(dest, "http://", 7) != 0 && strncmp(dest, "https://", 8) != 0) {
+        /* Allow bare hostnames/IPs (no scheme), block everything else with a scheme */
+        const char *colon = strchr(dest, ':');
+        if (colon && colon[1] == '/' && colon[2] == '/') {
+            return DCLAW_ACTION_BLOCK; /* Non-http(s) scheme like file://, gopher://, ftp:// */
+        }
+    }
+
+    /* Check for inline credentials (user:pass@host pattern) — only in URL authority */
+    const char *authority_start = dest;
+    const char *scheme_end = strstr(dest, "://");
+    if (scheme_end) {
+        authority_start = scheme_end + 3;
+    }
+    const char *authority_end = strchr(authority_start, '/');
+    if (!authority_end) authority_end = authority_start + strlen(authority_start);
+    for (const char *p = authority_start; p < authority_end; p++) {
+        if (*p == '@') {
             return DCLAW_ACTION_BLOCK;
         }
     }
@@ -422,6 +466,12 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
 
     /* Check for IPv6 loopback */
     if (strcmp(dest, "::1") == 0) {
+        return DCLAW_ACTION_BLOCK;
+    }
+
+    /* Check for IPv6 ULA (fc00::/7) and link-local (fe80::/10) */
+    if (strncmp(dest, "fc", 2) == 0 || strncmp(dest, "fd", 2) == 0 ||
+        strncmp(dest, "fe80:", 5) == 0 || strncmp(dest, "fe80%", 5) == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 
@@ -442,8 +492,8 @@ dclaw_action_t dclaw_ssrf_check_destination(const char *dest) {
         return DCLAW_ACTION_BLOCK;
     }
 
-    /* Check for 0.0.0.0 */
-    if (octets[0] == 0 && octets[1] == 0 && octets[2] == 0 && octets[3] == 0) {
+    /* Check for 0.0.0.0/8 range */
+    if (octets[0] == 0) {
         return DCLAW_ACTION_BLOCK;
     }
 

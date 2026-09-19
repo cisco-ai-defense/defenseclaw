@@ -191,7 +191,7 @@ int dclaw_mqtt_send_verdict_request(const dclaw_tool_request_t *req,
                                     uint16_t request_id) {
     if (!dclaw_mqtt_is_connected()) return -1;
 
-    uint8_t cbor_buf[128];
+    uint8_t cbor_buf[512];
     size_t cbor_len;
     if (dclaw_cbor_encode_verdict_request(req, request_id, 0,
                                           cbor_buf, &cbor_len, sizeof(cbor_buf)) != 0) {

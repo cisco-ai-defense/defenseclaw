@@ -123,10 +123,22 @@ int dclaw_cbor_encode_heartbeat(uint8_t *buf, size_t *out_len, size_t buf_size) 
     buf[pos++] = (uint8_t)(s->device.fw_version >> 8);
     buf[pos++] = (uint8_t)(s->device.fw_version);
 
-    /* denied_count, allowed_count, warned_count, escalated_count (2 bytes each = 8) */
-    /* TODO: wire these from actual counters; using zeros for now */
-    memset(buf + pos, 0, 8);
-    pos += 8;
+    /* denied_count (2 bytes) */
+    uint16_t denied = (uint16_t)(s->eval_denied_count & 0xFFFF);
+    buf[pos++] = (uint8_t)(denied >> 8);
+    buf[pos++] = (uint8_t)(denied);
+    /* allowed_count (2 bytes) */
+    uint16_t allowed = (uint16_t)(s->eval_allowed_count & 0xFFFF);
+    buf[pos++] = (uint8_t)(allowed >> 8);
+    buf[pos++] = (uint8_t)(allowed);
+    /* warned_count (2 bytes) */
+    uint16_t warned = (uint16_t)(s->eval_warned_count & 0xFFFF);
+    buf[pos++] = (uint8_t)(warned >> 8);
+    buf[pos++] = (uint8_t)(warned);
+    /* escalated_count (2 bytes) */
+    uint16_t escalated = (uint16_t)(s->eval_escalated_count & 0xFFFF);
+    buf[pos++] = (uint8_t)(escalated >> 8);
+    buf[pos++] = (uint8_t)(escalated);
 
     /* cache_hit_pct (1 byte) */
     buf[pos++] = 0;
