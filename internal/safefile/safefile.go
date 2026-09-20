@@ -31,109 +31,19 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"math"
 	"os"
 	"path/filepath"
 )
-
-// ValidateRegular verifies that a security-sensitive file is a regular,
-// single-link, expected-owner file and opens it without following symlinks to
-// close the lstat/open identity race. It does not read or modify file content.
-func ValidateRegular(path string) error {
-	file, opened, err := openValidatedRegular(path)
-	if err != nil {
-		return err
-	}
-	defer file.Close()
-	return validateOpenedRegular(path, file, opened, "validating")
-}
-
-// ReadRegular reads a bounded security-sensitive file without following a
-// symlink or accepting a hard link, unexpected owner, or path swap. Root-owned
-// files are accepted for managed installations; otherwise the owner must match
-// the current process. The final identity check closes the lstat/open race.
-// A negative maxBytes value is the explicit unlimited-read sentinel.
-func ReadRegular(path string, maxBytes int64) ([]byte, error) {
-	f, opened, err := openValidatedRegular(path)
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var raw []byte
-	if maxBytes < 0 {
-		raw, err = io.ReadAll(f)
-	} else {
-		readLimit := maxBytes
-		if readLimit < math.MaxInt64 {
-			readLimit++
-		}
-		raw, err = io.ReadAll(io.LimitReader(f, readLimit))
-	}
-	if err != nil {
-		return nil, err
-	}
-	if maxBytes >= 0 && int64(len(raw)) > maxBytes {
-		return nil, fmt.Errorf("safefile: managed input exceeds %d bytes: %s", maxBytes, path)
-	}
-	if err := validateOpenedRegular(path, f, opened, "reading"); err != nil {
-		return nil, err
-	}
-	return raw, nil
-}
-
-func openValidatedRegular(path string) (*os.File, os.FileInfo, error) {
-	if path == "" {
-		return nil, nil, errors.New("safefile: empty path")
-	}
-	before, err := os.Lstat(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
-		return nil, nil, fmt.Errorf("safefile: managed input must be a regular non-symlink file: %s", path)
-	}
-	if err := validateReadOwnerAndLinks(before, nil); err != nil {
-		return nil, nil, fmt.Errorf("safefile: unsafe managed input %s: %w", path, err)
-	}
-	f, err := openRegularNoFollow(path)
-	if err != nil {
-		return nil, nil, err
-	}
-	opened, err := f.Stat()
-	if err != nil {
-		_ = f.Close()
-		return nil, nil, err
-	}
-	if !os.SameFile(before, opened) || !opened.Mode().IsRegular() {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("safefile: managed input changed while opening: %s", path)
-	}
-	if err := validateReadOwnerAndLinks(opened, f); err != nil {
-		_ = f.Close()
-		return nil, nil, fmt.Errorf("safefile: unsafe opened input %s: %w", path, err)
-	}
-	return f, opened, nil
-}
-
-func validateOpenedRegular(path string, f *os.File, opened os.FileInfo, operation string) error {
-	openedAfter, err := f.Stat()
-	if err != nil {
-		return err
-	}
-	if err := validateReadOwnerAndLinks(openedAfter, f); err != nil {
-		return fmt.Errorf("safefile: unsafe opened input %s after %s: %w", path, operation, err)
-	}
-	after, err := os.Lstat(path)
-	if err != nil || after.Mode()&os.ModeSymlink != 0 || !os.SameFile(opened, after) {
-		return fmt.Errorf("safefile: managed input changed while %s: %s", operation, path)
-	}
-	return nil
-}
 
 // ErrSymlinkRefused is returned when the target path is a symlink.
 // We refuse to follow symlinks for secret writes because that opens
 // a same-name swap race against another local user.
 var ErrSymlinkRefused = errors.New("safefile: refusing to write through symlink")
+
+// MaxDotEnvBytes is the shared upper bound for credential-bearing dotenv
+// files. Keep every runtime dotenv reader on this limit so one entry point
+// cannot accept a file that another rejects.
+const MaxDotEnvBytes = 1024 * 1024
 
 // Write atomically writes data to path with mode 0600. The write
 // strategy:
@@ -151,8 +61,56 @@ var ErrSymlinkRefused = errors.New("safefile: refusing to write through symlink"
 //
 // On any failure between steps the temp file is removed.
 func Write(path string, data []byte) error {
+	return write(path, data)
+}
+
+// ReplaceFile performs a replacement-style rename from source to destination.
+// On Windows an existing destination is published with ReplaceFileW so its
+// DACL, EFS/compression state, creation metadata, and non-conflicting named
+// streams survive. It retries transient access, sharing, and lock violations
+// commonly caused by antivirus scanners briefly opening a newly written file.
+// Callers remain responsible for validating both paths and cleaning up source
+// on failure.
+func ReplaceFile(source, destination string) error {
+	return replaceFile(source, destination)
+}
+
+// WritePrivate protects the managed parent directory and holds it against
+// replacement while atomically writing a sensitive state file.
+func WritePrivate(path string, data []byte) error {
+	if err := writePrivate(path, data, nil); err != nil {
+		return err
+	}
+	// Root writing into a user-owned directory must not leave 0600 root
+	// files the operator's TUI, Doctor, and first-run cannot read.
+	return ReclaimToDirectoryOwner(path)
+}
+
+func writePrivate(path string, data []byte, beforeWrite func()) error {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := ProtectDirectory(dir); err != nil {
+		return err
+	}
+	return withLockedDirectory(dir, func() error {
+		if err := protectDirectory(dir); err != nil {
+			return fmt.Errorf("safefile: validate private directory %s: %w", dir, err)
+		}
+		if beforeWrite != nil {
+			beforeWrite()
+		}
+		return write(path, data)
+	})
+}
+
+func write(path string, data []byte) error {
 	if path == "" {
 		return errors.New("safefile: empty path")
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return err
 	}
 	dir := filepath.Dir(path)
 	if dir == "" {
@@ -164,6 +122,9 @@ func Write(path string, data []byte) error {
 		}
 	} else if !os.IsNotExist(err) {
 		return fmt.Errorf("safefile: lstat %s: %w", path, err)
+	}
+	if err := rejectReparsePath(dir); err != nil {
+		return err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("safefile: mkdir %s: %w", dir, err)
@@ -178,7 +139,7 @@ func Write(path string, data []byte) error {
 		// Best-effort cleanup; if rename succeeded the unlink is a no-op.
 		_ = os.Remove(tmpName)
 	}()
-	if err := tmp.Chmod(0o600); err != nil {
+	if err := protectFile(tmpName, tmp); err != nil {
 		_ = tmp.Close()
 		return fmt.Errorf("safefile: chmod temp: %w", err)
 	}
@@ -193,7 +154,13 @@ func Write(path string, data []byte) error {
 	if err := tmp.Close(); err != nil {
 		return fmt.Errorf("safefile: close temp: %w", err)
 	}
-	if err := os.Rename(tmpName, path); err != nil {
+	if err := rejectReparsePath(path); err != nil {
+		return err
+	}
+	if err := preserveExistingProtection(path, tmpName); err != nil {
+		return fmt.Errorf("safefile: preserve existing protection: %w", err)
+	}
+	if err := replaceFile(tmpName, path); err != nil {
 		return fmt.Errorf("safefile: rename: %w", err)
 	}
 	if d, err := os.Open(dir); err == nil {
@@ -217,17 +184,234 @@ func CreateExclusive(path string) (*os.File, error) {
 	if dir == "" {
 		dir = "."
 	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("safefile: mkdir %s: %w", dir, err)
+	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
 	}
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("safefile: open exclusive %s: %w", path, err)
 	}
-	if err := f.Chmod(0o600); err != nil {
+	if err := protectFile(path, f); err != nil {
 		_ = f.Close()
 		_ = os.Remove(path)
 		return nil, fmt.Errorf("safefile: chmod %s: %w", path, err)
 	}
 	return f, nil
+}
+
+// ProtectDirectory creates and protects a DefenseClaw-owned private state
+// directory. Callers must not use it for shared or operator-selected paths.
+func ProtectDirectory(path string) error {
+	if path == "" {
+		return errors.New("safefile: empty directory path")
+	}
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	if err := makePrivateDirectories(path); err != nil {
+		return fmt.Errorf("safefile: mkdir %s: %w", path, err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("safefile: private directory path is not a directory: %s", path)
+	}
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	return protectDirectory(path)
+}
+
+// ProtectFile applies the platform-native owner-only protection contract to an
+// existing regular file.
+func ProtectFile(path string) error {
+	expected, err := validateRegularFilePath(path)
+	if err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	opened, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		return fmt.Errorf("safefile: file changed while opening: %s", path)
+	}
+	current, err := validateRegularFilePath(path)
+	if err != nil {
+		return err
+	}
+	if !os.SameFile(opened, current) {
+		return fmt.Errorf("safefile: file changed while validating: %s", path)
+	}
+	return protectFile(path, f)
+}
+
+// ProtectFileWhileInUse applies the same owner-only protection contract as
+// ProtectFile while allowing a Windows executable image to remain mapped by a
+// running process. The Windows implementation binds validation and the DACL
+// update to one non-reparse handle; other platforms use ProtectFile directly.
+// This is intentionally separate from ProtectFile so ordinary writers retain
+// the stronger read/write-open behavior they already depend on.
+func ProtectFileWhileInUse(path string) error {
+	return protectFileWhileInUse(path)
+}
+
+// ValidatePrivateDirectory verifies that path is an existing, non-link
+// directory protected for the current user and the platform's trusted system
+// principal. Unlike ProtectDirectory it never changes the path. It is intended
+// for security-sensitive readers that must fail closed when private state has
+// been replaced or its permissions have drifted.
+func ValidatePrivateDirectory(path string) error {
+	return validatePrivateProtection(path, true)
+}
+
+// ValidatePrivateFile verifies that path is an existing, non-link regular file
+// protected for the current user and the platform's trusted system principal.
+// It performs no repair so a reader cannot silently bless attacker-controlled
+// state before consuming it.
+func ValidatePrivateFile(path string) error {
+	return validatePrivateProtection(path, false)
+}
+
+// ValidateRegular is the compatibility reader-side check used by the
+// Agent Control event spool. It rejects symlinks, non-regular files, and
+// ambiguous hard-linked aliases before a managed artifact is consumed.
+func ValidateRegular(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("safefile: inspect %s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("safefile: %s must be a non-symlink regular file", path)
+	}
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		return fmt.Errorf("safefile: inspect parent of %s: %w", path, err)
+	}
+	for _, entry := range entries {
+		if entry.Name() == filepath.Base(path) {
+			continue
+		}
+		other, statErr := os.Stat(filepath.Join(filepath.Dir(path), entry.Name()))
+		if statErr == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
+			return fmt.Errorf("safefile: %s has hard links", path)
+		}
+	}
+	return nil
+}
+
+// ReadRegularFileBounded reads one stable regular file without following a
+// leaf symlink/reparse point, blocking on a FIFO, or accepting a path swap.
+// The bytes are returned only after the opened object is re-bound to the
+// current pathname. This reader deliberately does not require owner-only
+// permissions: repair/diagnostic callers may need to inspect a drifted file
+// before they can tighten or atomically replace it.
+func ReadRegularFileBounded(path string, maxBytes int64) ([]byte, error) {
+	return readRegularFileBounded(path, maxBytes, nil)
+}
+
+// ReadRegular is the compatibility name used by the Agent Control policy
+// synchronizer. Keep the implementation on the hardened bounded-reader path.
+func ReadRegular(path string, maxBytes int64) ([]byte, error) {
+	return ReadRegularFileBounded(path, maxBytes)
+}
+
+func readRegularFileBounded(path string, maxBytes int64, afterRead func()) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, errors.New("safefile: read limit must be positive")
+	}
+	expected, err := validateRegularFilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if expected.Size() > maxBytes {
+		return nil, fmt.Errorf("safefile: file exceeds %d-byte read limit: %s", maxBytes, path)
+	}
+	file, err := openRegularRead(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(expected, opened) {
+		return nil, fmt.Errorf("safefile: file changed while opening: %s", path)
+	}
+	before, err := readStabilitySnapshot(file)
+	if err != nil {
+		return nil, fmt.Errorf("safefile: snapshot file before reading %s: %w", path, err)
+	}
+	if before.size > maxBytes {
+		return nil, fmt.Errorf("safefile: file exceeds %d-byte read limit: %s", maxBytes, path)
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("safefile: file exceeds %d-byte read limit: %s", maxBytes, path)
+	}
+	if afterRead != nil {
+		afterRead()
+	}
+	after, err := readStabilitySnapshot(file)
+	if err != nil {
+		return nil, fmt.Errorf("safefile: snapshot file after reading %s: %w", path, err)
+	}
+	if before != after || int64(len(data)) != before.size {
+		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+	}
+	current, err := validateRegularFilePath(path)
+	if err != nil {
+		return nil, err
+	}
+	if !os.SameFile(opened, current) {
+		return nil, fmt.Errorf("safefile: file changed while reading: %s", path)
+	}
+	return data, nil
+}
+
+func validateRegularFilePath(path string) (os.FileInfo, error) {
+	dir := filepath.Dir(path)
+	if dir == "" {
+		dir = "."
+	}
+	if err := rejectReparseChain(dir); err != nil {
+		return nil, err
+	}
+	if err := rejectReparsePath(path); err != nil {
+		return nil, err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return nil, fmt.Errorf("%w: %s", ErrSymlinkRefused, path)
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("safefile: path is not a regular file: %s", path)
+	}
+	return info, nil
 }

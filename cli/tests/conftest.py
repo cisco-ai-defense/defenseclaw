@@ -2,10 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import sys
 from contextlib import contextmanager
+from pathlib import Path
 
+import pytest
 from click.testing import CliRunner, Result
 
+from tests.environment import isolated_home_env
 
 _ORIGINAL_ISOLATION = CliRunner.isolation
 _ORIGINAL_STDERR_GETTER = Result.stderr.fget
@@ -34,3 +39,70 @@ def _stderr_compat(self):
 
 CliRunner.isolation = _isolation_compat
 Result.stderr = property(_stderr_compat)
+
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if _reconfigure is not None:
+        _reconfigure(encoding="utf-8")
+
+
+def _set_windows_identity(setenv, home: Path) -> None:
+    """Point every Windows user-state root at one disposable home."""
+    home.mkdir(parents=True, exist_ok=True)
+    for name, value in isolated_home_env(home).items():
+        setenv(name, value)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_windows_identity(tmp_path_factory, monkeypatch: pytest.MonkeyPatch):
+    """Keep tests away from the developer's real Windows profile.
+
+    Windows home discovery consults USERPROFILE and HOMEDRIVE/HOMEPATH rather
+    than HOME.  A large part of this suite intentionally redirects HOME, so
+    mirror those later redirects as well when they use pytest's monkeypatch.
+    Tests that need a deliberately mixed identity can still set the individual
+    variables after setting HOME.
+    """
+    if os.name != "nt":
+        yield
+        return
+
+    original_setenv = monkeypatch.setenv
+    _set_windows_identity(original_setenv, tmp_path_factory.mktemp("windows-identity"))
+
+    def setenv(self, name: str, value: str, prepend: str | None = None) -> None:
+        original_setenv(self, name, value, prepend=prepend)
+        if name == "HOME":
+            _set_windows_identity(
+                lambda key, item: original_setenv(self, key, item),
+                Path(value),
+            )
+
+    original_setenv = pytest.MonkeyPatch.setenv
+    monkeypatch.setattr(pytest.MonkeyPatch, "setenv", setenv)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _inject_supported_connector_host(request, monkeypatch: pytest.MonkeyPatch):
+    """Run platform-neutral connector behavior tests on an explicit host."""
+    if request.node.get_closest_marker("supported_connector_host") is None:
+        return
+
+    from defenseclaw import platform_support
+    from defenseclaw.commands import cmd_setup
+
+    monkeypatch.setattr(platform_support, "host_os", lambda: "linux")
+
+    def expand_connector_choices(command) -> None:
+        for parameter in getattr(command, "params", ()):
+            if isinstance(getattr(parameter, "type", None), cmd_setup._PlatformConnectorChoice):
+                monkeypatch.setattr(
+                    parameter.type,
+                    "choices",
+                    list(cmd_setup._CONNECTOR_NAMES_FALLBACK),
+                )
+        for child in getattr(command, "commands", {}).values():
+            expand_connector_choices(child)
+
+    expand_connector_choices(cmd_setup.setup)

@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
+	privatekeyfixture "github.com/defenseclaw/defenseclaw/internal/secretshape/testfixture"
 )
 
 // writeFixture creates a temp file with the given content and returns its path.
@@ -160,7 +161,7 @@ func TestClawShieldSecrets_Detections(t *testing.T) {
 		{"stripe live key", "sk: sk_live_abcdefghijklmnopqrstuvwx", "CS-SEC-STRIPE-LIVE"},
 		{"sendgrid key", "sg: SG.abcdefghijklmnopqrstuv.abcdefghijklmnopqrstuvwxyz01234567890123456", "CS-SEC-SENDGRID"},
 		{"npm token", "npm: npm_abcdefghijklmnopqrstuvwxyz0123456789", "CS-SEC-NPM"},
-		{"rsa private key", "-----BEGIN RSA PRIVATE KEY-----", "CS-SEC-KEY-RSA"},
+		{"rsa private key", privatekeyfixture.MustPEM("RSA PRIVATE KEY"), "CS-SEC-KEY-RSA"},
 		{"slack bot", "xoxb-123456789012-123456789012-abcdefghijklmnopqrstuvwx", "CS-SEC-SLACK-BOT"},
 	}
 	for _, tt := range tests {
@@ -174,6 +175,31 @@ func TestClawShieldSecrets_Detections(t *testing.T) {
 				t.Errorf("expected finding with ID %q, got %d findings: %v", tt.wantID, len(result.Findings), result.Findings)
 			}
 		})
+	}
+}
+
+func TestClawShieldSecrets_RejectsPrivateKeyHeaderOnly(t *testing.T) {
+	s := scanner.NewClawShieldSecretsScanner()
+	path := writeFixture(t, "header.txt", "-----BEGIN "+"RSA PRIVATE KEY-----")
+	result, err := s.Scan(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	if hasFinding(result, "CS-SEC-KEY-RSA") {
+		t.Fatalf("header-only marker produced a private-key finding: %+v", result.Findings)
+	}
+}
+
+func TestClawShieldSecrets_RejectsPrivateKeyWithArbitraryBase64(t *testing.T) {
+	s := scanner.NewClawShieldSecretsScanner()
+	content := "-----BEGIN " + "RSA PRIVATE KEY-----\nQUJDRA==\n-----END RSA PRIVATE KEY-----"
+	path := writeFixture(t, "arbitrary-base64.txt", content)
+	result, err := s.Scan(context.Background(), path)
+	if err != nil {
+		t.Fatalf("Scan error: %v", err)
+	}
+	if hasFinding(result, "CS-SEC-KEY-RSA") {
+		t.Fatalf("arbitrary Base64 produced a private-key finding: %+v", result.Findings)
 	}
 }
 

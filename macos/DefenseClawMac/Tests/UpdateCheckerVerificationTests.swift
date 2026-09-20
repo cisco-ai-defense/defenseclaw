@@ -25,13 +25,37 @@ enum RuntimePayload {
 @main
 struct UpdateCheckerVerificationTests {
     static func main() {
+        pinsExpectedPublisherRequirement()
         rejectsUnverifiedSelfUpdateAssets()
         selectsVerifiedSelfUpdateAsset()
         rejectsQualifiedAndMismatchedSelfUpdateAssets()
         rejectsNonAppZipAssets()
         allowsRuntimeReleaseWithoutSelfUpdateAsset()
         returnsPopulatedReleaseInfoForAppSelfUpdate()
+        selectsDigestBoundRuntimeInstallerAsset()
+        rejectsMutableOrUnverifiableRuntimeInstallerAssets()
         print("Update checker verification tests passed")
+    }
+
+    private static func pinsExpectedPublisherRequirement() {
+        expect(
+            UpdateChecker.expectedBundleIdentifier == "com.cisco.defenseclaw.macos",
+            "self-update pins the production bundle identifier"
+        )
+        expect(
+            UpdateChecker.expectedCodeRequirement.contains(#"identifier "com.cisco.defenseclaw.macos""#),
+            "self-update pins the Cisco bundle identifier in the publisher requirement"
+        )
+        let requirement = UpdateChecker.expectedCodeRequirement
+        expect(requirement.contains("anchor apple generic"), "publisher requirement uses Apple's trust anchor")
+        expect(
+            requirement.contains(#"identifier "com.cisco.defenseclaw.macos""#),
+            "publisher requirement binds the bundle identifier"
+        )
+        expect(
+            requirement.contains(#"identifier "com.cisco.defenseclaw.macos""#),
+            "publisher requirement binds the Cisco bundle identifier"
+        )
     }
 
     private static func rejectsUnverifiedSelfUpdateAssets() {
@@ -140,6 +164,55 @@ struct UpdateCheckerVerificationTests {
         expect(release?.assetName == "DefenseClawMac-1.2.3-macos-arm64.zip", "app release asset name is preserved")
         expect(release?.assetURL == "https://example.test/verified.zip", "app release asset URL is preserved")
         expect(release?.assetSHA256 == "def", "app release digest prefix is stripped")
+    }
+
+    private static func selectsDigestBoundRuntimeInstallerAsset() {
+        let digest = String(repeating: "a", count: 64)
+        let release = UpdateChecker.runtimeInstallerInfo(
+            from: [
+                "html_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/tag/0.8.10",
+                "assets": [[
+                    "name": "install.sh",
+                    "browser_download_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/download/0.8.10/install.sh",
+                    "digest": "sha256:\(digest)",
+                ]],
+            ],
+            tag: "0.8.10"
+        )
+        expect(release?.tag == "0.8.10", "runtime installer retains the immutable release tag")
+        expect(release?.assetSHA256 == digest, "runtime installer retains its release digest")
+    }
+
+    private static func rejectsMutableOrUnverifiableRuntimeInstallerAssets() {
+        let digest = String(repeating: "b", count: 64)
+        let mutable = UpdateChecker.runtimeInstallerInfo(
+            from: ["assets": [[
+                "name": "install.sh",
+                "browser_download_url": "https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/main/scripts/install.sh",
+                "digest": "sha256:\(digest)",
+            ]]],
+            tag: "0.8.10"
+        )
+        expect(mutable == nil, "mutable main-branch installer URL is rejected")
+
+        let missingDigest = UpdateChecker.runtimeInstallerInfo(
+            from: ["assets": [[
+                "name": "install.sh",
+                "browser_download_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/download/0.8.10/install.sh",
+            ]]],
+            tag: "0.8.10"
+        )
+        expect(missingDigest == nil, "runtime installer without a SHA-256 digest is rejected")
+
+        let wrongTag = UpdateChecker.runtimeInstallerInfo(
+            from: ["assets": [[
+                "name": "install.sh",
+                "browser_download_url": "https://github.com/cisco-ai-defense/defenseclaw/releases/download/0.8.9/install.sh",
+                "digest": "sha256:\(digest)",
+            ]]],
+            tag: "0.8.10"
+        )
+        expect(wrongTag == nil, "runtime installer URL must match the selected release tag")
     }
 
     private static func expect(_ condition: @autoclosure () -> Bool, _ label: String) {

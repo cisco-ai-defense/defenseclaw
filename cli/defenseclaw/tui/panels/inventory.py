@@ -21,6 +21,7 @@ from defenseclaw.tui.services.inventory_state import (
     InventoryCommandIntent,
     InventoryDetailInfo,
     InventoryFilter,
+    InventoryLimitation,
     InventoryMCP,
     InventoryMemory,
     InventoryModelProvider,
@@ -35,6 +36,7 @@ from defenseclaw.tui.services.inventory_state import (
     InventorySubTabInfo,
     InventorySummary,
     InventorySummaryState,
+    InventoryTool,
 )
 
 __all__ = [
@@ -46,6 +48,7 @@ __all__ = [
     "InventoryCommandIntent",
     "InventoryDetailInfo",
     "InventoryFilter",
+    "InventoryLimitation",
     "InventoryMCP",
     "InventoryMemory",
     "InventoryModelProvider",
@@ -60,4 +63,5 @@ __all__ = [
     "InventorySubTabInfo",
     "InventorySummary",
     "InventorySummaryState",
+    "InventoryTool",
 ]

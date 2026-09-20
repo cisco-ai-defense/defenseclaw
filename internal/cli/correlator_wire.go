@@ -33,9 +33,9 @@ type auditReaderAdapter struct {
 }
 
 func (a *auditReaderAdapter) ListRecentFindingsInSession(
-	sessionID, agentInstanceID string, limit int,
+	sessionID, agentInstanceID, agentID string, limit int,
 ) ([]guardrail.SessionFindingRow, error) {
-	rows, err := a.store.ListRecentFindingsInSession(sessionID, agentInstanceID, limit)
+	rows, err := a.store.ListRecentFindingsInSession(sessionID, agentInstanceID, agentID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -43,9 +43,13 @@ func (a *auditReaderAdapter) ListRecentFindingsInSession(
 	for i, r := range rows {
 		out[i] = guardrail.SessionFindingRow{
 			ID:                  r.ID,
+			AgentID:             r.AgentID,
+			AgentInstanceID:     r.AgentInstanceID,
+			Scanner:             r.Scanner,
 			RuleID:              r.RuleID,
 			Category:            r.Category,
 			Severity:            r.Severity,
+			Tags:                append([]string(nil), r.Tags...),
 			DataAxis:            r.DataAxis,
 			ToolCapabilityClass: r.ToolCapabilityClass,
 			ContentFingerprint:  r.ContentFingerprint,
@@ -55,6 +59,12 @@ func (a *auditReaderAdapter) ListRecentFindingsInSession(
 		}
 	}
 	return out, nil
+}
+
+func (a *auditReaderAdapter) ListFiredCorrelationRuleIDsInSession(
+	sessionID, agentInstanceID, agentID string, candidateRuleIDs []string,
+) ([]string, error) {
+	return a.store.ListFiredCorrelationRuleIDsInSession(sessionID, agentInstanceID, agentID, candidateRuleIDs)
 }
 
 var _ guardrail.SessionFindingReader = (*auditReaderAdapter)(nil)

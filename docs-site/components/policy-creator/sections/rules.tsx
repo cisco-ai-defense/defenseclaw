@@ -15,18 +15,17 @@ import { ChipsField } from '../ui/chips-field';
 import { RecipePicker } from '../ui/recipe-picker';
 import { RegexInput } from '../ui/regex-input';
 import { SegmentedControl } from '../ui/segmented-control';
-import { TextField } from '../ui/text-field';
+import { TextArea, TextField } from '../ui/text-field';
 import { Toggle } from '../ui/toggle';
 
 const RULE_RECIPE_KINDS: Recipe['kind'][] = [
-  'rule:secrets',
+  'rule:secret',
   'rule:injection',
-  'rule:exfiltration',
   'rule:command',
-  'rule:path',
+  'rule:sensitive-path',
   'rule:enterprise-data',
   'rule:trust-exploit',
-  'rule:cognitive',
+  'rule:cognitive-file',
   'rule:c2',
 ];
 
@@ -139,7 +138,7 @@ export function RulesSection({
           maxHeight={180}
           onPick={(r) => {
             // Drop the rule into the file whose name matches its kind suffix
-            // (rule:secrets → secrets.yaml). Create the file if missing.
+            // (rule:secret → secret.yaml). Create the file if missing.
             const targetFilename = r.kind.split(':')[1] ?? 'misc';
             const fileIdx = policy.rule_pack.files.findIndex((f) => f.filename === targetFilename);
             if (fileIdx >= 0) {
@@ -281,6 +280,27 @@ export function RulesSection({
                           onCounterexamplesChange={(next) => setExamplesFor(key, { no: next })}
                           hint="Engine compiles with Go's regexp (RE2). Lookarounds and backrefs are not supported."
                         />
+                        <div className="space-y-2 rounded-md border border-fd-border bg-fd-background/50 p-2">
+                          <Toggle
+                            label="authenticated tool calls only"
+                            checked={rule.tool_call_only === true}
+                            onChange={(v) =>
+                              updateRule(fileIdx, ruleIdx, { tool_call_only: v })
+                            }
+                          />
+                          <TextArea
+                            label="CEL expression (optional)"
+                            value={rule.expression ?? ''}
+                            onChange={(v) =>
+                              updateRule(fileIdx, ruleIdx, {
+                                expression: v || undefined,
+                              })
+                            }
+                            rows={3}
+                            monospace
+                            hint="Detection prefilter evaluated only after the server establishes an authenticated tool-call boundary. A custom CEL expression cannot grant itself code-owned same-rule block authority; final compilation and enforcement happen on the DefenseClaw host."
+                          />
+                        </div>
                       </li>
                     );
                   })

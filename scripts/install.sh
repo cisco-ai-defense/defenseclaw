@@ -22,9 +22,7 @@
 # No Go, Node.js, or git required — only Python and uv.
 #
 #   # From GitHub release:
-#   VERSION=0.8.4
-#   INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"
-#   curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash
+#   curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash
 #
 #   # From a complete authenticated release-asset directory (fresh installs only):
 #   ./scripts/install.sh --local /path/to/release-assets
@@ -69,12 +67,19 @@ readonly INSTALL_ATTEMPT_MARKER=".defenseclaw-install-in-progress-v1"
 readonly INSTALL_ATTEMPT_MARKER_CONTENT="DefenseClaw authenticated fresh install in progress v1"
 readonly REPO="cisco-ai-defense/defenseclaw"
 readonly OPENCLAW_VERSION="2026.3.24"
+readonly MIN_PYTHON_VERSION="3.10"
+readonly MAX_PYTHON_VERSION_EXCLUSIVE="3.14"
+readonly COSIGN_BOOTSTRAP_VERSION="2.6.3"
+readonly COSIGN_BOOTSTRAP_MAX_BYTES="209715200"
+readonly SANDBOX_INSTALLER_ASSET_START_VERSION="0.8.11"
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
 VERIFIED_CHECKSUM=""
+COSIGN_BIN=""
 
-# Supported connectors. Keep in sync with cli/defenseclaw/connector_paths.py
-# KNOWN_CONNECTORS. The "none" pseudo-value means "lay binaries only — pick
-# a connector later with `defenseclaw init --connector ...`".
-readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor windsurf geminicli copilot openhands antigravity opencode omnigent none)
+# Selectable connectors. Retired names may remain recognized by lifecycle
+# cleanup code but must not appear here. The "none" pseudo-value means "lay
+# binaries only — pick a connector later with `defenseclaw init --connector ...`".
+readonly CONNECTOR_CHOICES=(codex claudecode zeptoclaw openclaw hermes cursor devin copilot openhands antigravity opencode amp omnigent none)
 
 # ── Terminal Formatting ───────────────────────────────────────────────────────
 
@@ -99,6 +104,17 @@ die() { err "$@"; exit 1; }
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 has() { command -v "$1" &>/dev/null; }
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
 
 existing_install_detected() {
     has defenseclaw \
@@ -397,6 +413,17 @@ cleanup_install_attempt() {
     set +e
 
     if [[ "${INSTALL_SUCCEEDED:-false}" != true ]]; then
+        if [[ -n "${SKILL_SCANNER_PUBLISHED_ID:-}" ]]; then
+            if [[ "${MODERN_RELEASE:-false}" == true \
+                && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
+                "${POLICY_PYTHON}" "${PUBLISH_HELPER}" unlink-exact \
+                    "${INSTALL_DIR}/skill-scanner" \
+                    "${SKILL_SCANNER_PUBLISHED_ID}" \
+                    --custody-root "${INSTALL_CUSTODY_ROOT}" || true
+            else
+                warn "Legacy skill-scanner launcher rollback residue was preserved because exact retirement is unavailable"
+            fi
+        fi
         if [[ -n "${CLI_PUBLISHED_ID:-}" ]]; then
             if [[ "${MODERN_RELEASE:-false}" == true \
                 && -n "${PUBLISH_HELPER:-}" && -f "${PUBLISH_HELPER}" ]]; then
@@ -724,12 +751,12 @@ connector_display_name() {
         openclaw) echo "OpenClaw" ;;
         hermes) echo "Hermes Agent" ;;
         cursor) echo "Cursor" ;;
-        windsurf) echo "Windsurf" ;;
-        geminicli) echo "Gemini CLI" ;;
+        devin) echo "Devin" ;;
         copilot) echo "GitHub Copilot CLI" ;;
         openhands) echo "OpenHands" ;;
         antigravity) echo "Antigravity" ;;
         opencode) echo "OpenCode" ;;
+        amp) echo "Amp" ;;
         omnigent) echo "OmniGent" ;;
         *) echo "$1" ;;
     esac
@@ -854,6 +881,9 @@ detect_platform() {
 
     OS="$(uname -s | tr '[:upper:]' '[:lower:]')"
     ARCH="$(uname -m)"
+    if [[ "${OS}" == "darwin" ]]; then
+        ARCH="$(macos_hardware_machine "${ARCH}")"
+    fi
 
     case "${ARCH}" in
         x86_64|amd64)  ARCH_NORM="amd64" ;;
@@ -866,6 +896,10 @@ detect_platform() {
         linux)  OS_NAME="Linux" ;;
         *)      die "Unsupported OS: ${OS}" ;;
     esac
+
+    if [[ "${OS}" == "darwin" && "${ARCH_NORM}" != "arm64" ]]; then
+        die "Intel macOS (${ARCH}) is unsupported. DefenseClaw for macOS requires Apple Silicon (arm64); no changes were made."
+    fi
 
     ok "${OS_NAME} (${ARCH_NORM})"
 }
@@ -903,7 +937,8 @@ ensure_python() {
         if has "$cmd"; then
             local ver
             ver="$(extract_version "$("$cmd" --version 2>&1)")"
-            if version_gte "$ver" "3.10"; then
+            if version_gte "$ver" "${MIN_PYTHON_VERSION}" \
+                && ! version_gte "$ver" "${MAX_PYTHON_VERSION_EXCLUSIVE}"; then
                 PYTHON_VERSION="$ver"
                 POLICY_PYTHON="$(command -v "$cmd")"
                 ok "Python ${ver}"
@@ -965,12 +1000,51 @@ sha256_file() {
     fi
 }
 
+resolve_cosign() {
+    if has cosign; then
+        COSIGN_BIN="$(command -v cosign)"
+        return 0
+    fi
+
+    local expected filename verifier_url verifier_path actual size
+    case "${OS}/${ARCH_NORM}" in
+        darwin/arm64) expected="ff497a698f125f3130b04f000b2cb0dd163bcaf00b5e776ef536035e6d0b3f3e" ;;
+        linux/amd64) expected="7c78a7f2efc00088bd788a758db6e0928e79f3e0eb83eb5d3c499ed98da4c4f4" ;;
+        linux/arm64) expected="b7c23659a50a59fd8eec44b87188e9062157d0c87796cac7b38727e5390c4917" ;;
+        *) die "Automatic Cosign bootstrap is unavailable for ${OS}/${ARCH_NORM}; no payload was activated" ;;
+    esac
+    filename="cosign-${OS}-${ARCH_NORM}"
+    verifier_url="https://github.com/sigstore/cosign/releases/download/v${COSIGN_BOOTSTRAP_VERSION}/${filename}"
+    verifier_path="${POLICY_DIR}/${filename}"
+    info "Cosign was not found; authenticating temporary Cosign ${COSIGN_BOOTSTRAP_VERSION}..."
+    curl --fail --silent --show-error --location \
+        --proto '=https' --proto-redir '=https' --tlsv1.2 \
+        --max-filesize "${COSIGN_BOOTSTRAP_MAX_BYTES}" \
+        --output "${verifier_path}" "${verifier_url}" \
+        || die "Could not download the pinned Cosign verifier; no payload was activated"
+    [[ -f "${verifier_path}" && ! -L "${verifier_path}" && -O "${verifier_path}" ]] \
+        || die "Temporary Cosign verifier lost private file custody; no payload was activated"
+    size="$(custody_stat size "${verifier_path}")" \
+        || die "Could not inspect the temporary Cosign verifier"
+    [[ "${size}" -gt 0 && "${size}" -le "${COSIGN_BOOTSTRAP_MAX_BYTES}" ]] \
+        || die "Temporary Cosign verifier exceeded its authenticated size boundary"
+    actual="$(sha256_file "${verifier_path}")"
+    [[ "${actual}" == "${expected}" ]] \
+        || die "Temporary Cosign verifier SHA-256 authentication failed; no payload was activated"
+    chmod 700 "${verifier_path}" \
+        || die "Could not make the authenticated temporary Cosign verifier executable"
+    [[ "$(sha256_file "${verifier_path}")" == "${expected}" ]] \
+        || die "Temporary Cosign verifier changed before execution; no payload was activated"
+    COSIGN_BIN="${verifier_path}"
+    ok "Temporary Cosign verifier authenticated"
+}
+
 load_release_policy() {
     step "Authenticating release policy"
     [[ -n "${POLICY_PYTHON:-}" && -x "${POLICY_PYTHON}" ]] \
         || die "A supported Python interpreter is required to validate the signed release artifact policy"
     local policy_dir_raw
-    policy_dir_raw="$(mktemp -d)"
+    policy_dir_raw="$(mktemp -d "${TMPDIR:-/tmp}/defenseclaw-policy.XXXXXX")"
     POLICY_DIR="$(cd "${policy_dir_raw}" && pwd -P)" \
         || die "Could not canonicalize the release-policy staging directory"
     local policy_custody_key
@@ -1011,7 +1085,6 @@ PY
     MODERN_RELEASE=false
     if version_gte "${RELEASE_VERSION}" "0.8.4"; then
         MODERN_RELEASE=true
-        has cosign || die "cosign is required to authenticate DefenseClaw ${RELEASE_VERSION} before installation"
         local signature="${POLICY_DIR}/checksums.txt.sig"
         local certificate="${POLICY_DIR}/checksums.txt.pem"
         if [[ -n "${LOCAL_DIR}" ]]; then
@@ -1023,7 +1096,8 @@ PY
             fetch_artifact "$(artifact_path "checksums.txt.sig")" "${signature}"
             fetch_artifact "$(artifact_path "checksums.txt.pem")" "${certificate}"
         fi
-        cosign verify-blob \
+        resolve_cosign
+        "${COSIGN_BIN}" verify-blob \
             --certificate "${certificate}" \
             --signature "${signature}" \
             --certificate-identity "https://github.com/${REPO}/.github/workflows/release.yaml@refs/heads/main" \
@@ -1294,6 +1368,30 @@ verify_checksum() {
     VERIFIED_CHECKSUM="${actual}"
 }
 
+install_openshell_sandbox() {
+    step "Installing openshell-sandbox"
+    [[ "${MODERN_RELEASE:-false}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+
+    local asset_name="install-openshell-sandbox.sh"
+    local sandbox_installer="${POLICY_DIR}/${asset_name}"
+    local verified_sha256=""
+    info "Downloading the signed release sandbox installer..."
+    fetch_artifact "$(artifact_path "${asset_name}")" "${sandbox_installer}"
+    verify_checksum "${sandbox_installer}" "${asset_name}"
+    verified_sha256="${VERIFIED_CHECKSUM}"
+    [[ "${verified_sha256}" =~ ^[0-9A-Fa-f]{64}$ ]] \
+        || die "Signed checksums do not authenticate the sandbox installer; no sandbox installer was executed"
+    chmod 500 "${sandbox_installer}" \
+        || die "Could not protect the authenticated sandbox installer; no sandbox installer was executed"
+    [[ "$(sha256_file "${sandbox_installer}")" == "${verified_sha256}" ]] \
+        || die "Authenticated sandbox installer changed before execution; no sandbox installer was executed"
+    bash "${sandbox_installer}" \
+        || die "OpenShell sandbox installation failed"
+}
+
 # ── Install: Gateway binary ──────────────────────────────────────────────────
 
 install_gateway() {
@@ -1418,27 +1516,40 @@ install_python_cli() {
         warn "Legacy wheel download residue was preserved because exact retirement is unavailable"
     fi
 
+    "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null \
+        || die "CLI validation failed before launcher publication"
+    "${DEFENSECLAW_VENV}/bin/skill-scanner" --version &>/dev/null \
+        || die "Skill scanner validation failed before launcher publication"
+
     if [[ "${MODERN_RELEASE:-false}" == true ]]; then
         CLI_PUBLISHED_ID="$(
             "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
                 "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
                 --custody-root "${INSTALL_CUSTODY_ROOT}"
         )" || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
+        SKILL_SCANNER_PUBLISHED_ID="$(
+            "${POLICY_PYTHON}" "${PUBLISH_HELPER}" fresh-symlink \
+                "${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner" \
+                --custody-root "${INSTALL_CUSTODY_ROOT}"
+        )" || die "A skill-scanner launcher appeared during installation; it was preserved and this installation was not activated"
     else
         mkdir -p "${INSTALL_DIR}"
         ln -s "${DEFENSECLAW_VENV}/bin/defenseclaw" "${INSTALL_DIR}/defenseclaw" \
             || die "A DefenseClaw CLI appeared during installation; it was preserved and this installation was not activated"
         CLI_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/defenseclaw")" \
             || die "Could not bind the installed DefenseClaw CLI identity"
+        ln -s "${DEFENSECLAW_VENV}/bin/skill-scanner" "${INSTALL_DIR}/skill-scanner" \
+            || die "A skill-scanner launcher appeared during installation; it was preserved and this installation was not activated"
+        SKILL_SCANNER_PUBLISHED_ID="$(path_identity "${INSTALL_DIR}/skill-scanner")" \
+            || die "Could not bind the installed skill-scanner launcher identity"
     fi
     [[ "${CLI_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
         || die "Installed DefenseClaw CLI returned an invalid identity"
-
-    if "${DEFENSECLAW_VENV}/bin/defenseclaw" --help &>/dev/null; then
-        ok "CLI installed"
-    else
-        warn "CLI installed but verification failed — check dependencies"
-    fi
+    [[ "${SKILL_SCANNER_PUBLISHED_ID}" =~ ^[0-9]+:[0-9]+:[0-9]+:[0-9]+$ ]] \
+        || die "Installed skill-scanner launcher returned an invalid identity"
+    "${INSTALL_DIR}/skill-scanner" --version &>/dev/null \
+        || die "Published skill-scanner launcher does not use the managed environment"
+    ok "CLI and skill-scanner launcher installed"
 }
 
 # ── Install: OpenClaw Plugin (from tarball) ───────────────────────────────────
@@ -1746,6 +1857,7 @@ PICKED_CONNECTOR_ACTIVATION_ID=""
 CONNECTOR_MARKER_ROLLBACK_TOKEN=""
 CONNECTOR_MARKER_ID=""
 CLI_PUBLISHED_ID=""
+SKILL_SCANNER_PUBLISHED_ID=""
 INSTALL_SANDBOX=false
 RUN_QUICKSTART=false
 QUICKSTART_MODE=""
@@ -1764,6 +1876,9 @@ while [[ $# -gt 0 ]]; do
         --connector)
             [[ $# -lt 2 ]] && die "--connector requires a value (${CONNECTOR_CHOICES[*]})"
             CONNECTOR="$2"
+            if [[ "${CONNECTOR}" == "geminicli" || "${CONNECTOR}" == "gemini-cli" || "${CONNECTOR}" == "gemini" ]]; then
+                die "Gemini CLI integration is deprecated; use --connector antigravity"
+            fi
             is_valid_connector "${CONNECTOR}" \
                 || die "Invalid --connector '${CONNECTOR}'. Choices: ${CONNECTOR_CHOICES[*]}"
             shift 2
@@ -1784,9 +1899,7 @@ while [[ $# -gt 0 ]]; do
         --help|-h)
             echo ""
             echo "Usage:"
-            echo '  VERSION=0.8.4'
-            echo '  INSTALL_URL="https://raw.githubusercontent.com/cisco-ai-defense/defenseclaw/${VERSION}/scripts/install.sh"'
-            echo '  curl -LsSf "$INSTALL_URL" | VERSION="$VERSION" bash'
+            echo '  curl -LsSf https://github.com/cisco-ai-defense/defenseclaw/releases/latest/download/install.sh | bash'
             echo "  ./scripts/install.sh --local /path/to/release-assets  # complete authenticated assets"
             echo "  curl -LsSf <url>/install.sh | bash -s -- --yes    # non-interactive"
             echo "  curl ... | bash -s -- --sandbox                   # OpenClaw/OpenShell sandbox support"
@@ -1848,7 +1961,7 @@ if existing_install_detected && ! interrupted_install_attempt_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 detect_platform
@@ -1856,6 +1969,12 @@ resolve_version
 ensure_uv
 ensure_python
 load_release_policy
+if [[ "${INSTALL_SANDBOX}" == true ]]; then
+    [[ "${MODERN_RELEASE}" == true ]] \
+        || die "Sandbox installation requires a signed DefenseClaw release bundle; no sandbox installer was executed"
+    version_gte "${RELEASE_VERSION}" "${SANDBOX_INSTALLER_ASSET_START_VERSION}" \
+        || die "DefenseClaw ${RELEASE_VERSION} does not publish an authenticated sandbox installer; use ${SANDBOX_INSTALLER_ASSET_START_VERSION} or newer"
+fi
 if [[ "${MODERN_RELEASE}" == true ]]; then
     # Bind both roots before publishing payloads or rollback-token hardlinks.
     # A custom state home may be on another filesystem; its sibling custody is
@@ -1894,7 +2013,7 @@ if existing_install_detected; then
   Use the authenticated release-owned upgrade resolver from the target release in latest mode:
     bash defenseclaw-upgrade.sh --yes
   Do not pass --version. Download and verify the resolver with its signed checksums:
-    https://github.com/${REPO}/blob/main/docs/CLI.md#upgrade"
+    https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/"
 fi
 
 if [[ "${MODERN_RELEASE:-false}" == true ]]; then
@@ -1929,18 +2048,7 @@ if [[ "${INSTALL_SANDBOX}" == true ]]; then
     elif [[ "${OS}" != "linux" ]]; then
         warn "Sandbox mode requires Linux — skipping openshell-sandbox"
     else
-        local script_dir
-        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        local sandbox_installer="${script_dir}/install-openshell-sandbox.sh"
-        if [[ -f "${sandbox_installer}" ]]; then
-            bash "${sandbox_installer}"
-        else
-            step "Installing openshell-sandbox"
-            info "Downloading installer..."
-            curl -fsSL \
-                "https://raw.githubusercontent.com/${REPO}/${RELEASE_VERSION}/scripts/install-openshell-sandbox.sh" \
-                | bash
-        fi
+        install_openshell_sandbox
     fi
 fi
 
@@ -1952,3 +2060,4 @@ print_success
 }
 
 main "$@"
+# DefenseClaw POSIX installer complete v1

@@ -20,9 +20,13 @@ import json
 import os
 import sys
 import tempfile
+import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
+
+from tests.environment import isolated_home_env
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -38,11 +42,14 @@ from defenseclaw.commands.cmd_doctor import (
     _check_custom_provider_overlay,
     _check_guardrail_proxy,
     _check_hilt_support,
+    _check_hook_health,
     _check_llm_api_key,
+    _check_openclaw_transport_advisory,
     _check_openhands_hooks,
+    _check_proxy_interception,
+    _check_security_overrides,
     _check_sidecar,
     _DoctorResult,
-    _probe_splunk_hec,
     _verify_bedrock,
 )
 from defenseclaw.config import (
@@ -57,6 +64,40 @@ from defenseclaw.config import (
 )
 
 
+class DoctorSecurityOverrideTests(unittest.TestCase):
+    def test_private_upstream_config_entries_are_visible(self):
+        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100", "172.16.0.5"]))
+        result = _DoctorResult()
+
+        with patch.dict(os.environ, {}, clear=True):
+            _check_security_overrides(cfg, result)
+
+        self.assertEqual(result.warned, 1)
+        check = result.checks[0]
+        self.assertEqual(check["label"], "Private upstream allowlist")
+        self.assertIn("10.50.2.100", check["detail"])
+        self.assertIn("172.16.0.5", check["detail"])
+        self.assertIn("config.yaml", check["detail"])
+
+    def test_private_upstream_env_and_config_entries_are_merged(self):
+        cfg = SimpleNamespace(guardrail=SimpleNamespace(allow_private_upstreams=["10.50.2.100"]))
+        result = _DoctorResult()
+
+        with patch.dict(
+            os.environ,
+            {"DEFENSECLAW_ALLOW_PRIVATE_UPSTREAMS": "10.50.2.100,192.168.1.20"},
+            clear=True,
+        ):
+            _check_security_overrides(cfg, result)
+
+        self.assertEqual(result.warned, 1)
+        detail = result.checks[0]["detail"]
+        self.assertEqual(detail.count("10.50.2.100"), 1)
+        self.assertIn("192.168.1.20", detail)
+        self.assertIn("config.yaml", detail)
+        self.assertIn("environment", detail)
+
+
 class DoctorMultiConnectorInventoryTests(unittest.TestCase):
     """D6: the connector inventory check scopes paths per connector."""
 
@@ -69,9 +110,9 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
 
         seen: dict[str, list] = {"skill": [], "plugin": [], "mcp": []}
         cfg = SimpleNamespace(
-            skill_dirs=lambda connector=None: (seen["skill"].append(connector) or []),
-            plugin_dirs=lambda connector=None: (seen["plugin"].append(connector) or []),
-            mcp_servers=lambda connector=None: (seen["mcp"].append(connector) or []),
+            skill_dirs=lambda connector=None: seen["skill"].append(connector) or [],
+            plugin_dirs=lambda connector=None: seen["plugin"].append(connector) or [],
+            mcp_servers=lambda connector=None, **_: seen["mcp"].append(connector) or [],
         )
         r = _DoctorResult()
 
@@ -81,6 +122,27 @@ class DoctorMultiConnectorInventoryTests(unittest.TestCase):
         self.assertEqual(seen["plugin"], ["codex"])
         self.assertEqual(seen["mcp"], ["codex"])
 
+
+class DoctorHermesPathTests(unittest.TestCase):
+    def test_hook_health_uses_resolved_hermes_config_without_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            config_path = os.path.join(tmp, "LocalAppData", "hermes", "config.yaml")
+            os.makedirs(os.path.dirname(config_path), exist_ok=True)
+            with open(config_path, "w", encoding="utf-8") as fh:
+                fh.write('command: "defenseclaw-gateway.exe hook --connector hermes"\n')
+
+            result = _DoctorResult()
+            cfg = SimpleNamespace(data_dir=os.path.join(tmp, "defenseclaw"))
+            with patch(
+                "defenseclaw.commands.cmd_doctor.hermes_config_path",
+                return_value=config_path,
+            ):
+                _check_hook_health(cfg, "hermes", result)
+
+            self.assertEqual(result.passed, 0, result.checks)
+            self.assertEqual(result.failed, 1, result.checks)
+            self.assertIn(config_path, result.checks[0]["detail"])
+            self.assertIn("live=false", result.checks[0]["detail"])
 
 class DoctorGuardrailTests(unittest.TestCase):
     def test_agent_control_managed_posture_is_visible(self):
@@ -123,6 +185,174 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.passed, 1)
         warn_checks = [c for c in result.checks if c["status"] == "warn"]
         self.assertTrue(any("fetch-interceptor" in c["detail"] for c in warn_checks))
+
+    def test_proxy_interception_fails_when_self_test_misses(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("not being intercepted", result.checks[0]["detail"])
+
+    def test_proxy_interception_passes_when_self_test_verified(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(
+            cfg,
+            result,
+            live_health={
+                "interception": {
+                    "verified": True,
+                    "last_verified_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+                    "last_agent_traffic_at": "2026-09-04T12:00:00Z",
+                }
+            },
+        )
+        self.assertEqual(result.failed, 0, result.checks)
+        self.assertEqual(result.passed, 1, result.checks)
+        self.assertIn("self-test", result.checks[0]["detail"])
+        self.assertIn("agent traffic", result.checks[0]["detail"])
+
+    def test_proxy_interception_fails_when_self_test_is_stale(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        stale = (datetime.now(timezone.utc) - timedelta(minutes=4)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _check_proxy_interception(
+            cfg,
+            result,
+            live_health={"interception": {"verified": True, "last_verified_at": stale}},
+        )
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertIn("stale", result.checks[0]["detail"])
+
+    def test_proxy_interception_skips_zeptoclaw_only(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, port=4000, connector="zeptoclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.checks, [])
+
+    def test_proxy_interception_skips_hook_connectors(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, port=4000, connector="codex"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"interception": {"verified": False}})
+        self.assertEqual(result.checks, [])
+
+    def test_proxy_interception_fails_when_document_absent(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, model="openai/gpt-4", port=4000, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        _check_proxy_interception(cfg, result, live_health={"guardrail": {"state": "running"}})
+        self.assertEqual(result.failed, 1, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertEqual(result.to_dict()["exit_code"], 1)
+        self.assertIn("has not reported an interceptor self-test", result.checks[0]["detail"])
+
+    def test_disabled_openclaw_is_skipped_by_interception_and_transport_checks(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(
+                enabled=True,
+                model="openai/gpt-4",
+                port=4000,
+                connector="openclaw",
+                connectors={"openclaw": PerConnectorGuardrailConfig(enabled=False)},
+            ),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        interception = _DoctorResult()
+        _check_proxy_interception(
+            cfg,
+            interception,
+            live_health={"interception": {"verified": False}},
+        )
+        self.assertEqual(interception.checks, [])
+
+        advisory = _DoctorResult()
+        signal = SimpleNamespace(version="2026.6.8", installed=True)
+        with patch(
+            "defenseclaw.inventory.agent_discovery.discover_agents",
+            return_value=SimpleNamespace(agents={"openclaw": signal}),
+        ):
+            _check_openclaw_transport_advisory(cfg, advisory)
+        self.assertEqual(advisory.checks, [])
+
+    def test_openclaw_transport_advisory_for_2026_6(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, connector="openclaw"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        result = _DoctorResult()
+        signal = SimpleNamespace(version="2026.6.8", installed=True)
+        with patch(
+            "defenseclaw.inventory.agent_discovery.discover_agents",
+            return_value=SimpleNamespace(agents={"openclaw": signal}),
+        ):
+            _check_openclaw_transport_advisory(cfg, result)
+        self.assertEqual(result.warned, 1, result.checks)
+        self.assertIn("2026.6.8", result.checks[0]["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_sidecar_check_surfaces_disabled_summary(self, mock_probe):
@@ -228,6 +458,170 @@ class DoctorGuardrailTests(unittest.TestCase):
             gateway_rows[0]["detail"],
             "disabled (reported by sidecar)",
         )
+
+    @patch("defenseclaw.commands.cmd_doctor._http_probe")
+    def test_sidecar_check_treats_v8_telemetry_as_mandatory(self, mock_probe):
+        mock_probe.return_value = (
+            200,
+            json.dumps(
+                {
+                    "gateway": {"state": "running"},
+                    "telemetry": {"state": "disabled"},
+                }
+            ),
+        )
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg._source_config_version = 8
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        telemetry = [row for row in result.checks if row.get("label", "").strip().endswith("telemetry")]
+        self.assertEqual(len(telemetry), 1)
+        self.assertEqual(telemetry[0]["status"], "warn")
+        self.assertIn("sidecar is stale", telemetry[0]["detail"])
+
+    @staticmethod
+    def _sidecar_alignment_cfg(
+        *,
+        fleet_mode: str = "disabled",
+        watcher_enabled: bool = False,
+    ) -> Config:
+        gateway = GatewayConfig(
+            host="127.0.0.1",
+            fleet_mode=fleet_mode,
+        )
+        gateway.watcher.enabled = watcher_enabled
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=False, connector="codex"),
+            gateway=gateway,
+            openshell=OpenShellConfig(),
+        )
+        cfg.claw.mode = "codex"
+        cfg._source_config_version = 8
+        return cfg
+
+    @staticmethod
+    def _complete_sidecar_health() -> dict[str, dict[str, object]]:
+        return {
+            "gateway": {"state": "disabled"},
+            "watcher": {"state": "disabled"},
+            "guardrail": {"state": "disabled"},
+            "api": {"state": "running"},
+            "telemetry": {"state": "running"},
+            "sandbox": {"state": "disabled"},
+        }
+
+    def _run_sidecar_health(
+        self,
+        cfg: Config,
+        health: object,
+    ) -> _DoctorResult:
+        result = _DoctorResult()
+        with patch(
+            "defenseclaw.commands.cmd_doctor._http_probe",
+            return_value=(200, json.dumps(health)),
+        ):
+            _check_sidecar(cfg, result)
+        return result
+
+    @staticmethod
+    def _sidecar_row(result: _DoctorResult, subsystem: str) -> dict[str, str]:
+        return next(row for row in result.checks if row.get("label", "").strip().endswith(subsystem))
+
+    def test_sidecar_check_fails_when_required_api_entry_is_missing(self):
+        health = self._complete_sidecar_health()
+        del health["api"]
+
+        result = self._run_sidecar_health(
+            self._sidecar_alignment_cfg(),
+            health,
+        )
+
+        api = self._sidecar_row(result, "api")
+        self.assertEqual(api["status"], "fail")
+        self.assertIn("absent from health response", api["detail"])
+
+    def test_sidecar_check_accepts_intentionally_disabled_fleet_gateway(self):
+        for scenario, fleet_mode in (
+            ("codex loopback standalone", ""),
+            ("explicit fleet disable", "disabled"),
+        ):
+            with self.subTest(scenario=scenario):
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(fleet_mode=fleet_mode),
+                    self._complete_sidecar_health(),
+                )
+
+                gateway = self._sidecar_row(result, "gateway")
+                self.assertEqual(gateway["status"], "skip")
+                self.assertIn("disabled", gateway["detail"])
+
+    def test_sidecar_check_aligns_disabled_watcher_with_config(self):
+        for runtime_state, expected_status in (
+            ("disabled", "skip"),
+            ("running", "warn"),
+        ):
+            with self.subTest(runtime_state=runtime_state):
+                health = self._complete_sidecar_health()
+                health["watcher"] = {"state": runtime_state}
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(watcher_enabled=False),
+                    health,
+                )
+
+                watcher = self._sidecar_row(result, "watcher")
+                self.assertEqual(watcher["status"], expected_status)
+                if runtime_state == "running":
+                    self.assertIn("sidecar is stale", watcher["detail"])
+
+    def test_sidecar_check_reports_malformed_nested_health_without_crashing(self):
+        cases = (
+            (
+                "subsystem entry",
+                "gateway",
+                [],
+                "malformed health entry",
+            ),
+            (
+                "state",
+                "watcher",
+                {"state": ["running"]},
+                "malformed health state",
+            ),
+            (
+                "details",
+                "gateway",
+                {"state": "disabled", "details": ["unexpected"]},
+                "malformed health details",
+            ),
+        )
+        for scenario, subsystem, malformed, expected_detail in cases:
+            with self.subTest(scenario=scenario):
+                health = self._complete_sidecar_health()
+                health[subsystem] = malformed
+
+                result = self._run_sidecar_health(
+                    self._sidecar_alignment_cfg(),
+                    health,
+                )
+
+                row = self._sidecar_row(result, subsystem)
+                self.assertEqual(row["status"], "fail")
+                self.assertIn(expected_detail, row["detail"])
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
     def test_codex_observability_mode_skips_proxy_port_probe(self, mock_probe):
@@ -342,7 +736,7 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertIn("proxy port intentionally closed", detail)
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe")
-    def test_omnigent_action_reports_policy_enforcement_without_proxy_probe(self, mock_probe):
+    def test_omnigent_action_reports_configured_unverified_policy_without_proxy_probe(self, mock_probe):
         from defenseclaw.commands.cmd_doctor import _check_guardrail_proxy
 
         cfg = Config(
@@ -372,8 +766,9 @@ class DoctorGuardrailTests(unittest.TestCase):
         self.assertEqual(result.warned, 0, result.checks)
         self.assertEqual(result.passed, 1, result.checks)
         detail = result.checks[0]["detail"]
-        self.assertIn("policy-enforced for omnigent", detail)
+        self.assertIn("policy path configured for omnigent", detail)
         self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
+        self.assertIn("live policy generation unverified", detail)
 
     def test_omnigent_without_judge_skips_llm_key_requirement(self):
         from defenseclaw.commands.cmd_doctor import _check_llm_api_key
@@ -478,27 +873,51 @@ class DoctorGuardrailTests(unittest.TestCase):
         result = _DoctorResult()
         _check_hilt_support(cfg, "cursor", result)
         self.assertEqual(result.warned, 1)
-        self.assertIn("documented ask-capable", result.checks[0]["detail"])
-
-        result = _DoctorResult()
-        _check_hilt_support(cfg, "geminicli", result)
-        self.assertEqual(result.warned, 1)
-        self.assertIn("no native human approval surface", result.checks[0]["detail"])
+        self.assertIn(
+            "native human approval is not implemented",
+            result.checks[0]["detail"],
+        )
 
         result = _DoctorResult()
         _check_hilt_support(cfg, "openhands", result)
         self.assertEqual(result.warned, 1)
         self.assertIn("no native human approval surface", result.checks[0]["detail"])
 
-        # Antigravity is the one hook-only connector with a native ask
-        # surface that overrides --dangerously-skip-permissions, so it
-        # should pass HILT (not warn like the rest of the hook-only crowd).
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "opencode", result)
+        self.assertEqual(result.warned, 1)
+        self.assertIn("publishes permission.ask", result.checks[0]["detail"])
+        self.assertIn("intentionally does not implement", result.checks[0]["detail"])
+
+        # Antigravity documents native ask only at PreToolUse. No override of
+        # permission-bypass flags is claimed without persisted client evidence.
         result = _DoctorResult()
         _check_hilt_support(cfg, "antigravity", result)
         self.assertEqual(result.passed, 1, result.checks)
         self.assertEqual(result.warned, 0, result.checks)
         self.assertIn("PreToolUse ask", result.checks[0]["detail"])
-        self.assertIn("dangerously-skip-permissions", result.checks[0]["detail"])
+        self.assertIn("no override", result.checks[0]["detail"])
+
+    def test_hilt_omnigent_preserves_native_degraded_pre_action_ask_scope(self):
+        cfg = Config(
+            data_dir="/tmp/defenseclaw",
+            audit_db="/tmp/defenseclaw/audit.db",
+            quarantine_dir="/tmp/defenseclaw/quarantine",
+            plugin_dir="/tmp/defenseclaw/plugins",
+            policy_dir="/tmp/defenseclaw/policies",
+            guardrail=GuardrailConfig(enabled=True, mode="action", connector="omnigent"),
+            gateway=GatewayConfig(),
+            openshell=OpenShellConfig(),
+        )
+        cfg.guardrail.hilt.enabled = True
+
+        result = _DoctorResult()
+        _check_hilt_support(cfg, "omnigent", result)
+
+        self.assertEqual(result.passed, 1, result.checks)
+        self.assertEqual(result.warned, 0, result.checks)
+        self.assertIn("native-degraded support", result.checks[0]["detail"])
+        self.assertIn("request, tool_call, and llm_request", result.checks[0]["detail"])
 
 
 class DoctorHookReachabilityTests(unittest.TestCase):
@@ -540,7 +959,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 )
             cfg = self._cfg(tmp, "openhands")
             cfg.claw.workspace_dir = workspace
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
                 _check_openhands_hooks(cfg, result)
             self.assertEqual(result.failed, 0, result.checks)
@@ -555,26 +974,12 @@ class DoctorHookReachabilityTests(unittest.TestCase):
     #   1. Missing global file → fail.
     #   2. File exists but does not reference antigravity-hook.sh → fail.
     #   3. File exists and references the script → pass.
-    #   4. Pass + duplicate registration in the legacy
-    #      ~/.gemini/hooks.json or workspace .antigravitycli/hooks.json
-    #      → emit a warn alongside the pass, because agy merges every
-    #      discovered hooks file and would fire each registered hook
-    #      once per discovery (silent double-billing).
+    #   4. Pass + duplicate registration in the documented workspace
+    #      .agents/hooks.json → emit a warn alongside the pass.
     # ------------------------------------------------------------------
 
     def _antigravity_hooks_payload(self, hook_script_path: str) -> dict:
-        # Returns the Claude-Code-compatible nested schema agy
-        # v1.0.x evaluates at runtime, with all five Antigravity
-        # 2.0 lifecycle events (PreInvocation, PreToolUse,
-        # PostToolUse, PostInvocation, Stop) registered under
-        # separate DefenseClaw-owned outer keys. Matches what
-        # `defenseclaw setup antigravity` writes after the Hooks
-        # v2 contract bump. See patchAntigravityHooks in
-        # internal/gateway/connector/hook_only.go for the
-        # empirical evidence behind the nested shape and the
-        # rationale for registering all five events even when
-        # only PreToolUse is empirically verified to fire on agy
-        # v1.0.1.
+        # Returns Google's documented mixed matcher/direct lifecycle schema.
         events = [
             "PreInvocation",
             "PreToolUse",
@@ -584,19 +989,13 @@ class DoctorHookReachabilityTests(unittest.TestCase):
         ]
         cfg: dict = {}
         for event in events:
-            cfg[f"defenseclaw-antigravity-{event.lower()}"] = {
-                event: [
-                    {
-                        "matcher": "*",
-                        "hooks": [
-                            {
-                                "type": "command",
-                                "command": hook_script_path,
-                            }
-                        ],
-                    }
-                ]
-            }
+            handler = {"type": "command", "command": hook_script_path, "timeout": 30}
+            entries = (
+                [{"matcher": "*", "hooks": [handler]}]
+                if event in {"PreToolUse", "PostToolUse"}
+                else [handler]
+            )
+            cfg[f"defenseclaw-antigravity-{event.lower()}"] = {event: entries}
         return cfg
 
     def test_antigravity_hooks_missing_global_file_fails(self):
@@ -608,13 +1007,13 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             home = os.path.join(tmp, "home")
             os.makedirs(home, exist_ok=True)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             detail = result.checks[0]["detail"]
-            self.assertIn(".gemini/config/hooks.json", detail)
+            self.assertIn(os.path.join(".gemini", "config", "hooks.json"), detail)
             # Sanity: should NOT point at the legacy
             # antigravity-cli/ path now that we've pivoted.
             self.assertNotIn("antigravity-cli", detail)
@@ -631,9 +1030,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                             "PreToolUse": [
                                 {
                                     "matcher": "*",
-                                    "hooks": [
-                                        {"type": "command", "command": "/bin/true"}
-                                    ],
+                                    "hooks": [{"type": "command", "command": "/bin/true"}],
                                 }
                             ]
                         }
@@ -641,18 +1038,16 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                     fh,
                 )
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.passed, 0, result.checks)
             self.assertEqual(result.failed, 1)
             self.assertIn("does not reference", result.checks[0]["detail"])
 
     def test_antigravity_hooks_global_only_passes(self):
-        # Canonical happy path: the new ~/.gemini/config/hooks.json
-        # exists with the nested schema and the legacy
-        # antigravity-cli/ path is absent. Doctor should report
-        # exactly one PASS, zero WARNs, zero FAILs.
+        # The documented global hooks file exists with the mixed schema.
+        # Doctor should report exactly one PASS, zero WARNs, zero FAILs.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             hook_path = os.path.join(home, ".gemini", "config", "hooks.json")
@@ -661,21 +1056,17 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             with open(hook_path, "w", encoding="utf-8") as fh:
                 json.dump(self._antigravity_hooks_payload(script_path), fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
             self.assertEqual(result.warned, 0, result.checks)
             self.assertIn("reachable", result.checks[0]["detail"])
 
-    def test_antigravity_hooks_warn_on_legacy_path_residue(self):
-        # Pre-v0.5.0 install left a stale defenseclaw-managed
-        # entry at ~/.gemini/antigravity-cli/hooks.json. agy
-        # ignores that path at runtime, so it doesn't break the
-        # integration, but doctor must surface a WARN explaining
-        # the situation. The canonical path still exists and is
-        # valid, so PASS=1 and WARN=1.
+    def test_antigravity_hooks_ignore_undocumented_legacy_path_residue(self):
+        # Undocumented residue is ignored; only the documented global hook
+        # file is authoritative for this check.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             canonical = os.path.join(home, ".gemini", "config", "hooks.json")
@@ -688,49 +1079,78 @@ class DoctorHookReachabilityTests(unittest.TestCase):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
-            self.assertEqual(result.warned, 1, result.checks)
-            warn_check = next(c for c in result.checks if c["status"] == "warn")
-            self.assertIn("pre-v0.5.0", warn_check["detail"])
-            self.assertIn(legacy, warn_check["detail"])
+            self.assertEqual(result.warned, 0, result.checks)
 
     def test_antigravity_hooks_warn_on_duplicate_registration(self):
-        # ~/.gemini/hooks.json (the legacy global hooks file agy
-        # also reads) carries a duplicate DefenseClaw entry —
-        # agy will fire DefenseClaw twice per tool call. Doctor
-        # must surface a WARN distinct from the legacy-residue
-        # warn above.
+        # The documented workspace .agents/hooks.json carries a duplicate
+        # DefenseClaw entry, so Doctor warns about double evaluation.
         with tempfile.TemporaryDirectory() as tmp:
             home = os.path.join(tmp, "home")
             canonical = os.path.join(home, ".gemini", "config", "hooks.json")
-            legacy_global = os.path.join(home, ".gemini", "hooks.json")
+            workspace = os.path.join(tmp, "workspace")
+            legacy_global = os.path.join(workspace, ".agents", "hooks.json")
             os.makedirs(os.path.dirname(canonical), exist_ok=True)
+            os.makedirs(os.path.dirname(legacy_global), exist_ok=True)
             script_path = os.path.join(tmp, ".defenseclaw", "hooks", "antigravity-hook.sh")
             payload = self._antigravity_hooks_payload(script_path)
             for path in (canonical, legacy_global):
                 with open(path, "w", encoding="utf-8") as fh:
                     json.dump(payload, fh)
             cfg = self._cfg(tmp, "antigravity")
-            with patch.dict(os.environ, {"HOME": home}, clear=False):
+            cfg.claw.workspace_dir = workspace
+            with patch.dict(os.environ, isolated_home_env(home), clear=False):
                 result = _DoctorResult()
-                _check_antigravity_hooks(cfg, result)
+                _check_antigravity_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
             self.assertEqual(result.warned, 1, result.checks)
             warn_check = next(c for c in result.checks if c["status"] == "warn")
-            self.assertIn("duplicate firings", warn_check["detail"])
+            self.assertIn("fire twice", warn_check["detail"])
             self.assertIn(legacy_global, warn_check["detail"])
+
+    def test_antigravity_windows_hooks_warn_on_workspace_duplicate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = os.path.join(tmp, "workspace")
+            workspace_hooks = os.path.join(workspace, ".agents", "hooks.json")
+            os.makedirs(os.path.dirname(workspace_hooks), exist_ok=True)
+            script_path = os.path.join(tmp, ".defenseclaw", "hooks", "defenseclaw-hook.exe")
+            with open(workspace_hooks, "w", encoding="utf-8") as fh:
+                json.dump(self._antigravity_hooks_payload(script_path), fh)
+            cfg = self._cfg(tmp, "antigravity")
+            cfg.claw.workspace_dir = workspace
+            result = _DoctorResult()
+
+            def healthy_native(_cfg, _connector, _label, native_result, **_kwargs):
+                native_result.passed += 1
+                native_result.checks.append(
+                    {"status": "pass", "label": "Antigravity hooks", "detail": "healthy native matrix"}
+                )
+
+            with patch(
+                "defenseclaw.commands.cmd_doctor._check_windows_native_hooks",
+                side_effect=healthy_native,
+            ) as native_check:
+                _check_antigravity_hooks(cfg, result, platform_name="nt")
+
+            native_check.assert_called_once()
+            self.assertEqual(result.failed, 0, result.checks)
+            self.assertEqual(result.passed, 1, result.checks)
+            self.assertEqual(result.warned, 1, result.checks)
+            warning = next(check for check in result.checks if check["status"] == "warn")
+            self.assertIn(workspace_hooks, warning["detail"])
+            self.assertIn("fire twice", warning["detail"])
 
     def test_copilot_hooks_fail_when_workspace_is_data_dir(self):
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._cfg(tmp, "copilot")
             cfg.claw.workspace_dir = cfg.data_dir
             result = _DoctorResult()
-            _check_copilot_hooks(cfg, result)
+            _check_copilot_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 1, result.checks)
             self.assertIn("inside DefenseClaw data dir", result.checks[0]["detail"])
 
@@ -757,7 +1177,7 @@ class DoctorHookReachabilityTests(unittest.TestCase):
             cfg = self._cfg(tmp, "copilot")
             cfg.claw.workspace_dir = workspace
             result = _DoctorResult()
-            _check_copilot_hooks(cfg, result)
+            _check_copilot_hooks(cfg, result, platform_name="posix")
             self.assertEqual(result.failed, 0, result.checks)
             self.assertEqual(result.passed, 1)
 
@@ -855,6 +1275,26 @@ class DoctorLLMKeyProviderRoutingTests(unittest.TestCase):
 
         mock_anthropic.assert_called_once()
 
+    @patch.dict(os.environ, {"ANTHROPIC_API_KEY": "sk-ant-test"}, clear=False)
+    @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-ant-test")
+    @patch("defenseclaw.commands.cmd_doctor._verify_anthropic")
+    def test_passive_anthropic_check_never_invokes_model(
+        self,
+        mock_anthropic,
+        _mock_resolve,
+    ):
+        cfg = self._make_cfg(
+            model="anthropic/claude-sonnet-4-5-20250514",
+            api_key_env="ANTHROPIC_API_KEY",
+        )
+        r = _DoctorResult(passive=True)
+
+        _check_llm_api_key(cfg, r)
+
+        mock_anthropic.assert_not_called()
+        self.assertEqual(r.checks[-1]["status"], "skip")
+        self.assertIn("passive mode", r.checks[-1]["detail"])
+
     @patch.dict(os.environ, {"OPENAI_API_KEY": "sk-test"}, clear=False)
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="sk-test")
     @patch("defenseclaw.commands.cmd_doctor._verify_openai")
@@ -936,38 +1376,8 @@ class AnthropicProbeModelTests(unittest.TestCase):
         self.assertEqual(got, _ANTHROPIC_DEFAULT_PROBE_MODEL)
 
 
-class DoctorObservabilityLabelTests(unittest.TestCase):
-    @patch(
-        "defenseclaw.commands.cmd_doctor._resolve_audit_sink_endpoint_and_token",
-        return_value=("https://splunk.example.com:8088/services/collector/event", "hec-token"),
-    )
-    @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
-    def test_splunk_enterprise_probe_label(self, _mock_probe, _mock_resolve):
-        cfg = SimpleNamespace(data_dir="/tmp/defenseclaw")
-        dest = SimpleNamespace(
-            name="splunk-enterprise-splunk-example-com",
-            kind="splunk_hec",
-            preset_id="splunk-enterprise",
-            endpoint="https://splunk.example.com:8088/services/collector/event",
-        )
-        result = _DoctorResult()
-
-        _probe_splunk_hec(cfg, dest, result)
-
-        self.assertEqual(result.passed, 1)
-        self.assertEqual(
-            result.checks[0]["label"],
-            "splunk-enterprise-splunk-example-com (Splunk Enterprise (HEC))",
-        )
-
-
 class DoctorCacheWriteTests(unittest.TestCase):
-    """P3-#21: `_write_doctor_cache` must emit a JSON file that the
-    Go TUI can parse into a ``DoctorCache`` via
-    ``internal/tui/doctor_cache.go``. Keep these assertions in
-    lockstep with ``TestDoctorCache_PythonCompatibleTimestamp`` on
-    the Go side.
-    """
+    """`_write_doctor_cache` must emit an atomic Textual-TUI snapshot."""
 
     def _run_write(self, tmpdir, result):
         from defenseclaw.commands.cmd_doctor import (
@@ -1012,8 +1422,7 @@ class DoctorCacheWriteTests(unittest.TestCase):
         self.assertEqual(payload["warned"], 2)
         self.assertEqual(payload["skipped"], 0)
         self.assertEqual(len(payload["checks"]), 3)
-        # captured_at must be an ISO-8601 with Z suffix so Go's
-        # time.Time parser accepts it.
+        # captured_at is an unambiguous RFC3339 UTC value.
         self.assertIn("captured_at", payload)
         self.assertTrue(payload["captured_at"].endswith("Z"), payload["captured_at"])
 
@@ -1105,6 +1514,24 @@ class DoctorJsonOutputTests(unittest.TestCase):
         self.assertEqual(d["failed"], 0)
         self.assertEqual(len(d["checks"]), 3)
         self.assertEqual(d["checks"][0]["label"], "Config")
+
+    def test_planned_repair_prevents_false_healthy_outcome(self):
+        from defenseclaw.doctor_engine import RepairRecord
+
+        r = _DoctorResult(mode="plan", passive=True)
+        r.record_repair(
+            RepairRecord(
+                repair_id="doctor.example",
+                label="Example",
+                state="applicable",
+                risk="safe",
+                detail="would repair",
+            )
+        )
+
+        result = r.to_dict()
+        self.assertEqual(result["outcome"], "warning")
+        self.assertEqual(result["exit_code"], 0)
 
     def test_llm_reachability_suppresses_probe_stdout_when_json_mode(self):
         from defenseclaw.commands import cmd_doctor
@@ -1309,7 +1736,8 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
             gateway=GatewayConfig(),
             openshell=OpenShellConfig(),
             cisco_ai_defense=CiscoAIDefenseConfig(
-                endpoint=endpoint, api_key_env="CISCO_AI_DEFENSE_API_KEY",
+                endpoint=endpoint,
+                api_key_env="CISCO_AI_DEFENSE_API_KEY",
             ),
         )
 
@@ -1317,7 +1745,10 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(401, "invalid api key"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_401_emits_endpoint_and_setup_hint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         cfg = self._make_cfg(endpoint="https://eu.api.inspect.aidefense.security.cisco.com")
         r = _DoctorResult()
@@ -1326,9 +1757,7 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         # Hints go through click.echo (not _emit) so they don't
         # count toward the tally. Walk the captured calls and
         # assert the operator-visible text appears.
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn(
             "endpoint: https://eu.api.inspect.aidefense.security.cisco.com",
             printed,
@@ -1339,7 +1768,10 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(403, "forbidden"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_403_also_emits_region_hint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         # 403 is the same UX failure mode (authenticated but not
         # authorized for the route) — same hint applies.
@@ -1347,9 +1779,7 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
         r = _DoctorResult()
         _check_cisco_ai_defense(cfg, r)
         self.assertEqual(r.failed, 1, r.checks)
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("defenseclaw setup", printed)
 
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(200, "ok"))
@@ -1369,15 +1799,16 @@ class CiscoAIDefenseProbeTests(unittest.TestCase):
     @patch("defenseclaw.commands.cmd_doctor._http_probe", return_value=(0, "DNS failure"))
     @patch("defenseclaw.commands.cmd_doctor._resolve_api_key", return_value="fake-key")
     def test_unreachable_warns_and_shows_endpoint(
-        self, _mock_resolve, _mock_probe, mock_echo,
+        self,
+        _mock_resolve,
+        _mock_probe,
+        mock_echo,
     ):
         cfg = self._make_cfg(endpoint="https://preview.api.inspect.aidefense.aiteam.cisco.com")
         r = _DoctorResult()
         _check_cisco_ai_defense(cfg, r)
         self.assertEqual(r.warned, 1, r.checks)
-        printed = "\n".join(
-            call.args[0] if call.args else "" for call in mock_echo.call_args_list
-        )
+        printed = "\n".join(call.args[0] if call.args else "" for call in mock_echo.call_args_list)
         self.assertIn("preview.api.inspect.aidefense.aiteam.cisco.com", printed)
 
 
@@ -1406,7 +1837,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
-            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "codex-hook.sh", 'fail_response() { echo "$1"; }\n')
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
 
             reasons = cmd_doctor._stale_generated_hook_reasons(cfg, "codex")
@@ -1419,11 +1850,11 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             cfg = self._make_cfg(tmp)
-            self._write_hook(tmp, "codex-hook.sh", "fail_response() { echo \"$1\"; }\n")
+            self._write_hook(tmp, "codex-hook.sh", 'fail_response() { echo "$1"; }\n')
             self._write_hook(tmp, "_hardening.sh", "defenseclaw_read_stdin_capped() { cat; }\n")
             result = _DoctorResult()
 
-            cmd_doctor._check_codex_hooks(cfg, result)
+            cmd_doctor._check_codex_hooks(cfg, result, platform_name="posix")
 
         freshness = [c for c in result.checks if c["label"] == "Codex hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1446,7 +1877,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
             os.makedirs(old_hook_dir, exist_ok=True)
             old_hook = os.path.join(old_hook_dir, "claude-code-hook.sh")
             with open(old_hook, "w", encoding="utf-8") as fh:
-                fh.write("fail_response() { echo \"$1\"; }\n")
+                fh.write('fail_response() { echo "$1"; }\n')
             with open(os.path.join(old_hook_dir, "_hardening.sh"), "w", encoding="utf-8") as fh:
                 fh.write("defenseclaw_read_stdin_capped() { cat; }\n")
             with open(os.path.join(settings_dir, "settings.json"), "w", encoding="utf-8") as fh:
@@ -1469,12 +1900,12 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
                 )
             result = _DoctorResult()
 
-            with patch.object(
-                cmd_doctor.os.path,
-                "expanduser",
-                side_effect=lambda p: p.replace("~", home, 1) if p.startswith("~") else p,
-            ):
-                cmd_doctor._check_claudecode_hooks(cfg, result)
+            cmd_doctor._check_claudecode_hooks(
+                cfg,
+                result,
+                platform_name="posix",
+                config_path=os.path.join(settings_dir, "settings.json"),
+            )
 
         freshness = [c for c in result.checks if c["label"] == "Claude Code hooks freshness"]
         self.assertEqual(len(freshness), 1, result.checks)
@@ -1486,10 +1917,7 @@ class DoctorGeneratedHookFreshnessTests(unittest.TestCase):
 
 
 class DoctorGatewayHomeMismatchTests(unittest.TestCase):
-    """`_check_gateway_home_mismatch` warns when a gateway from a different
-    DEFENSECLAW_HOME (e.g. a leftover /tmp sandbox) is holding the API port —
-    the exact failure that makes every hook 401 while each half looks healthy.
-    """
+    """Gateway-home diagnostics use the same strong trust chain as auth."""
 
     def _make_cfg(self, data_dir: str) -> Config:
         return Config(
@@ -1512,24 +1940,23 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                # This home's tracked gateway is NOT alive (no/stale pid file).
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                # A foreign gateway is the actual listener...
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                # ...rooted at a /tmp sandbox home.
                 patch.object(
                     cmd_doctor,
-                    "_read_process_env_var",
-                    return_value="/tmp/defenseclaw-pr365-sandbox",
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "foreign_home",
+                        "managed PID record belongs to a different canonical data home",
+                        4321,
+                    ),
                 ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
         self.assertEqual(len(rows), 1, result.checks)
-        self.assertEqual(rows[0]["status"], "warn")
-        self.assertIn("/tmp/defenseclaw-pr365-sandbox", rows[0]["detail"])
-        self.assertIn("unset DEFENSECLAW_HOME", rows[0]["detail"])
+        self.assertEqual(rows[0]["status"], "fail")
+        self.assertIn("different canonical data home", rows[0]["detail"])
+        self.assertNotIn("/tmp/defenseclaw-pr365-sandbox", rows[0]["detail"])
 
     def test_passes_when_this_homes_gateway_is_alive(self):
         from defenseclaw.commands import cmd_doctor
@@ -1539,7 +1966,16 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=999),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "trusted",
+                        "verified",
+                        999,
+                        home_bound=True,
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
@@ -1555,16 +1991,21 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                # Can't read the listener's env (perms / no var) -> "can't tell".
-                patch.object(cmd_doctor, "_read_process_env_var", return_value=None),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "missing",
+                        "managed gateway PID file is missing",
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
-        # No mismatch row emitted — indeterminacy must not nag.
         rows = [c for c in result.checks if c["label"] == "Gateway home"]
-        self.assertEqual(rows, [], result.checks)
+        self.assertEqual(len(rows), 1, result.checks)
+        self.assertEqual(rows[0]["status"], "skip")
+        self.assertIn("not inferred", rows[0]["detail"])
 
     def test_passes_when_listener_home_matches_this_config(self):
         from defenseclaw.commands import cmd_doctor
@@ -1574,10 +2015,16 @@ class DoctorGatewayHomeMismatchTests(unittest.TestCase):
             result = _DoctorResult()
             with (
                 patch.object(cmd_doctor, "_http_probe", return_value=(200, "{}")),
-                # Stale pid file, but the live listener is THIS home's gateway.
-                patch.object(cmd_doctor, "_read_pid_from_file", return_value=0),
-                patch.object(cmd_doctor, "_gateway_listener_pid", return_value=4321),
-                patch.object(cmd_doctor, "_read_process_env_var", return_value=tmp),
+                patch.object(
+                    cmd_doctor,
+                    "_trusted_gateway_listener",
+                    return_value=cmd_doctor._GatewayTrust(
+                        "trusted",
+                        "verified",
+                        4321,
+                        home_bound=True,
+                    ),
+                ),
             ):
                 cmd_doctor._check_gateway_home_mismatch(cfg, result)
 
@@ -1620,53 +2067,116 @@ class DoctorFixDryRunTests(unittest.TestCase):
             openshell=OpenShellConfig(),
         )
 
-    def test_dry_run_skips_each_fixer_and_does_not_call_underlying_fns(self):
+    def test_dry_run_calls_only_read_only_planners(self):
         from defenseclaw.commands import cmd_doctor
 
         cfg = self._make_cfg()
         result = _DoctorResult()
-        # Patch the individual fixer functions to flag any invocation.
+        planner_result = ("plan", "would repair the applicable state")
+        healthy_prerequisite = cmd_doctor.RepairDecision("noop", "already healthy")
+        watchdog_plan = cmd_doctor.RepairDecision(
+            "applicable",
+            "would start the enabled stopped watchdog",
+        )
         with (
-            patch.object(cmd_doctor, "_fix_stale_pid") as fix_pid,
-            patch.object(cmd_doctor, "_fix_gateway_token") as fix_token,
-            patch.object(cmd_doctor, "_fix_gateway_token_env") as fix_token_env,
-            patch.object(cmd_doctor, "_fix_gateway_token_drift") as fix_drift,
-            patch.object(cmd_doctor, "_fix_dotenv_perms") as fix_dotenv,
-            patch.object(cmd_doctor, "_fix_pristine_backup") as fix_pristine,
-            patch.object(cmd_doctor, "_fix_plugin_registry_required") as fix_plugin_reg,
+            patch.object(cmd_doctor.sys, "platform", "win32"),
+            patch.object(
+                cmd_doctor,
+                "_plan_canonical_config_preflight",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_audit_db_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_device_key_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_watchdog_runtime",
+                return_value=watchdog_plan,
+            ) as plan_watchdog,
+            patch.object(cmd_doctor, "_fix_stale_pid", return_value=planner_result) as fix_pid,
+            patch.object(cmd_doctor, "_fix_gateway_token", return_value=planner_result) as fix_token,
+            patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=planner_result) as fix_token_env,
+            patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=planner_result) as fix_drift,
+            patch.object(cmd_doctor, "_fix_gateway_service", return_value=planner_result) as fix_service,
+            patch.object(cmd_doctor, "_fix_watchdog_runtime") as fix_watchdog,
+            patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=planner_result) as fix_dotenv,
+            patch.object(cmd_doctor, "_fix_pristine_backup", return_value=planner_result) as fix_pristine,
+            patch.object(
+                cmd_doctor,
+                "_fix_plugin_registry_required",
+                return_value=planner_result,
+            ) as fix_plugin_reg,
             patch.object(cmd_doctor, "_fix_connector_residue") as fix_residue,
         ):
             cmd_doctor._run_fixers(
-                cfg, result, assume_yes=True, json_out=True, dry_run=True,
+                cfg,
+                result,
+                assume_yes=True,
+                json_out=True,
+                dry_run=True,
             )
 
-            fix_pid.assert_not_called()
-            fix_token.assert_not_called()
-            fix_token_env.assert_not_called()
-            fix_drift.assert_not_called()
-            fix_dotenv.assert_not_called()
-            fix_pristine.assert_not_called()
-            # OTHER-5: the plugin-registry dead-end fixer is wired into --fix
-            # but, like the rest, must not run under --dry-run.
-            fix_plugin_reg.assert_not_called()
+            for planner in (
+                fix_pid,
+                fix_token,
+                fix_token_env,
+                fix_drift,
+                fix_service,
+                fix_dotenv,
+                fix_pristine,
+                fix_plugin_reg,
+            ):
+                planner.assert_called_once()
+                self.assertTrue(planner.call_args.kwargs["plan_only"])
+            plan_watchdog.assert_called_once_with(cfg)
+            fix_watchdog.assert_not_called()
             # D7: the connector-teardown fixer was removed from --fix entirely,
             # so it is never invoked even though it remains importable.
             fix_residue.assert_not_called()
 
-        # Each remaining fixer should have produced a "skip" record so the TUI
-        # can list every step the real run would touch. The teardown fixer was
-        # removed (D7); the plugin-registry dead-end fixer was added (OTHER-5).
-        # Stale generated hooks are detected as a warning only — there is no
-        # auto-fixer for them, so they do not appear here.
-        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        self.assertEqual(len(fix_records), 7)
-        for record in fix_records:
-            self.assertEqual(record["status"], "skip")
-            self.assertIn("dry-run", record["detail"])
+        # Repairs have their own typed collection and do not contaminate
+        # post-repair health counts. The policy-changing repair is visible but
+        # explicitly requires selection on the real run.
+        self.assertEqual(result.checks, [])
+        self.assertEqual(len(result.repairs), 16)
+        self.assertEqual(
+            {record["state"] for record in result.repairs},
+            {"applicable", "noop", "requires_confirmation"},
+        )
+        self.assertEqual(result.repair_summary.planned, 8)
+        self.assertEqual(result.repair_summary.requires_confirmation, 1)
+        self.assertEqual(result.repair_summary.noop, 7)
         # Doctor must NEVER offer connector teardown from --fix (D7).
         self.assertNotIn(
-            "fix: connector residue",
-            [c["label"] for c in fix_records],
+            "connector residue",
+            [record["label"] for record in result.repairs],
         )
 
     def test_real_fix_invokes_each_fixer_when_dry_run_false(self):
@@ -1674,34 +2184,94 @@ class DoctorFixDryRunTests(unittest.TestCase):
 
         cfg = self._make_cfg()
         result = _DoctorResult()
+
+        def planned_then_applied(*_args, **kwargs):
+            return ("plan", "would repair") if kwargs.get("plan_only") else ("pass", "ok")
+
+        healthy_prerequisite = cmd_doctor.RepairDecision("noop", "already healthy")
+        watchdog_plan = cmd_doctor.RepairDecision(
+            "applicable",
+            "would start the enabled stopped watchdog",
+        )
         with (
-            patch.object(cmd_doctor, "_fix_stale_pid", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token_env", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_gateway_token_drift", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_dotenv_perms", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_pristine_backup", return_value=("pass", "ok")),
-            patch.object(cmd_doctor, "_fix_plugin_registry_required", return_value=("pass", "ok")),
+            patch.object(cmd_doctor.sys, "platform", "win32"),
+            patch.object(
+                cmd_doctor,
+                "_plan_canonical_config_preflight",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_audit_db_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_device_key_recovery",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_connector_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_review",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_component_compatibility_gate",
+                return_value=healthy_prerequisite,
+            ),
+            patch.object(
+                cmd_doctor,
+                "_plan_watchdog_runtime",
+                return_value=watchdog_plan,
+            ),
+            patch.object(cmd_doctor, "_fix_stale_pid", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token_env", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_token_drift", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_gateway_service", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_fix_watchdog_runtime", return_value=("pass", "ok")),
+            patch.object(cmd_doctor, "_fix_dotenv_perms", side_effect=planned_then_applied),
+            patch.object(cmd_doctor, "_gateway_dotenv_safety_problem", return_value=""),
+            patch.object(cmd_doctor, "_fix_pristine_backup", side_effect=planned_then_applied),
+            patch.object(
+                cmd_doctor,
+                "_fix_plugin_registry_required",
+                side_effect=planned_then_applied,
+            ) as fix_plugin_reg,
             # _fix_connector_residue is intentionally NOT wired into --fix (D7);
             # patch it so a regression that re-adds it would surface as an extra row.
             patch.object(cmd_doctor, "_fix_connector_residue", return_value=("pass", "ok")) as fix_residue,
         ):
             cmd_doctor._run_fixers(
-                cfg, result, assume_yes=True, json_out=True, dry_run=False,
+                cfg,
+                result,
+                assume_yes=True,
+                json_out=True,
+                dry_run=False,
             )
 
-        fix_records = [c for c in result.checks if c["label"].startswith("fix:")]
-        # Seven fixers run: the connector-teardown fixer was removed (D7) and
-        # the plugin-registry dead-end fixer was added (OTHER-5). Stale
-        # generated hooks are warning-only (no auto-fixer), so they are not
-        # counted here.
-        self.assertEqual(len(fix_records), 7)
-        for record in fix_records:
-            self.assertEqual(record["status"], "pass")
+        self.assertEqual(result.checks, [])
+        self.assertEqual(len(result.repairs), 16)
+        self.assertEqual(result.repair_summary.applied, 8)
+        self.assertEqual(result.repair_summary.manual, 1)
+        self.assertEqual(result.repair_summary.noop, 7)
+        self.assertEqual(fix_plugin_reg.call_count, 1)
+        self.assertTrue(fix_plugin_reg.call_args.kwargs["plan_only"])
         fix_residue.assert_not_called()
         self.assertNotIn(
-            "fix: connector residue",
-            [c["label"] for c in fix_records],
+            "connector residue",
+            [record["label"] for record in result.repairs],
         )
 
     def test_dry_run_flag_is_exposed_on_click_command(self):
@@ -1710,13 +2280,16 @@ class DoctorFixDryRunTests(unittest.TestCase):
         opts = {p.name: p for p in doctor.params}
         self.assertIn("dry_run", opts)
         self.assertTrue(opts["dry_run"].is_flag)
+        self.assertTrue(opts["passive"].is_flag)
+        self.assertTrue(opts["fix_ids"].multiple)
 
     def test_dry_run_banner_discloses_restart_and_no_teardown(self):
         from defenseclaw.commands import cmd_doctor
 
         banner = cmd_doctor._auto_fix_hint(True)
         self.assertIn("nothing on disk changes", banner)
-        self.assertIn("may restart the gateway sidecar", banner)
+        self.assertIn("start an enabled stopped watchdog", banner)
+        self.assertIn("may start or restart the gateway sidecar", banner)
         self.assertIn("doctor never runs connector teardown", banner)
 
 
@@ -1748,13 +2321,16 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
             warn_checks = [c for c in r.checks if c["status"] == "warn"]
@@ -1767,22 +2343,23 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "domains": ["llm.acme.internal"],
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(
-                warn_checks, [],
+                warn_checks,
+                [],
                 "domains-coverage warn should not fire when host is listed",
             )
 
@@ -1794,20 +2371,20 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "acme-internal",
                     "domains": ["acme.internal"],
                     "base_url": "https://llm.acme.internal:8443",
                     "base_provider_type": "openai"
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(warn_checks, [], r.checks)
 
     def test_entry_without_base_url_skips_domain_check(self):
@@ -1817,18 +2394,18 @@ class CustomProviderOverlayChecksTests(unittest.TestCase):
         import tempfile
 
         with tempfile.TemporaryDirectory() as data_dir:
-            self._write_overlay(data_dir, """{
+            self._write_overlay(
+                data_dir,
+                """{
                 "providers": [{
                     "name": "openai",
                     "env_keys": ["MY_OPENAI_KEY"]
                 }]
-            }""")
+            }""",
+            )
             r = _DoctorResult()
             _check_custom_provider_overlay(self._make_cfg(data_dir), r)
-            warn_checks = [
-                c for c in r.checks
-                if c["status"] == "warn" and "not covered by domains" in c["detail"]
-            ]
+            warn_checks = [c for c in r.checks if c["status"] == "warn" and "not covered by domains" in c["detail"]]
             self.assertEqual(warn_checks, [], r.checks)
 
 
@@ -1852,24 +2429,50 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         # prove the auth header was NOT replayed to the redirect target.
         self.requests: list[dict] = []
         recorder = self.requests
+        self.health_body = json.dumps(
+            {
+                "gateway": {
+                    "state": "running",
+                    "details": {"inventory": "x" * 2200},
+                },
+                "watcher": {"state": "running"},
+                "guardrail": {"state": "running"},
+                "api": {"state": "running"},
+                "connectors": [
+                    {"name": "codex", "state": "running"},
+                    {"name": "claudecode", "state": "running"},
+                ],
+            }
+        ).encode("utf-8")
+        health_body = self.health_body
 
         class _Handler(http.server.BaseHTTPRequestHandler):
             def log_message(self, *args):  # silence test output
                 pass
 
             def _record_and_route(self):
-                recorder.append({
-                    "path": self.path,
-                    "headers": {k.lower(): v for k, v in self.headers.items()},
-                })
+                recorder.append(
+                    {
+                        "path": self.path,
+                        "headers": {k.lower(): v for k, v in self.headers.items()},
+                    }
+                )
                 if self.path == "/redirect":
                     # 302 to a different path that, if followed, would receive
                     # the replayed credential header.
                     self.send_response(302)
                     self.send_header("Location", "/leaked")
                     self.end_headers()
+                elif self.path == "/trickle":
+                    self.send_response(200)
+                    self.send_header("Content-Length", "20")
+                    self.end_headers()
+                    for _ in range(20):
+                        self.wfile.write(b"x")
+                        self.wfile.flush()
+                        time.sleep(0.1)
                 else:
-                    body = b"reached"
+                    body = health_body if self.path == "/health" else b"reached"
                     self.send_response(200)
                     self.send_header("Content-Length", str(len(body)))
                     self.end_headers()
@@ -1943,6 +2546,97 @@ class DoctorHttpProbeRedirectTests(unittest.TestCase):
         self.assertEqual(status, 200, (status, body))
         self.assertIn("reached", body)
 
+    def test_probe_timeout_is_a_total_wall_clock_deadline(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        started = time.monotonic()
+        status, body = _http_probe(self._url("/trickle"), timeout=0.12)
+        elapsed = time.monotonic() - started
+
+        self.assertEqual(status, 0)
+        self.assertIn("total deadline", body)
+        self.assertLess(elapsed, 1.0)
+
+    def test_published_probe_result_does_not_wait_for_worker_teardown(self):
+        import queue
+        import threading
+
+        from defenseclaw.commands import cmd_doctor
+
+        real_queue = queue.Queue
+        result_published = threading.Event()
+        release_teardown = threading.Event()
+
+        class _TeardownGatedQueue(real_queue):
+            def put_nowait(self, item):
+                super().put_nowait(item)
+                result_published.set()
+                release_teardown.wait(timeout=5)
+
+        try:
+            with (
+                patch.object(cmd_doctor.queue, "Queue", _TeardownGatedQueue),
+                patch.object(cmd_doctor, "_http_probe_once", return_value=(200, "reached")),
+            ):
+                status, body = cmd_doctor._http_probe(self._url("/unused"), timeout=1.0)
+
+            self.assertTrue(result_published.is_set())
+            self.assertEqual((status, body), (200, "reached"))
+        finally:
+            release_teardown.set()
+
+    def test_sidecar_health_parses_complete_large_multi_connector_document(self):
+        self.assertGreater(len(self.health_body), 2_000)
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        self.assertFalse(
+            any(c["label"] == "Sidecar health JSON" for c in result.checks),
+            result.checks,
+        )
+        subsystem_rows = {
+            c["label"].strip().removeprefix("└─ "): c["status"] for c in result.checks if "└─" in c["label"]
+        }
+        self.assertEqual(subsystem_rows["gateway"], "pass")
+        self.assertEqual(subsystem_rows["watcher"], "pass")
+        self.assertEqual(subsystem_rows["guardrail"], "pass")
+        self.assertEqual(subsystem_rows["api"], "pass")
+
+    def test_structured_probe_rejects_response_over_its_byte_bound(self):
+        from defenseclaw.commands.cmd_doctor import _http_probe
+
+        status, body = _http_probe(
+            self._url("/health"),
+            timeout=5.0,
+            response_limit=128,
+            allow_truncation=False,
+        )
+
+        self.assertEqual(status, 200)
+        self.assertEqual(body, "response exceeds 128-byte limit")
+
+    @patch(
+        "defenseclaw.commands.cmd_doctor._http_probe",
+        return_value=(200, "response exceeds 1048576-byte limit"),
+    )
+    def test_sidecar_health_surfaces_oversized_document_reason(self, _probe):
+        cfg = SimpleNamespace(
+            openshell=None,
+            gateway=SimpleNamespace(api_port=self.port),
+        )
+        result = _DoctorResult()
+
+        _check_sidecar(cfg, result)
+
+        row = next(c for c in result.checks if c["label"] == "Sidecar health JSON")
+        self.assertEqual(row["status"], "warn")
+        self.assertEqual(row["detail"], "response exceeds 1048576-byte limit")
+
 
 class GuardrailProxyMultiConnectorTests(unittest.TestCase):
     """D6: whether the proxy port is 'intentionally closed' is decided over the
@@ -1976,9 +2670,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             "codex": PerConnectorGuardrailConfig(mode="action"),
             "hermes": PerConnectorGuardrailConfig(mode="observe"),
         }
-        cfg.guardrail.effective_mode = lambda name: (
-            cfg.guardrail.connectors[name].mode or cfg.guardrail.mode
-        )
+        cfg.guardrail.effective_mode = lambda name: cfg.guardrail.connectors[name].mode or cfg.guardrail.mode
 
         detail = _guardrail_proxy_intentionally_closed(cfg)
 
@@ -1992,9 +2684,7 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["codex", "hermes"], mode="action")
-        )
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "hermes"], mode="action"))
 
         self.assertIn("hook-enforced for codex, hermes", detail)
         self.assertIn("mode=action via PreToolUse deny", detail)
@@ -2005,13 +2695,29 @@ class GuardrailProxyMultiConnectorTests(unittest.TestCase):
             _guardrail_proxy_intentionally_closed,
         )
 
-        detail = _guardrail_proxy_intentionally_closed(
-            self._cfg(["codex", "omnigent"], mode="action")
+        detail = _guardrail_proxy_intentionally_closed(self._cfg(["codex", "omnigent"], mode="action"))
+
+        self.assertTrue(detail.startswith("configured for"), detail)
+        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
+        self.assertIn(
+            "omnigent (native-degraded; mode=action via ALLOW/ASK/DENY; live policy generation unverified)",
+            detail,
+        )
+        self.assertIn("proxy port intentionally closed", detail)
+
+    def test_single_omnigent_status_preserves_native_degraded_posture(self):
+        from defenseclaw.commands.cmd_doctor import (
+            _guardrail_proxy_intentionally_closed,
         )
 
-        self.assertTrue(detail.startswith("enforced for"), detail)
-        self.assertIn("codex (mode=action via PreToolUse deny)", detail)
-        self.assertIn("omnigent (mode=action via ALLOW/ASK/DENY)", detail)
+        detail = _guardrail_proxy_intentionally_closed(
+            self._cfg(["omnigent"], mode="action")
+        )
+
+        self.assertIn("native-degraded", detail)
+        self.assertIn("mode=action via ALLOW/ASK/DENY", detail)
+        self.assertIn("live policy generation unverified", detail)
+        self.assertNotIn("policy-enforced", detail)
         self.assertIn("proxy port intentionally closed", detail)
 
     def test_proxy_peer_forces_real_probe(self):
@@ -2066,6 +2772,13 @@ class DoctorFixHelpTextTests(unittest.TestCase):
         help_text = " ".join((opts["do_fix"].help or "").split()).lower()
         self.assertIn("restart", help_text)
         self.assertIn("--dry-run", help_text)
+
+    def test_json_output_has_short_alias(self):
+        from defenseclaw.commands.cmd_doctor import doctor
+
+        json_option = next(param for param in doctor.params if param.name == "json_out")
+        self.assertIn("--json-output", json_option.opts)
+        self.assertIn("--json", json_option.opts)
 
     def test_fix_docstring_discloses_restart_and_drops_teardown(self):
         from defenseclaw.commands.cmd_doctor import doctor

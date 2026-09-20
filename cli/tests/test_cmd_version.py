@@ -99,6 +99,12 @@ class ComputeDriftTests(unittest.TestCase):
 class VersionCommandTests(unittest.TestCase):
     """Behaviour of the ``defenseclaw version`` click command."""
 
+    def test_cli_component_reads_the_live_package_version(self):
+        with patch("defenseclaw.__version__", "9.9.9"):
+            component = cmd_version._cli_component()
+
+        self.assertEqual(component.version, "9.9.9")
+
     def test_clean_install_exits_zero(self):
         runner = CliRunner()
         with patch("defenseclaw.commands.cmd_version._gateway_component") as gw, \

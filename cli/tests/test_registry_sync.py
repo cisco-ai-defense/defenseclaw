@@ -372,6 +372,43 @@ class TestPromotionWipeBeforeReplace(SyncTestBase):
 
 
 class TestErrorPath(SyncTestBase):
+    def test_scan_failure_marks_affected_entries_error(self):
+        self.stub_fetch(_fresh_skill_manifest())
+
+        def _failed_scan(_source, entry):
+            raise RuntimeError(f"scanner unavailable for {entry.name}")
+
+        report = sync_source(
+            self.cfg,
+            self.cfg.data_dir,
+            self.source,
+            scan_callback=_failed_scan,
+            auto_promote=False,
+            save=False,
+        )
+
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        self.assertEqual(idx.find("skill", "demo-skill").status, "error")
+        self.assertEqual(idx.find("skill", "another-skill").status, "error")
+        self.assertEqual(len(report.errors), 2)
+
+    def test_unavailable_optional_scan_leaves_entry_pending(self):
+        self.stub_fetch(_fresh_mcp_manifest())
+
+        report = sync_source(
+            self.cfg,
+            self.cfg.data_dir,
+            self.source,
+            scan_callback=lambda _source, _entry: None,
+            auto_promote=False,
+            save=False,
+        )
+
+        idx = load_index(self.cfg.data_dir, self.source.id)
+        self.assertEqual(idx.find("mcp", "demo-mcp").status, "pending")
+        self.assertEqual(report.scanned, 1)
+        self.assertEqual(report.errors, [])
+
     def test_fetch_failure_recorded_on_source(self):
         from defenseclaw.registries.adapters import IngestError
 

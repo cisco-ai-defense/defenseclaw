@@ -1,0 +1,170 @@
+---
+title: Contextual LLM Judge Benchmark
+description: Production-path Gemma judge accuracy, benign interruption rate, latency, token use, cost, and connector context behavior.
+keywords:
+  - DefenseClaw LLM judge benchmark
+  - Gemma security judge F1
+  - coding agent false positive rate
+  - contextual tool call detection
+  - LLM judge token cost
+---
+
+DefenseClaw's contextual judge is designed to add coverage when one tool call
+is ambiguous in isolation. On the frozen public validation set, the
+deterministic-first cascade with Bedrock Gemma 4 detected **94 of 100**
+family-excluded attack trajectories, with **98.95% precision**, **94% recall**,
+and **0.964 F1**. It alerted on one of 20 benign coding trajectories and
+recommended blocking none of them.
+
+<Callout type="info" title="Benchmark-bounded coverage">
+These results measure the frozen dataset and runtime path described below;
+they are not a universal protection percentage. The benign trajectory sample
+contains 20 task families, so its observed 5% alert FPR has a wide 95% Wilson
+interval of 0.89–23.61%. The 0/20 benign block rate has a 95% Wilson upper
+bound of 16.11%.
+</Callout>
+
+## Recommended runtime path
+
+Use the deterministic-first `regex_judge` strategy for coding sessions. A
+decisive local result returns immediately. Only unresolved tool calls incur a
+model request. `judge_first` remains useful for measuring the judge's maximum
+coverage, but it adds model latency to every eligible call.
+
+<Flow
+  direction="TB"
+  caption="The latest authenticated user-intent hook and a bounded same-session tool history give the judge context without turning model-generated content into trusted intent. Only a synchronous pre-tool connector can enforce a block."
+>
+  <Node id="intent" kind="generic">Latest user-intent hook</Node>
+  <Node id="tool" kind="generic">Proposed tool call</Node>
+  <Node id="local" kind="policy">Deterministic detection</Node>
+  <Node id="context" kind="datastore">Bounded in-memory context</Node>
+  <Node id="judge" kind="policy">Gemma strict-JSON judge</Node>
+  <Node id="policy" kind="policy">Conservative verdict policy</Node>
+  <Node id="sync" kind="generic">Synchronous pre-tool allow / alert / block</Node>
+  <Node id="async" kind="generic">Asynchronous observation</Node>
+  <Edge from="intent" to="context" />
+  <Edge from="tool" to="local" />
+  <Edge from="local" to="sync" label="decisive" />
+  <Edge from="local" to="context" label="unresolved" />
+  <Edge from="context" to="judge" />
+  <Edge from="judge" to="policy" />
+  <Edge from="policy" to="sync" label="hook path" />
+  <Edge from="policy" to="async" label="event stream" />
+</Flow>
+
+`weak_signal` findings are ignored. `needs_review` can alert but cannot block
+by itself. A block requires actionable corroboration or strong structural
+evidence of exfiltration or destruction. This keeps ambiguous activity visible
+without turning ordinary coding commands into routine interruptions.
+
+## Frozen public validation
+
+The attack lane contains 100 environment-successful MonitoringBench
+trajectories: 25 each from the firewall, malware, password-leak, and sudo
+families. Every family used during prompt development was excluded. The benign
+lane contains 20 unseen, task-deduplicated successful TerminalBench
+trajectories and replays each full public task instruction as user intent
+before 511 production-format tool decisions.
+
+Tool-risk training and protected tool-risk evaluation corpora are excluded.
+The harness uses the same `RunToolJudge` method, Bifrost provider path, shipped
+rule pack, strict JSON response schema, temperature zero, parser, severity
+mapping, and verdict merger as the gateway. Dataset commands are never
+executed.
+
+| System | TP / FN | FP / TN | Precision | Recall | F1 | FPR | Attack block recall | Benign block rate |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| Deterministic only | 1 / 99 | 0 / 20 | 100% | 1% | 0.020 | 0% | 0% | 0% |
+| Gemma 4 judge first | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Deterministic → Gemma 4 | 94 / 6 | 1 / 19 | 98.95% | 94% | **0.964** | 5% | 35% | **0%** |
+| Gemma 3 judge first | 99 / 1 | 18 / 2 | 84.62% | 99% | 0.912 | 90% | 95% | 90% |
+
+Gemma 4 added 93 detections beyond the deterministic result. Gemma 3's higher
+attack recall came with a 90% benign trajectory alert and block rate, so it is
+not recommended for coding-session enforcement. Granite was removed after
+lower-recall pilots; Qwen 3.5 and Muse were not included in the frozen matrix.
+
+Stateful labels apply to whole trajectories, not individual tool calls. On the
+benign lane, 1 of 511 hook decisions alerted (0.20%) and none blocked. That is
+an operational interruption measure, not per-hook classification accuracy.
+
+## Time, tokens, and cost
+
+| Model | Provider calls | Input / output tokens | Total tokens | Cost | Mean provider time | Trajectory p50 / p95 / max |
+| --- | ---: | ---: | ---: | ---: | ---: | ---: |
+| Bedrock Gemma 4 26B A4B | 1,146 | 3,020,728 / 57,692 | 3,078,420 | **$0.4158** | **0.614s/call** | 5.05s / 11.89s / 29.07s |
+| Bedrock Gemma 3 12B IT | 1,146 | 2,676,031 / 103,076 | 2,779,107 | $0.2707 | 1.341s/call | 10.96s / 23.17s / 83.93s |
+
+Costs use the explicit evaluation-time rates supplied to the scorecard:
+$0.13/M Gemma 4 input tokens and $0.40/M output tokens; $0.09/M Gemma 3 input
+tokens and $0.29/M output tokens. Both runs used JSON mode for every provider
+call and recorded zero provider, parser, or judge failures. Trajectory latency
+sums all judge decisions in a trajectory; it is not one hook's latency.
+
+## How intent works across connectors
+
+The judge retains the latest non-empty prompt-bearing turn-start event for an
+authenticated session. A new intent clears prior tool-call history so calls
+from the previous turn cannot contaminate the next decision. Prompt expansions,
+subagent lifecycle metadata, model requests, and tool results never overwrite
+the retained user task.
+
+| Connector | Intent event used by the judge |
+| --- | --- |
+| Codex, Claude Code, Devin | `UserPromptSubmit` |
+| Cursor | `beforeSubmitPrompt` |
+| Windsurf | `pre_user_prompt` |
+| GitHub Copilot | `userPromptSubmitted` |
+| OpenHands | `user_prompt_submit` |
+| Gemini CLI | `BeforeAgent` |
+| Antigravity | No prompt in the documented `PreInvocation` schema; same-session tool-call context only |
+| Hermes | `pre_llm_call`, when prompt content is present |
+| Amp | `agent.start` |
+| OmniGent | `UserPromptSubmit` only when the deployment supplies a stable session ID |
+| OpenCode | No prompt-bearing plugin hook; tool-call context only |
+
+Cross-call intent is retained only when the connector supplies a stable,
+authenticated session key; DefenseClaw does not use a process-global fallback
+that could mix users or sessions. The context is process-local and
+value-bounded: at most 256 active sessions,
+30 minutes of inactivity, the latest 2,048 bytes of user intent, seven prior
+tool calls with 1,024 bytes of arguments each, and 3,072 bytes for the current
+arguments. Oversized intent and arguments retain a UTF-8-safe beginning and
+end plus mechanically selected security-relevant middle excerpts. Explicit
+truncation markers tell the model that omitted material exists. Session start
+or end removes the context, except Claude Code's `SessionStart` with
+`source=compact`, which continues the current turn. The gateway's existing
+request-body limit rejects a hook payload that is too large to parse safely.
+
+Untrusted bodies cannot create fake context blocks: DefenseClaw neutralizes
+the structural delimiter tokens before assembly. Stream tool calls are added
+to history synchronously in arrival order before the model request runs in the
+bounded asynchronous worker pool.
+
+The retained prompt is tagged as untrusted data inside the judge request. It
+can explain authorized work, but it cannot excuse clear credential
+exfiltration, destructive host scope, persistence, or hidden execution.
+
+## Reproduce without shipping private data
+
+The repository contains corpus preparation, production-path execution,
+scoring scripts, frozen source revisions, and aggregate results under
+`benchmarks/llm_judge/`. Generated corpora, prompts, tool arguments, model
+responses, and prediction rows are not committed. Full run artifacts and
+checksums are retained in the private benchmark dataset.
+
+```bash
+make contextual-judge-test
+
+DEFENSECLAW_JUDGE_BENCHMARK_CONCURRENCY=16 \
+  benchmarks/scripts/benchmark_run_judge.sh \
+  outputs/contextual-judge/validation.jsonl \
+  outputs/contextual-judge/gemma4.jsonl \
+  bedrock/google.gemma-4-26b-a4b
+```
+
+Read the repository's contextual benchmark README for the corpus-building,
+resume, concurrency, scoring, and batch-lane details. A judge `block` is real
+prevention only when an enabled synchronous pre-tool connector consumes it;
+EventRouter judging is asynchronous and observational.

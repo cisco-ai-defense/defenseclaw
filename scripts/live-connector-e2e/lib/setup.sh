@@ -29,13 +29,13 @@ dc_connector_config_file() {
   case "$1" in
     codex)       printf '%s/.codex/config.toml' "${HOME}" ;;
     claudecode)  printf '%s/.claude/settings.json' "${HOME}" ;;
-    geminicli)   printf '%s/.gemini/settings.json' "${HOME}" ;;
     cursor)      printf '%s/.cursor/hooks.json' "${HOME}" ;;
-    windsurf)    printf '%s/.codeium/windsurf/hooks.json' "${HOME}" ;;
+    devin)       printf '%s/.config/devin/config.json' "${HOME}" ;;
     copilot)     printf '%s/.copilot/hooks/defenseclaw.json' "${HOME}" ;;
     openhands)   printf '%s/.openhands/hooks.json' "${HOME}" ;;
     antigravity) printf '%s/.gemini/config/hooks.json' "${HOME}" ;;
     hermes)      printf '%s/.hermes/config.yaml' "${HOME}" ;;
+    amp)         printf '%s/.config/amp/plugins/defenseclaw.ts' "${HOME}" ;;
     *)           printf '' ;;
   esac
 }
@@ -56,23 +56,47 @@ dc_write_env_key() {
 
 # dc_init_defenseclaw — run `defenseclaw init` once and stand up the gateway.
 # Idempotent: re-running against an initialized home is a no-op for config.
+# Set DC_E2E_ISOLATE_GATEWAY=1 when a harness must assign run-owned ports
+# before the first sidecar starts (for example, on a developer workstation
+# where the default API port may already belong to the user's gateway).
 dc_init_defenseclaw() {
   if [ ! -f "${DEFENSECLAW_HOME}/config.yaml" ]; then
     dc_log "running defenseclaw init"
-    defenseclaw init
+    if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+      defenseclaw init --no-start-gateway
+    else
+      defenseclaw init
+    fi
   else
     dc_log "defenseclaw already initialized at ${DEFENSECLAW_HOME}"
   fi
 }
 
-# dc_setup_connector <connector> <mode> — install DefenseClaw into the
+# dc_setup_connector <connector> <mode> [--no-verify] — install DefenseClaw into the
 # connector via its setup subcommand and wait for the gateway to come back
 # healthy. mode is observe|action. --restart wires hook scripts + OTel block.
 dc_setup_connector() {
-  local connector="$1" mode="${2:-action}" sub
+  local connector="$1" mode="${2:-action}" verify_flag="${3:-}" sub
+  case "${verify_flag}" in
+    ""|--no-verify) ;;
+    *) dc_err "unsupported setup verification flag: ${verify_flag}"; return 2 ;;
+  esac
   sub="$(dc_setup_subcommand "${connector}")"
-  dc_log "defenseclaw setup ${sub} --mode ${mode} --restart"
-  defenseclaw setup "${sub}" --yes --mode "${mode}" --restart
+  # Contract cells validate exactly one connector. `init` starts with the
+  # legacy OpenClaw proxy selected, while non-interactive setup is additive;
+  # replacing that bootstrap selection prevents an unrelated OpenClaw restart.
+  if [ "${verify_flag}" = "--no-verify" ]; then
+    # Hook-connector setup commands intentionally have no readiness bypass.
+    # Layer A has no vendor CLI to verify, so stage the connector offline and
+    # restart explicitly; the golden hook/event assertions below are its
+    # deterministic verification surface.
+    dc_log "defenseclaw setup ${sub} --mode ${mode} --replace --no-restart"
+    defenseclaw setup "${sub}" --yes --replace --mode "${mode}" --no-restart
+    defenseclaw-gateway restart
+  else
+    dc_log "defenseclaw setup ${sub} --mode ${mode} --replace --restart"
+    defenseclaw setup "${sub}" --yes --replace --mode "${mode}" --restart
+  fi
   dc_wait_for_gateway 30
 }
 
@@ -83,5 +107,11 @@ dc_teardown_connector() {
   dc_log "tearing down ${connector}"
   defenseclaw-gateway connector teardown --connector "${connector}" || \
     dc_warn "teardown command returned non-zero for ${connector}"
+  # The in-process hook guard debounces filesystem changes for 500ms. Wait
+  # beyond that window before verification so a teardown/guardian race cannot
+  # pass in the transient clean interval and reinstall managed config after the
+  # test exits. The low-level teardown marks the connector explicitly inactive;
+  # this delay proves the running guard honors that ownership revocation.
+  sleep "${DC_E2E_TEARDOWN_SETTLE_SECONDS:-1.25}"
   defenseclaw-gateway connector verify --connector "${connector}"
 }

@@ -299,6 +299,41 @@ def test_registries_panel_remove_source_only_from_sources_tab(tmp_path: Path) ->
     assert panel.handle_key("d").handled is False
 
 
+def test_registries_panel_mixed_effective_state_toggles_broad_enforcement_on(tmp_path: Path) -> None:
+    from defenseclaw.config import (
+        GuardrailConfig,
+        PerConnectorAssetPolicy,
+        PerConnectorAssetTypePolicy,
+        PerConnectorGuardrailConfig,
+    )
+
+    write_index(
+        tmp_path,
+        "corp-skills",
+        {"verdicts": [{"name": "demo-skill", "type": "skill", "status": "clean"}]},
+    )
+    cfg = new_panel(tmp_path).config
+    cfg.guardrail = GuardrailConfig(
+        connectors={
+            "codex": PerConnectorGuardrailConfig(),
+            "claudecode": PerConnectorGuardrailConfig(),
+        },
+    )
+    cfg.asset_policy.skill.registry_required = True
+    cfg.asset_policy.connectors["codex"] = PerConnectorAssetPolicy(
+        skill=PerConnectorAssetTypePolicy(registry_required=False),
+    )
+    panel = RegistriesPanelModel(cfg)
+    panel.set_tab(RegistriesTab.ENTRIES)
+
+    action = panel.handle_key("R")
+
+    assert action.intent is not None
+    assert action.intent.args == (
+        "registry", "require", "--type", "skill", "--enabled", "--json",
+    )
+
+
 def test_registries_panel_approve_requires_selection(tmp_path: Path) -> None:
     panel = new_panel(tmp_path)
     panel.set_tab(RegistriesTab.ENTRIES)
@@ -339,7 +374,7 @@ def test_registries_panel_source_detail_preserves_full_id_and_cache_safety(tmp_p
     assert detail.title == f"SOURCE: {long_id}"
     assert fields["Source ID"] == long_id
     assert fields["URL"] == "https://example.com/index.json"
-    assert fields["Cache Path"].endswith(f"/registries/{long_id}/index.json")
+    assert Path(fields["Cache Path"]).parts[-3:] == ("registries", long_id, "index.json")
 
     unsafe = RegistriesPanelModel(
         data_dir=tmp_path,

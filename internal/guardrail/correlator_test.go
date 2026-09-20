@@ -28,8 +28,6 @@ func TestLoadCorrelationPatterns_Defaults(t *testing.T) {
 	want := map[string]bool{
 		"LETHAL-TRIFECTA":                 true,
 		"TRIFECTA-WITH-FINGERPRINT-MATCH": true,
-		"ESCALATION-CHAIN":                true,
-		"DESTRUCTIVE-FLOW":                true,
 	}
 	if len(set.Patterns) != len(want) {
 		t.Errorf("got %d patterns, want %d", len(set.Patterns), len(want))
@@ -128,9 +126,8 @@ func TestMatchOrderedAllOf(t *testing.T) {
 	}
 }
 
-func TestEscalationChain_FiresInOrder(t *testing.T) {
-	set, _ := DefaultCorrelationPatterns()
-	pattern := mustFindPattern(t, set, "ESCALATION-CHAIN")
+func TestCustomSequencePatternFiresInOrder(t *testing.T) {
+	pattern := testSequencePattern()
 
 	// Window is newest-first; temporal order is oldest-first.
 	// MEDIUM at turn 1 -> HIGH at turn 2 -> HIGH at turn 3.
@@ -149,9 +146,8 @@ func TestEscalationChain_FiresInOrder(t *testing.T) {
 	}
 }
 
-func TestEscalationChain_DoesNotFireOnAllHighs(t *testing.T) {
-	set, _ := DefaultCorrelationPatterns()
-	pattern := mustFindPattern(t, set, "ESCALATION-CHAIN")
+func TestCustomSequencePatternDoesNotFireOnAllHighs(t *testing.T) {
+	pattern := testSequencePattern()
 
 	// No MEDIUM to start the chain.
 	window := []CorrelationFinding{
@@ -165,46 +161,17 @@ func TestEscalationChain_DoesNotFireOnAllHighs(t *testing.T) {
 	}
 }
 
-func TestDestructiveFlow_FiresOnExecShellAfterSensitive(t *testing.T) {
+func TestDefaultPatternsDoNotEscalateBroadSensitiveShellSequence(t *testing.T) {
 	set, _ := DefaultCorrelationPatterns()
-	pattern := mustFindPattern(t, set, "DESTRUCTIVE-FLOW")
 
+	// Proxy-derived shell capability is deliberately not enough to turn two
+	// otherwise unrelated sensitive reads into a synthetic CRITICAL finding.
 	window := []CorrelationFinding{
-		{
-			ID:                  "f-003",
-			RuleID:              "SHELL-DESTRUCTIVE-RM-RF",
-			Severity:            "CRITICAL",
-			ToolCapabilityClass: CapExecShell,
-		},
-		{
-			ID:       "f-002",
-			RuleID:   "PATH-SSH-KEY",
-			Severity: "HIGH",
-			DataAxis: []DataAxis{AxisSensitiveAccess},
-		},
+		{ID: "sensitive-shell", RuleID: "CMD-ENV-DUMP", Severity: "HIGH", DataAxis: []DataAxis{AxisSensitiveAccess}, ToolCapabilityClass: CapExecShell},
+		{ID: "sensitive-read", RuleID: "PATH-SSH-KEY", Severity: "HIGH", DataAxis: []DataAxis{AxisSensitiveAccess}},
 	}
-
-	contributing := pattern.Match(window)
-	if len(contributing) != 2 {
-		t.Fatalf("expected 2 contributing, got %d: %+v", len(contributing), contributing)
-	}
-}
-
-func TestDestructiveFlow_DoesNotFireWithoutSensitiveAccess(t *testing.T) {
-	set, _ := DefaultCorrelationPatterns()
-	pattern := mustFindPattern(t, set, "DESTRUCTIVE-FLOW")
-
-	window := []CorrelationFinding{
-		{
-			ID:                  "f-001",
-			RuleID:              "SHELL-DESTRUCTIVE-RM-RF",
-			Severity:            "CRITICAL",
-			ToolCapabilityClass: CapExecShell,
-		},
-	}
-
-	if got := pattern.Match(window); got != nil {
-		t.Errorf("expected no match (destructive alone is not a flow), got %+v", got)
+	if got := Evaluate(set.Patterns, window); len(got) != 0 {
+		t.Fatalf("broad sensitive/shell sequence produced default correlations: %+v", got)
 	}
 }
 
@@ -217,7 +184,7 @@ func TestFingerprintChain_RequiresSameFingerprint(t *testing.T) {
 		{ID: "f-002", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
 		{ID: "f-001", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "HIGH"},
 	}
-	if got := pattern.Match(match); len(got) != 2 {
+	if got := pattern.Match(match); len(got) != 2 || got[0].ID != "f-001" || got[1].ID != "f-002" {
 		t.Errorf("matching fingerprints: expected 2 contributing, got %+v", got)
 	}
 
@@ -228,6 +195,23 @@ func TestFingerprintChain_RequiresSameFingerprint(t *testing.T) {
 	}
 	if got := pattern.Match(nomatch); got != nil {
 		t.Errorf("different fingerprints should not match, got %+v", got)
+	}
+
+	dualAxis := []CorrelationFinding{{
+		ID: "dual", DataAxis: []DataAxis{AxisSensitiveAccess, AxisEgressExternal},
+		ContentFingerprint: "abc12345", Severity: "HIGH",
+	}}
+	if got := pattern.Match(dualAxis); got != nil {
+		t.Errorf("one dual-axis row satisfied two fingerprint steps: %+v", got)
+	}
+
+	// Newest-first window: sensitive is newer, so egress happened first.
+	reversed := []CorrelationFinding{
+		{ID: "sensitive-after", DataAxis: []DataAxis{AxisSensitiveAccess}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+		{ID: "egress-before", DataAxis: []DataAxis{AxisEgressExternal}, ContentFingerprint: "abc12345", Severity: "HIGH"},
+	}
+	if got := pattern.Match(reversed); got != nil {
+		t.Errorf("egress-before-sensitive fingerprint flow matched: %+v", got)
 	}
 }
 
@@ -259,11 +243,10 @@ func TestSyntheticFindingRuleID(t *testing.T) {
 }
 
 func TestWindowSizeIsRespected(t *testing.T) {
-	set, _ := DefaultCorrelationPatterns()
-	pattern := mustFindPattern(t, set, "ESCALATION-CHAIN")
+	pattern := testSequencePattern()
 
-	// ESCALATION-CHAIN has window_events: 10. Put the MEDIUM outside
-	// the window so it should NOT contribute.
+	// Put the MEDIUM outside the custom pattern's 10-event window so it
+	// should NOT contribute.
 	var window []CorrelationFinding
 	for i := 0; i < 10; i++ {
 		window = append(window, CorrelationFinding{ID: "high", Severity: "HIGH"})
@@ -273,6 +256,13 @@ func TestWindowSizeIsRespected(t *testing.T) {
 
 	if got := pattern.Match(window); got != nil {
 		t.Errorf("medium outside window should not complete the chain, got %+v", got)
+	}
+}
+
+func testSequencePattern() *CorrelationPattern {
+	return &CorrelationPattern{
+		ID: "CUSTOM-SEVERITY-SEQUENCE", WindowEvents: 10, SeverityOnMatch: "CRITICAL",
+		Sequence: []SequenceClause{{Severity: "MEDIUM"}, {Severity: "HIGH"}, {Severity: "HIGH"}},
 	}
 }
 

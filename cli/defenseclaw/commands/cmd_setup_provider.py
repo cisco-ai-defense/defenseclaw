@@ -71,16 +71,16 @@ import re
 import shutil
 import sys
 import tempfile
-import urllib.error
 import urllib.parse
-import urllib.request
 from dataclasses import dataclass
 from typing import Any
 
 import click
+import requests
 
 from defenseclaw import connector_paths, platform_support, ux
 from defenseclaw.context import AppContext, pass_ctx
+from defenseclaw.gateway import OrchestratorClient, gateway_api_client_host
 
 OVERLAY_FILENAME = "custom-providers.json"
 OVERLAY_ENV = "DEFENSECLAW_CUSTOM_PROVIDERS_PATH"
@@ -198,8 +198,7 @@ def _read_overlay(path: str) -> _Overlay:
             data = _json.load(f)
     except (OSError, _json.JSONDecodeError) as exc:
         raise click.ClickException(
-            f"cannot parse existing overlay {path!s}: {exc}. "
-            f"Back up the file and re-run if you want to start fresh."
+            f"cannot parse existing overlay {path!s}: {exc}. Back up the file and re-run if you want to start fresh."
         ) from exc
     # The shape we write is {"providers": [...], "ollama_ports": [...]},
     # but an operator hand-edit (or a different tool) could legitimately
@@ -350,10 +349,10 @@ def _write_overlay(path: str, overlay: _Overlay) -> None:
 
 
 _DOMAIN_RE = re.compile(
-    r"^(?=.{1,253}$)"               # overall length
+    r"^(?=.{1,253}$)"  # overall length
     r"(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)*"  # labels with dots
-    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"         # final label
-    r"(?::\d{1,5})?$"               # optional :port
+    r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"  # final label
+    r"(?::\d{1,5})?$"  # optional :port
 )
 
 
@@ -391,10 +390,7 @@ def _normalize_domain(raw: str) -> str:
     if not s or s.startswith(".") or ".." in s:
         raise click.BadParameter(f"invalid domain: {raw!r}")
     if not _DOMAIN_RE.match(s):
-        raise click.BadParameter(
-            f"invalid domain: {raw!r} "
-            f"(must be a bare hostname, optionally with :port)"
-        )
+        raise click.BadParameter(f"invalid domain: {raw!r} (must be a bare hostname, optionally with :port)")
     return s
 
 
@@ -414,9 +410,7 @@ def _validate_env_keys(keys: list[str]) -> list[str]:
         if not k:
             continue
         if not _ENV_KEY_RE.match(k):
-            raise click.BadParameter(
-                f"invalid env var name: {raw!r} (must be ASCII [A-Za-z_][A-Za-z0-9_]*)"
-            )
+            raise click.BadParameter(f"invalid env var name: {raw!r} (must be ASCII [A-Za-z_][A-Za-z0-9_]*)")
         if k in seen:
             continue
         seen.add(k)
@@ -437,6 +431,7 @@ _RELOAD_OK = "reloaded"
 _RELOAD_UNAUTHORIZED = "unauthorized"
 _RELOAD_FORBIDDEN = "forbidden"
 _RELOAD_SERVER_ERROR = "server-error"
+_RELOAD_MALFORMED = "malformed-response"
 
 
 def _reload_sidecar(app: AppContext | None) -> str | None:
@@ -451,51 +446,119 @@ def _reload_sidecar(app: AppContext | None) -> str | None:
         ``None``          -- sidecar unreachable (connection refused,
                              DNS failure, timeout)
 
-    Authentication: we send the X-DC-Auth header populated from the
-    environment (``OPENCLAW_GATEWAY_TOKEN``) or ``app.cfg.gateway.token``
-    when available — same token the Go ``authenticateRequest`` accepts.
-    A missing token means we skip the reload and tell the operator to
-    restart manually.
+    The client uses cfg.gateway.api_bind/api_port, normalizes wildcard binds
+    to loopback, and resolves the same gateway token precedence as the running
+    sidecar.
     """
     if app is None or app.cfg is None:
         return None
-    guardrail = getattr(app.cfg, "guardrail", None)
-    if guardrail is None:
+    gateway = getattr(app.cfg, "gateway", None)
+    if gateway is None:
         return None
-    port = getattr(guardrail, "port", 0)
-    if not port:
+    port = int(getattr(gateway, "api_port", 0) or 0)
+    if port <= 0:
         return None
-    token = (
-        os.environ.get("OPENCLAW_GATEWAY_TOKEN", "").strip()
-        or getattr(getattr(app.cfg, "gateway", None), "token", "") or ""
-    ).strip()
-    url = f"http://127.0.0.1:{int(port)}/v1/config/providers/reload"
-    req = urllib.request.Request(url, method="POST", data=b"{}")
-    if token:
-        req.add_header("X-DC-Auth", f"Bearer {token}")
-    req.add_header("Content-Type", "application/json")
+    resolver = getattr(gateway, "resolved_token", None)
+    token = resolver() if callable(resolver) else str(getattr(gateway, "token", "") or "")
+    client = OrchestratorClient(
+        host=gateway_api_client_host(app.cfg),
+        port=port,
+        token=token.strip(),
+        timeout=2,
+    )
     try:
-        with urllib.request.urlopen(req, timeout=2) as resp:  # noqa: S310
-            if 200 <= resp.status < 300:
-                return _RELOAD_OK
-            if resp.status >= 500:
-                return _RELOAD_SERVER_ERROR
-    except urllib.error.HTTPError as exc:
-        # HTTPError *is* reachability — the sidecar responded with
-        # a non-2xx status. Distinguish the auth branch so the caller
-        # can steer the operator toward fixing their token rather
-        # than suggesting a restart.
-        if exc.code == 401:
+        client.reload_provider_registry()
+        return _RELOAD_OK
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else 0
+        if status == 401:
             return _RELOAD_UNAUTHORIZED
-        if exc.code == 403:
+        if status == 403:
             return _RELOAD_FORBIDDEN
-        if exc.code >= 500:
-            return _RELOAD_SERVER_ERROR
         return _RELOAD_SERVER_ERROR
-    except (urllib.error.URLError, TimeoutError, OSError):
-        # Genuine network/unreachable path.
+    except (requests.ConnectionError, requests.Timeout, OSError):
         return None
-    return None
+    except (ValueError, _json.JSONDecodeError):
+        return _RELOAD_MALFORMED
+
+
+def _report_reload_outcome(app: AppContext | None, persisted_action: str) -> None:
+    """Report disk/runtime split outcomes and fail automation honestly."""
+    status = _reload_sidecar(app)
+    if status == _RELOAD_OK:
+        ux.ok("sidecar reloaded provider registry; disk and live state match.")
+        return
+
+    if status == _RELOAD_UNAUTHORIZED:
+        reason = "sidecar authentication failed (missing or invalid gateway token)"
+    elif status == _RELOAD_FORBIDDEN:
+        reason = "sidecar refused the authenticated reload"
+    elif status == _RELOAD_SERVER_ERROR:
+        reason = "sidecar returned an error while reloading"
+    elif status == _RELOAD_MALFORMED:
+        reason = "sidecar returned a malformed reload response"
+    else:
+        reason = "sidecar management API is unreachable"
+    ux.err(f"{persisted_action} persisted successfully on disk, but live reload failed: {reason}.")
+    ux.subhead("The running registry may differ from custom-providers.json; no disk change was rolled back.")
+    click.get_current_context().exit(1)
+
+
+def _provider_registry(app: AppContext) -> tuple[dict[str, Any], str | None]:
+    """Return live registry first, or an explicitly labeled disk fallback."""
+    gateway = getattr(app.cfg, "gateway", None) if app.cfg else None
+    live_error: str | None = None
+    if gateway is not None and int(getattr(gateway, "api_port", 0) or 0) > 0:
+        resolver = getattr(gateway, "resolved_token", None)
+        token = resolver() if callable(resolver) else str(getattr(gateway, "token", "") or "")
+        client = OrchestratorClient(
+            host=gateway_api_client_host(app.cfg),
+            port=int(gateway.api_port),
+            token=token.strip(),
+            timeout=2,
+        )
+        try:
+            data = client.provider_registry()
+            return {**data, "source": "live-sidecar", "live": True}, None
+        except requests.HTTPError as exc:
+            status = exc.response.status_code if exc.response is not None else 0
+            live_error = "authentication failed" if status in {401, 403} else f"HTTP {status or 'error'}"
+        except (ValueError, _json.JSONDecodeError):
+            live_error = "malformed response"
+        except (requests.ConnectionError, requests.Timeout, OSError):
+            live_error = "management API unavailable"
+
+    overlay = _read_overlay(_overlay_path(app))
+    fallback = {
+        "providers": overlay.providers,
+        "ollama_ports": overlay.ollama_ports,
+        "source": "disk-fallback",
+        "live": False,
+        "warning": "disk fallback may not match the running sidecar registry",
+    }
+    if live_error:
+        fallback["live_error"] = live_error
+    return fallback, live_error
+
+
+def _display_provider_registry(app: AppContext, as_json: bool) -> None:
+    data, live_error = _provider_registry(app)
+    if as_json:
+        click.echo(_json.dumps(data, indent=2))
+    else:
+        if data["live"]:
+            ux.ok("source: live sidecar registry")
+        else:
+            ux.warn("DISK FALLBACK — this may not match the running sidecar registry.")
+            if live_error:
+                click.echo(f"  live query: {live_error}")
+        for item in data.get("providers", []):
+            click.echo(f"  - {item.get('name')}: {', '.join(item.get('domains') or [])}")
+        if data.get("ollama_ports"):
+            click.echo(f"  ollama_ports: {data['ollama_ports']}")
+        _echo_provider_enforcement_legend(app)
+    if live_error in {"authentication failed", "malformed response"}:
+        click.get_current_context().exit(1)
 
 
 # ---------------------------------------------------------------------------
@@ -557,24 +620,16 @@ def _validate_request_path_override(raw: str) -> tuple[str, str]:
     relative URL path that begins with ``/``.
     """
     if "=" not in raw:
-        raise click.BadParameter(
-            f"--request-path-override expects ``key=value`` (got {raw!r})"
-        )
+        raise click.BadParameter(f"--request-path-override expects ``key=value`` (got {raw!r})")
     key, _, value = raw.partition("=")
     key = key.strip().lower()
     value = value.strip()
     if key not in _ALLOWED_REQUEST_TYPES:
-        raise click.BadParameter(
-            f"--request-path-override key {key!r} not one of {list(_ALLOWED_REQUEST_TYPES)}"
-        )
+        raise click.BadParameter(f"--request-path-override key {key!r} not one of {list(_ALLOWED_REQUEST_TYPES)}")
     if not value:
-        raise click.BadParameter(
-            f"--request-path-override value cannot be empty (key={key!r})"
-        )
+        raise click.BadParameter(f"--request-path-override value cannot be empty (key={key!r})")
     if not value.startswith("/"):
-        raise click.BadParameter(
-            f"--request-path-override {key!r} value must start with '/' (got {value!r})"
-        )
+        raise click.BadParameter(f"--request-path-override {key!r} value must start with '/' (got {value!r})")
     return (key, value)
 
 
@@ -595,15 +650,11 @@ def _parse_alias_pairs(raw: tuple[str, ...], flag_name: str) -> dict[str, str]:
     out: dict[str, str] = {}
     for entry in raw:
         if "=" not in entry:
-            raise click.BadParameter(
-                f"{flag_name} expects ``alias=value`` (got {entry!r})"
-            )
+            raise click.BadParameter(f"{flag_name} expects ``alias=value`` (got {entry!r})")
         k, _, v = entry.partition("=")
         k, v = k.strip(), v.strip()
         if not k or not v:
-            raise click.BadParameter(
-                f"{flag_name} both sides of ``=`` must be non-empty (got {entry!r})"
-            )
+            raise click.BadParameter(f"{flag_name} both sides of ``=`` must be non-empty (got {entry!r})")
         out[k] = v
     return out
 
@@ -632,17 +683,11 @@ def _validate_family_match(
         return
     bpt = base_provider_type.strip().lower()
     if bedrock_set and bpt != "bedrock":
-        raise click.BadParameter(
-            f"--bedrock-* flags require --base-provider-type bedrock (got {bpt!r})"
-        )
+        raise click.BadParameter(f"--bedrock-* flags require --base-provider-type bedrock (got {bpt!r})")
     if vertex_set and bpt != "vertex_ai":
-        raise click.BadParameter(
-            f"--vertex-* flags require --base-provider-type vertex_ai (got {bpt!r})"
-        )
+        raise click.BadParameter(f"--vertex-* flags require --base-provider-type vertex_ai (got {bpt!r})")
     if azure_set and bpt != "azure":
-        raise click.BadParameter(
-            f"--azure-* flags require --base-provider-type azure (got {bpt!r})"
-        )
+        raise click.BadParameter(f"--azure-* flags require --base-provider-type azure (got {bpt!r})")
 
 
 def _build_bedrock_block(
@@ -734,8 +779,7 @@ def _read_ca_cert_file(path: str) -> str:
     head = data.strip().splitlines()[0] if data.strip() else ""
     if "BEGIN CERTIFICATE" not in head:
         raise click.BadParameter(
-            f"--ca-cert-file: {path!r} does not start with a -----BEGIN CERTIFICATE----- block "
-            f"(saw {head!r})"
+            f"--ca-cert-file: {path!r} does not start with a -----BEGIN CERTIFICATE----- block (saw {head!r})"
         )
     return data
 
@@ -767,12 +811,16 @@ def _provider_add_interactive() -> dict[str, Any]:
             break
         click.echo("    Invalid name — use only A-Z a-z 0-9 _ -")
 
-    base_provider_type = click.prompt(
-        "  Base provider type (which Bifrost adapter to use)",
-        type=click.Choice(_ALLOWED_BASE_PROVIDER_TYPES, case_sensitive=False),
-        default="openai",
-        show_default=True,
-    ).strip().lower()
+    base_provider_type = (
+        click.prompt(
+            "  Base provider type (which Bifrost adapter to use)",
+            type=click.Choice(_ALLOWED_BASE_PROVIDER_TYPES, case_sensitive=False),
+            default="openai",
+            show_default=True,
+        )
+        .strip()
+        .lower()
+    )
 
     while True:
         base_url = click.prompt(
@@ -831,21 +879,22 @@ def _provider_add_interactive() -> dict[str, Any]:
     ux.subhead("TLS overrides (optional):")
     ca_cert_file = ""
     insecure_skip_verify = False
-    tls_choice = click.prompt(
-        "  TLS mode  [n]one / [c]a-cert-file / [s]kip-verify (lab-only)",
-        type=click.Choice(["n", "c", "s"]),
-        default="n",
-        show_default=True,
-    ).strip().lower()
+    tls_choice = (
+        click.prompt(
+            "  TLS mode  [n]one / [c]a-cert-file / [s]kip-verify (lab-only)",
+            type=click.Choice(["n", "c", "s"]),
+            default="n",
+            show_default=True,
+        )
+        .strip()
+        .lower()
+    )
     if tls_choice == "c":
         ca_cert_file = click.prompt(
             "  Path to PEM CA bundle",
         ).strip()
     elif tls_choice == "s":
-        ux.warn(
-            "Setting insecure_skip_verify=true means the gateway will "
-            "trust ANY certificate from this endpoint."
-        )
+        ux.warn("Setting insecure_skip_verify=true means the gateway will trust ANY certificate from this endpoint.")
         insecure_skip_verify = click.confirm("  Confirm insecure skip-verify?", default=False)
 
     # Provider-typed sub-block. Branch on base_provider_type so the
@@ -868,21 +917,31 @@ def _provider_add_interactive() -> dict[str, Any]:
         click.echo()
         ux.subhead("Bedrock backend (blank to skip a field):")
         bedrock_region = click.prompt("  AWS region (e.g. us-east-1)", default="", show_default=False).strip()
-        bedrock_auth_mode = click.prompt(
-            "  Auth mode",
-            type=click.Choice(list(_BEDROCK_AUTH_MODES)),
-            default="api_key",
-            show_default=True,
-        ).strip().lower()
+        bedrock_auth_mode = (
+            click.prompt(
+                "  Auth mode",
+                type=click.Choice(list(_BEDROCK_AUTH_MODES)),
+                default="api_key",
+                show_default=True,
+            )
+            .strip()
+            .lower()
+        )
         if bedrock_auth_mode == "iam_credentials":
             bedrock_access_key_env = click.prompt(
-                "  AWS_ACCESS_KEY_ID env var name", default="", show_default=False,
+                "  AWS_ACCESS_KEY_ID env var name",
+                default="",
+                show_default=False,
             ).strip()
             bedrock_secret_key_env = click.prompt(
-                "  AWS_SECRET_ACCESS_KEY env var name", default="", show_default=False,
+                "  AWS_SECRET_ACCESS_KEY env var name",
+                default="",
+                show_default=False,
             ).strip()
             bedrock_session_token_env = click.prompt(
-                "  AWS_SESSION_TOKEN env var (optional)", default="", show_default=False,
+                "  AWS_SESSION_TOKEN env var (optional)",
+                default="",
+                show_default=False,
             ).strip()
         elif bedrock_auth_mode == "profile":
             bedrock_profile_name = click.prompt(
@@ -891,7 +950,9 @@ def _provider_add_interactive() -> dict[str, Any]:
                 show_default=False,
             ).strip()
         bedrock_inference_profile = click.prompt(
-            "  Inference-profile prefix (e.g. 'us.', blank to skip)", default="", show_default=False,
+            "  Inference-profile prefix (e.g. 'us.', blank to skip)",
+            default="",
+            show_default=False,
         ).strip()
         click.echo()
         ux.subhead("Bedrock model aliases (alias=model-id, blank ends):")
@@ -911,12 +972,16 @@ def _provider_add_interactive() -> dict[str, Any]:
         ux.subhead("Vertex AI backend (blank to skip a field):")
         vertex_project_id = click.prompt("  GCP project id", default="", show_default=False).strip()
         vertex_region = click.prompt("  GCP region/location (e.g. us-central1)", default="", show_default=False).strip()
-        vertex_auth_mode = click.prompt(
-            "  Auth mode",
-            type=click.Choice(list(_VERTEX_AUTH_MODES)),
-            default="service_account",
-            show_default=True,
-        ).strip().lower()
+        vertex_auth_mode = (
+            click.prompt(
+                "  Auth mode",
+                type=click.Choice(list(_VERTEX_AUTH_MODES)),
+                default="service_account",
+                show_default=True,
+            )
+            .strip()
+            .lower()
+        )
         if vertex_auth_mode == "service_account":
             vertex_service_account_json_env = click.prompt(
                 "  Service-account JSON env var",
@@ -927,15 +992,21 @@ def _provider_add_interactive() -> dict[str, Any]:
         click.echo()
         ux.subhead("Azure OpenAI backend (blank to skip a field):")
         azure_endpoint = click.prompt(
-            "  Endpoint (e.g. https://name.openai.azure.com)", default="", show_default=False,
+            "  Endpoint (e.g. https://name.openai.azure.com)",
+            default="",
+            show_default=False,
         ).strip()
         azure_api_version = click.prompt("  API version (e.g. 2024-10-21)", default="", show_default=False).strip()
-        azure_auth_mode = click.prompt(
-            "  Auth mode",
-            type=click.Choice(list(_AZURE_AUTH_MODES)),
-            default="api_key",
-            show_default=True,
-        ).strip().lower()
+        azure_auth_mode = (
+            click.prompt(
+                "  Auth mode",
+                type=click.Choice(list(_AZURE_AUTH_MODES)),
+                default="api_key",
+                show_default=True,
+            )
+            .strip()
+            .lower()
+        )
         click.echo()
         ux.subhead("Azure deployment aliases (model=deployment, blank ends):")
         while True:
@@ -1020,10 +1091,12 @@ def _provider_add_interactive() -> dict[str, Any]:
         if bedrock_inference_profile:
             rows.append(("bedrock.inference_profile", bedrock_inference_profile))
         if bedrock_deployment_aliases:
-            rows.append((
-                "bedrock.deployment_aliases",
-                ", ".join(f"{k}={v}" for k, v in bedrock_deployment_aliases.items()),
-            ))
+            rows.append(
+                (
+                    "bedrock.deployment_aliases",
+                    ", ".join(f"{k}={v}" for k, v in bedrock_deployment_aliases.items()),
+                )
+            )
     elif base_provider_type == "vertex_ai":
         rows.append(("vertex.project_id", vertex_project_id or "(none)"))
         rows.append(("vertex.region", vertex_region or "(none)"))
@@ -1035,10 +1108,12 @@ def _provider_add_interactive() -> dict[str, Any]:
         rows.append(("azure.api_version", azure_api_version or "(none)"))
         rows.append(("azure.auth_mode", azure_auth_mode or "(none)"))
         if azure_deployment_aliases:
-            rows.append((
-                "azure.deployment_aliases",
-                ", ".join(f"{k}={v}" for k, v in azure_deployment_aliases.items()),
-            ))
+            rows.append(
+                (
+                    "azure.deployment_aliases",
+                    ", ".join(f"{k}={v}" for k, v in azure_deployment_aliases.items()),
+                )
+            )
     width = max(len(k) for k, _ in rows)
     for k, v in rows:
         click.echo(f"    {k + ':':<{width + 1}} {v}")
@@ -1107,8 +1182,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     "--profile-id",
     default=None,
     help=(
-        "OpenClaw auth-profiles.json profile ID. "
-        "Optional; leave unset for providers without a profile (e.g. bedrock)."
+        "OpenClaw auth-profiles.json profile ID. Optional; leave unset for providers without a profile (e.g. bedrock)."
     ),
 )
 @click.option(
@@ -1152,10 +1226,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     "--request-path-override",
     "request_path_overrides",
     multiple=True,
-    help=(
-        "Per-route path override formatted ``key=value`` "
-        "(e.g. chat=/openai/v1/chat/completions). Repeatable."
-    ),
+    help=("Per-route path override formatted ``key=value`` (e.g. chat=/openai/v1/chat/completions). Repeatable."),
 )
 @click.option(
     "--ca-cert-file",
@@ -1175,10 +1246,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     "--bedrock-region",
     "bedrock_region",
     default=None,
-    help=(
-        "AWS region for an overlay-managed Bedrock instance "
-        "(requires --base-provider-type bedrock)."
-    ),
+    help=("AWS region for an overlay-managed Bedrock instance (requires --base-provider-type bedrock)."),
 )
 @click.option(
     "--bedrock-auth-mode",
@@ -1209,19 +1277,13 @@ def _provider_add_interactive() -> dict[str, Any]:
     "--bedrock-profile-name",
     "bedrock_profile_name",
     default=None,
-    help=(
-        "AWS shared-config profile name (from ~/.aws/credentials). "
-        "Applied process-wide on the gateway side."
-    ),
+    help=("AWS shared-config profile name (from ~/.aws/credentials). Applied process-wide on the gateway side."),
 )
 @click.option(
     "--bedrock-inference-profile",
     "bedrock_inference_profile",
     default=None,
-    help=(
-        "Inference-profile prefix (e.g. 'us.') prepended to the model id "
-        "before dispatch."
-    ),
+    help=("Inference-profile prefix (e.g. 'us.') prepended to the model id before dispatch."),
 )
 @click.option(
     "--bedrock-deployment",
@@ -1281,8 +1343,7 @@ def _provider_add_interactive() -> dict[str, Any]:
     "azure_deployment_aliases",
     multiple=True,
     help=(
-        "model=deployment mapping for Azure deployments (repeatable). "
-        "Honored by the gateway when resolving a model id."
+        "model=deployment mapping for Azure deployments (repeatable). Honored by the gateway when resolving a model id."
     ),
 )
 @click.option(
@@ -1392,9 +1453,7 @@ def provider_add(
         if azure_auth_mode is None:
             azure_auth_mode = wiz.get("azure_auth_mode") or None
         if not azure_deployment_aliases:
-            azure_deployment_aliases = tuple(
-                f"{k}={v}" for k, v in (wiz.get("azure_deployment_aliases") or {}).items()
-            )
+            azure_deployment_aliases = tuple(f"{k}={v}" for k, v in (wiz.get("azure_deployment_aliases") or {}).items())
 
     clean_name = (name or "").strip()
     if not clean_name:
@@ -1413,9 +1472,7 @@ def provider_add(
 
     clean_base_url = (base_url or "").strip()
     if clean_base_url and "://" not in clean_base_url:
-        raise click.BadParameter(
-            f"--base-url must include scheme (e.g. https://) — got {clean_base_url!r}"
-        )
+        raise click.BadParameter(f"--base-url must include scheme (e.g. https://) — got {clean_base_url!r}")
 
     clean_allowed = sorted({a.lower() for a in allowed_requests if a})
     clean_models = _dedupe_preserve([m.strip() for m in available_models if m and m.strip()])
@@ -1426,9 +1483,7 @@ def provider_add(
 
     tls_block: dict[str, Any] = {}
     if insecure_skip_verify and ca_cert_file:
-        raise click.BadParameter(
-            "--insecure-skip-verify and --ca-cert-file are mutually exclusive."
-        )
+        raise click.BadParameter("--insecure-skip-verify and --ca-cert-file are mutually exclusive.")
     if ca_cert_file:
         tls_block["ca_cert_pem"] = _read_ca_cert_file(ca_cert_file)
         # A CA pin replaces any prior skip-verify on this provider (F-0141).
@@ -1452,12 +1507,8 @@ def provider_add(
     if base_provider_type:
         base_provider_type = base_provider_type.strip().lower()
 
-    bedrock_alias_map = _parse_alias_pairs(
-        tuple(bedrock_deployment_aliases), "--bedrock-deployment"
-    )
-    azure_alias_map = _parse_alias_pairs(
-        tuple(azure_deployment_aliases), "--azure-deployment-alias"
-    )
+    bedrock_alias_map = _parse_alias_pairs(tuple(bedrock_deployment_aliases), "--bedrock-deployment")
+    azure_alias_map = _parse_alias_pairs(tuple(azure_deployment_aliases), "--azure-deployment-alias")
 
     bedrock_block = _build_bedrock_block(
         region=bedrock_region,
@@ -1522,9 +1573,7 @@ def provider_add(
         if clean_allowed:
             entry["allowed_requests"] = clean_allowed
         if clean_models:
-            existing_models = [
-                str(m) for m in entry.get("available_models") or []
-            ]
+            existing_models = [str(m) for m in entry.get("available_models") or []]
             entry["available_models"] = _dedupe_preserve(existing_models + clean_models)
         if clean_path_overrides:
             existing_overrides: dict[str, str] = {
@@ -1559,9 +1608,7 @@ def provider_add(
         _merge_subblock("azure", azure_block)
 
         if clean_ports:
-            overlay.ollama_ports = sorted(
-                {*overlay.ollama_ports, *clean_ports}
-            )
+            overlay.ollama_ports = sorted({*overlay.ollama_ports, *clean_ports})
 
         _write_overlay(path, overlay)
 
@@ -1636,33 +1683,9 @@ def provider_add(
             click.echo(f"  {ux.dim('azure:')} {', '.join(bits)}")
 
     if no_reload:
-        ux.subhead("sidecar reload skipped (--no-reload).")
+        ux.subhead("disk-only operation (--no-reload): running sidecar registry was not changed.")
         return
-    status = _reload_sidecar(app)
-    if status == _RELOAD_OK:
-        ux.ok("sidecar reloaded provider registry.")
-    elif status == _RELOAD_UNAUTHORIZED:
-        ux.err(
-            "sidecar rejected reload: unauthorized. "
-            "Set OPENCLAW_GATEWAY_TOKEN (or guardrail.token in config.yaml) "
-            "to a value the gateway accepts.",
-        )
-    elif status == _RELOAD_FORBIDDEN:
-        ux.err(
-            "sidecar rejected reload: forbidden. "
-            "The token was accepted but the sidecar declined the request; "
-            "check the gateway's access logs.",
-        )
-    elif status == _RELOAD_SERVER_ERROR:
-        ux.warn(
-            "sidecar returned an error on reload — the overlay is on "
-            "disk but not yet live. Check the gateway log.",
-        )
-    else:
-        ux.warn(
-            "sidecar not reachable on guardrail port — restart the "
-            "gateway for the overlay to take effect.",
-        )
+    _report_reload_outcome(app, f"provider {clean_name!r}")
 
 
 @provider.command("remove")
@@ -1686,11 +1709,7 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
         overlay = _read_overlay(path)
 
         before = len(overlay.providers)
-        overlay.providers = [
-            p
-            for p in overlay.providers
-            if str(p.get("name", "")).lower() != name.strip().lower()
-        ]
+        overlay.providers = [p for p in overlay.providers if str(p.get("name", "")).lower() != name.strip().lower()]
         if len(overlay.providers) == before:
             ux.warn(f"no overlay provider named {name!r}")
             sys.exit(1)
@@ -1699,28 +1718,17 @@ def provider_remove(app: AppContext, name: str, no_reload: bool) -> None:
     ux.ok(f"removed overlay provider {name!r} from {path}")
 
     if no_reload:
+        ux.subhead("disk-only operation (--no-reload): running sidecar registry was not changed.")
         return
-    _reload_sidecar(app)
+    _report_reload_outcome(app, f"removal of provider {name!r}")
 
 
 @provider.command("list")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @pass_ctx
-def provider_list(app: AppContext) -> None:
-    """Print the overlay contents. Read-only; never touches the
-    sidecar. For the merged view (built-ins + overlay) use
-    :command:`defenseclaw setup provider show`.
-    """
-    path = _overlay_path(app)
-    overlay = _read_overlay(path)
-    if not overlay.providers and not overlay.ollama_ports:
-        click.echo(f"{ux.dim('(no overlay entries)')} — {path}")
-        return
-    click.echo(f"{ux.bold('overlay:')} {path}")
-    for p in overlay.providers:
-        click.echo(f"  - {p.get('name')}: {', '.join(p.get('domains') or [])}")
-    if overlay.ollama_ports:
-        click.echo(f"  ollama_ports: {overlay.ollama_ports}")
-    _echo_provider_enforcement_legend(app)
+def provider_list(app: AppContext, as_json: bool) -> None:
+    """Print the live merged registry, with a labeled disk fallback."""
+    _display_provider_registry(app, as_json)
 
 
 def _echo_provider_enforcement_legend(app: AppContext) -> None:
@@ -1755,35 +1763,14 @@ def _echo_provider_enforcement_legend(app: AppContext) -> None:
 
 
 @provider.command("show")
+@click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")
 @pass_ctx
-def provider_show(app: AppContext) -> None:
+def provider_show(app: AppContext, as_json: bool) -> None:
     """Print the merged registry as reported by the live sidecar
-    (``GET /v1/config/providers``). Falls back to parsing the overlay
-    when the sidecar isn't running.
+    (``GET /v1/config/providers``). Any disk fallback is explicitly
+    labeled because it may not match the running process.
     """
-    guardrail = getattr(app.cfg, "guardrail", None) if app.cfg else None
-    port = int(getattr(guardrail, "port", 0) or 0)
-    if port > 0:
-        try:
-            with urllib.request.urlopen(  # noqa: S310
-                f"http://127.0.0.1:{port}/v1/config/providers",
-                timeout=2,
-            ) as resp:
-                body = resp.read()
-            data = _json.loads(body)
-            click.echo(_json.dumps(data, indent=2))
-            return
-        except Exception:
-            # Fall through to overlay-only view below.
-            pass
-
-    overlay = _read_overlay(_overlay_path(app))
-    click.echo(
-        _json.dumps(
-            {"providers": overlay.providers, "ollama_ports": overlay.ollama_ports},
-            indent=2,
-        )
-    )
+    _display_provider_registry(app, as_json)
 
 
 # ---------------------------------------------------------------------------

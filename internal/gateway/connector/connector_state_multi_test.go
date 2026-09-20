@@ -134,3 +134,145 @@ func TestClearActiveConnector_RemovesSet(t *testing.T) {
 		t.Errorf("after clear LoadActiveConnectors = %v, want nil", got)
 	}
 }
+
+func TestReadActiveConnectorStateDistinguishesEmptyWithoutSuppressingGuards(t *testing.T) {
+	dir := t.TempDir()
+	if names, exists, err := ReadActiveConnectorState(dir); err != nil || exists || names != nil {
+		t.Fatalf("absent state = (%v, %v, %v), want (nil, false, nil)", names, exists, err)
+	}
+	if err := SaveActiveConnectors(dir, nil); err != nil {
+		t.Fatalf("SaveActiveConnectors(empty): %v", err)
+	}
+	names, exists, err := ReadActiveConnectorState(dir)
+	if err != nil || !exists || names != nil {
+		t.Fatalf("explicit empty state = (%v, %v, %v), want (nil, true, nil)", names, exists, err)
+	}
+	if ConnectorExplicitlyInactive(dir, "geminicli") {
+		t.Fatal("empty active set globally suppressed an unrelated connector")
+	}
+}
+
+func TestMarkConnectorInactiveIsScopedAndRestorable(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatalf("SaveActiveConnectors: %v", err)
+	}
+	restore, err := MarkConnectorInactive(dir, "cursor")
+	if err != nil {
+		t.Fatalf("MarkConnectorInactive: %v", err)
+	}
+	if ConnectorExplicitlyInactive(dir, "codex") {
+		t.Fatal("active codex reported inactive")
+	}
+	if !ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("cursor did not receive an inactive tombstone")
+	}
+	if ConnectorExplicitlyInactive(dir, "geminicli") {
+		t.Fatal("unrelated geminicli was suppressed")
+	}
+	if got := LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex"}) {
+		t.Fatalf("active connectors = %v, want [codex]", got)
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if got := LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("restored active connectors = %v, want [codex cursor]", got)
+	}
+	if ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("restored cursor remained inactive")
+	}
+}
+
+func TestMarkConnectorInactiveRecoversCorruptStateAndRestoresExactBytes(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, activeConnectorFile)
+	original := []byte("{not-json\n")
+	if err := os.WriteFile(path, original, 0o600); err != nil {
+		t.Fatalf("write corrupt state: %v", err)
+	}
+	restore, err := MarkConnectorInactive(dir, "geminicli")
+	if err != nil {
+		t.Fatalf("MarkConnectorInactive: %v", err)
+	}
+	if !ConnectorExplicitlyInactive(dir, "geminicli") {
+		t.Fatal("corrupt state was not replaced by scoped tombstone")
+	}
+	if ConnectorExplicitlyInactive(dir, "codex") {
+		t.Fatal("corrupt-state recovery suppressed unrelated codex")
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read restored state: %v", err)
+	}
+	if !reflect.DeepEqual(got, original) {
+		t.Fatalf("restored bytes = %q, want %q", got, original)
+	}
+}
+
+func TestMarkConnectorInactiveMissingStateRestoreRemovesMarker(t *testing.T) {
+	dir := t.TempDir()
+	restore, err := MarkConnectorInactive(dir, "cursor")
+	if err != nil {
+		t.Fatalf("MarkConnectorInactive: %v", err)
+	}
+	if !ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("cursor did not receive an inactive tombstone")
+	}
+	if ConnectorExplicitlyInactive(dir, "codex") {
+		t.Fatal("missing-state teardown suppressed unrelated codex")
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	if _, exists, err := ReadActiveConnectorState(dir); err != nil || exists {
+		t.Fatalf("state after restore = exists %v, err %v; want absent", exists, err)
+	}
+}
+
+func TestSaveActiveConnectorsPreservesUnrelatedInactiveTombstone(t *testing.T) {
+	dir := t.TempDir()
+	if err := SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatalf("SaveActiveConnectors: %v", err)
+	}
+	restore, err := MarkConnectorInactive(dir, "cursor")
+	if err != nil {
+		t.Fatalf("MarkConnectorInactive: %v", err)
+	}
+	// Model a concurrent sidecar reconcile while the CLI teardown process is
+	// removing Cursor's agent config. The unrelated active-set save must not
+	// erase Cursor's ownership-revocation tombstone.
+	if err := SaveActiveConnectors(dir, []string{"codex"}); err != nil {
+		t.Fatalf("concurrent SaveActiveConnectors: %v", err)
+	}
+	if !ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("active-set save erased cursor inactive tombstone")
+	}
+	if ConnectorExplicitlyInactive(dir, "codex") {
+		t.Fatal("active-set save suppressed active codex")
+	}
+	if err := restore(); err != nil {
+		t.Fatalf("restore after concurrent save: %v", err)
+	}
+	if got := LoadActiveConnectors(dir); !reflect.DeepEqual(got, []string{"codex", "cursor"}) {
+		t.Fatalf("restored active connectors = %v, want [codex cursor]", got)
+	}
+	if ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("restore left cursor inactive")
+	}
+
+	// An authoritative setup that activates Cursor again may explicitly clear
+	// its tombstone without affecting other connector state.
+	if _, err := MarkConnectorInactive(dir, "cursor"); err != nil {
+		t.Fatalf("second MarkConnectorInactive: %v", err)
+	}
+	if err := SaveActiveConnectors(dir, []string{"codex", "cursor"}); err != nil {
+		t.Fatalf("reactivate cursor: %v", err)
+	}
+	if ConnectorExplicitlyInactive(dir, "cursor") {
+		t.Fatal("authoritative reactivation did not clear cursor tombstone")
+	}
+}

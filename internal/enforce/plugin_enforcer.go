@@ -34,6 +34,17 @@ func NewPluginEnforcer(quarantineDir string, shell *sandbox.OpenShell) *PluginEn
 }
 
 func (e *PluginEnforcer) Quarantine(pluginPath string) (string, error) {
+	// Refuse bundled-skill containers and descendants before any stat
+	// touches the source tree — a vendor-supplied .system container
+	// must never be moved to the quarantine store even in the
+	// crash-recovery reconciler. The check is on the caller-supplied
+	// path (not a resolved one) because plugin_enforcer operates on
+	// paths the caller has already validated; the sibling
+	// AssetQuarantinePlan path does its own containment check and
+	// re-verifies here as defence in depth.
+	if IsBundledSkillPath(pluginPath) {
+		return "", ErrBundledSkill
+	}
 	info, err := os.Stat(pluginPath)
 	if err != nil {
 		return "", fmt.Errorf("enforce: plugin path %q: %w", pluginPath, err)

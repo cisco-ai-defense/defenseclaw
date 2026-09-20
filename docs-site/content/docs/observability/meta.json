@@ -2,6 +2,7 @@
   "title": "Observability",
   "pages": [
     "index",
+    "end-user-identity",
     "local-observability",
     "grafana-dashboards",
     "agent360",

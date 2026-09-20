@@ -30,16 +30,32 @@ and safe to call from background contexts.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import io
 import json
 import os
 import shutil
+import stat
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from defenseclaw.connector_paths import omnigent_config_path
+from defenseclaw import platform_support
+from defenseclaw.connector_paths import (
+    amp_policy_plugin_path,
+    connector_config_files,
+    connector_home,
+    copilot_home,
+    devin_hook_config_path,
+    hermes_config_path,
+    omnigent_config_path,
+)
+from defenseclaw.file_permissions import (
+    open_regular_file_no_follow,
+    root_owned_private_regular_file,
+    trusted_runtime_owner,
+)
 from defenseclaw.inventory import agent_discovery
 
 if TYPE_CHECKING:
@@ -103,6 +119,9 @@ class FirstRunOptions:
     """Structured input for the guided first-run backend."""
 
     connector: str = "codex"
+    # Complete ordered connector selection for this first-run transaction.
+    # ``None`` preserves single-connector callers by using ``connector``.
+    connector_settings: list[dict] | None = None
     profile: str = "observe"  # observe | action
     scanner_mode: str = "local"  # local | remote | both
     with_judge: bool = False
@@ -121,17 +140,14 @@ class FirstRunOptions:
     cisco_endpoint: str = ""
     cisco_api_key: str = ""
     cisco_api_key_env: str = "CISCO_AI_DEFENSE_API_KEY"
-    # hook_fail_mode controls what generated hooks
-    # (codex-hook, claude-code-hook, inspect-*) do when the
-    # gateway returns a *response-layer* failure (4xx, malformed
-    # JSON, missing action). Empty string means "leave the
+    # hook_fail_mode controls what generated hooks (codex-hook,
+    # claude-code-hook, inspect-*) do when delivery, authentication,
+    # or a gateway response fails. Empty string means "leave the
     # current cfg.guardrail.hook_fail_mode untouched" so callers
     # who don't care don't accidentally clobber an operator's
-    # earlier choice. Transport-layer failures (gateway
-    # unreachable / 5xx) ALWAYS allow unless
-    # DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this
-    # value — see _normalize_hook_fail_mode for the canonical
-    # rule.
+    # earlier choice. Transport failures and invalid responses
+    # follow the same effective value. DEFENSECLAW_STRICT_AVAILABILITY=1
+    # additionally forces transport and missing-token failures closed.
     hook_fail_mode: str = ""
     # human_approval is the operator's HITL (Human-In-the-Loop)
     # toggle. ``None`` means "leave whatever was loaded alone" —
@@ -155,6 +171,12 @@ class FirstRunOptions:
     # falling back to a stricter posture is safer than silently
     # promoting a typo into a permissive setting.
     hilt_min_severity: str = ""
+    # A pre-init trusted-path bootstrap may have already created config.yaml
+    # solely to admit a staged agent runtime. ``init`` snapshots those exact,
+    # validated prefixes and passes them here so every first-run save carries
+    # the trust decision into the final v8 transaction instead of treating it
+    # as transient discovery input. None keeps non-init callers unchanged.
+    trusted_binary_prefixes: tuple[str, ...] | None = None
 
 
 @dataclass
@@ -170,6 +192,14 @@ class FirstRunReport:
     readiness: list[StepResult] = field(default_factory=list)
     next_commands: list[str] = field(default_factory=list)
     connector_mode_warnings: list[dict] = field(default_factory=list)
+    # Concrete transaction-local selection result. This is deliberately
+    # omitted from ``to_dict``; mutation helpers revalidate its records against
+    # the exact protected receipt generation before using it.
+    _protected_selection: object | None = field(
+        default=None,
+        repr=False,
+        compare=False,
+    )
 
     def to_dict(self) -> dict:
         data = {
@@ -187,12 +217,311 @@ class FirstRunReport:
         return data
 
 
+class FreshMigrationStateError(OSError):
+    """A fresh v8 config was published but its migration cursor was not."""
+
+
+_FRESH_MIGRATION_PENDING_FILE = ".migration_state.fresh.pending.json"
+_FRESH_MIGRATION_PENDING_SCHEMA = 1
+_MAX_FRESH_MIGRATION_PENDING_BYTES = 16 * 1024
+_MAX_FRESH_CONFIG_BYTES = 4 * 1024 * 1024
+
+
+def fresh_migration_pending_path(data_dir: str) -> str:
+    """Return the exact-config retry marker used by init and signed recovery."""
+    normalized = os.path.abspath(os.path.expanduser(data_dir))
+    return os.path.join(normalized, _FRESH_MIGRATION_PENDING_FILE)
+
+
+def _fresh_migration_pending_path(data_dir: str) -> str:
+    """Compatibility alias for the private name introduced by PR #610."""
+    return fresh_migration_pending_path(data_dir)
+
+
+def _read_bounded_regular_file(path: str, maximum: int, *, private: bool) -> bytes:
+    try:
+        descriptor = open_regular_file_no_follow(path)
+    except OSError:
+        if private and root_owned_private_regular_file(path):
+            raise OSError(
+                "fresh migration-state recovery evidence is root-owned from a sudo-started gateway"
+            ) from None
+        raise
+    try:
+        info = os.fstat(descriptor)
+        # CPython 3.12 reports st_nlink as zero on Windows; the secure opener
+        # already rejects reparse points and verifies the opened file identity.
+        if (
+            (os.name != "nt" and info.st_nlink != 1)
+            or not 0 < info.st_size <= maximum
+            or (
+                private
+                and os.name != "nt"
+                and (
+                    not trusted_runtime_owner(info.st_uid)
+                    or stat.S_IMODE(info.st_mode) & 0o077
+                )
+            )
+        ):
+            raise OSError("fresh migration-state recovery evidence is not a bounded private file")
+        raw = b""
+        while len(raw) <= info.st_size:
+            chunk = os.read(descriptor, info.st_size + 1 - len(raw))
+            if not chunk:
+                break
+            raw += chunk
+        if len(raw) != info.st_size:
+            raise OSError("fresh migration-state recovery evidence changed while reading")
+        return raw
+    finally:
+        os.close(descriptor)
+
+
+def _fresh_config_identity(cfg: Config) -> tuple[str, str]:
+    from defenseclaw.config import config_path_for_data_dir
+
+    path = os.path.abspath(os.fspath(config_path_for_data_dir(cfg.data_dir)))
+    raw = _read_bounded_regular_file(path, _MAX_FRESH_CONFIG_BYTES, private=False)
+    return path, hashlib.sha256(raw).hexdigest()
+
+
+def _fresh_migration_state():
+    from defenseclaw import __version__, migration_state
+    from defenseclaw.migrations import MIGRATIONS
+
+    return migration_state.bootstrap(
+        None,
+        from_version=__version__,
+        package_version=__version__,
+        registry_versions=[version for version, _description, _migration in MIGRATIONS],
+    )
+
+
+def _fresh_migration_pending_payload(cfg: Config) -> dict[str, object]:
+    from defenseclaw import __version__
+
+    config_path, config_sha256 = _fresh_config_identity(cfg)
+    return {
+        "schema": _FRESH_MIGRATION_PENDING_SCHEMA,
+        "package_version": __version__,
+        "config_path": config_path,
+        "config_sha256": config_sha256,
+    }
+
+
+def _load_fresh_migration_pending(cfg: Config) -> dict[str, object] | None:
+    """Load exact retry authority without trusting paths stored inside it."""
+    marker_path = fresh_migration_pending_path(cfg.data_dir)
+    if not os.path.lexists(marker_path):
+        return None
+
+    from defenseclaw import __version__
+
+    try:
+        payload = json.loads(
+            _read_bounded_regular_file(
+                marker_path,
+                _MAX_FRESH_MIGRATION_PENDING_BYTES,
+                private=True,
+            )
+        )
+    except (json.JSONDecodeError, UnicodeError, OSError, TypeError) as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence is unsafe or unreadable; "
+            "leave it in place and run the latest signed upgrade resolver"
+        ) from exc
+
+    expected_keys = {"schema", "package_version", "config_path", "config_sha256"}
+    if not isinstance(payload, dict) or set(payload) != expected_keys:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence has an unknown shape; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    if payload.get("package_version") != __version__:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery is pending from DefenseClaw "
+            f"{payload.get('package_version', 'unknown')}; run the latest signed upgrade resolver "
+            "instead of inferring migration state with a different version"
+        )
+
+    try:
+        expected = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery config is unavailable; "
+            "leave the marker in place and run the latest signed upgrade resolver"
+        ) from exc
+    if payload != expected or getattr(cfg, "_source_config_version", None) != 8:
+        raise FreshMigrationStateError(
+            "fresh migration-state recovery evidence does not match the current config; "
+            "leave it in place and run the latest signed upgrade resolver"
+        )
+    return payload
+
+
+def _record_fresh_migration_retry(cfg: Config) -> str:
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import atomic_write_text_secure, make_private_directory
+
+    try:
+        payload = _fresh_migration_pending_payload(cfg)
+    except OSError as exc:
+        raise FreshMigrationStateError("fresh migration-state recovery config is unavailable") from exc
+    marker_path = _fresh_migration_pending_path(cfg.data_dir)
+
+    make_private_directory(cfg.data_dir)
+    with locked_file_update(marker_path):
+        if os.path.lexists(marker_path):
+            raise OSError("fresh migration-state recovery evidence already exists")
+
+        def write_marker(stream) -> None:
+            json.dump(payload, stream, indent=2, sort_keys=True)
+            stream.write("\n")
+
+        atomic_write_text_secure(
+            marker_path,
+            write_marker,
+            prefix=".migration_state.fresh.pending.",
+        )
+        persisted = _load_fresh_migration_pending(cfg)
+        if persisted is None:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence disappeared during publication")
+        if persisted != payload:
+            raise FreshMigrationStateError("fresh migration-state recovery evidence changed during publication")
+    return marker_path
+
+
+def repair_pending_first_run_config(cfg: Config) -> bool:
+    """Retry cursor publication for an exact config saved by a fresh run.
+
+    The pending record is written only after the fresh v8 config is durably
+    saved and binds the retry to those exact config bytes, package version,
+    and path. A later init can therefore repair the cursor before mutating the
+    config again without treating an unrelated cursorless v8 installation as
+    fresh.
+    """
+    marker_path = _fresh_migration_pending_path(cfg.data_dir)
+    if not os.path.lexists(marker_path):
+        return False
+
+    from defenseclaw import migration_state
+    from defenseclaw.file_lock import locked_file_update
+    from defenseclaw.file_permissions import delete_file_durable
+
+    try:
+        with locked_file_update(marker_path):
+            if _load_fresh_migration_pending(cfg) is None:
+                raise FreshMigrationStateError(
+                    "fresh migration-state recovery evidence disappeared before cursor publication; "
+                    "no migration cursor was inferred"
+                )
+            state = _fresh_migration_state()
+            try:
+                migration_state.save_if_absent(cfg.data_dir, state)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "could not publish the pending fresh migration cursor; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            try:
+                observed = migration_state.load(cfg.data_dir)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor was published but could not be read back; "
+                    "the retry marker was retained for signed recovery"
+                ) from exc
+            if observed != state:
+                raise FreshMigrationStateError(
+                    "an existing migration cursor does not match the pending fresh installation; "
+                    "it was preserved and the retry marker remains for signed recovery"
+                )
+            try:
+                delete_file_durable(marker_path)
+            except OSError as exc:
+                raise FreshMigrationStateError(
+                    "the pending fresh migration cursor is complete, but its retry marker could not be cleared; "
+                    "rerun init with this version to finish cleanup"
+                ) from exc
+    except FreshMigrationStateError:
+        raise
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "could not complete the pending fresh migration cursor; the retry marker was retained for signed recovery"
+        ) from exc
+    return True
+
+
+def finalize_first_run_config(cfg: Config, *, was_config_absent: bool) -> bool:
+    """Publish the finalized config and, for a fresh v8 install, its cursor.
+
+    ``was_config_absent`` must be captured before any first-run mutation.
+    Guided setup can save the config several times while configuring the
+    connector, and :func:`bootstrap_env` runs after the first publication, so
+    checking for the config file here would misclassify every successful fresh
+    install as an existing one.
+
+    Cursor publication is deliberately ordered after ``cfg.save()``.  A failed
+    config write therefore cannot create or advance migration state.  Existing
+    cursor paths are preserved without parsing so corrupt, unknown-schema, and
+    future-schema recovery evidence remains untouched.
+
+    Returns ``True`` when a fresh cursor was created and ``False`` for an
+    existing config or cursor.
+    """
+    cfg.save()
+    if not was_config_absent:
+        return False
+    if getattr(cfg, "_source_config_version", None) != 8:
+        return False
+
+    from defenseclaw import migration_state
+    from defenseclaw.file_permissions import delete_file_durable
+
+    try:
+        marker_path = _record_fresh_migration_retry(cfg)
+    except (FreshMigrationStateError, OSError) as exc:
+        raise FreshMigrationStateError(
+            "config was saved, but retryable fresh migration state could not be registered; "
+            "run the latest signed upgrade resolver before continuing"
+        ) from exc
+
+    state = _fresh_migration_state()
+    try:
+        created = migration_state.save_if_absent(cfg.data_dir, state)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "could not publish the fresh-install migration cursor; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+
+    try:
+        observed = migration_state.load(cfg.data_dir)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh-install migration cursor was published but could not be read back; "
+            "the retry marker was retained, so rerunning init with this version is safe"
+        ) from exc
+    if observed != state:
+        raise FreshMigrationStateError(
+            "an existing migration cursor does not match the pending fresh installation; "
+            "it was preserved and the retry marker remains for signed recovery"
+        )
+    try:
+        delete_file_durable(marker_path)
+    except OSError as exc:
+        raise FreshMigrationStateError(
+            "the fresh migration cursor is complete, but its retry marker could not be cleared; "
+            "rerun init with this version to finish cleanup"
+        ) from exc
+    return created
+
+
 def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """Initialize ``~/.defenseclaw/`` and related state.
 
     Safe to call repeatedly. Each step is idempotent:
 
-    * directories — ``os.makedirs(exist_ok=True)``
+    * directories — private owner/SYSTEM-only creation (idempotent)
     * policy seeding — skipped when destination already exists
     * audit DB — ``Store.init()`` runs ``CREATE TABLE IF NOT EXISTS``
     * gateway token — re-read from ``openclaw.json`` on every call
@@ -203,6 +532,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     """
     from defenseclaw.config import config_path
     from defenseclaw.db import Store
+    from defenseclaw.file_permissions import make_private_directory
 
     report = BootstrapReport(
         data_dir=cfg.data_dir,
@@ -218,7 +548,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
         if not d:
             continue
         try:
-            os.makedirs(d, exist_ok=True)
+            make_private_directory(d)
             report.dirs_created.append(d)
         except OSError as exc:
             report.errors.append(f"mkdir {d}: {exc}")
@@ -235,7 +565,7 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
             continue
         if os.path.realpath(d).startswith(data_real + os.sep):
             try:
-                os.makedirs(d, exist_ok=True)
+                make_private_directory(d)
                 report.dirs_created.append(d)
             except OSError as exc:
                 report.errors.append(f"mkdir {d}: {exc}")
@@ -275,6 +605,42 @@ def bootstrap_env(cfg: Config, logger: Logger | None = None) -> BootstrapReport:
     return report
 
 
+def _restore_first_run_selection_transaction(app, setup_snapshot) -> str:
+    """Restore the pre-selection desired-state and authority snapshot."""
+
+    if setup_snapshot is None:
+        return ""
+    from defenseclaw.commands.cmd_setup import _restore_setup_config_snapshot
+
+    try:
+        _restore_setup_config_snapshot(app, setup_snapshot)
+    except Exception as exc:  # noqa: BLE001 — caller must surface incomplete custody restoration.
+        return str(exc)
+    return ""
+
+
+def _restore_first_run_selection_authority(cfg, setup_snapshot) -> str:
+    """Restore only receipt/lock files when selection itself is refused."""
+
+    if setup_snapshot is None:
+        return ""
+    from defenseclaw.commands.cmd_setup import (
+        _restore_setup_agent_selection_snapshot,
+        _restore_setup_hook_contract_lock_snapshot,
+    )
+
+    errors: list[str] = []
+    for label, restore in (
+        ("agent_selection.json", _restore_setup_agent_selection_snapshot),
+        ("hook_contract_lock.json", _restore_setup_hook_contract_lock_snapshot),
+    ):
+        try:
+            restore(cfg, setup_snapshot)
+        except Exception as exc:  # noqa: BLE001 — continue restoring independent authority files.
+            errors.append(f"{label}: {exc}")
+    return "; ".join(errors)
+
+
 def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     """Run the canonical first-run setup flow without rendering UI.
 
@@ -290,26 +656,247 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
     from defenseclaw.logger import Logger
 
     setup: list[StepResult] = []
+    retain_pending_migration_transaction = False
+    rollback_first_run_transaction = False
     connector = _normalize_connector(options.connector)
     profile = _normalize_profile(options.profile, connector)
     scanner_mode = _normalize_scanner_mode(options.scanner_mode)
     connector_mode_warnings: list[dict] = []
 
-    new_config = not os.path.exists(cfg_mod.config_path())
+    # ``lexists`` keeps a broken symlink or other pre-existing directory entry
+    # on the existing-install path.  Fresh bootstrap must never reinterpret an
+    # operator-controlled config path merely because its target is unavailable.
+    was_config_absent = not os.path.lexists(cfg_mod.config_path())
+    new_config = was_config_absent
+    if not new_config:
+        try:
+            cfg_mod.require_v8_config()
+        except cfg_mod.ConfigVersionError:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    "configuration schema v8 is required",
+                    "defenseclaw upgrade",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw upgrade"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
     try:
         cfg = cfg_mod.load()
-    except Exception:
+    except Exception as exc:
+        if connector == "none" and not was_config_absent:
+            cfg = cfg_mod.default_config()
+            setup.append(
+                StepResult(
+                    "Config",
+                    "fail",
+                    f"existing configuration could not be loaded and was preserved: {exc}",
+                    "defenseclaw config validate",
+                )
+            )
+            return FirstRunReport(
+                status="needs_attention",
+                config_file=str(cfg_mod.config_path()),
+                data_dir=cfg.data_dir,
+                connector=connector,
+                profile=profile,
+                setup=setup,
+                next_commands=["defenseclaw config validate"],
+                connector_mode_warnings=connector_mode_warnings,
+            )
         cfg = cfg_mod.default_config()
+        cfg_mod.prepare_fresh_v8_config(cfg)
         new_config = True
+    else:
+        # Loading an absent file returns the normal default dataclass rather
+        # than raising. Mark that never-persisted object as a fresh v8 source
+        # before the first mutation; ordinary Config.save deliberately rejects
+        # unversioned/legacy objects after the hard cutover.
+        if new_config and getattr(cfg, "_source_config_version", 0) == 0:
+            cfg_mod.prepare_fresh_v8_config(cfg)
 
-    cfg.environment = cfg_mod.detect_environment()
-    if profile == "action":
-        mode_warning = _first_run_action_mode_warning(connector, getattr(cfg, "data_dir", ""))
-        if mode_warning:
-            connector_mode_warnings.append(mode_warning)
-            profile = "observe"
+    transaction_app = AppContext()
+    transaction_app.cfg = cfg
+    from defenseclaw.commands.cmd_setup import _capture_setup_config_snapshot
 
-    _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+    preserved_trusted_prefixes: tuple[str, ...] | None = None
+    if options.trusted_binary_prefixes is not None:
+        preserved: list[str] = []
+        seen: set[str] = set()
+        # See _validated_preinit_trusted_binary_prefixes in cmd_init.py:
+        # quarantine entries that fail post-`--force` re-validation with a
+        # warning instead of aborting first-run bootstrap. The pruned list
+        # is written back to cfg.ai_discovery.trusted_binary_prefixes below
+        # and gets persisted by finalize_first_run_config — the offending
+        # entries are dropped from the config on this run, not merely
+        # skipped. The warning tells the operator WHICH entries were
+        # dropped and why, so the same `--force` add doesn't get re-issued
+        # blindly; there is no remove-step required after the fact because
+        # the entry is already gone by the time the warning renders.
+        quarantined_bootstrap: list[tuple[str, str]] = []
+        for raw in options.trusted_binary_prefixes:
+            resolved, error = agent_discovery.validate_trusted_prefix(raw)
+            if not resolved or error:
+                quarantined_bootstrap.append((raw, error or "invalid path"))
+                continue
+            key = agent_discovery._path_key(resolved)
+            if key in seen:
+                continue
+            seen.add(key)
+            preserved.append(resolved)
+        # Emit via the standard warnings module so long-form test suites
+        # can assert with pytest's recwarn / pytest.warns. (caplog only
+        # captures logging records — not warnings.warn output — so the
+        # earlier justification comment overstated its scope.) The
+        # bootstrap runs before click's output stream is bound; stderr
+        # would work but warnings.warn threads through pytest cleanly.
+        import warnings as _warnings
+        for entry, reason in quarantined_bootstrap:
+            _warnings.warn(
+                f"dropped pre-init trusted binary prefix {entry} "
+                f"({reason}) from managed config; the persisted list "
+                f"has been pruned on this run so no follow-up remove is "
+                f"required",
+                stacklevel=2,
+            )
+        preserved_trusted_prefixes = tuple(preserved)
+        cfg.ai_discovery.trusted_binary_prefixes = list(preserved_trusted_prefixes)
+
+    try:
+        setup_snapshot = _capture_setup_config_snapshot(cfg)
+    except OSError as exc:
+        setup.append(
+            StepResult(
+                "First-run transaction",
+                "fail",
+                f"could not establish the protected first-run rollback point: {exc}",
+                "defenseclaw init",
+            )
+        )
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+    selection_targets: tuple[str, ...] | None = None
+    if platform_support.host_os() == "windows":
+        from defenseclaw.agent_selection import setup_agent_selection_connectors
+
+        selection_targets = setup_agent_selection_connectors(_first_run_connector_roster(options, connector))
+
+    protected_selection, selection_error = _preflight_first_run_agent_selections(
+        cfg.data_dir,
+        options,
+        connector,
+        setup_snapshot,
+        selected_connectors=selection_targets,
+    )
+    if selection_error:
+        setup.append(StepResult("Agent Selection", "fail", selection_error, "defenseclaw init"))
+        rollback_error = _restore_first_run_selection_authority(cfg, setup_snapshot)
+        if rollback_error:
+            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+
+    try:
+        repaired_migration_state = repair_pending_first_run_config(cfg)
+    except FreshMigrationStateError as exc:
+        setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+        return FirstRunReport(
+            status="needs_attention",
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            next_commands=["defenseclaw init"],
+            connector_mode_warnings=connector_mode_warnings,
+        )
+    except BaseException as exc:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            raise OSError(
+                f"first-run migration repair failed ({exc}); rollback was incomplete: {rollback_error}"
+            ) from exc
+        raise
+    if repaired_migration_state:
+        setup.append(StepResult("Migration State", "pass", "recovered pending fresh cursor"))
+
+    try:
+        if protected_selection is not None:
+            from defenseclaw.commands.cmd_setup import _revalidate_setup_agent_selections
+
+            try:
+                protected_selection = _revalidate_setup_agent_selections(
+                    cfg.data_dir,
+                    protected_selection,
+                    transaction_snapshot=setup_snapshot,
+                )
+            except OSError:
+                protected_selection, selection_error = _preflight_first_run_agent_selections(
+                    cfg.data_dir,
+                    options,
+                    connector,
+                    setup_snapshot,
+                    selected_connectors=selection_targets,
+                )
+                if selection_error:
+                    raise OSError(selection_error)
+
+        cfg.environment = cfg_mod.detect_environment()
+        if connector != "none" and profile == "action":
+            exact_windows_opencode = (
+                connector == "opencode"
+                and platform_support.host_os() == "windows"
+                and protected_selection is not None
+                and protected_selection.record_for(connector) is not None
+            )
+            mode_warning = None
+            if not exact_windows_opencode:
+                mode_warning = _first_run_action_mode_warning(
+                    connector,
+                    getattr(cfg, "data_dir", ""),
+                )
+            if mode_warning:
+                connector_mode_warnings.append(mode_warning)
+                profile = "observe"
+
+        if connector != "none":
+            _apply_first_run_choices(cfg, options, connector, profile, scanner_mode)
+    except BaseException as exc:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            raise OSError(
+                f"first-run choice application failed ({exc}); rollback was incomplete: {rollback_error}"
+            ) from exc
+        raise
 
     try:
         cfg.save()
@@ -322,83 +909,177 @@ def run_first_run(options: FirstRunOptions) -> FirstRunReport:
         )
     except OSError as exc:
         setup.append(StepResult("Config", "fail", str(exc), "defenseclaw config validate"))
-
-    store = Store(cfg.audit_db)
-    try:
-        store.init()
-    except Exception as exc:  # broad: sqlite/file errors need to surface
-        setup.append(StepResult("Audit DB", "fail", str(exc), "defenseclaw doctor --fix"))
-    logger = Logger(store, cfg.splunk)
+    except BaseException as exc:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            raise OSError(f"first-run config save failed ({exc}); rollback was incomplete: {rollback_error}") from exc
+        raise
 
     try:
-        bootstrap = bootstrap_env(cfg, logger)
-        if bootstrap.errors:
-            setup.extend(StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix") for e in bootstrap.errors)
-        else:
-            setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
-    finally:
-        pass
-
-    _persist_first_run_secrets(cfg, options, setup)
-
-    if options.skip_install:
-        setup.append(StepResult("Scanners", "skip", "--skip-install"))
-    else:
-        scanner_status = _scanner_availability(cfg)
-        setup.extend(scanner_status)
-
-    app = AppContext()
-    app.cfg = cfg
-    app.store = store
-    app.logger = logger
-
-    setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
-    setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
-
-    if options.sandbox:
-        setup.append(
-            StepResult(
-                "Sandbox",
-                "warn",
-                "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
-                "defenseclaw sandbox setup",
+        store = Store(cfg.audit_db)
+    except BaseException as exc:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            raise OSError(
+                f"first-run audit store creation failed ({exc}); rollback was incomplete: {rollback_error}"
+            ) from exc
+        raise
+    logger = None
+    try:
+        try:
+            store.init()
+        except Exception as exc:  # broad: sqlite/file errors need to surface
+            setup.append(
+                StepResult(
+                    "Audit DB",
+                    "fail",
+                    str(exc),
+                    "defenseclaw doctor --fix --dry-run",
+                )
             )
+        # A genuinely new/pre-v8 bootstrap has no canonical graph yet. Re-running
+        # first-run against v8 must use the live owner and must not silently drop
+        # ordinary v8 setup mutations.
+        logger = (
+            Logger.no_runtime()
+            if new_config or getattr(cfg, "_source_config_version", None) != 8
+            else Logger.from_config(cfg)
         )
 
-    if options.start_gateway:
-        setup.append(_start_gateway_structured(cfg))
-    else:
-        setup.append(StepResult("Sidecar", "skip", "not started (--no-start-gateway)", "defenseclaw-gateway start"))
+        bootstrap = bootstrap_env(cfg, logger)
+        if bootstrap.errors:
+            setup.extend(
+                StepResult("Bootstrap", "fail", e, "defenseclaw doctor --fix --dry-run") for e in bootstrap.errors
+            )
+        else:
+            setup.append(StepResult("Bootstrap", "pass", cfg.data_dir))
 
-    try:
-        cfg.save()
-    except OSError as exc:
-        setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
+        _persist_first_run_secrets(cfg, options, setup)
 
-    readiness = (
-        targeted_readiness(cfg, options)
-        if options.verify
-        else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
-    )
+        if options.skip_install:
+            setup.append(StepResult("Scanners", "skip", "--skip-install"))
+        else:
+            scanner_status = _scanner_availability(cfg)
+            setup.extend(scanner_status)
 
-    try:
-        logger.close()
+        app = AppContext()
+        app.cfg = cfg
+        app.store = store
+        app.logger = logger
+
+        if connector == "none":
+            setup.append(StepResult("Guardrail", "skip", "no connector requested"))
+        else:
+            setup.append(_quiet_guardrail_setup(app, connector, verbose=options.verbose))
+        rollback_first_run_transaction = any(step.status == "fail" for step in setup)
+        setup.extend(_connector_mode_warning_steps(connector_mode_warnings))
+
+        if options.sandbox:
+            setup.append(
+                StepResult(
+                    "Sandbox",
+                    "warn",
+                    "sandbox setup is experimental, Linux-only, and OpenClaw/OpenShell-only",
+                    "defenseclaw sandbox setup",
+                )
+            )
+
+        if options.start_gateway:
+            gateway_step = _start_gateway_structured(cfg)
+            setup.append(gateway_step)
+            if gateway_step.status == "fail":
+                rollback_first_run_transaction = True
+        else:
+            setup.append(
+                StepResult(
+                    "Sidecar",
+                    "skip",
+                    "not started (--no-start-gateway)",
+                    "defenseclaw-gateway start",
+                )
+            )
+
+        try:
+            if preserved_trusted_prefixes is not None:
+                cfg.ai_discovery.trusted_binary_prefixes = list(
+                    preserved_trusted_prefixes
+                )
+            finalize_first_run_config(cfg, was_config_absent=was_config_absent)
+            if preserved_trusted_prefixes is not None:
+                persisted = cfg_mod.load(data_dir=cfg.data_dir)
+                observed = tuple(
+                    str(value)
+                    for value in (
+                        persisted.ai_discovery.trusted_binary_prefixes or []
+                    )
+                )
+                if observed != preserved_trusted_prefixes:
+                    raise OSError(
+                        "init did not retain the pre-init trusted binary "
+                        "prefix transaction"
+                    )
+        except FreshMigrationStateError as exc:
+            setup.append(StepResult("Migration State", "fail", str(exc), "defenseclaw init"))
+            retain_pending_migration_transaction = os.path.isfile(
+                fresh_migration_pending_path(cfg.data_dir)
+            ) and os.path.isfile(cfg_mod.config_path())
+        except OSError as exc:
+            setup.append(StepResult("Config Save", "fail", str(exc), "defenseclaw config validate"))
+            rollback_first_run_transaction = True
+
+        readiness = (
+            targeted_readiness(cfg, options)
+            if options.verify
+            else [StepResult("Readiness", "skip", "--no-verify", "defenseclaw doctor")]
+        )
+        if any(step.status == "fail" for step in readiness):
+            rollback_first_run_transaction = True
+
+        next_commands = _next_commands(setup, readiness, cfg, profile)
+        status = _rollup_status(setup, readiness)
+        report = FirstRunReport(
+            status=status,
+            config_file=str(cfg_mod.config_path()),
+            data_dir=cfg.data_dir,
+            connector=connector,
+            profile=profile,
+            setup=setup,
+            readiness=readiness,
+            next_commands=next_commands,
+            connector_mode_warnings=connector_mode_warnings,
+            _protected_selection=protected_selection,
+        )
+    except BaseException as exc:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        if rollback_error:
+            raise OSError(f"first-run failed ({exc}); rollback was incomplete: {rollback_error}") from exc
+        raise
     finally:
-        store.close()
+        close_error: BaseException | None = None
+        try:
+            if logger is not None:
+                logger.close()
+        except BaseException as exc:
+            close_error = exc
+        try:
+            store.close()
+        except BaseException as exc:
+            if close_error is None:
+                close_error = exc
+        if close_error is not None:
+            rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+            if rollback_error:
+                raise OSError(
+                    f"first-run resource close failed ({close_error}); rollback was incomplete: {rollback_error}"
+                ) from close_error
+            raise close_error
 
-    next_commands = _next_commands(setup, readiness, cfg, profile)
-    status = _rollup_status(setup, readiness)
-    return FirstRunReport(
-        status=status,
-        config_file=str(cfg_mod.config_path()),
-        data_dir=cfg.data_dir,
-        connector=connector,
-        profile=profile,
-        setup=setup,
-        readiness=readiness,
-        next_commands=next_commands,
-        connector_mode_warnings=connector_mode_warnings,
-    )
+    if rollback_first_run_transaction and not retain_pending_migration_transaction:
+        rollback_error = _restore_first_run_selection_transaction(transaction_app, setup_snapshot)
+        report._protected_selection = None
+        if rollback_error:
+            report.setup.append(StepResult("First-run rollback", "fail", rollback_error, "defenseclaw init"))
+    return report
 
 
 def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult]:
@@ -420,7 +1101,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Audit database",
             "pass" if os.path.isfile(cfg.audit_db) else "fail",
             cfg.audit_db,
-            "defenseclaw doctor --fix" if not os.path.isfile(cfg.audit_db) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.state.audit-db.initialize"
+                if not os.path.isfile(cfg.audit_db)
+                else ""
+            ),
         )
     )
     device_key = cfg.gateway.device_key_file
@@ -429,7 +1114,11 @@ def targeted_readiness(cfg: Config, options: FirstRunOptions) -> list[StepResult
             "Device key",
             "pass" if device_key and os.path.isfile(device_key) else "fail",
             device_key or "(unset)",
-            "defenseclaw doctor --fix" if not (device_key and os.path.isfile(device_key)) else "",
+            (
+                "defenseclaw doctor --fix --fix-id doctor.identity.device-key.initialize"
+                if not (device_key and os.path.isfile(device_key))
+                else ""
+            ),
         )
     )
 
@@ -490,7 +1179,9 @@ def _normalize_connector(raw: str | None) -> str:
     value = (raw or "").strip().lower()
     if value in {"claude", "claude-code", "claude_code"}:
         value = "claudecode"
-    if value in {"none", ""}:
+    if value == "none":
+        return "none"
+    if value == "":
         value = "codex"
     try:
         return connector_paths.normalize(value)
@@ -507,7 +1198,79 @@ def _normalize_profile(raw: str, connector: str) -> str:
     return "observe"
 
 
-def _first_run_action_mode_warning(connector: str, data_dir: str) -> dict | None:
+def _first_run_connector_roster(options: FirstRunOptions, connector: str) -> tuple[str, ...]:
+    """Return the complete ordered connector roster carried by first-run."""
+
+    raw_connectors: list[str] = []
+    if options.connector_settings is not None:
+        raw_connectors.extend(
+            str(item.get("connector", "")) for item in options.connector_settings if isinstance(item, dict)
+        )
+    if not raw_connectors:
+        raw_connectors.append(connector)
+    normalized = [_normalize_connector(raw) for raw in raw_connectors if raw]
+    primary = _normalize_connector(connector)
+    if primary and primary not in normalized:
+        normalized.insert(0, primary)
+    return tuple(dict.fromkeys(normalized))
+
+
+def _preflight_first_run_agent_selections(
+    data_dir: str,
+    options: FirstRunOptions,
+    connector: str,
+    setup_snapshot,
+    *,
+    selected_connectors: tuple[str, ...] | None = None,
+) -> tuple[object | None, str]:
+    """Record one complete protected roster before first-run state mutation."""
+
+    if platform_support.host_os() != "windows":
+        return None, ""
+
+    from defenseclaw.agent_selection import (
+        record_setup_agent_selections,
+        setup_agent_selection_connectors,
+    )
+
+    selected = (
+        selected_connectors
+        if selected_connectors is not None
+        else setup_agent_selection_connectors(_first_run_connector_roster(options, connector))
+    )
+    if not selected:
+        return None, ""
+    try:
+        selections, selection_errors = record_setup_agent_selections(data_dir, selected)
+    except OSError as exc:
+        return None, f"could not protect explicit agent executable selection: {exc}"
+    for name in selected:
+        if name not in selections and name not in selection_errors:
+            selection_errors[name] = "selection was not recorded"
+    if selection_errors:
+        details = "; ".join(f"{name}: {detail}" for name, detail in sorted(selection_errors.items()))
+        return (
+            None,
+            f"cannot configure native hooks without a freshly verified selected agent executable ({details})",
+        )
+    from defenseclaw.commands.cmd_setup import _validate_setup_agent_selection_receipt
+
+    try:
+        verified = _validate_setup_agent_selection_receipt(
+            data_dir,
+            selected,
+            selections,
+            prior_generation=setup_snapshot.agent_selection_generation,
+        )
+    except OSError as exc:
+        return None, f"could not bind selected agent executables to the protected receipt: {exc}"
+    return verified, ""
+
+
+def _first_run_action_mode_warning(
+    connector: str,
+    data_dir: str,
+) -> dict | None:
     """Return structured action-to-observe remediation for first-run flows."""
     from defenseclaw.commands.cmd_setup import _check_connector_version_supported_for_setup
 
@@ -561,6 +1324,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         )
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
+    elif signal is not None and getattr(signal, "version", ""):
+        record["reason"] = (
+            f"installed version {signal.version} is not covered by a known hook contract"
+        )
+        record["installed_version"] = signal.version
     return record
 
 
@@ -574,8 +1342,7 @@ def _connector_mode_warning_steps(warnings: list[dict]) -> list[StepResult]:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         steps.append(
             StepResult(
@@ -617,9 +1384,7 @@ def _apply_first_run_choices(
             if _normalize_connector(str(key)) == wanted:
                 selected_override = pc
                 break
-        cfg.guardrail.connectors = {
-            connector: selected_override or PerConnectorGuardrailConfig()
-        }
+        cfg.guardrail.connectors = {connector: selected_override or PerConnectorGuardrailConfig()}
     else:
         cfg.guardrail.connectors = {}
     cfg.guardrail.scanner_mode = scanner_mode
@@ -629,15 +1394,11 @@ def _apply_first_run_choices(
     if options.with_judge:
         cfg.guardrail.judge.enabled = True
         cfg.guardrail.judge.hook_connectors = (
-            list(options.judge_hook_connectors)
-            if options.judge_hook_connectors is not None
-            else ["*"]
+            list(options.judge_hook_connectors) if options.judge_hook_connectors is not None else ["*"]
         )
         if not cfg.guardrail.detection_strategy or cfg.guardrail.detection_strategy == "regex_only":
             cfg.guardrail.detection_strategy = "regex_judge"
-        completion_strategy = (
-            getattr(cfg.guardrail, "detection_strategy_completion", "") or ""
-        ).strip().lower()
+        completion_strategy = (getattr(cfg.guardrail, "detection_strategy_completion", "") or "").strip().lower()
         if completion_strategy in ("", "regex_only"):
             cfg.guardrail.detection_strategy_completion = "regex_judge"
     else:
@@ -983,11 +1744,10 @@ def _pid_file_running(pid_file: str) -> bool:
     planted or staled gateway.pid could make ``quickstart``/``init`` skip
     starting the sidecar — generated hooks then forwarded uninspected traffic
     because the default fail mode for the inspect hook is "open" until the
-    gateway is up. We additionally require the PID's argv0 to match a known
-    gateway binary name (POSIX, via /proc or ``ps``). Windows has no equally
-    cheap argv0 probe and the Go daemon's ``processExists``
-    (internal/daemon/proc_windows.go) is liveness-only too, so there a live
-    PID is accepted.
+    gateway is up. We additionally require the PID's process image to match a
+    known gateway binary name. POSIX uses ``/proc`` or ``ps``; Windows uses
+    ``QueryFullProcessImageNameW`` through the shared fail-closed identity
+    verifier.
     """
     from defenseclaw.process_liveness import pid_alive, read_pid_file
 
@@ -996,8 +1756,6 @@ def _pid_file_running(pid_file: str) -> bool:
         return False
     if not pid_alive(pid):
         return False
-    if os.name == "nt":
-        return True
     return _pid_looks_like_gateway(pid)
 
 
@@ -1019,6 +1777,8 @@ def _pid_looks_like_gateway(pid: int) -> bool:
 
 
 def _connector_readiness(cfg: Config, connector: str) -> StepResult:
+    if connector == "none":
+        return StepResult("Connector", "skip", "no connector requested")
     if connector == "openclaw":
         path = os.path.expanduser(cfg.claw.config_file)
         if os.path.isfile(path):
@@ -1030,12 +1790,12 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "defenseclaw setup openclaw",
         )
     if connector == "codex":
-        path = os.path.expanduser("~/.codex/config.toml")
+        path = connector_config_files("codex")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Codex config found")
         return StepResult("Connector", "warn", "Codex config not found yet", "defenseclaw setup codex")
     if connector == "claudecode":
-        path = os.path.expanduser("~/.claude/settings.json")
+        path = connector_config_files("claudecode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Claude Code settings found")
         return StepResult("Connector", "warn", "Claude Code settings not found yet", "defenseclaw setup claude-code")
@@ -1045,7 +1805,7 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "ZeptoClaw config found")
         return StepResult("Connector", "warn", "ZeptoClaw config not found yet", "defenseclaw setup zeptoclaw")
     if connector == "hermes":
-        path = os.path.expanduser("~/.hermes/config.yaml")
+        path = hermes_config_path()
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Hermes config found")
         return StepResult("Connector", "warn", "Hermes config not found yet", "defenseclaw setup hermes")
@@ -1054,23 +1814,40 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Cursor hooks found")
         return StepResult("Connector", "warn", "Cursor hooks not found yet", "defenseclaw setup cursor")
-    if connector == "windsurf":
-        path = os.path.expanduser("~/.codeium/windsurf/hooks.json")
-        if os.path.isfile(path):
-            return StepResult("Connector", "pass", "Windsurf hooks found")
-        return StepResult("Connector", "warn", "Windsurf hooks not found yet", "defenseclaw setup windsurf")
+    if connector == "devin":
+        claw_cfg = getattr(cfg, "claw", None)
+        workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
+        path = devin_hook_config_path(workspace)
+        if path and os.path.isfile(path):
+            return StepResult("Connector", "pass", "Devin project hooks found")
+        return StepResult(
+            "Connector",
+            "warn",
+            "Devin project hooks not found; pin a workspace and run setup",
+            "defenseclaw setup devin --workspace <project>",
+        )
     if connector == "geminicli":
-        path = os.path.expanduser("~/.gemini/settings.json")
+        path = connector_config_files("geminicli")[0]
         if os.path.isfile(path):
-            return StepResult("Connector", "pass", "Gemini CLI settings found")
-        return StepResult("Connector", "warn", "Gemini CLI settings not found yet", "defenseclaw setup geminicli")
+            return StepResult(
+                "Connector",
+                "warn",
+                "Gemini CLI integration is deprecated; remove managed state and use Antigravity",
+                "defenseclaw setup remove geminicli --yes",
+            )
+        return StepResult(
+            "Connector",
+            "warn",
+            "Gemini CLI integration is deprecated; use Antigravity",
+            "defenseclaw setup antigravity",
+        )
     if connector == "copilot":
         claw_cfg = getattr(cfg, "claw", None)
         workspace = (getattr(claw_cfg, "workspace_dir", "") or "").strip()
         if workspace:
             path = os.path.join(workspace, ".github", "hooks", "defenseclaw.json")
         else:
-            path = os.path.expanduser("~/.copilot/hooks/defenseclaw.json")
+            path = os.path.join(copilot_home(), "hooks", "defenseclaw.json")
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "Copilot hooks found")
         return StepResult("Connector", "warn", "Copilot hooks not found yet", "defenseclaw setup copilot")
@@ -1086,17 +1863,11 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             return StepResult("Connector", "pass", "OpenHands hooks found")
         return StepResult("Connector", "warn", "OpenHands hooks not found yet", "defenseclaw setup openhands")
     if connector == "antigravity":
-        # Antigravity is global-only by design — agy merges discovered
-        # hooks files, so DefenseClaw never writes to a workspace copy.
-        # The canonical path is ~/.gemini/config/hooks.json (the path
-        # agy v1.0.x actually evaluates). The legacy
-        # ~/.gemini/antigravity-cli/hooks.json is also accepted as a
-        # pass signal so operators recovering from a pre-v0.5.0
-        # install don't see a confusing "missing hooks" error before
-        # doctor's migration warning has had a chance to surface.
-        canonical = os.path.expanduser("~/.gemini/config/hooks.json")
-        legacy = os.path.expanduser("~/.gemini/antigravity-cli/hooks.json")
-        if os.path.isfile(canonical) or os.path.isfile(legacy):
+        # DefenseClaw owns only the documented global hook file, under the
+        # effective Antigravity config home. Workspace .agents/hooks.json is a
+        # host customization surface but is not a setup-complete signal here.
+        canonical = os.path.join(connector_home("antigravity"), "hooks.json")
+        if os.path.isfile(canonical):
             return StepResult("Connector", "pass", "Antigravity hooks found")
         return StepResult(
             "Connector",
@@ -1107,7 +1878,9 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
     if connector == "opencode":
         # opencode is governed by a bridge plugin DefenseClaw writes into
         # opencode's auto-load plugin directory (no hooks.json to patch).
-        path = os.path.expanduser("~/.config/opencode/plugins/defenseclaw.js")
+        # Resolve through the shared path contract so OPENCODE_CONFIG_DIR
+        # registrations are reported just like Setup, Doctor, and inventory.
+        path = connector_config_files("opencode")[0]
         if os.path.isfile(path):
             return StepResult("Connector", "pass", "OpenCode bridge plugin found")
         return StepResult(
@@ -1116,18 +1889,43 @@ def _connector_readiness(cfg: Config, connector: str) -> StepResult:
             "OpenCode bridge plugin not found yet",
             "defenseclaw setup opencode",
         )
+    if connector == "amp":
+        # Amp's DefenseClaw plugin is global even when a workspace is set.
+        # Do not select it by position from ``connector_config_files``:
+        # that list includes optional workspace files and managed settings,
+        # so its indices are intentionally not a stable artifact contract.
+        path = amp_policy_plugin_path()
+        try:
+            plugin_text = Path(path).read_text(encoding="utf-8")
+            configured = "DefenseClaw" in plugin_text and "/api/v1/amp/hook" in plugin_text
+        except (OSError, UnicodeError):
+            configured = False
+        if configured:
+            return StepResult("Connector", "pass", f"Amp system policy plugin found at {path}")
+        return StepResult(
+            "Connector",
+            "warn",
+            f"Amp system policy plugin not found at {path}",
+            "defenseclaw setup amp",
+        )
     if connector == "omnigent":
         path = omnigent_config_path()
         try:
             config_text = Path(path).read_text(encoding="utf-8")
             configured = all(
-                marker in config_text
-                for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
+                marker in config_text for marker in ("defenseclaw_omnigent_policy", "defenseclaw_guardrail")
             )
         except (OSError, UnicodeError):
             configured = False
         if configured:
-            return StepResult("Connector", "pass", f"OmniGent custom policy found at {path}")
+            return StepResult(
+                "Connector",
+                "warn",
+                f"OmniGent custom policy configured at {path}; OmniGent 0.7.0 does not expose "
+                "a loaded policy generation/module identity, so live action/fail-closed "
+                "enforcement is unverified pending OmniGent reload/restart",
+                "defenseclaw doctor",
+            )
         return StepResult(
             "Connector",
             "warn",
@@ -1357,6 +2155,6 @@ def _apply_gateway_defaults(cfg: Config, is_new_config: bool) -> bool:
 
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
-    _ensure_device_key(cfg.gateway.device_key_file)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     return token_configured

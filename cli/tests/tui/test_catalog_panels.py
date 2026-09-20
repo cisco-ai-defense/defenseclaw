@@ -17,6 +17,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import pytest
+from defenseclaw import connector_paths
 from defenseclaw.config import AssetPolicyRule
 from defenseclaw.tui.panels.mcps import MCPsPanelModel, mcp_actions, mcp_unset_target_for_connector
 from defenseclaw.tui.panels.plugins import PluginRow, PluginsPanelModel, plugin_actions
@@ -115,6 +116,7 @@ def test_skill_actions_and_intents_match_go_branches() -> None:
     assert action_keys(skill_actions("clean")) == ["s", "i", "b", "a", "d", "q", "n"]
     for status in ("blocked", "allowed", "quarantined", "disabled", "clean", ""):
         assert_no_duplicate_keys(skill_actions(status))
+    assert action_keys(skill_actions("active", bundled=True)) == ["i"]
 
     panel = SkillsPanelModel()
     panel.apply_loaded([SkillRow(name="tutor", status="active")])
@@ -126,6 +128,31 @@ def test_skill_actions_and_intents_match_go_branches() -> None:
 
     panel.apply_loaded([SkillRow(name="tutor", status="blocked")])
     assert panel.handle_key("u").intent.args == ("skill", "unblock", "tutor")
+
+
+def test_bundled_skill_row_is_discovery_only_in_tui() -> None:
+    panel = SkillsPanelModel(connector="hermes")
+    panel.apply_json(
+        json.dumps(
+            [{"name": "vendor-docs", "connector": "hermes", "bundled": True}]
+        )
+    )
+
+    assert panel.selected() == SkillRow(
+        name="vendor-docs",
+        connector="hermes",
+        bundled=True,
+    )
+    assert action_keys(panel.menu_actions()) == ["i"]
+    for key in ("s", "b", "a", "d", "q", "n"):
+        assert panel.action_intent(key) is None
+    assert panel.action_intent("i").args == (
+        "skill",
+        "info",
+        "vendor-docs",
+        "--connector",
+        "hermes",
+    )
 
 
 def test_skills_filter_cursor_registry_and_click_selection() -> None:
@@ -234,21 +261,34 @@ def test_mcp_parse_scoped_group_and_empty_group() -> None:
     assert parse_mcp_list_json(json.dumps({"connector": "claudecode", "mcp_servers": []})) == ()
 
 
-def test_mcp_actions_name_connector_specific_unset_targets() -> None:
+def test_mcp_actions_name_connector_specific_unset_targets(monkeypatch, tmp_path) -> None:
+    hermes_config = tmp_path / "hermes-home" / "config.yaml"
+    claude_config = tmp_path / "claude-home" / "settings.json"
+    codex_config = tmp_path / "codex-home" / "config.toml"
+    devin_config = tmp_path / "devin-config"
+    gemini_home = tmp_path / "gemini-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_config.parent))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_config.parent))
+    monkeypatch.setenv("CODEX_HOME", str(codex_config.parent))
+    monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
+    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "openclaw": "OpenClaw config",
-        "claudecode": "~/.claude/settings.json",
-        "codex": "./.mcp.json",
+        "claudecode": str(claude_config),
+        "codex": str(codex_config),
         "zeptoclaw": "~/.zeptoclaw/config.json",
-        "hermes": "~/.hermes/config.yaml",
+        "hermes": str(hermes_config),
         "cursor": "./.cursor/mcp.json",
-        "windsurf": "~/.codeium/windsurf/mcp_config.json",
-        "geminicli": "~/.gemini/settings.json",
+        "devin": str(devin_config / "mcp_config.json"),
+        "geminicli": connector_paths.cleanup_only_guidance("geminicli"),
         "copilot": "./.github/mcp.json",
         "antigravity": "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json",
     }
     for connector, want in cases.items():
         assert mcp_unset_target_for_connector(connector) == want
+        if connector == "geminicli":
+            assert mcp_actions("blocked", connector) == ()
+            continue
         unset = next(action for action in mcp_actions("blocked", connector) if action.key == "x")
         assert want in unset.description
 
@@ -259,7 +299,10 @@ def test_mcp_actions_name_connector_specific_unset_targets() -> None:
     assert action_keys(mcp_actions("active", "openclaw")) == ["s", "i", "b", "a"]
 
 
-def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_paths() -> None:
+def test_catalog_empty_connector_stays_unowned_and_hook_connector_labels_contract_paths(
+    monkeypatch,
+    tmp_path,
+) -> None:
     assert friendly_connector_name("") == "No connector"
     assert PluginsPanelModel(connector="").is_visible_for_connector() is False
 
@@ -267,10 +310,82 @@ def test_catalog_empty_connector_stays_unowned_and_antigravity_labels_contract_p
     assert ".agents/mcp_config.json" in connector_source_label("antigravity", "mcps")
     assert "hooks-only" not in connector_source_label("antigravity", "mcps")
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    antigravity_plugins = connector_source_label("antigravity", "plugins")
+    assert ".gemini/config/plugins" in antigravity_plugins
+    assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
+    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
+    assert "--config" in connector_source_label("omnigent", "config")
+    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in mcp_unset_target_for_connector("omnigent")
+
+    opencode_home = tmp_path / "opencode-config"
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
+        "opencode", "config"
+    )
+    assert ".config/opencode/opencode.json" in connector_source_label("opencode", "mcps")
+    assert "~/.opencode/opencode.json" in connector_source_label("opencode", "mcps")
+    assert str(opencode_home / "opencode.json") in connector_source_label("opencode", "mcps")
+    assert "OPENCODE_CONFIG_CONTENT" in connector_source_label("opencode", "mcps")
+    assert "enterprise precedence excluded" in connector_source_label("opencode", "mcps")
+    assert str(opencode_home / "opencode.json") in mcp_unset_target_for_connector("opencode")
+    assert "<workspace>/opencode.json" in mcp_unset_target_for_connector("opencode")
+    assert ".opencode/{skill,skills}" in connector_source_label("opencode", "skills")
+    assert "excluded from inventory and scans" in connector_source_label(
+        "opencode", "plugins"
+    )
+    assert "tools permission map is not an asset" in connector_source_label(
+        "opencode", "tools"
+    )
+
+
+def test_catalog_gemini_labels_are_cleanup_only_and_route_to_antigravity(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    gemini_home = tmp_path / "authenticated" / ".gemini"
+    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
+
+    guidance = connector_paths.cleanup_only_guidance("geminicli")
+    for category in ("skills", "plugins", "mcps", "config"):
+        assert connector_source_label("geminicli", category) == guidance
+    assert "Antigravity" in guidance
+    assert "setup remove geminicli --yes" in guidance
+
+
+def test_catalog_gemini_panels_expose_no_active_actions() -> None:
+    skills = SkillsPanelModel(connector="geminicli")
+    skills.apply_json(json.dumps([{"name": "legacy-skill"}]))
+    mcps = MCPsPanelModel(connector="geminicli")
+    mcps.apply_json(json.dumps([{"name": "legacy-mcp"}]))
+    plugins = PluginsPanelModel(connector="geminicli")
+    plugins.apply_json(json.dumps([{"id": "legacy-plugin", "name": "legacy-plugin"}]))
+
+    for panel in (skills, mcps, plugins):
+        assert panel.menu_actions() == ()
+        assert panel.action_intent("b") is None
+        refresh = panel.handle_key("r")
+        assert refresh.intent is None
+        assert "Antigravity" in refresh.hint
+
+    assert mcps.handle_key("+").open_mcp_set_form is False
+
+
+def test_catalog_codex_labels_use_current_official_asset_layouts() -> None:
+    skills = connector_source_label("codex", "skills")
+    mcps = connector_source_label("codex", "mcps")
+    plugins = connector_source_label("codex", "plugins")
+
+    assert "~/.agents/skills" in skills
+    assert "./.agents/skills" in skills
+    assert ".codex/skills" not in skills
+    assert ".codex/config.toml" in mcps
+    assert "trusted projects only" in mcps
+    assert ".mcp.json" not in mcps
+    assert ".agents/plugins/marketplace.json" in plugins
+    assert ".claude-plugin/marketplace.json" in plugins
+    assert "plugins/cache" in plugins.replace("\\", "/")
 
 
 def test_plugin_parse_connector_gate_actions_and_intents() -> None:
@@ -387,10 +502,25 @@ def test_tools_refresh_scoped_display_counts_and_intents() -> None:
     assert panel.action_intent("b").args == ("tool", "block", "write_file@filesystem")
     assert panel.action_intent("u").args == ("tool", "unblock", "write_file@filesystem")
     assert panel.handle_key("u").intent.args == ("tool", "unblock", "write_file@filesystem")
-
     panel.select_row(1)
     assert panel.selected().display_scope == "(global)"
     assert panel.action_intent("i").args == ("tool", "status", "read_file")
+
+
+def test_tools_refresh_key_defers_store_read_to_shell_worker() -> None:
+    calls: list[str] = []
+
+    class Store:
+        def list_actions_by_type(self, target_type: str) -> list[object]:
+            calls.append(target_type)
+            return []
+
+    panel = ToolsPanelModel(Store())
+    action = panel.handle_key("r")
+
+    assert action.handled is True
+    assert action.reload_requested is True
+    assert calls == []
 
 
 def test_tools_connector_filter_shows_selected_connector_plus_global_fallback() -> None:
@@ -824,6 +954,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
     # Action set is on its own line so it can't be missed.
     assert "[dim]Actions:[/]" in text
     assert "o open menu" in text
+    assert "u unblock" in text
     # Navigation primer is on the row above, not jammed in with actions.
     assert "[dim]Navigate:[/]" in text
     # Filter / detail metadata still on line 2.
@@ -833,6 +964,7 @@ def test_catalog_summary_text_splits_navigation_and_action_keys() -> None:
 # ---------------------------------------------------------------------------
 # WU13: multi-connector focus — list command targets the focused connector
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.parametrize(
     "model_factory, base_args",

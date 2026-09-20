@@ -6,8 +6,11 @@ package enterprisehooks
 
 import (
 	"context"
+	"encoding/base64"
+	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -15,7 +18,104 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 )
 
+func requireEnterpriseHookInstaller(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("enterprise hook guardian internals are unsupported on native Windows; early rejection is covered separately")
+	}
+}
+
+func TestInstallRejectsInvalidNativeWindowsRequestBeforeSideEffects(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native Windows rejection contract")
+	}
+	scope := t.TempDir()
+	sentinel := filepath.Join(scope, "sentinel")
+	if err := os.WriteFile(sentinel, []byte("unchanged"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	_, err := Install(context.Background(), InstallOptions{UserHome: filepath.Join(scope, "home")})
+	if err == nil {
+		t.Fatal("Install error = nil, want preflight/validation rejection")
+	}
+	if got, readErr := os.ReadFile(sentinel); readErr != nil || string(got) != "unchanged" {
+		t.Fatalf("sentinel changed: data=%q err=%v", got, readErr)
+	}
+}
+
+func TestValidateHookContractUsesManagedLockAndRuntimeReaders(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("strict managed runtime artifacts are native Windows-only")
+	}
+	t.Setenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT", "")
+	const oversizedManagedArtifact = int64(4<<20 + 1)
+	conn := connector.NewClaudeCodeConnector()
+	newOpts := func(dataDir string) connector.SetupOpts {
+		return connector.SetupOpts{
+			DataDir:           dataDir,
+			AgentVersion:      "2.1.154",
+			ManagedEnterprise: true,
+		}
+	}
+	writeSparse := func(t *testing.T, path string) {
+		t.Helper()
+		file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := file.Truncate(oversizedManagedArtifact); err != nil {
+			_ = file.Close()
+			t.Fatal(err)
+		}
+		if err := file.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	t.Run("contract lock", func(t *testing.T) {
+		opts := newOpts(t.TempDir())
+		writeSparse(t, filepath.Join(opts.DataDir, "hook_contract_lock.json"))
+
+		err := validateHookContract("action", conn, opts)
+		if err == nil ||
+			!strings.Contains(err.Error(), "enterprise hooks: load hook contract lock:") ||
+			!strings.Contains(err.Error(), "byte limit") {
+			t.Fatalf("managed lock validation error = %v, want bounded load context", err)
+		}
+		opts.ManagedEnterprise = false
+		if err := validateHookContract("action", conn, opts); err != nil {
+			t.Fatalf("unmanaged lock validation changed: %v", err)
+		}
+	})
+
+	t.Run("hook runtime", func(t *testing.T) {
+		opts := newOpts(t.TempDir())
+		unmanagedOpts := opts
+		unmanagedOpts.ManagedEnterprise = false
+		entry := connector.NewHookContractLockEntry(unmanagedOpts, conn, "test-build")
+		if err := connector.SaveHookContractLockEntry(opts.DataDir, entry); err != nil {
+			t.Fatalf("seed contract lock: %v", err)
+		}
+		hookDir := filepath.Join(opts.DataDir, "hooks")
+		if err := os.MkdirAll(hookDir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		writeSparse(t, filepath.Join(hookDir, "_hardening.sh"))
+
+		err := validateHookContract("action", conn, opts)
+		if err == nil ||
+			!strings.Contains(err.Error(), "enterprise hooks: hash managed hook runtime:") ||
+			!strings.Contains(err.Error(), "byte limit") {
+			t.Fatalf("managed runtime validation error = %v, want bounded hash context", err)
+		}
+		if err := validateHookContract("action", conn, unmanagedOpts); err != nil {
+			t.Fatalf("unmanaged runtime validation changed: %v", err)
+		}
+	})
+}
+
 func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -26,6 +126,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		t.Fatalf("write codex config: %v", err)
 	}
 
+	otlpToken := strings.Repeat("d", 64)
 	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
@@ -34,6 +135,7 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
 		APIToken:      "test-token",
+		OTLPPathToken: otlpToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
 		AgentVersion:  "codex-cli 0.142.0",
@@ -58,12 +160,28 @@ func TestInstallCodexTargetsExplicitUserHome(t *testing.T) {
 	if !strings.Contains(string(data), filepath.Join(home, ".defenseclaw", "hooks", "codex-hook.sh")) {
 		t.Fatalf("codex config does not reference per-user hook script:\n%s", string(data))
 	}
+	if strings.Contains(string(data), "/otlp/codex/"+otlpToken) {
+		t.Fatalf("codex config leaked the supplied service OTLP token in an endpoint:\n%s", string(data))
+	}
+	doubleQuotedBearer := `authorization = "Bearer ` + otlpToken + `"`
+	singleQuotedBearer := `authorization = 'Bearer ` + otlpToken + `'`
+	if !strings.Contains(string(data), doubleQuotedBearer) && !strings.Contains(string(data), singleQuotedBearer) {
+		t.Fatalf("codex config does not carry the supplied service OTLP token as an Authorization bearer:\n%s", string(data))
+	}
+	userOTLPToken, err := connector.OTLPPathTokenFilePath(filepath.Join(home, ".defenseclaw"), connector.OTLPScopeCodex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(userOTLPToken); !os.IsNotExist(err) {
+		t.Fatalf("managed install minted a per-user OTLP token sidecar: %v", err)
+	}
 	if _, err := os.Stat(filepath.Join(home, ".defenseclaw", "hook_contract_lock.json")); err != nil {
 		t.Fatalf("hook contract lock missing: %v", err)
 	}
 }
 
 func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	configPath := filepath.Join(home, ".omnigent", "config.yaml")
@@ -84,6 +202,7 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		connector.OmnigentSitePackagesPathOverride = previousSite
 	})
 
+	scopedToken := strings.Repeat("c", 64)
 	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "omnigent",
 		UserHome:      home,
@@ -91,10 +210,10 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		ProxyAddr:     "127.0.0.1:4000",
-		APIToken:      "omnigent-scoped-token",
+		APIToken:      scopedToken,
 		GuardrailMode: "action",
 		HookFailMode:  "closed",
-		AgentVersion:  "omnigent 0.1.0",
+		AgentVersion:  "omnigent 0.7.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
 	if err != nil {
@@ -113,9 +232,289 @@ func TestInstallOmnigentPolicyModuleThroughGuardian(t *testing.T) {
 	if !strings.Contains(string(configData), "defenseclaw_omnigent_policy.defenseclaw_policy") {
 		t.Fatalf("OmniGent config does not reference DefenseClaw policy module:\n%s", configData)
 	}
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-omnigent.token")
+	tokenData, err := os.ReadFile(tokenPath)
+	if err != nil {
+		t.Fatalf("read OmniGent scoped token sidecar: %v", err)
+	}
+	if got, want := string(tokenData), scopedToken+"\n"; got != want {
+		t.Fatalf("OmniGent scoped token sidecar = %q, want exact token plus newline", got)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("OmniGent scoped token sidecar mode/info = %v, %v", info, err)
+	}
+	modulePath := filepath.Join(home, ".defenseclaw", "hooks", "defenseclaw_omnigent_policy.py")
+	moduleData, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatalf("read OmniGent policy module: %v", err)
+	}
+	if encodedPath := base64.StdEncoding.EncodeToString([]byte(tokenPath)); !strings.Contains(string(moduleData), encodedPath) {
+		t.Fatalf("OmniGent policy module does not reference the stable scoped token sidecar")
+	}
+	if strings.Contains(string(moduleData), scopedToken) ||
+		strings.Contains(string(moduleData), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("OmniGent policy module embedded the connector-scoped token")
+	}
+}
+
+func TestInstallAMPManagedPluginThroughGuardian(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = ""
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+	if _, err := os.Lstat(pluginPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("precondition: Amp plugin must be absent before first install: %v", err)
+	}
+
+	scopedToken := strings.Repeat("a", 64)
+	opts := InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      scopedToken,
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	}
+
+	result, err := Install(context.Background(), opts)
+	if err != nil {
+		t.Fatalf("Install Amp: %v", err)
+	}
+	if result.Connector != "amp" {
+		t.Fatalf("connector = %q, want amp", result.Connector)
+	}
+	if len(result.HookConfigPaths) != 1 || result.HookConfigPaths[0] != pluginPath {
+		t.Fatalf("hook config paths = %v, want %s", result.HookConfigPaths, pluginPath)
+	}
+	if len(result.HookScripts) != 1 || result.HookScripts[0] != pluginPath {
+		t.Fatalf("managed runtime artifacts = %v, want %s", result.HookScripts, pluginPath)
+	}
+	info, err := os.Stat(pluginPath)
+	if err != nil {
+		t.Fatalf("stat Amp plugin: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("Amp plugin mode = %#o, want 0600", got)
+	}
+	body, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read Amp plugin: %v", err)
+	}
+	for _, marker := range []string{
+		"// defenseclaw-managed-plugin v2",
+		"DC_TOKEN_FILE",
+		filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token"),
+		`amp.on("tool.call"`,
+		`amp.on("tool.result"`,
+	} {
+		if !strings.Contains(string(body), marker) {
+			t.Fatalf("Amp plugin missing %q", marker)
+		}
+	}
+	if strings.Contains(string(body), scopedToken) ||
+		strings.Contains(string(body), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("Amp plugin embedded the connector-scoped token")
+	}
+	backupPath := filepath.Join(home, ".defenseclaw", "connector_backups", "amp", "config.json")
+	if backupInfo, err := os.Stat(backupPath); err != nil {
+		t.Fatalf("Amp managed backup missing: %v", err)
+	} else if got := backupInfo.Mode().Perm(); got != 0o600 {
+		t.Fatalf("Amp managed backup mode = %#o, want 0600", got)
+	}
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	if tokenData, err := os.ReadFile(tokenPath); err != nil {
+		t.Fatalf("read Amp scoped token sidecar: %v", err)
+	} else if got, want := string(tokenData), scopedToken+"\n"; got != want {
+		t.Fatalf("Amp scoped token sidecar = %q, want exact token plus newline", got)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("Amp scoped token sidecar mode/info = %v, %v", info, err)
+	}
+
+	if err := os.WriteFile(pluginPath, []byte("// attacker replacement\n"), 0o644); err != nil {
+		t.Fatalf("tamper Amp plugin: %v", err)
+	}
+	if err := os.WriteFile(tokenPath, []byte("attacker-controlled-token\n"), 0o644); err != nil {
+		t.Fatalf("tamper Amp scoped token sidecar: %v", err)
+	}
+	opts.AllowMissingHookConfigRepair = true
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair tampered Amp plugin: %v", err)
+	}
+	repaired, err := os.ReadFile(pluginPath)
+	if err != nil {
+		t.Fatalf("read repaired Amp plugin: %v", err)
+	}
+	if !strings.Contains(string(repaired), "DC_TOKEN_FILE") ||
+		!strings.Contains(string(repaired), tokenPath) ||
+		strings.Contains(string(repaired), "attacker replacement") {
+		t.Fatalf("Amp plugin was not repaired:\n%s", repaired)
+	}
+	if strings.Contains(string(repaired), scopedToken) ||
+		strings.Contains(string(repaired), base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("repaired Amp plugin embedded the connector-scoped token")
+	}
+	if info, err := os.Stat(pluginPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("repaired Amp plugin mode/info = %v, %v", info, err)
+	}
+	if tokenData, err := os.ReadFile(tokenPath); err != nil || string(tokenData) != scopedToken+"\n" {
+		t.Fatalf("repaired Amp scoped token sidecar = %q, %v", tokenData, err)
+	}
+	if info, err := os.Stat(tokenPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("repaired Amp scoped token sidecar mode/info = %v, %v", info, err)
+	}
+
+	decoy := filepath.Join(home, "amp-plugin-decoy")
+	if err := os.WriteFile(decoy, []byte("decoy must remain unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Install(context.Background(), opts); err != nil {
+		t.Fatalf("repair symlinked Amp plugin: %v", err)
+	}
+	if info, err := os.Lstat(pluginPath); err != nil || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatalf("Amp plugin symlink survived repair: info=%v err=%v", info, err)
+	}
+	if got, err := os.ReadFile(decoy); err != nil || string(got) != "decoy must remain unchanged\n" {
+		t.Fatalf("Amp decoy changed: %q err=%v", got, err)
+	}
+}
+
+func TestInstallAMPRejectsMissingOrMalformedScopedTokenBeforeMutation(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	for _, test := range []struct {
+		name  string
+		token string
+	}{
+		{name: "missing"},
+		{name: "non-hex", token: "not-a-scoped-token"},
+		{name: "uppercase", token: strings.Repeat("A", 64)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			home := newTestHome(t)
+			pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+			tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+			_, err := Install(context.Background(), InstallOptions{
+				ConnectorName: "amp",
+				UserHome:      home,
+				OwnerUID:      os.Getuid(),
+				OwnerGID:      os.Getgid(),
+				APIAddr:       "127.0.0.1:18970",
+				ProxyAddr:     "127.0.0.1:4000",
+				APIToken:      test.token,
+				GuardrailMode: "action",
+				HookFailMode:  "closed",
+				AgentVersion:  "0.0.1785334225",
+				Registry:      connector.NewDefaultRegistry(),
+			})
+			if err == nil || !strings.Contains(err.Error(), "connector-scoped hook token is required") {
+				t.Fatalf("Install error = %v, want scoped-token refusal", err)
+			}
+			if _, statErr := os.Lstat(pluginPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Amp plugin was mutated before scoped-token refusal: %v", statErr)
+			}
+			if _, statErr := os.Lstat(tokenPath); !errors.Is(statErr, os.ErrNotExist) {
+				t.Fatalf("Amp scoped token was mutated before refusal: %v", statErr)
+			}
+		})
+	}
+}
+
+func TestInstallAMPPublicationFailureRollsBackRuntimeTokenAndContractLock(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	tokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	originalPublisher := publishEnterpriseHookAPIToken
+	publishEnterpriseHookAPIToken = func(_, _, _ string) error {
+		return errors.New("injected connector-scoped publication failure")
+	}
+	t.Cleanup(func() { publishEnterpriseHookAPIToken = originalPublisher })
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      strings.Repeat("a", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "injected connector-scoped publication failure") {
+		t.Fatalf("Install error = %v, want injected publication failure", err)
+	}
+	if _, statErr := os.Lstat(pluginPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed install left the managed Amp policy plugin committed: %v", statErr)
+	}
+	if _, statErr := os.Lstat(tokenPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("failed install left the connector-scoped token committed: %v", statErr)
+	}
+	if entry := connector.LoadHookContractLockEntry(filepath.Join(home, ".defenseclaw"), "amp"); entry.Connector != "" {
+		t.Fatalf("failed install left the Amp hook contract lock committed: %+v", entry)
+	}
+}
+
+func TestInstallAMPFirstInstallRefusesPluginSymlink(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	if err := os.MkdirAll(filepath.Dir(pluginPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	decoy := filepath.Join(home, "decoy")
+	if err := os.WriteFile(decoy, []byte("unchanged\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(decoy, pluginPath); err != nil {
+		t.Fatal(err)
+	}
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = pluginPath
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+
+	_, err := Install(context.Background(), InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      strings.Repeat("a", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err == nil || !strings.Contains(err.Error(), "refusing symlink hook config") {
+		t.Fatalf("first Amp install error = %v, want symlink refusal", err)
+	}
+	if got, readErr := os.ReadFile(decoy); readErr != nil || string(got) != "unchanged\n" {
+		t.Fatalf("Amp symlink decoy changed: %q err=%v", got, readErr)
+	}
 }
 
 func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -201,6 +600,7 @@ func TestInstallMultipleConnectorsKeepsScopedHookTokens(t *testing.T) {
 }
 
 func TestInstallAuthorizedRepairNormalizesWritableArtifacts(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -253,6 +653,7 @@ func TestInstallAuthorizedRepairNormalizesWritableArtifacts(t *testing.T) {
 }
 
 func TestInstallMultipleConnectorsNoOpRepairPreservesModificationTimes(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -330,6 +731,7 @@ func TestInstallMultipleConnectorsNoOpRepairPreservesModificationTimes(t *testin
 }
 
 func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -367,27 +769,217 @@ func TestWatchDirsIncludesHookConfigAndRuntimeDirs(t *testing.T) {
 	}
 }
 
-func TestInstallRefusesMissingHookConfig(t *testing.T) {
+// TestWatchOwnedFilesReturnsSpecificFilesNotDirs asserts the
+// watcher's per-event ownership filter has the right shape: it must
+// enumerate concrete file paths (the codex config, the connector's
+// hook script, its .token sidecar, hook helpers), NOT parent dirs.
+// Filtering by dir would defeat the whole point — the loop already
+// receives dir-scoped events from fsnotify. If a future edit ever
+// makes this return dirs instead, unrelated agent-runtime writes
+// (session sqlite churn, cache writes) would once again be treated
+// as tamper signals.
+func TestWatchOwnedFilesReturnsSpecificFilesNotDirs(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
-	_, err := Install(context.Background(), InstallOptions{
+	codexConfig := filepath.Join(home, ".codex", "config.toml")
+	if err := os.MkdirAll(filepath.Dir(codexConfig), 0o700); err != nil {
+		t.Fatalf("mkdir codex dir: %v", err)
+	}
+	if err := os.WriteFile(codexConfig, []byte("model = \"gpt-5\"\n"), 0o600); err != nil {
+		t.Fatalf("write codex config: %v", err)
+	}
+	hookDir := filepath.Join(home, ".defenseclaw", "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatalf("mkdir hook dir: %v", err)
+	}
+
+	own, err := WatchOwnedFiles(InstallOptions{
+		ConnectorName: "codex",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      "test-token",
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "codex-cli 0.142.0",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchOwnedFiles: %v", err)
+	}
+
+	// The native agent config file is SHARED-writer: Codex itself
+	// rewrites config.toml during normal use, so the guardian must
+	// only react to Create/Remove/Rename on it (Write/Chmod are the
+	// agent updating its own state).
+	wantShared := filepath.Join(home, ".codex", "config.toml")
+	if !sliceContains(own.SharedWriter, wantShared) {
+		t.Fatalf("WatchOwnedFiles.SharedWriter = %v, missing %s", own.SharedWriter, wantShared)
+	}
+	// It MUST NOT appear in ExclusiveWriter — that would re-introduce
+	// the log spam where every Codex config write fires a reconcile.
+	if sliceContains(own.ExclusiveWriter, wantShared) {
+		t.Fatalf("~/.codex/config.toml must not be ExclusiveWriter (Codex writes to it during normal use); got %v", own.ExclusiveWriter)
+	}
+
+	// EXCLUSIVE-writer files: DC-only artifacts that render to
+	// the same bytes on every reconcile. This includes the
+	// connector-specific hook and scoped token as well as every
+	// contract-digested shared script. The shared scripts are
+	// connector-independent, so adding them does not reintroduce
+	// cross-connector publication churn.
+	wantExclusive := []string{
+		filepath.Join(hookDir, "codex-hook.sh"),
+		filepath.Join(hookDir, ".hook-codex.token"),
+		filepath.Join(hookDir, "inspect-tool.sh"),
+		filepath.Join(hookDir, "inspect-request.sh"),
+		filepath.Join(hookDir, "inspect-response.sh"),
+		filepath.Join(hookDir, "inspect-tool-response.sh"),
+		filepath.Join(hookDir, "_hardening.sh"),
+	}
+	for _, w := range wantExclusive {
+		if !sliceContains(own.ExclusiveWriter, w) {
+			t.Fatalf("WatchOwnedFiles.ExclusiveWriter = %v, missing %s", own.ExclusiveWriter, w)
+		}
+		// And they must NOT slip into SharedWriter (would suppress
+		// Write/Chmod events on a file only DC writes to).
+		if sliceContains(own.SharedWriter, w) {
+			t.Fatalf("%s must be ExclusiveWriter (DC-only), not SharedWriter", w)
+		}
+	}
+
+	// Regression guard: merged sidecars that are not
+	// contract-digested scripts remain outside both ownership sets.
+	wantExcluded := []string{
+		filepath.Join(hookDir, ".hookcfg"),
+	}
+	for _, w := range wantExcluded {
+		if sliceContains(own.ExclusiveWriter, w) {
+			t.Fatalf("%s must NOT be in ExclusiveWriter", w)
+		}
+		if sliceContains(own.SharedWriter, w) {
+			t.Fatalf("%s must NOT be in SharedWriter either", w)
+		}
+	}
+
+	// Regression guard: NO returned entry may be a bare dir.
+	allFiles := append(append([]string{}, own.ExclusiveWriter...), own.SharedWriter...)
+	forbiddenDirs := []string{
+		filepath.Join(home, ".codex"),
+		filepath.Join(home, ".defenseclaw"),
+		hookDir,
+	}
+	for _, f := range allFiles {
+		for _, d := range forbiddenDirs {
+			if f == d {
+				t.Fatalf("WatchOwnedFiles returned a directory %s; must return only files", f)
+			}
+		}
+	}
+
+	// Unrelated agent-runtime paths MUST NOT appear in either set.
+	forbiddenPaths := []string{
+		filepath.Join(home, ".codex", "sessions"),
+		filepath.Join(home, ".codex", "history.jsonl"),
+		filepath.Join(home, ".codex", "logs_2.sqlite-wal"),
+		filepath.Join(home, ".codex", "auth.json"),
+	}
+	for _, f := range allFiles {
+		for _, forbidden := range forbiddenPaths {
+			if f == forbidden {
+				t.Fatalf("WatchOwnedFiles leaked unrelated agent-runtime path %s", f)
+			}
+		}
+	}
+}
+
+func TestWatchOwnedFilesClassifiesAMPPluginAsExclusive(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	pluginPath := filepath.Join(home, ".config", "amp", "plugins", "defenseclaw.ts")
+	previousPluginPath := connector.AMPPluginPathOverride
+	connector.AMPPluginPathOverride = ""
+	t.Cleanup(func() { connector.AMPPluginPathOverride = previousPluginPath })
+
+	own, err := WatchOwnedFiles(InstallOptions{
+		ConnectorName: "amp",
+		UserHome:      home,
+		OwnerUID:      os.Getuid(),
+		OwnerGID:      os.Getgid(),
+		APIAddr:       "127.0.0.1:18970",
+		ProxyAddr:     "127.0.0.1:4000",
+		APIToken:      strings.Repeat("a", 64),
+		GuardrailMode: "action",
+		HookFailMode:  "closed",
+		AgentVersion:  "0.0.1785334225",
+		Registry:      connector.NewDefaultRegistry(),
+	})
+	if err != nil {
+		t.Fatalf("WatchOwnedFiles Amp: %v", err)
+	}
+	if !sliceContains(own.ExclusiveWriter, pluginPath) {
+		t.Fatalf("Amp plugin missing from ExclusiveWriter: %v", own.ExclusiveWriter)
+	}
+	if sliceContains(own.SharedWriter, pluginPath) {
+		t.Fatalf("Amp plugin must not be a shared-writer config file: %v", own.SharedWriter)
+	}
+	scopedTokenPath := filepath.Join(home, ".defenseclaw", "hooks", ".hook-amp.token")
+	if !sliceContains(own.ExclusiveWriter, scopedTokenPath) {
+		t.Fatalf("Amp scoped token sidecar missing from ExclusiveWriter: %v", own.ExclusiveWriter)
+	}
+	if sliceContains(own.SharedWriter, scopedTokenPath) {
+		t.Fatalf("Amp scoped token sidecar must not be a shared-writer file: %v", own.SharedWriter)
+	}
+}
+
+// TestInstallBootstrapsMissingHookConfigFirstTime locks the endpoint-
+// product contract: on a fresh target where the user has never
+// launched the agent (so ~/.codex/config.toml doesn't exist yet),
+// Install auto-creates the connector's minimal-valid stub as the
+// target user AND completes successfully. Before this change the
+// installer refused with "hook config file missing", leaving
+// customers with no enforcement until they opened each agent once —
+// see bootstrap.go for the rationale.
+func TestInstallBootstrapsMissingHookConfigFirstTime(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
+	skipIfRoot(t)
+	home := newTestHome(t)
+	cfgPath := filepath.Join(home, ".codex", "config.toml")
+	if _, err := os.Stat(cfgPath); !os.IsNotExist(err) {
+		t.Fatalf("precondition: %s must not exist before Install (err=%v)", cfgPath, err)
+	}
+	result, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
 		UserHome:      home,
 		OwnerUID:      os.Getuid(),
 		OwnerGID:      os.Getgid(),
 		APIAddr:       "127.0.0.1:18970",
 		APIToken:      "test-token",
+		AgentVersion:  "codex-cli 0.142.0",
 		Registry:      connector.NewDefaultRegistry(),
 	})
-	if err == nil || !strings.Contains(err.Error(), "hook config") || !strings.Contains(err.Error(), "missing") {
-		t.Fatalf("Install error = %v, want hook config missing", err)
+	if err != nil {
+		t.Fatalf("Install with missing hook config: %v", err)
 	}
-	if _, statErr := os.Stat(filepath.Join(home, ".defenseclaw")); !os.IsNotExist(statErr) {
-		t.Fatalf("data dir exists after refused install: %v", statErr)
+	if result.Connector != "codex" {
+		t.Fatalf("result.Connector = %q, want codex", result.Connector)
+	}
+	// The stub must exist AND be owned by the target user after Install.
+	info, statErr := os.Stat(cfgPath)
+	if statErr != nil {
+		t.Fatalf("stat %s after Install: %v", cfgPath, statErr)
+	}
+	if info.Size() == 0 {
+		t.Fatalf("stub at %s is empty; Connector.Setup should have written entries", cfgPath)
 	}
 }
 
 func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 
@@ -420,6 +1012,7 @@ func TestInstallRepairsMissingHookConfigWhenPreviouslyProtected(t *testing.T) {
 }
 
 func TestInstallRepairsHookConfigSymlinkWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	outside := filepath.Join(t.TempDir(), "outside.toml")
@@ -462,6 +1055,7 @@ func TestInstallRepairsHookConfigSymlinkWhenPreviouslyProtected(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	outside := filepath.Join(t.TempDir(), "config.toml")
@@ -494,6 +1088,7 @@ func TestInstallRefusesHookConfigSymlinkOutsideHome(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkInsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	realConfig := filepath.Join(home, "real-config.toml")
@@ -526,6 +1121,7 @@ func TestInstallRefusesHookConfigSymlinkInsideHome(t *testing.T) {
 }
 
 func TestInstallRefusesHookConfigSymlinkParent(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	realDir := filepath.Join(home, "real-codex")
@@ -554,6 +1150,7 @@ func TestInstallRefusesHookConfigSymlinkParent(t *testing.T) {
 }
 
 func TestInstallRefusesDataDirSymlink(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -589,6 +1186,7 @@ func TestInstallRefusesDataDirSymlink(t *testing.T) {
 }
 
 func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -630,6 +1228,7 @@ func TestInstallRefusesExistingHookScriptSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRepairsExistingHookScriptSymlinkWhenPreviouslyProtected(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -680,6 +1279,7 @@ func TestInstallRepairsExistingHookScriptSymlinkWhenPreviouslyProtected(t *testi
 }
 
 func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -721,6 +1321,7 @@ func TestInstallRefusesExistingHookTokenSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRefusesExistingHookHelperSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -762,6 +1363,7 @@ func TestInstallRefusesExistingHookHelperSymlinkBeforeSetup(t *testing.T) {
 }
 
 func TestInstallRefusesExistingGeneratedExecutableSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -803,6 +1405,7 @@ func TestInstallRefusesExistingGeneratedExecutableSymlinkBeforeSetup(t *testing.
 }
 
 func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -830,6 +1433,7 @@ func TestValidateInstallFootprintRefusesGeneratedFileSymlinkBeforeSetup(t *testi
 }
 
 func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	codexConfig := filepath.Join(home, ".codex", "config.toml")
@@ -855,6 +1459,7 @@ func TestInstallRefusesHomeOwnerMismatch(t *testing.T) {
 }
 
 func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	dataDir := filepath.Join(home, ".defenseclaw")
@@ -868,13 +1473,14 @@ func TestHardenInstallFootprintRefusesCreatedDirOutsideHome(t *testing.T) {
 
 	err := hardenInstallFootprint(os.Getuid(), os.Getgid(), home, dataDir, "codex", connector.AgentPaths{
 		CreatedDirs: []string{outside},
-	}, nil)
+	}, nil, nil)
 	if err == nil || !strings.Contains(err.Error(), "refusing created dir outside user home") {
 		t.Fatalf("hardenInstallFootprint error = %v, want outside created dir refusal", err)
 	}
 }
 
 func TestInstallRefusesProxyConnector(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	skipIfRoot(t)
 	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
@@ -892,6 +1498,7 @@ func TestInstallRefusesProxyConnector(t *testing.T) {
 }
 
 func TestInstallRefusesRootTarget(t *testing.T) {
+	requireEnterpriseHookInstaller(t)
 	home := newTestHome(t)
 	_, err := Install(context.Background(), InstallOptions{
 		ConnectorName: "codex",
@@ -909,9 +1516,17 @@ func TestInstallRefusesRootTarget(t *testing.T) {
 
 func TestLoadManifestValidatesEnabledTargets(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "targets.yaml")
+	targetIdentity := "  - user: alice\n"
+	if runtime.GOOS == "windows" {
+		// YAML single quotes do not process backslash escapes, so a single
+		// pair per separator is what LoadManifest sees. The doubled
+		// backslashes here were previously making the parsed value
+		// `C:\\Users\\alice`, not the intended `C:\Users\alice`.
+		targetIdentity = "  - user: alice\n    user_home: 'C:\\Users\\alice'\n    sid: S-1-5-21-1-2-3-1001\n"
+	}
 	if err := os.WriteFile(path, []byte(`
 targets:
-  - user: alice
+`+targetIdentity+`
     connector: codex
     agent_version: "codex-cli 0.142.0"
   - enabled: false

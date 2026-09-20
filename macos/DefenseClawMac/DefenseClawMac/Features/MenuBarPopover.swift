@@ -190,8 +190,8 @@ struct MenuBarPopover: View {
     }
 
     private func openMainWindow() {
-        AppDelegate.recreateMainWindow = { openWindow(id: "main") }
-        AppDelegate.openMainWindow()
+        AppDelegate.prepareForMainWindowPresentation()
+        openWindow(id: "main")
     }
 
     private var displayedConnectors: [ConnectorHealth] {
@@ -273,7 +273,11 @@ struct MenuBarPopover: View {
                 Task { await appState.acknowledge(appState.unackedAlerts) }
             }
             .controlSize(.small)
-            .disabled(appState.unackedAlerts.isEmpty)
+            .disabled(
+                appState.unackedAlerts.isEmpty
+                    || appState.ackInProgress
+                    || !appState.installationMutationsAllowed
+            )
             Button(appState.monitoringPaused ? "Resume" : "Pause") {
                 appState.monitoringPaused.toggle()
             }

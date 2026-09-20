@@ -27,12 +27,59 @@
 //     would-block / approval-pending UX can render the source and
 //     severity inline without packing them into the body string.
 //
-// Platform-native delivery happens in sendPlatform (osascript on
-// macOS, notify-send on Linux); on platforms without sendPlatform the
-// package falls back to writing a structured line on fallbackWriter.
+// Platform-native delivery happens in sendPlatform (osascript on macOS,
+// notify-send on Linux, and an in-process Shell_NotifyIconW broker on
+// Windows); on platforms without sendPlatform the package falls back to
+// writing a structured line on fallbackWriter.
 package notify
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+	"runtime"
+	"strings"
+)
+
+// ErrDesktopUnsupported is returned when the current platform has no native
+// desktop notification implementation. Callers may still receive the message
+// through the explicitly labelled terminal fallback.
+var ErrDesktopUnsupported = errors.New("native desktop notifications are unsupported")
+
+// DesktopNotificationCapability is the authoritative platform capability for
+// the native desktop delivery route. Configured state is intentionally kept
+// separate: a legacy Windows config may say enabled while effective delivery
+// remains inactive.
+type DesktopNotificationCapability struct {
+	GOOS              string
+	Supported         bool
+	Provider          string
+	UnsupportedReason string
+}
+
+// DesktopCapabilityForGOOS resolves native desktop notification support for a
+// platform. Keeping the GOOS input explicit makes status and dispatcher tests
+// deterministic without changing the host OS.
+func DesktopCapabilityForGOOS(goos string) DesktopNotificationCapability {
+	goos = strings.ToLower(strings.TrimSpace(goos))
+	switch goos {
+	case "darwin":
+		return DesktopNotificationCapability{GOOS: goos, Supported: true, Provider: "osascript"}
+	case "linux":
+		return DesktopNotificationCapability{GOOS: goos, Supported: true, Provider: "notify-send"}
+	case "windows":
+		return DesktopNotificationCapability{GOOS: goos, Supported: true, Provider: "Shell_NotifyIconW"}
+	default:
+		return DesktopNotificationCapability{
+			GOOS:              goos,
+			UnsupportedReason: "native desktop notifications are not supported on this platform",
+		}
+	}
+}
+
+// DesktopCapability returns the native desktop capability of this process.
+func DesktopCapability() DesktopNotificationCapability {
+	return DesktopCapabilityForGOOS(runtime.GOOS)
+}
 
 // Notification is a structured, multi-line desktop notification.
 // All fields are optional; empty Title/Subtitle/Body are skipped by
@@ -57,8 +104,22 @@ func Send(title, message string) error {
 // running with no display server still see what would have been
 // shown.
 func SendNotification(n Notification) error {
-	if err := sendPlatform(n); err != nil {
-		fmt.Fprintf(fallbackWriter, "[defenseclaw] %s%s: %s\n",
+	return sendNotification(n, DesktopCapability(), sendPlatform)
+}
+
+func sendNotification(
+	n Notification,
+	capability DesktopNotificationCapability,
+	sender func(Notification) error,
+) error {
+	var err error
+	if !capability.Supported {
+		err = fmt.Errorf("%w: %s", ErrDesktopUnsupported, capability.UnsupportedReason)
+	} else {
+		err = sender(n)
+	}
+	if err != nil {
+		fmt.Fprintf(fallbackWriter, "[defenseclaw terminal fallback] %s%s: %s\n",
 			n.Title, formatSubtitle(n.Subtitle), n.Body)
 		return err
 	}

@@ -25,18 +25,22 @@ import (
 	"os/exec"
 	"path/filepath"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/processutil"
 )
 
 type PluginScanner struct {
-	BinaryPath string
-	Policy     string
-	Profile    string
+	BinaryPath  string
+	Policy      string
+	Profile     string
+	IncludeSelf bool
 }
 
 func NewPluginScanner(binaryPath string) *PluginScanner {
 	if binaryPath == "" {
 		binaryPath = "defenseclaw"
 	}
+	binaryPath = resolveDefaultPluginScanner(binaryPath)
 	return &PluginScanner{BinaryPath: binaryPath}
 }
 
@@ -62,21 +66,20 @@ func (s *PluginScanner) pluginScanCommand(target string) (string, []string) {
 	if s.Profile != "" {
 		args = append(args, "--profile", s.Profile)
 	}
+	if s.IncludeSelf {
+		args = append(args, "--include-self")
+	}
 	return binaryPath, args
 }
 
 func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, error) {
 	start := time.Now()
-	ctx, sp := BeginScanSpan(ctx, s.Name(), target, InferTargetType(s.Name()), AgentIdentity{})
 	exitCode := 0
 	var scanErr error
 	var result *ScanResult
-	defer func() {
-		FinishScanSpan(sp, result, exitCode, scanErr)
-	}()
 
 	binaryPath, args := s.pluginScanCommand(target)
-	cmd := exec.CommandContext(ctx, binaryPath, args...)
+	cmd := processutil.CommandContext(ctx, binaryPath, args...)
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
@@ -99,14 +102,11 @@ func (s *PluginScanner) Scan(ctx context.Context, target string) (*ScanResult, e
 			exitCode = exitErr.ExitCode()
 		}
 		if errors.Is(err, exec.ErrNotFound) {
-			scanErr = fmt.Errorf("scanner: %s not found at %q — install with: pip install defenseclaw", s.Name(), s.BinaryPath)
+			scanErr = fmt.Errorf("scanner: %s not found at %q — repair the managed DefenseClaw installation; source checkouts: uv sync", s.Name(), s.BinaryPath)
 			return nil, scanErr
 		}
-		if exitCode != 0 {
-			EmitSubprocessExitFromContext(ctx, binaryPath, exitCode, stderrStr)
-		}
 		if stdout.Len() == 0 {
-			scanErr = fmt.Errorf("scanner: %s failed: %s", s.Name(), stderrStr)
+			scanErr = fmt.Errorf("scanner: %s exited %d: %s", s.Name(), exitCode, stderrStr)
 			return nil, scanErr
 		}
 	}
@@ -180,17 +180,19 @@ func parsePluginOutput(data []byte) ([]Finding, error) {
 			ln = &v
 		}
 		findings = append(findings, Finding{
-			ID:          f.ID,
-			Severity:    Severity(f.Severity),
-			Title:       f.Title,
-			Description: f.Description,
-			Location:    f.Location,
-			Remediation: f.Remediation,
-			Scanner:     "plugin-scanner",
-			Tags:        f.Tags,
-			RuleID:      f.RuleID,
-			Category:    f.Category,
-			LineNumber:  ln,
+			ID:              f.ID,
+			Severity:        Severity(f.Severity),
+			Title:           f.Title,
+			Description:     f.Description,
+			EvidenceSummary: f.Evidence,
+			Location:        f.Location,
+			Remediation:     f.Remediation,
+			Scanner:         "plugin-scanner",
+			Tags:            f.Tags,
+			RuleID:          f.RuleID,
+			Category:        f.Category,
+			LineNumber:      ln,
+			Confidence:      f.Confidence,
 		})
 	}
 	return findings, nil

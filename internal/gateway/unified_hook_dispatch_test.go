@@ -38,26 +38,24 @@ import (
 // "let's reintroduce a bespoke handler for X" change immediately
 // fails CI.
 //
-// The contract we assert: an empty POST body produces the unified
-// handler's "hook event name is required" error (lowercase
-// _event_). The legacy bespoke handlers emitted
-// "hook_event_name is required" (with underscore), so if a future
-// regression reintroduces a bespoke handler we'd see the
-// underscored variant and this test fails.
+// The contract we assert: an empty POST body reaches the unified handler.
+// Most connectors then produce its generic "hook event name is required"
+// error. Codex and Copilot first enforce their installer-bound event
+// registrations inside that same unified handler, so their connector-specific
+// trust errors are pinned separately.
 func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 	api := &APIServer{}
-	connectors := []string{
-		"codex",
-		"claudecode",
-		"hermes",
-		"cursor",
-		"windsurf",
-		"geminicli",
-		"copilot",
-		"openhands",
-		"made-up",
+	connectors := map[string]string{
+		"codex":      "installer-bound Codex hook event is required",
+		"claudecode": "hook event name is required",
+		"hermes":     "hook event name is required",
+		"cursor":     "hook event name is required",
+		"devin":      "hook event name is required",
+		"copilot":    "Copilot hook event registration is required",
+		"openhands":  "hook event name is required",
+		"made-up":    "hook event name is required",
 	}
-	for _, name := range connectors {
+	for name, wantError := range connectors {
 		t.Run(name, func(t *testing.T) {
 			h := api.handleUnifiedConnectorHook(name)
 			w := httptest.NewRecorder()
@@ -68,13 +66,9 @@ func TestUnifiedHookDispatch_SingleEntryPoint(t *testing.T) {
 				t.Fatalf("expected 400 for empty body, got %d: %s", w.Code, w.Body.String())
 			}
 			body := w.Body.String()
-			// "hook event name is required" is handleAgentHook's
-			// error message (lowercase _event_). The deleted
-			// bespoke handlers used "hook_event_name is required"
-			// (underscored). Asserting the lowercase form pins
-			// the unified-handler routing for every connector.
-			if !contains(body, "hook event name is required") {
-				t.Errorf("connector %s did not flow through unified pipeline; body=%q", name, body)
+			if !contains(body, wantError) {
+				t.Errorf("connector %s did not reach its unified pipeline precondition %q; body=%q",
+					name, wantError, body)
 			}
 		})
 	}
@@ -102,7 +96,8 @@ func TestHookProfileForConnector(t *testing.T) {
 		// hermes has no Decode: its `extra` content is recovered by the
 		// generic decoder's ContentEnvelopeKey fallback.
 		{"hermes", "hermes", "hermes", false, true, true},
-		{"cursor", "cursor", "cursor", false, true, true},
+		{"cursor", "cursor", "cursor", true, true, true},
+		{"devin", "devin", "devin", true, true, true},
 		{"openhands", "openhands", "openhands", false, true, true},
 		{"unknown_returns_zero", "made-up", "made-up", false, false, false},
 	}
@@ -159,8 +154,7 @@ func TestUnifiedDispatch_PreservesConnectorWireShape(t *testing.T) {
 		{"claudecode", "claude_code_output"},
 		{"hermes", "hook_output"},
 		{"cursor", "hook_output"},
-		{"windsurf", "hook_output"},
-		{"geminicli", "hook_output"},
+		{"devin", "hook_output"},
 		{"copilot", "hook_output"},
 		{"openhands", "hook_output"},
 		{"made-up", "hook_output"},
@@ -200,7 +194,7 @@ func jsonKeys(m map[string]interface{}) []string {
 // renderAgentHookResponseForProfile MUST project them onto the
 // JSON output map so hook scripts (and any downstream consumer
 // of the HTTP response body) can pivot on the same join key
-// surfaced via gateway.jsonl, scan_findings, and the audit DB
+// surfaced via canonical logs, scan_findings, and the audit DB
 // structured envelope.
 //
 // Regression guard: the original render projection built a

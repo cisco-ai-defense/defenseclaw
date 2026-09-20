@@ -181,8 +181,8 @@ enum ScannerProbe {
         return plan
     }
 
-    private static func dotEnvNames() -> Set<String> {
-        let url = ConfigStore.dataDirectory.appendingPathComponent(".env")
+    private static func dotEnvNames(environmentURL: URL) -> Set<String> {
+        let url = environmentURL
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         var names = Set<String>()
         for rawLine in text.split(separator: "\n") {
@@ -201,12 +201,12 @@ enum ScannerProbe {
     }
 
     /// Missing required gateway credentials (env or ~/.defenseclaw/.env).
-    static func missingKeys(config: DefenseClawConfig) -> [String] {
+    static func missingKeys(config: DefenseClawConfig, environmentURL: URL) -> [String] {
         let requiredKeys = requiresOpenClawGatewayToken(config: config)
             ? [openClawGatewayToken]
             : []
         let env = ProcessInfo.processInfo.environment
-        let dotenv = dotEnvNames()
+        let dotenv = dotEnvNames(environmentURL: environmentURL)
         return requiredKeys.filter { name in
             let inEnv = !(env[name] ?? "").isEmpty
             return !inEnv && !dotenv.contains(name)

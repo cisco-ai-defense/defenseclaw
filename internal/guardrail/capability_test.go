@@ -48,3 +48,17 @@ func TestClassifyToolName(t *testing.T) {
 		}
 	}
 }
+
+func TestCapabilityForWindowsCommandRules(t *testing.T) {
+	for _, ruleID := range []string{
+		"CMD-WIN-REMOVE-ITEM-RF",
+		"CMD-WIN-RM-FORCE",
+		"CMD-WIN-RMDIR-SQ",
+		"CMD-WIN-IWR-IEX",
+		"CMD-WIN-REG-PERSIST",
+	} {
+		if got := CapabilityForRuleID(ruleID); got != CapExecShell {
+			t.Errorf("CapabilityForRuleID(%q) = %q, want %q", ruleID, got, CapExecShell)
+		}
+	}
+}

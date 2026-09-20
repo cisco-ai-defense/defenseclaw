@@ -220,8 +220,11 @@ func TestIPC_GetStatsSnapshotFirst(t *testing.T) {
 	if first.Availability != pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE {
 		t.Errorf("availability = %v, want AVAILABLE", first.Availability)
 	}
-	if first.BlockedSkills < 1 {
-		t.Errorf("blocked_skills = %d, want ≥1 after seeding", first.BlockedSkills)
+	// GetBlockedSkills() folds nil into 0 so the assertion is
+	// pointer-safe under the new proto3 `optional` contract; after
+	// seedBlockedSkill the counter is >=1 and present on the wire.
+	if first.GetBlockedSkills() < 1 {
+		t.Errorf("blocked_skills = %d, want ≥1 after seeding", first.GetBlockedSkills())
 	}
 
 	// Mutate the store and expect a fresh snapshot on the next tick.
@@ -230,9 +233,9 @@ func TestIPC_GetStatsSnapshotFirst(t *testing.T) {
 	if err != nil {
 		t.Fatalf("delta stats snapshot: %v", err)
 	}
-	if next.BlockedSkills <= first.BlockedSkills {
+	if next.GetBlockedSkills() <= first.GetBlockedSkills() {
 		t.Errorf("blocked_skills did not increase: first=%d next=%d",
-			first.BlockedSkills, next.BlockedSkills)
+			first.GetBlockedSkills(), next.GetBlockedSkills())
 	}
 }
 

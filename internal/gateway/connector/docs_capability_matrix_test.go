@@ -78,6 +78,11 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 
 	opts := SetupOpts{DataDir: t.TempDir(), WorkspaceDir: t.TempDir()}
 	for _, conn := range newBuiltinConnectors() {
+		if conn.Name() == "geminicli" {
+			// Gemini CLI remains constructible only for legacy teardown. The
+			// operator-facing capability matrix intentionally omits it.
+			continue
+		}
 		row, exists := rows[conn.Name()]
 		if !exists {
 			t.Errorf("connector %q is missing from docs capability matrix", conn.Name())
@@ -101,9 +106,8 @@ func TestDocsCapabilityMatrixMatchesConnectors(t *testing.T) {
 			t.Errorf("%s toolInspection=%q want %q", conn.Name(), row.toolInspection, wantToolInspection)
 		}
 		actualSubprocess := string(conn.SubprocessPolicy())
-		// Codex and Claude Code prefer the sandbox policy but resolve to
-		// shims when OpenShell is not installed on the test host. The docs
-		// describe the configured/preferred policy, not that host fallback.
+		// Proxy connectors prefer sandbox but resolve to shims off Linux. The
+		// docs describe that configured policy rather than the host fallback.
 		subprocessMatches := row.subprocessPolicy == actualSubprocess || (row.subprocessPolicy == "sandbox" && actualSubprocess == "shims")
 		if !subprocessMatches {
 			t.Errorf("%s subprocessPolicy=%q want %q", conn.Name(), row.subprocessPolicy, conn.SubprocessPolicy())

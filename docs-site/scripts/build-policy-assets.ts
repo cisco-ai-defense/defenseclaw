@@ -24,6 +24,9 @@
 //                                           Rego domain so the Live Test
 //                                           pane has something to render
 //                                           the moment it loads.
+//   docs-site/data/policy-use-case-packs.json — opt-in high-assurance
+//                                           rule files operators can layer
+//                                           onto a custom policy.
 //   docs-site/public/opa/<domain>.wasm    — compiled WASM modules for
 //                                           every Rego domain reachable
 //                                           via opa-wasm in the browser.
@@ -50,6 +53,7 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const DOCS_SITE = resolve(HERE, '..');
 const REPO_ROOT = resolve(DOCS_SITE, '..');
 const POLICIES = resolve(REPO_ROOT, 'policies');
+const USE_CASE_PACKS = resolve(POLICIES, 'guardrail-use-cases');
 const DATA_OUT = resolve(DOCS_SITE, 'data');
 const WASM_OUT = resolve(DOCS_SITE, 'public', 'opa');
 
@@ -211,14 +215,13 @@ interface Recipe {
   id: string;
   title: string;
   kind:
-    | 'rule:secrets'
+    | 'rule:secret'
     | 'rule:injection'
-    | 'rule:exfiltration'
     | 'rule:command'
-    | 'rule:path'
+    | 'rule:sensitive-path'
     | 'rule:enterprise-data'
     | 'rule:trust-exploit'
-    | 'rule:cognitive'
+    | 'rule:cognitive-file'
     | 'rule:c2'
     | 'pre_judge_strip'
     | 'finding_suppression'
@@ -233,6 +236,60 @@ interface Recipe {
   tool_capability_class?: Array<
     'read_fs' | 'write_fs' | 'exec_shell' | 'network_fetch' | 'send_message'
   >;
+}
+
+interface UseCasePack {
+  id: string;
+  title: string;
+  status: 'selectable' | 'staged';
+  summary: string;
+  files: Array<{
+    filename: string;
+    category: string;
+    rules: Array<Record<string, unknown>>;
+  }>;
+}
+
+function buildUseCasePacks(): UseCasePack[] {
+  const packs: UseCasePack[] = [];
+  for (const id of readDirSafely(USE_CASE_PACKS).sort()) {
+    const packDir = join(USE_CASE_PACKS, id);
+    if (!statSync(packDir).isDirectory()) continue;
+
+    const readme = existsSync(join(packDir, 'README.md'))
+      ? readFileSync(join(packDir, 'README.md'), 'utf-8')
+      : '';
+    const title = readme.match(/^#\s+(.+)$/m)?.[1]?.trim() ?? id;
+    const summary = readme
+      .replace(/^#\s+.+$/m, '')
+      .trim()
+      .split(/\n\s*\n/, 1)[0]
+      ?.replace(/\s+/g, ' ')
+      .trim() ?? '';
+    const files: UseCasePack['files'] = [];
+    const rulesDir = join(packDir, 'rules');
+    for (const entry of readDirSafely(rulesDir).sort()) {
+      if (!entry.endsWith('.yaml')) continue;
+      const parsed = readYaml(join(rulesDir, entry));
+      if (!parsed) continue;
+      const rules = Array.isArray(parsed.rules)
+        ? (parsed.rules as Array<Record<string, unknown>>)
+        : [];
+      files.push({
+        filename: entry.replace(/\.yaml$/, ''),
+        category: String(parsed.category ?? entry.replace(/\.yaml$/, '')),
+        rules,
+      });
+    }
+    packs.push({
+      id,
+      title,
+      status: files.some((file) => file.rules.length > 0) ? 'selectable' : 'staged',
+      summary,
+      files,
+    });
+  }
+  return packs;
 }
 
 // Rule-axes mapping is sourced from the Go authority at
@@ -319,6 +376,33 @@ function buildRecipes(strict: PresetBundle): Recipe[] {
     'SEC-SLACK-WEBHOOK': {
       examples: ['https://hooks.slack.com/services/T0000/B0000/abcdefg12345'],
       counterexamples: ['https://hooks.slack.com/wrongpath', 'https://example.com'],
+    },
+    'OBFUSC-UNICODE-ZWSP': {
+      examples: [
+        'a' +
+          '\u200B' +
+          'b' +
+          '\u200C' +
+          'c' +
+          '\u200D' +
+          'd' +
+          '\uFEFF' +
+          'e' +
+          '\u200B' +
+          'f' +
+          '\u200C' +
+          'g' +
+          '\u200D' +
+          'h' +
+          '\uFEFF' +
+          'i' +
+          '\u200B' +
+          'j' +
+          '\u200C',
+      ],
+      counterexamples: ['copy' + '\u200B' + 'paste', '👩' + '\u200D' + '💻'],
+      why:
+        'Requires ten zero-width characters immediately after ASCII alphanumerics, avoiding isolated formatting artifacts and emoji ZWJ sequences.',
     },
   };
 
@@ -476,11 +560,22 @@ function buildScenarios(): Scenario[] {
       input: {
         target_type: 'plugin',
         target_name: 'defenseclaw',
-        path: '/Users/op/.defenseclaw/plugins/defenseclaw',
+        path: '/Users/op/.config/amp/plugins/defenseclaw.ts',
         block_list: [],
         allow_list: [
-          { target_type: 'plugin', target_name: 'defenseclaw', reason: 'first-party DefenseClaw plugin' },
+          {
+            target_type: 'plugin',
+            target_name: 'defenseclaw',
+            reason: 'first-party DefenseClaw plugin',
+            source_path_contains: ['.config/amp/plugins/defenseclaw.ts'],
+          },
         ],
+        scan_result: {
+          max_severity: 'CRITICAL',
+          total_findings: 1,
+          scanner_name: 'mcp-scanner',
+          findings: [{ severity: 'CRITICAL', scanner: 'mcp-scanner', title: 'Allow-list precedence fixture' }],
+        },
       },
     },
     {
@@ -634,54 +729,6 @@ function buildScenarios(): Scenario[] {
         content_length: 0,
       },
     },
-    {
-      id: 'correlator-escalation-chain',
-      title: 'Escalation chain promotion',
-      domain: 'guardrail',
-      description:
-        'Session ran MEDIUM → HIGH → HIGH severity findings in order. The correlator emits a CRITICAL on chain completion.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'prompt',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched ESCALATION-CHAIN correlator pattern'],
-          reason: 'CORR-ESCALATION-CHAIN: MEDIUM→HIGH→HIGH sequence in 6 events',
-          signal_strength: 'high',
-          correlator_pattern_id: 'ESCALATION-CHAIN',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
-    {
-      id: 'correlator-destructive-flow',
-      title: 'Destructive shell after sensitive read',
-      domain: 'guardrail',
-      description:
-        'rm -rf invoked in the same session as a prior ~/.ssh read. Correlator emits CRITICAL.',
-      expectedVerdict: 'block',
-      input: {
-        direction: 'tool_call',
-        model: 'gpt-4o-mini',
-        mode: 'action',
-        scanner_mode: 'local',
-        local_result: {
-          action: 'block',
-          severity: 'CRITICAL',
-          findings: ['Session matched DESTRUCTIVE-FLOW correlator pattern'],
-          reason: 'CORR-DESTRUCTIVE-FLOW: exec_shell capability after sensitive_access finding',
-          signal_strength: 'high',
-          correlator_pattern_id: 'DESTRUCTIVE-FLOW',
-        },
-        cisco_result: null,
-        content_length: 0,
-      },
-    },
   ];
 }
 
@@ -689,6 +736,7 @@ interface BuildResult {
   presets: Array<{ name: string; description: string; bundle: PresetBundle }>;
   recipes: Recipe[];
   scenarios: Scenario[];
+  useCasePacks: UseCasePack[];
 }
 
 function buildAll(): BuildResult {
@@ -705,8 +753,9 @@ function buildAll(): BuildResult {
   }
   const recipes = buildRecipes(strict);
   const scenarios = buildScenarios();
+  const useCasePacks = buildUseCasePacks();
 
-  return { presets, recipes, scenarios };
+  return { presets, recipes, scenarios, useCasePacks };
 }
 
 function ensureDir(path: string) {
@@ -722,12 +771,16 @@ function compileWasm(opts: { skipMissingOpa: boolean }): { compiled: string[]; s
   const compiled: string[] = [];
   const skipped: string[] = [];
 
-  // Locate `opa` on PATH. We resolve via `which` instead of a hard-
-  // coded path so the script works on Linux CI runners and macOS dev
-  // boxes alike.
+  // Locate `opa` on PATH without hard-coding an installation directory.
+  // `which` emits MSYS paths such as /tmp/... on Windows; Node's native
+  // process launcher cannot execute those paths. Use the platform resolver
+  // so Windows receives a native drive-qualified path from where.exe.
   let opaPath = '';
   try {
-    opaPath = execFileSync('which', ['opa'], { encoding: 'utf-8' }).trim();
+    const resolver = process.platform === 'win32' ? 'where.exe' : 'which';
+    opaPath = execFileSync(resolver, ['opa'], { encoding: 'utf-8' })
+      .trim()
+      .split(/\r?\n/, 1)[0] ?? '';
   } catch {
     /* missing — fall through */
   }
@@ -824,7 +877,7 @@ function main() {
   ensureDir(DATA_OUT);
 
   console.log('[policy-assets] building presets, recipes, scenarios…');
-  const { presets, recipes, scenarios } = buildAll();
+  const { presets, recipes, scenarios, useCasePacks } = buildAll();
   // Note: no `generated_at` timestamps in any of these JSON files.
   // Dropping the timestamps means a clean PR diff only shows real
   // schema/content changes, which is the whole point of bundling
@@ -832,7 +885,8 @@ function main() {
   writeJson(join(DATA_OUT, 'policy-presets.json'), { presets });
   writeJson(join(DATA_OUT, 'policy-recipes.json'), { recipes });
   writeJson(join(DATA_OUT, 'policy-scenarios.json'), { scenarios });
-  console.log(`[policy-assets]   presets=${presets.length}  recipes=${recipes.length}  scenarios=${scenarios.length}`);
+  writeJson(join(DATA_OUT, 'policy-use-case-packs.json'), { packs: useCasePacks });
+  console.log(`[policy-assets]   presets=${presets.length}  recipes=${recipes.length}  scenarios=${scenarios.length}  use-case-packs=${useCasePacks.length}`);
 
   console.log('[policy-assets] compiling Rego → WASM…');
   const { compiled, skipped } = compileWasm({ skipMissingOpa });

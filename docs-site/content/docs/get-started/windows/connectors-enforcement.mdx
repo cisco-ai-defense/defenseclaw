@@ -1,0 +1,21 @@
+---
+title: Windows connector guidance moved
+description: Native Windows connector support, setup, and enforcement guidance now lives on each connector page.
+---
+
+Native Windows connector guidance now lives beside macOS/Linux guidance on
+each [connector page](/docs/connectors#platform-support). This route remains as
+a compatibility pointer for existing bookmarks; it is no longer a separate
+source of connector support or enforcement claims.
+
+<Cards>
+  <Card title="Compare platform support" href="/docs/connectors#platform-support" description="See every connector's macOS/Linux and native Windows status and its important Windows boundary." />
+  <Card title="Connector capabilities" href="/docs/capability-matrix" description="Compare block, native ask, fail-closed, and subprocess capabilities." />
+  <Card title="Fail modes" href="/docs/reference/fail-modes" description="Understand connector-specific transport and invalid-response behavior." />
+  <Card title="Enable, disable, or remove" href="/docs/setup/guardrail/disabling" description="Manage one connector or the full guardrail without confusing disable with teardown." />
+</Cards>
+
+Use the connector's own page for setup commands, files, event semantics,
+telemetry, HITL behavior, and Windows-only quirks. Use the
+[Windows security model](/docs/get-started/windows/telemetry-security) for
+platform-wide loopback, credential, DACL, audit, and release-trust boundaries.

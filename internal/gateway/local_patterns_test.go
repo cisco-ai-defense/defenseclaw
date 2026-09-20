@@ -75,7 +75,7 @@ func TestLocalPatternsDefaultsParity(t *testing.T) {
 	for _, profile := range []string{"default", "strict", "permissive"} {
 		profile := profile
 		t.Run(profile, func(t *testing.T) {
-			rp := guardrail.LoadRulePack(filepath.Join(policiesRoot, profile))
+			rp := mustLoadRulePack(t, filepath.Join(policiesRoot, profile))
 			if rp == nil || rp.LocalPatterns == nil {
 				t.Fatalf("profile=%s: LocalPatterns nil — loader did not pick up local-patterns.yaml", profile)
 			}
@@ -111,12 +111,14 @@ func TestApplyLocalPatternsOverride_NilRestoresDefaults(t *testing.T) {
 	withLocalPatternsRestored(t)
 
 	// Mutate first so the nil-call has something to undo.
-	ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+	if err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
 		Version:      1,
 		Injection:    []string{"only-this-phrase"},
 		Secrets:      []string{"only-this-secret"},
 		Exfiltration: []string{"only-this-exfil"},
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	localPatternsMu.RLock()
 	if len(injectionPatterns) != 1 || injectionPatterns[0] != "only-this-phrase" {
@@ -124,7 +126,9 @@ func TestApplyLocalPatternsOverride_NilRestoresDefaults(t *testing.T) {
 	}
 	localPatternsMu.RUnlock()
 
-	ApplyLocalPatternsOverride(nil)
+	if err := ApplyLocalPatternsOverride(nil); err != nil {
+		t.Fatal(err)
+	}
 
 	localPatternsMu.RLock()
 	defer localPatternsMu.RUnlock()
@@ -148,11 +152,19 @@ func TestApplyLocalPatternsOverride_NilRestoresDefaults(t *testing.T) {
 func TestApplyLocalPatternsOverride_NilFieldKeepsDefault(t *testing.T) {
 	withLocalPatternsRestored(t)
 
-	ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+	if err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+		Version: 1,
+		Secrets: []string{"stale-secret-that-must-not-survive"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
 		Version:   1,
 		Injection: []string{"new-injection"},
 		// All other fields nil: must remain at defaults.
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	localPatternsMu.RLock()
 	defer localPatternsMu.RUnlock()
@@ -174,10 +186,12 @@ func TestApplyLocalPatternsOverride_NilFieldKeepsDefault(t *testing.T) {
 func TestApplyLocalPatternsOverride_EmptySliceClearsField(t *testing.T) {
 	withLocalPatternsRestored(t)
 
-	ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+	if err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
 		Version:      1,
 		Exfiltration: []string{}, // empty, not nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	localPatternsMu.RLock()
 	defer localPatternsMu.RUnlock()
@@ -189,29 +203,94 @@ func TestApplyLocalPatternsOverride_EmptySliceClearsField(t *testing.T) {
 	}
 }
 
-// TestApplyLocalPatternsOverride_BadRegexLoggedNotPanic verifies that
-// a malformed entry in `injection_regexes` is logged and dropped
-// rather than panicking — operator YAML is operator-typed and a
-// regex typo must not crash the gateway on rule-pack reload.
-func TestApplyLocalPatternsOverride_BadRegexLoggedNotPanic(t *testing.T) {
+// TestApplyLocalPatternsOverride_BadRegexRejectsAtomically verifies that an
+// invalid candidate cannot partially replace the active scanner state.
+func TestApplyLocalPatternsOverride_BadRegexRejectsAtomically(t *testing.T) {
 	withLocalPatternsRestored(t)
 
-	ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
-		Version: 1,
-		InjectionRegexes: []string{
-			`valid\s+pattern`,
-			`(unclosed-group`,
-			`also[valid`,
+	active := &guardrail.LocalPatterns{
+		Version:          1,
+		Injection:        []string{"active-injection"},
+		InjectionRegexes: []string{`active\s+injection`},
+		PIIRequests:      []string{"active-pii-request"},
+		PIIDataRegexes:   []string{`active-pii-\d+`},
+		Secrets:          []string{"active-secret"},
+		Exfiltration:     []string{"active-exfiltration"},
+	}
+	if err := ApplyLocalPatternsOverride(active); err != nil {
+		t.Fatal(err)
+	}
+	err := ApplyLocalPatternsOverride(&guardrail.LocalPatterns{
+		Version:          1,
+		Injection:        []string{"candidate-injection"},
+		InjectionRegexes: []string{`candidate\s+injection`},
+		PIIRequests:      []string{"candidate-pii-request"},
+		PIIDataRegexes: []string{
+			`candidate-pii-\d+`,
+			`(private-unclosed-group`,
 		},
+		Secrets:      []string{"candidate-secret"},
+		Exfiltration: []string{"candidate-exfiltration"},
 	})
+	if err == nil {
+		t.Fatal("invalid local-pattern candidate unexpectedly activated")
+	}
+	if strings.Contains(err.Error(), "private-unclosed-group") || strings.Contains(err.Error(), "error parsing regexp") {
+		t.Fatalf("activation error leaked rejected regex details: %v", err)
+	}
 
 	localPatternsMu.RLock()
 	defer localPatternsMu.RUnlock()
-	if len(injectionRegexes) != 1 {
-		var srcs []string
-		for _, re := range injectionRegexes {
-			srcs = append(srcs, re.String())
-		}
-		t.Errorf("expected 1 surviving regex, got %d: %s", len(injectionRegexes), strings.Join(srcs, ", "))
+	if !reflect.DeepEqual(injectionPatterns, active.Injection) {
+		t.Errorf("rejected candidate changed injection patterns: %v", injectionPatterns)
 	}
+	if got := regexSources(injectionRegexes); !reflect.DeepEqual(got, active.InjectionRegexes) {
+		t.Errorf("rejected candidate changed injection regexes: %v", got)
+	}
+	if !reflect.DeepEqual(piiRequestPatterns, active.PIIRequests) {
+		t.Errorf("rejected candidate changed PII request patterns: %v", piiRequestPatterns)
+	}
+	if got := regexSources(piiDataRegexes); !reflect.DeepEqual(got, active.PIIDataRegexes) {
+		t.Errorf("rejected candidate changed PII data regexes: %v", got)
+	}
+	if !reflect.DeepEqual(secretPatterns, active.Secrets) {
+		t.Errorf("rejected candidate changed secret patterns: %v", secretPatterns)
+	}
+	if !reflect.DeepEqual(exfilPatterns, active.Exfiltration) {
+		t.Errorf("rejected candidate changed exfiltration patterns: %v", exfilPatterns)
+	}
+}
+
+func TestCompileLocalPatternSourcesEnforcesSafeCompilerLimits(t *testing.T) {
+	privatePattern := strings.Repeat("a", 2049)
+	_, err := compileLocalPatternSources("injection_regexes", []string{privatePattern})
+	if err == nil {
+		t.Fatal("oversized local regex unexpectedly compiled")
+	}
+	if got, want := err.Error(), "local-patterns injection_regexes entry 0 contains an invalid regular expression: pattern exceeds size limit"; got != want {
+		t.Fatalf("safe compiler error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), privatePattern) || strings.Contains(err.Error(), "pattern too long") {
+		t.Fatalf("safe compiler error leaked pattern details: %v", err)
+	}
+
+	const privateInvalidPattern = "[private-token"
+	_, err = compileLocalPatternSources("injection_regexes", []string{privateInvalidPattern})
+	if err == nil {
+		t.Fatal("malformed local regex unexpectedly compiled")
+	}
+	if got, want := err.Error(), "local-patterns injection_regexes entry 0 contains an invalid regular expression: pattern syntax is invalid"; got != want {
+		t.Fatalf("safe compiler error = %q, want %q", got, want)
+	}
+	if strings.Contains(err.Error(), privateInvalidPattern) {
+		t.Fatalf("safe compiler error leaked pattern details: %v", err)
+	}
+}
+
+func regexSources(regexes []*regexp.Regexp) []string {
+	sources := make([]string, len(regexes))
+	for i, re := range regexes {
+		sources[i] = re.String()
+	}
+	return sources
 }

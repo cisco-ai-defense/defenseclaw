@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from defenseclaw.tui.panels.first_run import (
     CONNECTOR_CHOICES,
+    FirstRunField,
     FirstRunPanelModel,
     decide_first_run_prompt,
     first_run_prompt_text,
@@ -30,12 +31,12 @@ def test_first_run_defaults_match_go_panel_argv() -> None:
         "openclaw",
         "hermes",
         "cursor",
-        "windsurf",
-        "geminicli",
+        "devin",
         "copilot",
         "openhands",
         "antigravity",
         "opencode",
+        "amp",
         "omnigent",
     )
     assert panel.args() == (
@@ -91,6 +92,24 @@ def test_first_run_cycles_choices_and_bools() -> None:
     )
 
 
+def test_first_run_selects_amp_and_builds_init_command() -> None:
+    panel = FirstRunPanelModel()
+    panel.cursor = 0
+
+    # Exercise the same choice-cycling path as the TUI without assuming every
+    # OS exposes the same set of connectors between Codex and Amp.
+    connector_options = panel.fields[0].options
+    assert "amp" in connector_options
+    moves = (connector_options.index("amp") - connector_options.index("codex")) % len(connector_options)
+    for _ in range(moves):
+        panel.handle_key("right")
+
+    assert panel.value("Connector") == "amp"
+    args = panel.args()
+    connector_index = args.index("--connector")
+    assert args[connector_index + 1] == "amp"
+
+
 def test_first_run_passes_hitl_flags_only_in_action_profile() -> None:
     """HITL flags only flow through when profile=action.
 
@@ -120,6 +139,19 @@ def test_first_run_passes_hitl_flags_only_in_action_profile() -> None:
     assert "observe" in args
     assert "--human-approval" not in args
     assert "--no-human-approval" not in args
+
+
+def test_connector_preview_badge_uses_stable_kind_not_label(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "defenseclaw.tui.panels.first_run.connector_preview_on_os",
+        lambda value: value == "codex",
+    )
+
+    preview = FirstRunField("Renamed display label", "connector", "codex")
+    supported = FirstRunField("Renamed display label", "connector", "hermes")
+
+    assert preview.display_value == "codex (preview)"
+    assert supported.display_value == "hermes"
 
 
 def test_first_run_fail_mode_cycles_to_closed() -> None:

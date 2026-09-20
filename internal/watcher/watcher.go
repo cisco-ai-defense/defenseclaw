@@ -19,22 +19,25 @@ package watcher
 import (
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
 
 	"github.com/fsnotify/fsnotify"
+	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
+	"github.com/defenseclaw/defenseclaw/internal/hermesskills"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 )
 
 // InstallType distinguishes between skill and MCP install events.
@@ -104,17 +107,23 @@ type InstallWatcher struct {
 	cfg        *config.Config
 	skillDirs  []string
 	pluginDirs []string
-	store      *audit.Store
-	logger     *audit.Logger
-	shell      *sandbox.OpenShell
-	opa        *policy.Engine
-	otel       *telemetry.Provider
-	webhooks   WebhookDispatcher
-	debounce   time.Duration
-	onAdmit    OnAdmission
+	// managedArtifacts are exact connector-owned plugin files. They remain
+	// visible to connector lifecycle/Doctor, but ordinary plugin scanners must
+	// not inspect or quarantine DefenseClaw's own bridge artifact.
+	managedArtifacts []string
+	store            *audit.Store
+	logger           *audit.Logger
+	shell            *sandbox.OpenShell
+	opa              *policy.Engine
+	webhooks         WebhookDispatcher
+	debounce         time.Duration
+	onAdmit          OnAdmission
 
 	mu      sync.Mutex
 	pending map[string]time.Time // path → first-seen, for debounce
+
+	observabilityV8Mu sync.RWMutex
+	observabilityV8   ObservabilityV8Runtime
 
 	policyFileMu     sync.Mutex
 	policyFileHashes map[string]string   // path → sha256 hex of file contents (policy / list YAML watch)
@@ -136,9 +145,9 @@ func (w *InstallWatcher) newScanner(evt InstallEvent) scanner.Scanner {
 }
 
 // New creates an InstallWatcher. The opa parameter may be nil to fall back
-// to the built-in Go admission logic. The otel parameter may be nil when
-// telemetry is disabled.
-func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, otel *telemetry.Provider, onAdmit OnAdmission) *InstallWatcher {
+// to the built-in Go admission logic. Watcher observability is exclusively
+// emitted through the audit logger's generated v8 runtime.
+func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store, logger *audit.Logger, shell *sandbox.OpenShell, opa *policy.Engine, onAdmit OnAdmission) *InstallWatcher {
 	debounce := time.Duration(cfg.Watch.DebounceMs) * time.Millisecond
 	if debounce <= 0 {
 		debounce = 500 * time.Millisecond
@@ -151,7 +160,6 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 		logger:           logger,
 		shell:            shell,
 		opa:              opa,
-		otel:             otel,
 		debounce:         debounce,
 		onAdmit:          onAdmit,
 		pending:          make(map[string]time.Time),
@@ -160,9 +168,40 @@ func New(cfg *config.Config, skillDirs, pluginDirs []string, store *audit.Store,
 	}
 }
 
-// SetOTelProvider attaches the OTel provider for watcher metrics.
-func (w *InstallWatcher) SetOTelProvider(p *telemetry.Provider) {
-	w.otel = p
+// SetManagedArtifacts binds exact connector-owned plugin paths before Run.
+// Paths are matched exactly; parent directories and sibling plugins receive no
+// exemption.
+func (w *InstallWatcher) SetManagedArtifacts(paths []string) {
+	w.managedArtifacts = w.managedArtifacts[:0]
+	for _, path := range paths {
+		trimmed := strings.TrimSpace(path)
+		if trimmed == "" {
+			continue
+		}
+		absolute, err := filepath.Abs(filepath.Clean(trimmed))
+		if err != nil {
+			continue
+		}
+		duplicate := false
+		for _, existing := range w.managedArtifacts {
+			if sameWatcherPath(existing, absolute) {
+				duplicate = true
+				break
+			}
+		}
+		if !duplicate {
+			w.managedArtifacts = append(w.managedArtifacts, absolute)
+		}
+	}
+}
+
+func (w *InstallWatcher) isManagedArtifact(path string) bool {
+	for _, managedPath := range w.managedArtifacts {
+		if sameWatcherPath(path, managedPath) {
+			return true
+		}
+	}
+	return false
 }
 
 // SetWebhookDispatcher attaches a webhook dispatcher for outbound notifications.
@@ -179,21 +218,36 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 	defer fsw.Close()
 
 	watched := 0
-	for _, dir := range w.skillDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] skill dir %s: %v (skipping)\n", dir, err)
-			continue
+	watchedDirs := make(map[string]struct{})
+	watchOnce := func(dir, kind string) bool {
+		absolute, absErr := filepath.Abs(dir)
+		if absErr != nil {
+			absolute = filepath.Clean(dir)
 		}
+		key := strings.ToLower(filepath.Clean(absolute))
+		if _, exists := watchedDirs[key]; exists {
+			return true
+		}
+		if err := ensureAndWatch(fsw, dir); err != nil {
+			fmt.Fprintf(os.Stderr, "[watch] %s dir %s: %v (skipping)\n", kind, dir, err)
+			return false
+		}
+		watchedDirs[key] = struct{}{}
 		watched++
-		fmt.Printf("[watch] monitoring skill dir: %s\n", dir)
+		fmt.Printf("[watch] monitoring %s dir: %s\n", kind, dir)
+		return true
+	}
+	for _, dir := range w.skillDirs {
+		watchOnce(dir, "skill")
 	}
 	for _, dir := range w.pluginDirs {
-		if err := ensureAndWatch(fsw, dir); err != nil {
-			fmt.Fprintf(os.Stderr, "[watch] plugin dir %s: %v (skipping)\n", dir, err)
+		if !watchOnce(dir, "plugin") {
 			continue
 		}
-		watched++
-		fmt.Printf("[watch] monitoring plugin dir: %s\n", dir)
+		if watcherConnectorName(w.cfg) == "claudecode" &&
+			strings.EqualFold(filepath.Base(filepath.Clean(dir)), "cache") {
+			addClaudeCacheWatches(fsw, dir, watchedDirs)
+		}
 	}
 
 	if watched == 0 {
@@ -202,9 +256,6 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 
 	_ = w.logger.LogAction(string(audit.ActionWatchStart), "", fmt.Sprintf("dirs=%d debounce=%s", watched, w.debounce))
 
-	if w.opa != nil && w.otel != nil {
-		w.opa.SetOTelProvider(w.otel)
-	}
 	go w.watchPolicyListsAndYAML(ctx)
 
 	if w.cfg.Watch.RescanEnabled {
@@ -227,16 +278,25 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if event.Op&(fsnotify.Create|fsnotify.Rename) == 0 {
 				continue
 			}
+			if watcherConnectorName(w.cfg) == "claudecode" {
+				if depth, inside := w.claudeCacheDepth(event.Name); inside {
+					if info, statErr := os.Stat(event.Name); statErr == nil &&
+						info.IsDir() && depth < 3 {
+						addClaudeCacheWatches(fsw, event.Name, watchedDirs)
+					}
+					if depth != 3 {
+						continue
+					}
+				}
+			}
 			if !w.isDirectChildDir(event.Name) {
 				continue
 			}
-			if w.otel != nil {
-				evtType := "create"
-				if event.Op&fsnotify.Rename != 0 {
-					evtType = "rename"
-				}
-				w.otel.RecordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
+			evtType := "create"
+			if event.Op&fsnotify.Rename != 0 {
+				evtType = "rename"
 			}
+			w.recordWatcherEvent(ctx, evtType, w.classifyEvent(event.Name).Type.String(), "")
 			w.mu.Lock()
 			if _, exists := w.pending[event.Name]; !exists {
 				w.pending[event.Name] = time.Now()
@@ -247,9 +307,7 @@ func (w *InstallWatcher) Run(ctx context.Context) error {
 			if !ok {
 				return nil
 			}
-			if w.otel != nil {
-				w.otel.RecordWatcherError(ctx)
-			}
+			w.recordWatcherError(ctx)
 			fmt.Fprintf(os.Stderr, "[watch] fsnotify error: %v\n", err)
 
 		case <-ticker.C:
@@ -276,16 +334,65 @@ func (w *InstallWatcher) processPending(ctx context.Context) {
 		if _, err := os.Stat(path); err != nil {
 			continue
 		}
-		evt := w.classifyEvent(path)
-		result := w.runAdmission(ctx, evt)
-		if w.onAdmit != nil {
-			w.onAdmit(result)
+		for _, evt := range w.pendingInstallEvents(path) {
+			result := w.runAdmission(ctx, evt)
+			if w.onAdmit != nil {
+				w.onAdmit(result)
+			}
 		}
 	}
 }
 
+// pendingInstallEvents expands a top-level Hermes category notification into
+// the actual nested SKILL.md identities. A provenance/discovery failure keeps
+// the original category event so it fails open to scanning.
+func (w *InstallWatcher) pendingInstallEvents(path string) []InstallEvent {
+	fallback := w.classifyEvent(path)
+	for _, root := range w.skillDirs {
+		if !hermesskills.IsRoot(root) || !watcherPathAtOrBelow(path, root) {
+			continue
+		}
+		entries, err := hermesskills.Discover(root, hermesskills.DefaultDirectoryLimit)
+		if err != nil {
+			return []InstallEvent{fallback}
+		}
+		out := make([]InstallEvent, 0, len(entries))
+		for _, entry := range entries {
+			if !watcherPathAtOrBelow(entry.Path, path) {
+				continue
+			}
+			out = append(out, InstallEvent{
+				Type:      InstallSkill,
+				Name:      entry.Name,
+				Path:      entry.Path,
+				Connector: "hermes",
+				Timestamp: time.Now().UTC(),
+			})
+		}
+		if len(out) > 0 {
+			return out
+		}
+		return []InstallEvent{fallback}
+	}
+	return []InstallEvent{fallback}
+}
+
 func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 	installType := InstallSkill
+	name := filepath.Base(path)
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if pluginID, isPlugin := w.claudePluginIdentity(path); isPlugin {
+			installType = InstallPlugin
+			name = pluginID
+		}
+		return InstallEvent{
+			Type:      installType,
+			Name:      name,
+			Path:      path,
+			Connector: "claudecode",
+			Timestamp: time.Now().UTC(),
+		}
+	}
 	pathAbs, _ := filepath.Abs(path)
 	for _, dir := range w.pluginDirs {
 		abs, _ := filepath.Abs(dir)
@@ -297,11 +404,40 @@ func (w *InstallWatcher) classifyEvent(path string) InstallEvent {
 
 	return InstallEvent{
 		Type:      installType,
-		Name:      filepath.Base(path),
+		Name:      name,
 		Path:      path,
 		Connector: watcherConnectorName(w.cfg),
 		Timestamp: time.Now().UTC(),
 	}
+}
+
+func (w *InstallWatcher) claudePluginIdentity(path string) (string, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		parts := strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})
+		switch {
+		case strings.EqualFold(filepath.Base(rootAbs), "cache") && len(parts) == 3:
+			return parts[1] + "@" + parts[0], true
+		case strings.EqualFold(filepath.Base(rootAbs), "skills") &&
+			len(parts) == 1 && isClaudeSkillsPlugin(pathAbs):
+			return claudeSkillsPluginIdentity(pathAbs), true
+		}
+	}
+	return "", false
 }
 
 // eventConnector resolves the connector that owns an install event: the
@@ -320,24 +456,42 @@ func (w *InstallWatcher) eventConnector(evt InstallEvent) string {
 // When the OPA engine is available it delegates the verdict decision to
 // Rego policy; otherwise it falls back to the built-in Go logic.
 func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (res AdmissionResult) {
+	if evt.Type == InstallPlugin && w.isManagedArtifact(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "connector-managed plugin is lifecycle-owned and discovery-only",
+		}
+	}
+	// Vendor-managed skills remain visible to inventory, but
+	// must never enter scanner or enforcement paths. Check both the lexical
+	// and resolved path so an alias outside a bundle cannot bypass the boundary.
+	if evt.Type == InstallSkill && isBundledSkillWatchPath(evt.Path) {
+		return AdmissionResult{
+			Event:   evt,
+			Verdict: VerdictAllowed,
+			Reason:  "vendor-bundled skill is discovery-only",
+		}
+	}
+
 	pe := enforce.NewPolicyEngine(w.store)
 	targetType := string(evt.Type)
 	policyID := enforce.PolicyStableID(w.cfg.PolicyDir)
-	ctx, admSpan := enforce.StartAdmissionDecideSpan(ctx, targetType, evt.Name, policyID)
+	ctx, admissionTrace := w.startAdmissionTraceV8(ctx, evt, targetType, policyID)
 	// SLO timer: measure watcher-detection → admission-decision wall
 	// time so every run feeds defenseclaw.slo.block.latency. Blocked
 	// verdicts drive the <2000ms SLO dashboard; allowed/clean still
 	// populate the histogram so operators can compare distributions.
 	admissionStart := time.Now()
 	defer func() {
-		enforce.EndAdmissionDecideSpan(admSpan, string(res.Verdict), res.Reason, policyID, nil)
-		if w.otel != nil {
-			w.otel.RecordBlockSLO(ctx, targetType, float64(time.Since(admissionStart).Milliseconds()))
-		}
+		_ = admissionTrace.end(res)
+		w.recordBlockSLO(ctx, targetType, float64(time.Since(admissionStart).Milliseconds()))
 	}()
 
-	_ = w.logger.LogAction(string(audit.ActionInstallDetected), evt.Path,
-		fmt.Sprintf("type=%s name=%s", targetType, evt.Name))
+	w.logAssetDiscovered(
+		ctx, evt,
+		fmt.Sprintf("type=%s name=%s", targetType, evt.Name), "detected",
+	)
 
 	// Avarice F-2867: an explicit operator allow that recorded a
 	// source_path MUST NOT auto-allow a different on-disk asset
@@ -349,14 +503,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			_ = w.logger.LogAction("install-allow-path-mismatch", evt.Path,
 				fmt.Sprintf("type=%s name=%s allowed_path=%q presented_path=%q (F-2867)",
 					targetType, evt.Name, existing.SourcePath, evt.Path))
-			if w.otel != nil {
-				w.otel.EmitPolicyDecision("admission", "allow-path-mismatch", evt.Name, targetType,
-					"allow entry pinned to different source_path; failing closed (F-2867)",
-					map[string]string{
-						"allowed_path":   existing.SourcePath,
-						"presented_path": evt.Path,
-					})
-			}
 			w.enforceBlock(ctx, evt)
 			w.recordAdmission(ctx, "blocked", targetType)
 			res = AdmissionResult{
@@ -381,14 +527,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		RuntimeSurface: "watcher",
 	})
 	if assetDecision.Enabled && assetDecision.RawAction == "block" {
-		if w.otel != nil {
-			w.otel.EmitPolicyDecision("asset-policy", assetDecision.Action, evt.Name, targetType, assetDecision.Reason, map[string]string{
-				"source":          assetDecision.Source,
-				"registry_status": assetDecision.RegistryStatus,
-				"runtime_surface": "watcher",
-				"would_block":     fmt.Sprintf("%t", assetDecision.WouldBlock),
-			})
-		}
 		if assetDecision.Action == "block" {
 			_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 				fmt.Sprintf("type=%s reason=%s source=%s", targetType, assetDecision.Reason, assetDecision.Source))
@@ -414,9 +552,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "blocked":
 				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=blocked", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "blocked", evt.Name, targetType, out.Reason, nil)
-				}
 				w.enforceBlock(ctx, evt)
 				w.recordAdmission(ctx, "blocked", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictBlocked, Reason: out.Reason}
@@ -424,9 +559,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "rejected":
 				_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 					fmt.Sprintf("type=%s reason=policy-rejected", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "rejected", evt.Name, targetType, out.Reason, nil)
-				}
 				w.enforceBlock(ctx, evt)
 				w.recordAdmission(ctx, "rejected", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictRejected, Reason: out.Reason}
@@ -434,9 +566,6 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 			case "allowed":
 				_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 					fmt.Sprintf("type=%s reason=allow-listed", targetType))
-				if w.otel != nil {
-					w.otel.EmitPolicyDecision("admission", "allowed", evt.Name, targetType, out.Reason, nil)
-				}
 				w.recordAdmission(ctx, "allowed", targetType)
 				res = AdmissionResult{Event: evt, Verdict: VerdictAllowed, Reason: out.Reason}
 				return res
@@ -502,9 +631,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 	if err != nil {
 		_ = w.logger.LogAction(string(audit.ActionInstallScanError), evt.Path,
 			fmt.Sprintf("type=%s scanner=%s error=%v", targetType, s.Name(), err))
-		if w.otel != nil {
-			w.otel.RecordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
-		}
+		w.recordScanError(ctx, s.Name(), targetType, classifyWatcherScanError(err))
 		// Avarice F-3187: a scanner error must NOT leave the
 		// freshly-detected install in place. The legacy code
 		// recorded `scan-error` and returned without quarantine,
@@ -531,7 +658,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("%s %q is on the block list — rejected", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallRejected), evt.Path,
 			fmt.Sprintf("type=%s reason=blocked-post-scan", targetType))
-		_ = w.logger.LogScanWithVerdict(result, "blocked")
+		_ = w.logScan(ctx, evt, result, "blocked")
 		w.enforceBlock(ctx, evt)
 		w.recordAdmission(ctx, "blocked", targetType)
 		res = AdmissionResult{
@@ -545,12 +672,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		reason := fmt.Sprintf("scan found findings but %s %q is allow-listed — skipping enforcement", targetType, evt.Name)
 		_ = w.logger.LogAction(string(audit.ActionInstallAllowed), evt.Path,
 			fmt.Sprintf("type=%s reason=allow-listed-post-scan", targetType))
-		_ = w.logger.LogScanWithVerdict(result, "allowed")
-		if w.otel != nil {
-			w.otel.EmitPolicyDecision("admission", "allowed", evt.Name, targetType, reason, map[string]string{
-				"scanner": s.Name(),
-			})
-		}
+		_ = w.logScan(ctx, evt, result, "allowed")
 		w.recordAdmission(ctx, "allowed", targetType)
 		res = AdmissionResult{
 			Event: evt, Verdict: VerdictAllowed, Reason: reason,
@@ -578,22 +700,8 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		}
 		out, evalErr := w.opa.Evaluate(ctx, input)
 		if evalErr == nil {
-			if w.otel != nil {
-				if out.Verdict == "rejected" || out.Verdict == "blocked" {
-					w.otel.EmitPolicyDecision("admission", out.Verdict, evt.Name, targetType, out.Reason, map[string]string{
-						"scanner":      s.Name(),
-						"max_severity": string(result.MaxSeverity()),
-					})
-				}
-				if out.Verdict == "clean" || out.Verdict == "warning" {
-					w.otel.EmitPolicyDecision("admission", out.Verdict, evt.Name, targetType, out.Reason, map[string]string{
-						"scanner":      s.Name(),
-						"max_severity": string(result.MaxSeverity()),
-					})
-				}
-			}
 			w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-			_ = w.logger.LogScanWithVerdict(result, out.Verdict)
+			_ = w.logScan(ctx, evt, result, out.Verdict)
 			w.recordAdmission(ctx, out.Verdict, targetType)
 			res = AdmissionResult{
 				Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -622,7 +730,7 @@ func (w *InstallWatcher) runAdmission(ctx context.Context, evt InstallEvent) (re
 		ScanResult: scanInput,
 	}, fallbackProfile)
 	w.applyPostScanEnforcement(ctx, pe, out, evt, targetType, result, s.Name())
-	_ = w.logger.LogScanWithVerdict(result, out.Verdict)
+	_ = w.logScan(ctx, evt, result, out.Verdict)
 	w.recordAdmission(ctx, out.Verdict, targetType)
 	res = AdmissionResult{
 		Event: evt, Verdict: toVerdict(out.Verdict), Reason: out.Reason,
@@ -695,6 +803,17 @@ func (w *InstallWatcher) applyPostScanEnforcement(ctx context.Context, pe *enfor
 		_ = w.logger.LogAction(string(audit.ActionInstallWarning), evt.Path,
 			fmt.Sprintf("type=%s severity=%s scanner=%s", targetType, result.MaxSeverity(), scannerName))
 	}
+}
+
+func (w *InstallWatcher) logAssetDiscovered(
+	ctx context.Context,
+	evt InstallEvent,
+	details, reason string,
+) {
+	_ = w.logger.LogAssetDiscoveredCtx(ctx, evt.Path, details, audit.AssetLifecycleInput{
+		AssetID: evt.Name, AssetType: string(evt.Type), TargetPath: evt.Path,
+		Reason: reason, Initiator: "watcher",
+	})
 }
 
 func coalesce(vals ...string) string {
@@ -792,57 +911,284 @@ func (w *InstallWatcher) takeActionFor(evt InstallEvent) bool {
 
 func (w *InstallWatcher) enforceBlock(ctx context.Context, evt InstallEvent) {
 	switch evt.Type {
-	case InstallSkill:
-		se := enforce.NewSkillEnforcer(w.cfg.QuarantineDir)
-		dest, err := se.Quarantine(evt.Path)
-		if err != nil {
-			w.emitQuarantineFailure(ctx, gatewaylog.ErrCodeFSMoveFailed, evt.Path, err)
-			return
-		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt.Path, dest)
 	case InstallMCP:
 		me := enforce.NewMCPEnforcer(w.shell)
 		_ = me.BlockEndpoint(evt.Name)
-	case InstallPlugin:
-		pe := enforce.NewPluginEnforcer(w.cfg.QuarantineDir, w.shell)
-		dest, err := pe.Quarantine(evt.Path)
-		if err != nil {
-			w.emitQuarantineFailure(ctx, gatewaylog.ErrCodeFSMoveFailed, evt.Path, err)
+	case InstallSkill, InstallPlugin:
+		w.quarantineAsset(ctx, evt)
+	}
+}
+
+func (w *InstallWatcher) quarantineAsset(ctx context.Context, evt InstallEvent) {
+	if w == nil || w.cfg == nil || w.store == nil {
+		w.emitQuarantineFailure(ctx, evt.Path, fmt.Errorf("watcher: quarantine provenance store is unavailable"))
+		return
+	}
+	if w.preserveRestoredBlockedAsset(evt) {
+		_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
+			fmt.Sprintf("type=%s restored physical files retained while install block remains", evt.Type))
+		return
+	}
+	connector := w.eventConnector(evt)
+	// The admission identity is connector-defined and may come from an asset
+	// manifest (for example a Hermes SKILL.md name or a Claude plugin ID).  The
+	// quarantine planner deliberately binds filesystem mutations to the exact
+	// source basename.  Keep those identities separate so a valid manifest name
+	// cannot weaken the path check or prevent an otherwise valid quarantine.
+	physicalName := filepath.Base(filepath.Clean(evt.Path))
+	plan, err := enforce.NewAssetQuarantinePlan(
+		w.cfg.QuarantineDir, w.sourceRootsFor(evt.Type), evt.Type.String(),
+		physicalName, connector, evt.Path,
+	)
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	record, err := w.store.CreateQuarantineRecord(ctx, audit.CreateQuarantineRecordInput{
+		TargetType: evt.Type.String(), TargetName: evt.Name,
+		OriginalPath: plan.SourcePath, QuarantinePath: plan.QuarantinePath,
+		ContentHash: plan.ContentHash, Reason: "watcher enforcement",
+		State: audit.QuarantineStatePending, OwnershipJSON: plan.OwnershipJSON,
+		// The physical owner and global action scope are committed together so
+		// either Go or Python restore clears the exact logical file decision.
+		Connectors: []string{connector, ""},
+	})
+	if err != nil {
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	if record.State == audit.QuarantineStateRestoring &&
+		sameWatcherPath(record.RestorePath, plan.SourcePath) {
+		matches, hashErr := enforce.AssetContentHashMatches(plan.SourcePath, record.ContentHash)
+		if hashErr == nil && matches {
+			_ = w.logger.LogAction(string(audit.ActionWatcherBlock), evt.Path,
+				fmt.Sprintf("type=%s restore in progress; physical files retained", evt.Type))
 			return
 		}
-		w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt.Path, dest)
 	}
+	if err := enforce.ExecuteAssetQuarantine(plan, record.ID); err != nil {
+		// Roll back only an unmaterialized journal. A verified destination is
+		// authoritative recovery data and must retain its pending provenance.
+		if _, statErr := os.Lstat(plan.QuarantinePath); os.IsNotExist(statErr) {
+			_ = w.store.DeleteQuarantineRecord(ctx, record.ID)
+		}
+		w.emitQuarantineFailure(ctx, evt.Path, err)
+		return
+	}
+	if err := w.store.UpdateQuarantineRecordState(
+		ctx, record.ID, audit.QuarantineStateActive, "",
+	); err != nil {
+		// The pending write-ahead record is intentionally retained and can be
+		// finalized or restored after restart.
+		fmt.Fprintf(os.Stderr, "[watch] quarantine provenance remains pending for %s: %v\n", evt.Path, err)
+	}
+	w.recordQuarantineAudit(ctx, audit.ActionQuarantine, evt, plan.QuarantinePath)
 }
 
-func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, code gatewaylog.ErrorCode, path string, err error) {
-	if w.otel != nil {
-		w.otel.EmitGatewayEvent(gatewaylog.Event{
-			Timestamp: time.Now().UTC(),
-			EventType: gatewaylog.EventError,
-			Severity:  gatewaylog.SeverityHigh,
-			Error: &gatewaylog.ErrorPayload{
-				Subsystem: string(gatewaylog.SubsystemQuarantine),
-				Code:      string(code),
-				Message:   "quarantine filesystem move failed",
-				Cause:     err.Error(),
-			},
-		})
-		w.otel.RecordQuarantineAction(ctx, "move_in", "error")
+// RestoreQuarantined restores one connector-owned watcher quarantine. The
+// physical file action is cleared transactionally at completion, while an
+// install block or runtime disable remains intact.
+func (w *InstallWatcher) RestoreQuarantined(
+	ctx context.Context,
+	targetType, targetName, connector, restorePath string,
+) error {
+	if w == nil || w.cfg == nil || w.store == nil {
+		return fmt.Errorf("watcher: quarantine provenance store is unavailable")
+	}
+	if ctx == nil {
+		return fmt.Errorf("watcher: restore context is required")
+	}
+	targetType = strings.TrimSpace(targetType)
+	targetName = strings.TrimSpace(targetName)
+	connector = strings.TrimSpace(connector)
+	if targetType != InstallSkill.String() && targetType != InstallPlugin.String() {
+		return fmt.Errorf("watcher: unsupported restore target type %q", targetType)
+	}
+	records, err := w.store.ListQuarantineRecordsForConnector(
+		ctx, targetType, targetName, connector,
+	)
+	if err != nil {
+		return err
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("watcher: %s %q is not quarantined for connector %q", targetType, targetName, connector)
+	}
+	if len(records) != 1 {
+		return fmt.Errorf("watcher: restore is ambiguous for %s %q connector %q", targetType, targetName, connector)
+	}
+	record := records[0]
+	requestedRestorePath := strings.TrimSpace(restorePath)
+	boundRestorePath := strings.TrimSpace(record.RestorePath)
+	if record.State == audit.QuarantineStateRestoring && boundRestorePath != "" {
+		if requestedRestorePath == "" {
+			restorePath = boundRestorePath
+		} else if !sameWatcherPath(requestedRestorePath, boundRestorePath) {
+			return fmt.Errorf(
+				"watcher: explicit restore path does not match durable restoring destination",
+			)
+		} else {
+			restorePath = requestedRestorePath
+		}
+	} else if requestedRestorePath == "" {
+		restorePath = record.OriginalPath
 	} else {
-		fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
+		restorePath = requestedRestorePath
+	}
+	if err := w.store.UpdateQuarantineRecordState(
+		ctx, record.ID, audit.QuarantineStateRestoring, restorePath,
+	); err != nil {
+		return fmt.Errorf("watcher: journal quarantine restore: %w", err)
+	}
+	plan := enforce.AssetRestorePlan{
+		RecordID: record.ID, TargetType: record.TargetType,
+		TargetName:     filepath.Base(filepath.Clean(record.QuarantinePath)),
+		QuarantineRoot: w.cfg.QuarantineDir, QuarantinePath: record.QuarantinePath,
+		RestorePath: restorePath, AllowedRoots: w.sourceRootsFor(InstallType(record.TargetType)),
+		ContentHash: record.ContentHash,
+	}
+	if err := enforce.ExecuteAssetRestore(plan); err != nil {
+		if matches, matchErr := enforce.AssetContentHashMatches(
+			record.QuarantinePath, record.ContentHash,
+		); matchErr == nil && matches {
+			_ = w.store.UpdateQuarantineRecordState(
+				ctx, record.ID, audit.QuarantineStateActive, "",
+			)
+		}
+		if w.logger != nil {
+			_ = w.logger.RecordQuarantineActionMetric(ctx, "move_out", "error")
+		}
+		return fmt.Errorf("watcher: restore quarantined asset: %w", err)
+	}
+	if err := w.store.CompleteQuarantineRestore(ctx, record.ID, restorePath); err != nil {
+		return fmt.Errorf("watcher: finalize quarantine restore: %w", err)
+	}
+	if w.logger != nil {
+		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_out", "ok")
+		w.recordQuarantineAudit(ctx, audit.ActionRestore, InstallEvent{
+			Type: InstallType(targetType), Name: targetName, Path: restorePath,
+			Connector: connector, Timestamp: time.Now().UTC(),
+		}, restorePath)
+	}
+	return nil
+}
+
+func (w *InstallWatcher) sourceRootsFor(targetType InstallType) []string {
+	switch targetType {
+	case InstallSkill:
+		return w.skillDirs
+	case InstallPlugin:
+		return w.pluginDirs
+	default:
+		return nil
 	}
 }
 
-func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, srcPath, destPath string) {
-	if w.otel != nil {
-		w.otel.RecordQuarantineAction(ctx, "move_in", "ok")
+func (w *InstallWatcher) preserveRestoredBlockedAsset(evt InstallEvent) bool {
+	if w == nil || w.store == nil {
+		return false
 	}
-	_ = w.logger.LogEvent(audit.Event{
+	connector := w.eventConnector(evt)
+	pe := enforce.NewPolicyEngine(w.store)
+	blocked, err := pe.IsBlockedForConnector(evt.Type.String(), evt.Name, connector)
+	if err != nil || !blocked {
+		return false
+	}
+	connectors := []string{connector}
+	if connector != "" {
+		connectors = append(connectors, "")
+	}
+	for _, scope := range connectors {
+		entry, err := w.store.GetActionForConnector(evt.Type.String(), evt.Name, scope)
+		if err != nil || entry == nil {
+			continue
+		}
+		if entry.Actions.File == "" && entry.SourcePath != "" &&
+			sameWatcherPath(entry.SourcePath, evt.Path) {
+			return true
+		}
+	}
+	return false
+}
+
+func (w *InstallWatcher) claudeCacheDepth(path string) (int, bool) {
+	pathAbs, err := filepath.Abs(path)
+	if err != nil {
+		return 0, false
+	}
+	for _, root := range w.pluginDirs {
+		rootAbs, absErr := filepath.Abs(root)
+		if absErr != nil || !strings.EqualFold(filepath.Base(rootAbs), "cache") {
+			continue
+		}
+		relative, relErr := filepath.Rel(rootAbs, pathAbs)
+		if relErr != nil || relative == "." || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			continue
+		}
+		return len(strings.FieldsFunc(relative, func(r rune) bool {
+			return r == '/' || r == '\\'
+		})), true
+	}
+	return 0, false
+}
+
+func sameWatcherPath(left, right string) bool {
+	leftAbs, leftErr := filepath.Abs(strings.TrimSpace(left))
+	rightAbs, rightErr := filepath.Abs(strings.TrimSpace(right))
+	if leftErr != nil || rightErr != nil {
+		return false
+	}
+	leftAbs = filepath.Clean(leftAbs)
+	rightAbs = filepath.Clean(rightAbs)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(leftAbs, rightAbs)
+	}
+	return leftAbs == rightAbs
+}
+
+func watcherPathAtOrBelow(path, root string) bool {
+	pathAbs, pathErr := filepath.Abs(filepath.Clean(path))
+	rootAbs, rootErr := filepath.Abs(filepath.Clean(root))
+	if pathErr != nil || rootErr != nil {
+		return false
+	}
+	relative, err := filepath.Rel(rootAbs, pathAbs)
+	if err != nil {
+		return false
+	}
+	return relative == "." || (relative != ".." &&
+		!strings.HasPrefix(relative, ".."+string(filepath.Separator)))
+}
+
+func (w *InstallWatcher) emitQuarantineFailure(ctx context.Context, path string, err error) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordQuarantineActionMetric(ctx, "move_in", "error")
+	}
+	fmt.Fprintf(os.Stderr, "[watch] quarantine %s: %v\n", path, err)
+}
+
+func (w *InstallWatcher) recordQuarantineAudit(ctx context.Context, action audit.Action, evt InstallEvent, destPath string) {
+	event := audit.Event{
 		Action:   string(action),
-		Target:   srcPath,
+		Target:   evt.Path,
 		Actor:    "defenseclaw",
 		Details:  fmt.Sprintf("dest=%s", destPath),
 		Severity: "INFO",
+	}
+	if action != audit.ActionQuarantine {
+		_ = w.logger.LogEventCtx(ctx, event)
+		return
+	}
+	_ = w.logger.LogEnforcementQuarantineApplied(ctx, event, audit.EnforcementQuarantineAppliedInput{
+		EnforcementID:   uuid.NewString(),
+		RequestedAction: "quarantine",
+		EffectiveAction: "quarantine",
+		Initiator:       "defenseclaw",
+		ResultingState:  "quarantined",
+		AssetID:         evt.Name,
+		AssetType:       evt.Type.String(),
+		SourcePath:      evt.Path,
+		DestinationPath: destPath,
 	})
 }
 
@@ -862,6 +1208,9 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 	for _, dir := range w.skillDirs {
 		dirAbs, _ := filepath.Abs(dir)
 		if parentAbs == dirAbs {
+			if isBundledSkillWatchPath(path) {
+				return false
+			}
 			return true
 		}
 	}
@@ -871,13 +1220,98 @@ func (w *InstallWatcher) isDirectChildDir(path string) bool {
 			return true
 		}
 	}
+	if watcherConnectorName(w.cfg) == "claudecode" {
+		if depth, inside := w.claudeCacheDepth(path); inside {
+			return depth == 3
+		}
+	}
 	return false
 }
 
-func (w *InstallWatcher) recordAdmission(ctx context.Context, decision, targetType string) {
-	if w.otel != nil {
-		w.otel.RecordAdmissionDecision(ctx, decision, targetType, "watcher")
+func isBundledSkillWatchPath(path string) bool {
+	if enforce.IsBundledSkillPath(path) {
+		return true
 	}
+	resolved, err := filepath.EvalSymlinks(path)
+	return err == nil && enforce.IsBundledSkillPath(resolved)
+}
+
+func (w *InstallWatcher) recordAdmission(ctx context.Context, decision, targetType string) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordAdmissionDecisionMetric(ctx, decision, targetType, "watcher")
+	}
+}
+
+func (w *InstallWatcher) recordWatcherEvent(
+	ctx context.Context,
+	eventType, targetType, connector string,
+) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherEventMetric(ctx, eventType, targetType, connector)
+	}
+}
+
+func (w *InstallWatcher) recordWatcherError(ctx context.Context) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherErrorMetric(ctx)
+	}
+}
+
+func (w *InstallWatcher) recordBlockSLO(ctx context.Context, targetType string, latencyMS float64) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordBlockSLOMetric(ctx, targetType, latencyMS)
+	}
+}
+
+func (w *InstallWatcher) recordScanError(
+	ctx context.Context,
+	scannerName, targetType, errorType string,
+) {
+	if w != nil && w.logger != nil {
+		_ = w.logger.RecordWatcherScanErrorMetric(ctx, scannerName, targetType, errorType)
+	}
+}
+
+func (w *InstallWatcher) logScan(
+	ctx context.Context,
+	evt InstallEvent,
+	result *scanner.ScanResult,
+	verdict string,
+) error {
+	if w == nil || w.logger == nil {
+		return fmt.Errorf("watcher: v8 scan logger is unavailable")
+	}
+	return w.logger.LogScanWithCorrelation(
+		ctx, result, verdict,
+		watcherScanCorrelation(ctx, "", w.eventConnector(evt)),
+	)
+}
+
+func watcherScanCorrelation(
+	ctx context.Context,
+	runID, connector string,
+) audit.ScanCorrelation {
+	envelope := audit.EnvelopeFromContext(ctx)
+	if runID == "" {
+		runID = envelope.RunID
+	}
+	correlation := audit.ScanCorrelation{
+		RunID: runID, RequestID: envelope.RequestID, SessionID: envelope.SessionID,
+		TraceID: envelope.TraceID, AgentID: envelope.AgentID, AgentName: envelope.AgentName,
+		AgentInstanceID: envelope.AgentInstanceID, Connector: connector,
+		EvaluationID: watcherAdmissionEvaluationID(ctx),
+	}
+	spanContext := trace.SpanContextFromContext(ctx)
+	if spanContext.IsValid() {
+		if correlation.TraceID == "" {
+			correlation.TraceID = spanContext.TraceID().String()
+			correlation.SpanID = spanContext.SpanID().String()
+		}
+		if correlation.TraceID == spanContext.TraceID().String() && correlation.SpanID == "" {
+			correlation.SpanID = spanContext.SpanID().String()
+		}
+	}
+	return correlation
 }
 
 func watcherConnectorName(cfg *config.Config) string {
@@ -929,4 +1363,47 @@ func ensureAndWatch(fsw *fsnotify.Watcher, dir string) error {
 	}
 
 	return nil
+}
+
+func addClaudeCacheWatches(
+	fsw *fsnotify.Watcher,
+	root string,
+	watched map[string]struct{},
+) {
+	root = filepath.Clean(root)
+	_ = filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			if path == root {
+				return fs.SkipAll
+			}
+			return fs.SkipDir
+		}
+		if !entry.IsDir() {
+			return nil
+		}
+		if entry.Type()&os.ModeSymlink != 0 {
+			return fs.SkipDir
+		}
+		relative, relErr := filepath.Rel(root, path)
+		if relErr != nil || relative == ".." ||
+			strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+			return fs.SkipDir
+		}
+		depth := 0
+		if relative != "." {
+			depth = len(strings.FieldsFunc(relative, func(r rune) bool {
+				return r == '/' || r == '\\'
+			}))
+		}
+		if depth > 2 {
+			return fs.SkipDir
+		}
+		key := strings.ToLower(filepath.Clean(path))
+		if _, exists := watched[key]; !exists {
+			if addErr := fsw.Add(path); addErr == nil {
+				watched[key] = struct{}{}
+			}
+		}
+		return nil
+	})
 }

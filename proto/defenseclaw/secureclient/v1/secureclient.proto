@@ -39,6 +39,23 @@ message HealthSnapshot {
 
   // DefenseClaw product/runtime version, if available.
   string defense_claw_version = 3;
+
+  // Managed-enterprise deferred-config state, plumbed through from
+  // internal/gateway/health.go's HealthSnapshot.Configuration.State
+  // (spec 003 REQ-19 / REQ-20). Present on Windows and macOS managed-
+  // enterprise deployments; UNSPECIFIED on every other build (OSS,
+  // SaaS, DP, CP) so a Secure Client UI can key on the value without
+  // additional deployment-mode probing. See
+  // docs/specs/004-windows-ui-ipc/design.md § Interfaces.
+  //
+  // Semantic layering with `availability` above: `availability` reports
+  // overall reachability of the DefenseClaw runtime; `configuration_state`
+  // reports whether the managed-enterprise UCB drop has completed. A
+  // "starting" availability + "waiting_for_config" configuration_state
+  // means "gateway process is up but config.yaml has not arrived yet",
+  // which lets Secure Client render a first-class "waiting for
+  // configuration" UI state distinct from a generic "starting" spinner.
+  ConfigurationState configuration_state = 4;
 }
 
 enum ServiceAvailability {
@@ -49,6 +66,34 @@ enum ServiceAvailability {
   SERVICE_AVAILABILITY_UNAVAILABLE = 4;
   SERVICE_AVAILABILITY_DISABLED_BY_POLICY = 5;
   SERVICE_AVAILABILITY_ERROR = 6;
+}
+
+// ConfigurationState mirrors internal/gateway/health.go's
+// ConfigurationState (spec 003) on the wire. The values track the
+// managed-enterprise UCB drop lifecycle:
+//   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
+//   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.
+//     Reserved value. The current gateway build does NOT publish this
+//     state on the initial-boot path — rootPersistentPreRunE blocks in
+//     waitForConfigV8Managed before the SidecarHealth object is
+//     constructed, so during the actual config-wait window there is
+//     no health surface for AVC to poll (connect refused, not
+//     WAITING_FOR_CONFIG). Kept in the enum for wire-compat with
+//     existing AVC UI clients and reserved for a future hot-reload
+//     path that flips SetDaemonConfigLoaded(false) at reload start.
+//     UI implementers should treat this value as observable-but-rare
+//     and MUST NOT hard-fail on receiving it.
+//   - WAITING_FOR_TARGETS: config.yaml loaded, hook-guardian has not
+//     yet loaded targets.yaml.
+//   - READY: both files loaded, hook enforcement engaged.
+// Downstream Secure Client UIs treat UNSPECIFIED as "no configuration
+// tracking here" — the field is absent from every non-managed
+// deployment's HealthSnapshot and MUST NOT be rendered as an error.
+enum ConfigurationState {
+  CONFIGURATION_STATE_UNSPECIFIED = 0;
+  CONFIGURATION_STATE_WAITING_FOR_CONFIG = 1;
+  CONFIGURATION_STATE_WAITING_FOR_TARGETS = 2;
+  CONFIGURATION_STATE_READY = 3;
 }
 
 message GetStatsSnapshotRequest {
@@ -63,23 +108,49 @@ message StatsSnapshot {
   // Indicates whether the statistics are current, stale, or unavailable.
   StatsAvailability availability = 2;
 
-  // Total scan count for the agreed statistics scope.
-  uint64 total_scans = 3;
+  // Counter fields below are proto3 `optional`. Presence semantics
+  // differ by field — this matters for AVC's rendering logic.
+  //
+  // Server-side presence policy (see internal/ipc/stats_source.go):
+  //
+  //   total_scans, active_alerts — ALWAYS present on an AVAILABLE
+  //     snapshot, even when the value is zero. These back AVC's
+  //     primary KPI tiles and need an explicit numeric rendering
+  //     (e.g. "0") on a fresh install. If either field is ABSENT on
+  //     an AVAILABLE snapshot, this DefenseClaw build does not
+  //     support the counter and consumers should render it as
+  //     unsupported (em-dash or hidden), NOT as "0".
+  //
+  //   blocked_skills, allowed_skills, blocked_mcp_servers,
+  //   allowed_mcp_servers — MAY be absent even on an AVAILABLE
+  //     snapshot. The server omits these when the value is zero to
+  //     save wire bytes on secondary drill-down views. Consumers
+  //     should treat absent as "zero" (equivalent to a value of 0),
+  //     not as "unsupported". A present zero and an absent field
+  //     carry the same meaning for these fields.
+  //
+  // On an ERROR / STALE / UNAVAILABLE snapshot every counter is
+  // absent; the availability enum carries the reachability signal.
+
+  // Total scan count for the agreed statistics scope. Always present
+  // on an AVAILABLE snapshot (even at zero).
+  optional uint64 total_scans = 3;
 
   // Current active alert count for the agreed statistics scope.
-  uint64 active_alerts = 4;
+  // Always present on an AVAILABLE snapshot (even at zero).
+  optional uint64 active_alerts = 4;
 
   // Count of blocked skills for the agreed statistics scope.
-  uint64 blocked_skills = 5;
+  optional uint64 blocked_skills = 5;
 
   // Count of allowed skills for the agreed statistics scope.
-  uint64 allowed_skills = 6;
+  optional uint64 allowed_skills = 6;
 
   // Count of blocked MCP servers for the agreed statistics scope.
-  uint64 blocked_mcp_servers = 7;
+  optional uint64 blocked_mcp_servers = 7;
 
   // Count of allowed MCP servers for the agreed statistics scope.
-  uint64 allowed_mcp_servers = 8;
+  optional uint64 allowed_mcp_servers = 8;
 }
 
 enum StatsAvailability {

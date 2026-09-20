@@ -1,0 +1,134 @@
+# Copyright 2026 Cisco Systems, Inc. and its affiliates
+# SPDX-License-Identifier: Apache-2.0
+
+name: Telemetry Registry Exhaustive
+
+on:
+  # Always start on pull requests so the aggregate check below can be made
+  # required without leaving unrelated changes permanently pending. The
+  # changes job keeps the expensive mutation suites selective.
+  pull_request: {}
+  schedule:
+    - cron: "47 3 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: telemetry-registry-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  changes:
+    name: Detect telemetry registry changes
+    runs-on: ubuntu-latest
+    outputs:
+      telemetry: ${{ steps.detect.outputs.telemetry }}
+    steps:
+      - if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select exhaustive suites
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -euo pipefail
+
+          # Nightly and manual runs are exhaustive by definition. Only pull
+          # requests use the internal diff filter.
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            echo "telemetry=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          telemetry_paths=(
+            ':(glob)schemas/telemetry/**'
+            'scripts/generate_telemetry_registry.py'
+            'scripts/update_telemetry_registry_upstream.py'
+            ':(glob)scripts/render_telemetry_*.py'
+            ':(glob)scripts/telemetry_*.py'
+            'cli/tests/conftest.py'
+            'cli/tests/test_telemetry_ci_strategy.py'
+            ':(glob)cli/tests/test_telemetry_registry_*.py'
+            'cli/tests/support/telemetry_registry_manifest_driver.py'
+            'schemas/telemetry/v8/compatibility/v7-compatibility-inputs.yaml'
+            ':(glob)internal/observability/zz_generated_telemetry_*.go'
+            'Makefile'
+            'pyproject.toml'
+            'uv.lock'
+            '.github/workflows/ci.yml'
+            '.github/workflows/telemetry-registry.yml'
+          )
+
+          git cat-file -e "${BASE_SHA}^{commit}"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+          set +e
+          git diff --quiet "$BASE_SHA" "$HEAD_SHA" -- "${telemetry_paths[@]}"
+          diff_status=$?
+          set -e
+
+          case "$diff_status" in
+            0) echo "telemetry=false" >> "$GITHUB_OUTPUT" ;;
+            1) echo "telemetry=true" >> "$GITHUB_OUTPUT" ;;
+            *) echo "::error::telemetry path detection failed (git diff exit $diff_status)"; exit "$diff_status" ;;
+          esac
+
+  exhaustive:
+    name: ${{ matrix.name }}
+    needs: changes
+    if: ${{ needs.changes.outputs.telemetry == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Registry generator mutation suite
+            test_file: cli/tests/test_telemetry_registry_generator.py
+          - name: Candidate renderer mutation suite
+            test_file: cli/tests/test_telemetry_registry_candidate_renderer.py
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+      - run: uv sync
+      - run: make _bundle-data
+      - name: Run exhaustive telemetry registry suite
+        env:
+          PYTHON_TELEMETRY_TEST_FILE: ${{ matrix.test_file }}
+        run: |
+          set -euo pipefail
+          .venv/bin/python -m pytest "$PYTHON_TELEMETRY_TEST_FILE" \
+            -q --tb=short \
+            --durations=25 \
+            --numprocesses=4 \
+            --dist=worksteal
+
+  complete:
+    name: Telemetry Registry Exhaustive
+    needs: [changes, exhaustive]
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every exhaustive suite
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          TELEMETRY_CHANGED: ${{ needs.changes.outputs.telemetry }}
+          EXHAUSTIVE_RESULT: ${{ needs.exhaustive.result }}
+        run: |
+          set -euo pipefail
+          test "$CHANGES_RESULT" = success
+          if [[ "$TELEMETRY_CHANGED" = "true" ]]; then
+            test "$EXHAUSTIVE_RESULT" = success
+          else
+            test "$TELEMETRY_CHANGED" = "false"
+            test "$EXHAUSTIVE_RESULT" = skipped
+          fi

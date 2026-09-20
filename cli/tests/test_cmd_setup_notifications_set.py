@@ -25,12 +25,13 @@ from __future__ import annotations
 import os
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from click.testing import CliRunner  # noqa: E402,I001
 from defenseclaw.commands.cmd_setup import setup as setup_group  # noqa: E402,I001
+from defenseclaw.logger import CanonicalObservabilityUnavailableError  # noqa: E402,I001
 from tests.helpers import cleanup_app, make_app_context  # noqa: E402,I001
 
 
@@ -87,6 +88,29 @@ class TestNotificationsSetCategory(_NotificationsSetBase):
         )
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("already on", result.output)
+
+    def test_no_restart_allows_explicit_offline_staging(self):
+        self.app.cfg.notifications.block_enforced = True
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        result = self._run(
+            "notifications-set", "block_enforced", "off",
+            "--no-restart",
+        )
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.notifications.block_enforced)
+        self.assertIn("canonical setup audit event was not recorded", result.output)
+
+
+class TestNotificationsToggle(_NotificationsSetBase):
+    def test_no_restart_allows_explicit_offline_staging(self):
+        self.app.cfg.notifications.enabled = True
+        self.app.logger = MagicMock()
+        self.app.logger.log_action.side_effect = CanonicalObservabilityUnavailableError("offline")
+        result = self._run("notifications", "off", "--yes", "--no-restart")
+        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertFalse(self.app.cfg.notifications.enabled)
+        self.assertIn("canonical setup audit event was not recorded", result.output)
 
 
 class TestNotificationsSetSource(_NotificationsSetBase):

@@ -17,7 +17,7 @@
 #   2. Feeds every golden stdin payload under golden/<connector>/ into the
 #      *installed* hook entrypoint:
 #        - unix:    ~/.defenseclaw/hooks/<connector>-hook.sh
-#        - windows: defenseclaw-gateway hook --connector <name> --event <ev>
+#        - windows: defenseclaw-hook hook --connector <name> --event <ev>
 #   3. Asserts the gateway received the event (fires) and that the entrypoint
 #      shaped the verdict correctly (allow -> exit 0; block -> exit 2 or a
 #      decision JSON carrying block/deny).
@@ -25,9 +25,9 @@
 #
 # This proves the decode -> map -> respond contract through the real installed
 # entrypoint on every OS, complementing the Go contract matrix (which proves
-# the same chain at the handler level). The block payload reads /etc/shadow
-# (rule PATH-ETC-SHADOW, CRITICAL) so it is denied deterministically without
-# an LLM and is harmless if a regression ever lets it through.
+# the same chain at the handler level). The block payload describes a recursive
+# delete of the filesystem root, which has complete typed proof and is denied
+# deterministically without an LLM. The harness never executes the command.
 #
 # Usage: contract-smoke.sh <connector>
 
@@ -36,10 +36,11 @@ set -euo pipefail
 DC_E2E_CONNECTOR="${1:?usage: contract-smoke.sh <connector>}"
 export DC_E2E_CONNECTOR
 
-# Layer A deliberately runs with NO upstream agent installed — it feeds golden
-# stdin payloads into the installed hook entrypoint, never the real CLI. With no
-# agent on disk the cached agent version is empty, so ResolveHookContract returns
-# "unversioned". In action mode the gateway boot path
+# Layer A deliberately runs without a real upstream agent — it feeds golden
+# stdin payloads into the installed hook entrypoint, never the real CLI. The
+# macOS OpenHands cell supplies a version-only executable fixture so its
+# protected setup selection can be exercised; every other cell remains
+# agent-less and resolves an "unversioned" contract. In action mode the gateway boot path
 # (internal/gateway/sidecar.go) then refuses to run Connector.Setup() unless this
 # override is set, which would leave ~/.defenseclaw/hooks/<connector>-hook.sh
 # unwritten and make every hook invocation exit 127. This is exactly the
@@ -56,6 +57,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "${HERE}/lib/assert.sh"
 # shellcheck source=lib/setup.sh
 . "${HERE}/lib/setup.sh"
+if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+  # shellcheck source=lib/persistent-macos.sh
+  . "${HERE}/lib/persistent-macos.sh"
+fi
 
 golden_dir="${DC_E2E_GOLDEN_DIR}/${DC_E2E_CONNECTOR}"
 if [ ! -d "${golden_dir}" ]; then
@@ -65,37 +70,70 @@ fi
 dc_section "contract smoke: ${DC_E2E_CONNECTOR} ($(dc_detect_os))"
 
 dc_init_defenseclaw
-dc_setup_connector "${DC_E2E_CONNECTOR}" action
+if [ "${DC_E2E_ISOLATE_GATEWAY:-0}" = "1" ]; then
+  dc_persist_isolate_gateway_config || dc_die "could not configure isolated gateway ports"
+fi
+
+# Capture the exact pre-setup agent config. Teardown is correct when it
+# restores these bytes (or restores absence), not when the resulting file
+# happens to contain no generic "defenseclaw" substring. The latter falsely
+# rejects legitimate pre-existing user content and does not prove restoration.
+cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+cfg_baseline="${TMPDIR:-/tmp}/dc-e2e-${DC_E2E_CONNECTOR}-config-$$.baseline"
+cfg_baseline_state="missing"
+if [ -f "${cfg}" ]; then
+  cp "${cfg}" "${cfg_baseline}"
+  cfg_baseline_state="present"
+else
+  rm -f "${cfg_baseline}"
+fi
+# Layer A has no runnable upstream agent by design. The payload assertions below
+# are its verification surface; setup readiness cannot validate an absent real
+# vendor client (the macOS OpenHands fixture supports only --version).
+if ! dc_setup_connector "${DC_E2E_CONNECTOR}" action --no-verify; then
+  rm -f "${cfg_baseline}"
+  exit 1
+fi
 
 overall_rc=0
 
 # drive_event <event_label> <payload_file> <expect:allow|block>
 drive_event() {
   local label="$1" payload="$2" expect="$3"
-  local before after out code
-  before="$(dc_gateway_jsonl_count)"
-  out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${label}" "${payload}")"
+  local before after out code native_event
+  if [ "${DC_E2E_CONNECTOR}" = "antigravity" ]; then
+    # Antigravity's official stdin schema omits the event name; setup binds
+    # each installed hook command to its trusted event out-of-band.
+    native_event="PreToolUse"
+  elif ! native_event="$(jq -er '[.hook_event_name, .hookEventName] | map(select(type == "string" and length > 0)) | .[0] // empty' "${payload}")"; then
+    dc_record_result "${label}:fixture" fail "missing non-empty hook event name in ${payload}"
+    overall_rc=1
+    return
+  fi
+  before="$(dc_event_cursor)"
+  out="$(dc_invoke_hook "${DC_E2E_CONNECTOR}" "${native_event}" "${payload}")"
   # Portable BRE: BSD sed (macOS) treats \+ as a literal '+', so use
   # [0-9][0-9]* for "one or more digits" — otherwise the exit code parses
   # empty on macOS and every allow assertion (which requires exit 0) fails.
   code="$(printf '%s\n' "${out}" | sed -n 's/^exit:\([0-9][0-9]*\)$/\1/p' | tail -1)"
-  # Give the gateway a beat to flush the JSONL line.
-  sleep 1
-  after="$(dc_gateway_jsonl_count)"
+  # Hook response and canonical persistence are deliberately decoupled. Wait
+  # for this probe's connector row instead of assuming a fixed flush delay.
+  dc_wait_for_connector_event "${DC_E2E_CONNECTOR}" "${before}" || true
+  after="$(dc_event_cursor)"
 
   # Fires: gateway received an event attributed to this connector.
   if dc_assert_fired "${DC_E2E_CONNECTOR}" "${before}"; then
-    dc_record_result "${label}:fires" pass "jsonl ${before}->${after}"
+    dc_record_result "${label}:fires" pass "sqlite ${before}->${after}"
   else
-    dc_record_result "${label}:fires" fail "jsonl ${before}->${after} exit=${code}"
+    dc_record_result "${label}:fires" fail "sqlite ${before}->${after} exit=${code}"
     overall_rc=1
   fi
 
   case "${expect}" in
     block)
-      # Verdict shaping: the entrypoint must signal block — either a
-      # non-zero (exit 2) deny or a decision JSON carrying block/deny.
-      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
+      # Block-capable connectors return their documented native block shape:
+      # exit 2 or decision JSON carrying block/deny.
+      if [ "${code}" = "2" ] || printf '%s' "${out}" | grep -Eqi '"(decision|action|permission|permissionDecision)"\s*:\s*"(block|deny)"|\bdeny\b|\bblock\b'; then
         dc_record_result "${label}:verdict-shape" pass "exit=${code}"
       else
         dc_record_result "${label}:verdict-shape" fail "expected block shaping, exit=${code}"
@@ -122,21 +160,24 @@ drive_event() {
 
 # Drive whatever golden payloads exist for this connector.
 [ -f "${golden_dir}/session_start.json" ] && drive_event "SessionStart" "${golden_dir}/session_start.json" allow
+[ -f "${golden_dir}/agent_start.json" ] && drive_event "AgentStart" "${golden_dir}/agent_start.json" allow
 [ -f "${golden_dir}/pre_tool_allow.json" ] && drive_event "PreTool-allow" "${golden_dir}/pre_tool_allow.json" allow
+[ -f "${golden_dir}/tool_result.json" ] && drive_event "ToolResult" "${golden_dir}/tool_result.json" allow
+[ -f "${golden_dir}/subagent_tool_call.json" ] && drive_event "SubagentToolCall" "${golden_dir}/subagent_tool_call.json" allow
 [ -f "${golden_dir}/pre_tool_block.json" ] && drive_event "PreTool-block" "${golden_dir}/pre_tool_block.json" block
+[ -f "${golden_dir}/agent_end.json" ] && drive_event "AgentEnd" "${golden_dir}/agent_end.json" allow
 
 # Schema invariant over everything emitted so far.
 if dc_assert_schema 1; then
   dc_record_result "schema" pass ""
 else
-  dc_record_result "schema" fail "gateway.jsonl schema validation failed"
+  dc_record_result "schema" fail "canonical SQLite history validation failed"
   overall_rc=1
 fi
 
-# Teardown + clean-state assertion.
-cfg="$(dc_connector_config_file "${DC_E2E_CONNECTOR}")"
+# Teardown + exact pre-setup state assertion.
 if dc_teardown_connector "${DC_E2E_CONNECTOR}"; then
-  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}"; then
+  if dc_assert_teardown "${DC_E2E_CONNECTOR}" "${cfg}" "${cfg_baseline}" "${cfg_baseline_state}"; then
     dc_record_result "teardown" pass ""
   else
     dc_record_result "teardown" fail "config not restored: ${cfg}"
@@ -146,5 +187,7 @@ else
   dc_record_result "teardown" fail "connector verify reported residual state"
   overall_rc=1
 fi
+
+rm -f "${cfg_baseline}"
 
 exit "${overall_rc}"

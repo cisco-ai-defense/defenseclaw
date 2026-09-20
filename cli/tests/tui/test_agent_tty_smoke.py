@@ -22,6 +22,11 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 
+pytestmark = pytest.mark.skipif(
+    os.name == "nt",
+    reason="agent-tty live fixture requires a POSIX PTY and /bin/bash",
+)
+
 
 def _agent_tty_enabled() -> bool:
     return os.environ.get("DEFENSECLAW_AGENT_TTY_TESTS") == "1"

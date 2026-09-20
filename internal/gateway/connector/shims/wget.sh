@@ -26,8 +26,9 @@ RESPONSE=$("$CURL_BIN" -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
   --max-time 5 \
-  -d "$(jq -n --arg tool "wget" --arg cmd "$*" \
-    '{tool: $tool, args: {command: $cmd}}')" 2>/dev/null) || {
+  -d "$(jq -cn --arg tool "wget" --args \
+    '{tool: $tool, args: {argv: ([$tool] + $ARGS.positional)}}' \
+    -- "$@")" 2>/dev/null) || {
   exec "$REAL_BINARY" "$@"
 }
 

@@ -11,90 +11,44 @@
 package gateway
 
 import (
-	"context"
-	"sync"
+	"path/filepath"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
-func TestEmitJudge_PersistsUnredactedRawBeforeFanoutScrub(t *testing.T) {
-	capture := withCapturedEvents(t)
-
-	// Install a persistor that records the payload it was called
-	// with. emitJudge runs the persistor on the original payload
-	// (before emitEvent shallow-copies + redacts), so the SQLite
-	// sink receives the un-redacted body while the fanout / JSONL
-	// sees the scrubbed form.
-	var (
-		persistedMu        sync.Mutex
-		persistedRaw       string
-		persistedDirection gatewaylog.Direction
-		persistedInvoked   int
-	)
-	SetJudgePersistor(func(_ context.Context, p gatewaylog.JudgePayload, dir gatewaylog.Direction, _ JudgeEmitOpts) {
-		persistedMu.Lock()
-		defer persistedMu.Unlock()
-		persistedRaw = p.RawResponse
-		persistedDirection = dir
-		persistedInvoked++
+func TestEmitJudge_AuthoritativeStorePersistsRawBody(t *testing.T) {
+	bodyStore, err := audit.NewJudgeBodyStore(filepath.Join(t.TempDir(), "judge_bodies.db"))
+	if err != nil {
+		t.Fatalf("NewJudgeBodyStore: %v", err)
+	}
+	t.Cleanup(func() { _ = bodyStore.Close() })
+	store := NewJudgeStoreFromBodyStore(bodyStore, nil, 8)
+	SetJudgeResponseStore(store)
+	t.Cleanup(func() {
+		SetJudgeResponseStore(nil)
+		_ = store.Shutdown(t.Context())
 	})
-	t.Cleanup(func() { SetJudgePersistor(nil) })
 
-	raw := `{"verdict":"block","reason":"email found: victim@example.com"}`
+	raw := `{"verdict":"block","reason":"email found in inspected content"}`
 	emitJudge(t.Context(), "pii", "gpt-4", gatewaylog.DirectionPrompt, 128, 42, "block",
 		gatewaylog.SeverityHigh, "", raw, JudgeEmitOpts{})
-
-	persistedMu.Lock()
-	gotRaw := persistedRaw
-	gotCalls := persistedInvoked
-	gotDir := persistedDirection
-	persistedMu.Unlock()
-	if gotCalls != 1 {
-		t.Fatalf("persistor called %d times want 1", gotCalls)
-	}
-	if gotRaw != raw {
-		t.Fatalf("persistor got redacted raw=%q want unredacted=%q", gotRaw, raw)
-	}
-	// Regression: direction must flow through the persistor; a
-	// prior revision wrote empty strings to SQLite because the
-	// hook signature dropped this field.
-	if gotDir != gatewaylog.DirectionPrompt {
-		t.Fatalf("persistor got direction=%q want %q", gotDir, gatewaylog.DirectionPrompt)
+	if err := store.Shutdown(t.Context()); err != nil {
+		t.Fatalf("Shutdown: %v", err)
 	}
 
-	// Sink-side payload must have been scrubbed by emitEvent.
-	if len(*capture) != 1 {
-		t.Fatalf("captured %d events want 1", len(*capture))
+	rows, err := bodyStore.ListJudgeResponses(10)
+	if err != nil {
+		t.Fatalf("ListJudgeResponses: %v", err)
 	}
-	jp := (*capture)[0].Judge
-	if jp == nil {
-		t.Fatal("judge payload missing from captured event")
-		return
+	if len(rows) != 1 {
+		t.Fatalf("authoritative rows=%d want 1", len(rows))
 	}
-	if jp.RawResponse == raw {
-		t.Fatalf("fanout saw un-redacted raw — redaction layer bypassed")
+	if rows[0].Raw != raw {
+		t.Fatalf("authoritative raw=%q want exact body", rows[0].Raw)
 	}
-}
-
-func TestEmitJudge_EmptyRawDoesNotCallPersistor(t *testing.T) {
-	_ = withCapturedEvents(t)
-
-	var called int
-	SetJudgePersistor(func(_ context.Context, _ gatewaylog.JudgePayload, _ gatewaylog.Direction, _ JudgeEmitOpts) { called++ })
-	t.Cleanup(func() { SetJudgePersistor(nil) })
-
-	emitJudge(t.Context(), "injection", "gpt-4", gatewaylog.DirectionPrompt, 0, 1, "allow",
-		gatewaylog.SeverityInfo, "", "", JudgeEmitOpts{})
-	if called != 0 {
-		t.Fatalf("persistor called %d times on empty raw (retention no-op path)", called)
+	if rows[0].Direction != string(gatewaylog.DirectionPrompt) {
+		t.Fatalf("authoritative direction=%q want %q", rows[0].Direction, gatewaylog.DirectionPrompt)
 	}
-}
-
-func TestEmitJudge_NilPersistorSafe(t *testing.T) {
-	_ = withCapturedEvents(t)
-	SetJudgePersistor(nil)
-	// Must not panic.
-	emitJudge(t.Context(), "pii", "gpt-4", gatewaylog.DirectionPrompt, 10, 1, "allow",
-		gatewaylog.SeverityInfo, "", "raw body", JudgeEmitOpts{})
 }

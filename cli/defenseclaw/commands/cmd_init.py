@@ -25,11 +25,12 @@ import json
 import os
 import shutil
 import subprocess
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 import click
 
-from defenseclaw import connector_paths, platform_support, ux
+from defenseclaw import connector_paths, platform_support, terminal_checkbox, ux
 
 if TYPE_CHECKING:
     from defenseclaw.bootstrap import StepResult
@@ -41,11 +42,26 @@ from defenseclaw.paths import (
     bundled_rego_dir,
     bundled_splunk_bridge_dir,
 )
+from defenseclaw.process_liveness import _process_image_path_windows, _process_parent_id_windows
 from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
+
+_stdout_is_tty = terminal_checkbox.stdout_is_tty
+_supports_terminal_redraw = terminal_checkbox.supports_terminal_redraw
+_checkbox_key_name = terminal_checkbox.checkbox_key_name
+_render_checkbox_menu = terminal_checkbox.render_checkbox_menu
+_INTERNAL_SETUP_CONNECTOR_ENV = "DEFENSECLAW_INTERNAL_SETUP_CONNECTOR"
+_INTERNAL_SETUP_PARENT_ENV = "DEFENSECLAW_INTERNAL_SETUP_PARENT"
+_INSTALL_ROOT_ENV = "DEFENSECLAW_INSTALL_ROOT"
+_WINDOWS_SETUP_EXECUTABLE = "DefenseClawSetup-x64.exe"
+_WINDOWS_LAUNCHER_EXECUTABLE = "defenseclaw.exe"
 
 
 @click.command("init")
-@click.option("--skip-install", is_flag=True, help="Skip automatic scanner dependency installation")
+@click.option(
+    "--skip-install",
+    is_flag=True,
+    help="Skip scanner and built-in guardrail availability checks (legacy option name).",
+)
 @click.option("--enable-guardrail", is_flag=True, help="Configure LLM guardrail during init")
 @click.option(
     "--sandbox",
@@ -55,6 +71,7 @@ from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
 @click.option("--non-interactive", is_flag=True, help="Run the guided first-run backend without prompts.")
 @click.option("--yes", "-y", is_flag=True, help="Assume defaults/yes for first-run prompts.")
 @click.option("--rescan-agents", is_flag=True, help="Refresh cached local agent discovery before choosing a connector.")
+@click.option("--native-setup-copilot", is_flag=True, hidden=True)
 @click.option(
     "--connector",
     type=click.Choice(
@@ -66,13 +83,14 @@ from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
             "openclaw",
             "hermes",
             "cursor",
-            "windsurf",
-            "geminicli",
+            "devin",
             "copilot",
             "openhands",
             "antigravity",
             "opencode",
+            "amp",
             "omnigent",
+            "none",
         ],
         case_sensitive=False,
     ),
@@ -116,10 +134,10 @@ from defenseclaw.safety import DotenvValueError, sanitize_dotenv_value
     type=click.Choice(["open", "closed"], case_sensitive=False),
     default=None,
     help=(
-        "Hook fail-mode for response-layer failures (gateway returns 4xx, malformed JSON, "
-        "or missing action). 'open' = allow + log (recommended); 'closed' = block. "
-        "Transport failures (gateway unreachable / 5xx) ALWAYS allow unless "
-        "DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of this setting."
+        "Hook fail-mode for delivery, authentication, and invalid gateway responses. "
+        "'open' = allow + log (recommended); 'closed' = block where the hook supports "
+        "a blocking response. DEFENSECLAW_STRICT_AVAILABILITY=1 additionally forces "
+        "transport and missing-token failures closed."
     ),
 )
 @click.option(
@@ -175,6 +193,7 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     non_interactive: bool,
     yes: bool,
     rescan_agents: bool,
+    native_setup_copilot: bool,
     connector: str | None,
     profile: str | None,
     observe_all: bool,
@@ -199,8 +218,9 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
 ) -> None:
     """Initialize DefenseClaw environment.
 
-    Creates ~/.defenseclaw/, default config, SQLite database,
-    and installs scanner dependencies.
+    Creates ~/.defenseclaw/, default config, and the SQLite database, then
+    verifies scanner availability. Runtime dependencies belong to the
+    installation lifecycle; init does not install Python packages.
 
     The guided wizard detects every installed hook connector, brings them all
     up in observe mode, and asks which subset should enforce (action mode).
@@ -214,6 +234,55 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     Use --enable-guardrail to configure the LLM guardrail inline.
     """
     import platform
+
+    requested_connectors = []
+    if connector:
+        requested_connectors.append(_normalize_connector_arg(connector))
+    requested_connectors.extend(_parse_connector_list(action_connectors))
+    installer_copilot = native_setup_copilot and _native_setup_copilot_invocation_allowed(
+        connector=connector,
+        requested_connectors=requested_connectors,
+        skip_install=skip_install,
+        non_interactive=non_interactive,
+        yes=yes,
+        sandbox=sandbox,
+        observe_all=observe_all,
+        action_connectors=action_connectors,
+        start_gateway=start_gateway,
+        verify=verify,
+    )
+    if native_setup_copilot and not installer_copilot:
+        raise click.ClickException(
+            "--native-setup-copilot is reserved for the exact non-interactive native Windows Setup invocation"
+        )
+    internal_antigravity_binding = bool(
+        os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip()
+        or os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
+    )
+    if internal_antigravity_binding and not _native_setup_antigravity_invocation_allowed(
+        connector=connector,
+        requested_connectors=requested_connectors,
+        skip_install=skip_install,
+        non_interactive=non_interactive,
+        yes=yes,
+        sandbox=sandbox,
+        observe_all=observe_all,
+        action_connectors=action_connectors,
+        start_gateway=start_gateway,
+        verify=verify,
+    ):
+        raise click.ClickException(
+            "internal Antigravity Setup binding is invalid for this invocation"
+        )
+    for requested in requested_connectors:
+        if requested == "none":
+            continue
+        support = platform_support.connector_platform_support(requested)
+        if not support.available:
+            raise click.ClickException(
+                f"connector {requested!r} is {support.status} on "
+                f"{platform_support.host_os()}: {support.reason}"
+            )
 
     if _use_guided_first_run(
         non_interactive=non_interactive,
@@ -267,7 +336,13 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         )
         return
 
-    from defenseclaw.config import config_path, default_config, detect_environment, load
+    from defenseclaw.config import (
+        config_path,
+        default_config,
+        detect_environment,
+        load,
+        prepare_fresh_v8_config,
+    )
     from defenseclaw.db import Store
     from defenseclaw.logger import Logger
 
@@ -290,13 +365,30 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"  Platform:      {ux.bold(env)}")
 
     cfg_file = config_path()
-    is_new_config = not os.path.exists(cfg_file)
+    is_new_config = not os.path.lexists(cfg_file)
     if is_new_config:
         cfg = default_config()
+        prepare_fresh_v8_config(cfg)
         click.echo("  Config:        " + ux._style("created new defaults", fg="green"))
     else:
         cfg = load()
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException("configuration schema v8 is required; run 'defenseclaw upgrade' first")
         click.echo("  Config:        " + ux.dim("preserved existing"))
+
+    from defenseclaw.bootstrap import (
+        FreshMigrationStateError,
+        repair_pending_first_run_config,
+    )
+
+    try:
+        repaired_migration_state = repair_pending_first_run_config(cfg)
+    except FreshMigrationStateError as exc:
+        raise click.ClickException(
+            f"could not recover pending fresh migration state: {exc}; rerun 'defenseclaw init' after repair"
+        ) from exc
+    if repaired_migration_state:
+        click.echo("  Migration:     " + ux._style("recovered pending fresh cursor", fg="green"))
 
     cfg.environment = env
     click.echo(f"  Claw mode:     {ux.bold(cfg.claw.mode)}")
@@ -317,16 +409,16 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     # leaking audit state to other local users. Force 0700 on creation
     # *and* tighten any pre-existing directory so the perms are
     # deterministic regardless of umask.
+    from defenseclaw.file_permissions import make_private_directory
+
     for d in dirs:
-        os.makedirs(d, mode=0o700, exist_ok=True)
-        os.chmod(d, 0o700)
+        make_private_directory(d)
 
     external_dirs = list(cfg.skill_dirs())
     for d in external_dirs:
         d_real = os.path.realpath(d)
         if d_real.startswith(data_dir_real + os.sep):
-            os.makedirs(d, mode=0o700, exist_ok=True)
-            os.chmod(d, 0o700)
+            make_private_directory(d)
     click.echo("  Directories:   " + ux._style("created", fg="green"))
 
     _seed_rego_policies(cfg.policy_dir)
@@ -341,7 +433,14 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     store.init()
     click.echo(f"  Audit DB:      {cfg.audit_db}")
 
-    logger = Logger(store, cfg.splunk)
+    # Only a genuinely new/pre-v8 initialization lacks a canonical graph.
+    # Re-running init against v8 uses the process owner and fails closed if it
+    # is unavailable instead of silently dropping setup mutations.
+    logger = (
+        Logger.no_runtime()
+        if is_new_config or getattr(cfg, "_source_config_version", None) != 8
+        else Logger.from_config(cfg)
+    )
     logger.log_action("init", cfg.data_dir, f"environment={env}")
 
     ux.banner("Scanners")
@@ -381,8 +480,6 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
         yes=yes,
         is_new_config=is_new_config,
     )
-
-    cfg.save()
 
     # Sandbox setup (Linux only)
     if sandbox:
@@ -429,6 +526,17 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
             click.echo("  " + ux.dim("Restarting sidecar to apply guardrail config..."))
             _restart_gateway_quiet()
 
+    from defenseclaw.bootstrap import finalize_first_run_config
+
+    try:
+        finalize_first_run_config(cfg, was_config_absent=is_new_config)
+    except FreshMigrationStateError as exc:
+        store.close()
+        raise click.ClickException(
+            f"config was saved but its fresh migration cursor was not published: {exc}; "
+            "rerun 'defenseclaw init' to retry safely"
+        ) from exc
+
     # Final completion banner. We render it as a plain divider with
     # bold success text so the eye lands here when the operator
     # scrolls back up after a long init.
@@ -448,7 +556,10 @@ def init_cmd(  # noqa: PLR0913 - first-run CLI mirrors the setup surface.
     click.echo(f"    {ux.accent('defenseclaw doctor')}           " + ux.dim("Verify connectivity and credentials"))
     click.echo(f"    {ux.accent('defenseclaw skill scan all')}   " + ux.dim("Scan installed agent skills"))
     click.echo(f"    {ux.accent('defenseclaw mcp scan --all')}   " + ux.dim("Scan configured MCP servers"))
-    click.echo(f"    {ux.accent('defenseclaw setup <connector>')} " + ux.dim("Add another agent (codex, claudecode)"))
+    click.echo(
+        f"    {ux.accent('defenseclaw setup <connector>')} "
+        + ux.dim("Add another supported native agent")
+    )
 
     store.close()
 
@@ -537,19 +648,27 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         _rollup_status,
         run_first_run,
     )
-    from defenseclaw.config import default_data_path
+    from defenseclaw.config import config_path, default_data_path, source_config_version
     from defenseclaw.ux import CLIRenderer
 
     data_dir = default_data_path()
+    trusted_binary_prefixes = _validated_preinit_trusted_binary_prefixes(data_dir)
     connector_settings: list[dict] | None = None
     judge_hook_connectors: list[str] | None = None
     interactive_wizard = False
+    # Reject a legacy source before discovery prompts or connector mutation.
+    # The hard cut requires the ordinary upgrade transaction to create v8;
+    # spending an entire interactive setup session before discovering that
+    # precondition is both misleading and, for multi-connector selection,
+    # previously let the follow-on merge reach Config.save and raise.
+    legacy_config = os.path.exists(config_path()) and source_config_version() != 8
     # --observe-all / --action-connectors express an explicit, scripted
     # connector selection. Honor them deterministically even on a TTY instead
     # of dropping into the wizard (which would silently ignore the flags).
     flag_driven_multi = observe_all or bool(_parse_connector_list(action_connectors))
     if (
-        not flag_driven_multi
+        not legacy_config
+        and not flag_driven_multi
         and not non_interactive
         and not yes
         and not json_summary
@@ -626,6 +745,7 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
 
     opts = FirstRunOptions(
         connector=primary["connector"],
+        connector_settings=connector_settings,
         profile=primary["profile"] or "observe",
         scanner_mode=scanner_mode,
         with_judge=with_judge,
@@ -654,17 +774,42 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         # invalid values.
         human_approval=primary["human_approval"],
         hilt_min_severity=primary["hilt_min_severity"] or "",
+        trusted_binary_prefixes=trusted_binary_prefixes,
     )
     report = run_first_run(opts)
 
-    activated = [primary["connector"]]
-    if extras:
+    config_upgrade_required = any(
+        step.name == "Config" and step.status == "fail" and step.next_command == "defenseclaw upgrade"
+        for step in report.setup
+    )
+    if config_upgrade_required:
+        # Do not let multi-connector setup mutate the legacy object after the
+        # canonical backend has already rejected it. JSON remains a successful
+        # machine-readable status response; the human command exits non-zero.
+        if json_summary:
+            click.echo(json.dumps(report.to_dict(), indent=2))
+            return
+        _render_first_run_report(report, CLIRenderer())
+        raise SystemExit(1)
+
+    selection_failed = any(step.name == "Agent Selection" and step.status == "fail" for step in report.setup)
+    if selection_failed:
+        if json_summary:
+            click.echo(json.dumps(report.to_dict(), indent=2))
+        else:
+            _render_first_run_report(report, CLIRenderer())
+        raise SystemExit(1)
+
+    first_run_failed = report.status == "needs_attention"
+    activated = [] if primary["connector"] == "none" or first_run_failed else [primary["connector"]]
+    if extras and not first_run_failed:
         activated, sidecar_step = _activate_additional_connectors(
             primary,
             extras,
             start_gateway=bool(start_gateway),
             quiet=json_summary,
             allow_trusted_path_prompt=interactive_wizard,
+            protected_selection=report._protected_selection,
         )
         # When the gateway start was deferred (multi-connector + start_gateway),
         # run_first_run recorded a stale "Sidecar not started (--no-start-gateway)"
@@ -688,17 +833,13 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
             # "defenseclaw-gateway start"); recompute so the "Next" hints match
             # the now-started gateway. _next_commands only reads cfg.data_dir,
             # which the report already exposes.
-            report.next_commands = _next_commands(
-                report.setup, report.readiness, report, report.profile
-            )
+            report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
     mode_warnings = _connector_mode_warnings(connector_settings)
     if mode_warnings:
         _append_mode_warning_steps(report, mode_warnings)
         report.status = _rollup_status(report.setup, report.readiness)
-        report.next_commands = _next_commands(
-            report.setup, report.readiness, report, report.profile
-        )
+        report.next_commands = _next_commands(report.setup, report.readiness, report, report.profile)
 
     if json_summary:
         payload = report.to_dict()
@@ -716,6 +857,56 @@ def _run_first_run_cmd(  # noqa: PLR0913 - mirrors click options.
         raise SystemExit(1)
 
 
+def _validated_preinit_trusted_binary_prefixes(
+    data_dir: str | os.PathLike[str],
+) -> tuple[str, ...] | None:
+    """Snapshot exact config-backed trust before the init transaction."""
+
+    from defenseclaw import config as cfg_mod
+
+    if not os.path.lexists(cfg_mod.config_path_for_data_dir(data_dir)):
+        return None
+    cfg_path = cfg_mod.config_path_for_data_dir(data_dir)
+    cfg = cfg_mod.load(data_dir=os.fspath(data_dir))
+    values = tuple(cfg.ai_discovery.trusted_binary_prefixes or ())
+    resolved_values: list[str] = []
+    quarantined: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for raw in values:
+        resolved, error = agent_discovery.validate_trusted_prefix(str(raw))
+        if not resolved or error:
+            # `setup trusted-paths add --force` can persist an entry that
+            # later fails validation (writable parent, missing directory,
+            # etc.). Aborting init leaves no CLI-visible recovery path:
+            # the operator has to hand-edit the config file to unblock
+            # subsequent runs. Quarantine the offending entry, warn
+            # visibly with the fix hint, and let init proceed on the
+            # remaining valid prefixes. The persisted list itself is
+            # untouched here — the operator can inspect / correct via
+            # the setup subcommands. See Vineeth review of PR #767, #3.
+            quarantined.append((str(raw), error or "invalid path"))
+            continue
+        key = agent_discovery._path_key(resolved)
+        if key in seen:
+            continue
+        seen.add(key)
+        resolved_values.append(resolved)
+    if quarantined:
+        import shlex
+        for entry, reason in quarantined:
+            # {entry!r} would render a Python repr ('D:\\staging\\bin'),
+            # which isn't a valid shell argument. Use shlex.quote for the
+            # command portion so cut-and-paste works verbatim.
+            click.echo(
+                f"warning: skipping pre-init trusted binary prefix "
+                f"{entry} ({reason}); config file: {cfg_path}; "
+                f"fix with `defenseclaw setup trusted-paths remove "
+                f"{shlex.quote(entry)}`",
+                err=True,
+            )
+    return tuple(resolved_values)
+
+
 def _parse_connector_list(raw: str | None) -> list[str]:
     """Parse a comma/space-separated connector string into an ordered,
     de-duplicated, normalized list. Empty/blank entries are dropped."""
@@ -730,46 +921,6 @@ def _parse_connector_list(raw: str | None) -> list[str]:
     return out
 
 
-def _stdout_is_tty() -> bool:
-    try:
-        return click.get_text_stream("stdout").isatty()
-    except Exception:
-        return False
-
-
-def _checkbox_key_name(ch: str) -> str:
-    if ch in ("\r", "\n"):
-        return "enter"
-    if ch in (" ", "\t"):
-        return "toggle"
-    if ch in ("\x1b[A", "k", "K"):
-        return "up"
-    if ch in ("\x1b[B", "j", "J"):
-        return "down"
-    if ch == "a":
-        return "all"
-    if ch == "n":
-        return "none"
-    return ""
-
-
-def _render_checkbox_menu(
-    options: list[str],
-    selected: set[str],
-    cursor: int,
-    *,
-    redraw: bool,
-) -> None:
-    if redraw:
-        click.echo(f"\x1b[{len(options)}F", nl=False)
-    for idx, name in enumerate(options):
-        if redraw:
-            click.echo("\r\x1b[2K", nl=False)
-        pointer = ">" if idx == cursor else " "
-        mark = "x" if name in selected else " "
-        click.echo(f"  {pointer} [{mark}] {name}")
-
-
 def _prompt_checkbox_selection(
     options: list[str],
     *,
@@ -777,44 +928,14 @@ def _prompt_checkbox_selection(
     title: str,
     empty_ok: bool,
 ) -> list[str]:
-    """Tiny checkbox selector for first-run terminal prompts.
-
-    Click gives us portable raw-key reads but not a full list widget. This keeps
-    the interaction small: j/k moves, Space toggles, Enter accepts.
-    """
-    if not options:
-        return []
-
-    selected = {name for name in default_selected if name in options}
-    cursor = 0
-    ux.subhead(title)
-    ux.subhead("  Space toggles, j/k moves, a selects all, n clears, Enter continues.")
-
-    redraw = _stdout_is_tty()
-    rendered = False
-    while True:
-        _render_checkbox_menu(options, selected, cursor, redraw=redraw and rendered)
-        rendered = True
-        key = _checkbox_key_name(click.getchar())
-        if key == "enter":
-            if selected or empty_ok:
-                return [name for name in options if name in selected]
-            ux.warn("Select at least one connector.", indent="  ")
-            continue
-        if key == "toggle":
-            name = options[cursor]
-            if name in selected:
-                selected.remove(name)
-            else:
-                selected.add(name)
-        elif key == "up":
-            cursor = (cursor - 1) % len(options)
-        elif key == "down":
-            cursor = (cursor + 1) % len(options)
-        elif key == "all":
-            selected = set(options)
-        elif key == "none":
-            selected.clear()
+    return terminal_checkbox.prompt_checkbox_selection(
+        options,
+        default_selected=default_selected,
+        title=title,
+        empty_ok=empty_ok,
+        redraw=_supports_terminal_redraw(),
+        getchar=click.getchar,
+    )
 
 
 def _installed_hook_connectors(disc) -> list[str]:
@@ -830,7 +951,13 @@ def _installed_hook_connectors(disc) -> list[str]:
     names: list[str] = []
     for name in order:
         sig = disc.agents.get(name)
-        if sig and sig.installed and name in _HOOK_ENFORCED_CONNECTORS and name not in names:
+        if (
+            sig
+            and sig.installed
+            and name in _HOOK_ENFORCED_CONNECTORS
+            and platform_support.connector_supported_on_os(name)
+            and name not in names
+        ):
             names.append(name)
     return names
 
@@ -841,21 +968,17 @@ def _untrusted_discovery_prefixes(
 ) -> list[tuple[str, str, str]]:
     rows: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    wanted = {
-        connector_paths.normalize(connector)
-        for connector in connectors or []
-        if connector.strip()
-    }
+    wanted = {connector_paths.normalize(connector) for connector in connectors or [] if connector.strip()}
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     for name in order:
         if wanted and connector_paths.normalize(name) not in wanted:
             continue
+        if platform_support.host_os() == "windows" and connector_paths.normalize(name) == "opencode":
+            # Windows OpenCode setup authority is the exact SST package image,
+            # so a generic/PATH signal must never trigger prefix persistence.
+            continue
         signal = disc.agents.get(name)
-        if (
-            signal is None
-            or signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR
-            or not signal.binary_path
-        ):
+        if signal is None or signal.error != agent_discovery.UNTRUSTED_PREFIX_ERROR or not signal.binary_path:
             continue
         resolved_bin = os.path.realpath(signal.binary_path)
         parent = os.path.dirname(resolved_bin)
@@ -947,6 +1070,13 @@ def _prompt_connector_selection(
     if connector:
         names = _parse_connector_list(connector)
         if names:
+            if platform_support.host_os() == "windows" and "opencode" in {
+                connector_paths.normalize(name) for name in names
+            }:
+                # An explicit native-Windows OpenCode roster is gated by the
+                # exact SST image in run_first_run. Do not publish or trust a
+                # generic discovery result before that transaction begins.
+                return names
             disc = agent_discovery.discover_agents(refresh=rescan_agents, data_dir=data_dir)
             _prompt_trust_discovery_prefixes(
                 disc,
@@ -979,9 +1109,12 @@ def _prompt_connector_selection(
 
     fallback = agent_discovery.first_installed(disc, "codex")
     ux.subhead("No hook connectors were detected. Choose one active connector to configure.")
+    choices = platform_support.supported_connectors(sorted(connector_paths.KNOWN_CONNECTORS))
+    if fallback not in choices:
+        fallback = choices[0] if choices else "codex"
     raw = click.prompt(
         "  Connector",
-        type=click.Choice(sorted(connector_paths.KNOWN_CONNECTORS), case_sensitive=False),
+        type=click.Choice(choices, case_sensitive=False),
         default=fallback,
         show_default=True,
     )
@@ -996,12 +1129,23 @@ def _note_proxy_connectors(disc) -> None:
     their dedicated setup so a detected proxy agent isn't silently skipped."""
     order = getattr(agent_discovery, "DISCOVERY_PRECEDENCE", None) or sorted(disc.agents)
     detected: list[str] = []
+    unavailable: list[str] = []
     for name in order:
         if not platform_support.is_proxy_connector(name):
             continue
         signal = disc.agents.get(name)
         if signal is not None and signal.installed:
-            detected.append(name)
+            if platform_support.connector_supported_on_os(name):
+                detected.append(name)
+            else:
+                unavailable.append(name)
+    for name in unavailable:
+        support = platform_support.connector_platform_support(name)
+        ux.warn(
+            f"Detected {name}, but it is {support.status} on "
+            f"{platform_support.host_os()}: {support.reason}",
+            indent="  ",
+        )
     if not detected:
         return
     ux.subhead(
@@ -1055,15 +1199,16 @@ def _prompt_action_policy(
     rather than per connector. Pre-supplied flags skip the matching prompt."""
     # Hook fail-mode: surface the choice so first-run operators don't have to
     # discover `defenseclaw guardrail fail-mode` later. Default is "open"
-    # because silently bricking the agent on a transient gateway response
+    # because silently bricking the agent on a transient delivery or response
     # error is worse than leaking a single tool call.
     if fail_mode is None:
-        ux.section("Hook fail-mode (response-layer failures)")
+        terminal_checkbox.restore_line_prompt_mode()
+        ux.section("Hook fail-mode (delivery and response failures)")
         ux.subhead(
-            "What hooks do when the gateway returns 4xx, malformed JSON, or no action.",
+            "What hooks do when delivery/authentication fails or the gateway response is invalid.",
         )
         ux.subhead(
-            "Transport failures (gateway down / 5xx) ALWAYS allow unless DEFENSECLAW_STRICT_AVAILABILITY=1.",
+            "Strict availability can additionally force transport and missing-token failures closed.",
         )
         fail_mode = click.prompt(
             "  " + ux.bold("Fail mode"),
@@ -1125,6 +1270,12 @@ def _supported_action_connectors(
     failed: list[str] = []
     for name in candidates:
         key = connector_paths.normalize(name)
+        if platform_support.host_os() == "windows" and key == "opencode":
+            # Carry the requested mode provisionally. run_first_run performs
+            # the exact SST selection/version gate before any state mutation;
+            # generic discovery cannot downgrade or authorize this connector.
+            out.append(key)
+            continue
         if _check_connector_version_supported_for_setup(
             key,
             mode="action",
@@ -1214,6 +1365,11 @@ def _action_downgrade_record(connector: str, discovery=None) -> dict:
         )
     elif signal is not None and getattr(signal, "error", ""):
         record["reason"] = f"connector version could not be verified: {signal.error}"
+    elif signal is not None and getattr(signal, "version", ""):
+        record["reason"] = (
+            f"installed version {signal.version} is not covered by a known hook contract"
+        )
+        record["installed_version"] = signal.version
     return record
 
 
@@ -1266,8 +1422,7 @@ def _append_mode_warning_steps(report, warnings: list[dict]) -> None:
         connector = warning.get("connector", "")
         label = _CONNECTOR_META.get(connector, {}).get("label", connector or "Connector")
         detail = (
-            f"requested action, configured observe: "
-            f"{warning.get('reason', 'connector version could not be verified')}"
+            f"requested action, configured observe: {warning.get('reason', 'connector version could not be verified')}"
         )
         report.setup.append(
             StepResult(
@@ -1378,9 +1533,7 @@ def _build_noninteractive_connector_settings(
             quiet=quiet,
         )
     )
-    downgrade_by_connector = {
-        warning["connector"]: warning for warning in action_downgrades
-    }
+    downgrade_by_connector = {warning["connector"]: warning for warning in action_downgrades}
     settings: list[dict] = []
     for name in configured:
         is_action = name in action_set
@@ -1423,6 +1576,7 @@ def _prompt_first_run(
         data_dir=data_dir,
         trusted_prompt_cache=trusted_prompt_cache,
     )
+    terminal_checkbox.restore_line_prompt_mode()
 
     # Scanner mode is process-wide guardrail config, so it is asked once
     # regardless of how many connectors are being configured. Rule/regex
@@ -1461,9 +1615,7 @@ def _prompt_first_run(
             trusted_prompt_cache=trusted_prompt_cache,
         )
     )
-    downgrade_by_connector = {
-        warning["connector"]: warning for warning in action_downgrades
-    }
+    downgrade_by_connector = {warning["connector"]: warning for warning in action_downgrades}
 
     # The action-only policy knobs (fail-mode + HITL) are asked once and
     # shared across every connector being enabled in action mode.
@@ -1475,7 +1627,11 @@ def _prompt_first_run(
             hilt_min_severity=hilt_min_severity,
         )
 
-    judge_candidates = [c for c in connectors if c in action_set]
+    # Offer the judge for every connector the operator selected for action.
+    # Hook-contract downgrades still apply to the saved profile, but they
+    # must not hide the checkbox — `defenseclaw setup` already uses the
+    # requested action set here.
+    judge_candidates = [c for c in connectors if c in set(requested_action)]
     if judge_candidates:
         judge_hook_connectors = _prompt_first_run_judge_connectors(judge_candidates, default_all=with_judge)
     else:
@@ -1509,7 +1665,12 @@ def _prompt_first_run(
 
 
 def _prompt_first_run_judge_connectors(connectors: list[str], *, default_all: bool) -> list[str]:
-    """Ask which first-run action connectors should get the optional LLM judge."""
+    """Ask which requested-action connectors should get the optional LLM judge.
+
+    ``connectors`` intentionally includes candidates downgraded to observe by
+    hook-contract admission. The operator's requested mode, rather than the
+    effective fallback mode, controls whether the optional judge is offered.
+    """
     ux.section("Optional LLM judge")
     ux.subhead("Rule/regex scanning is already enabled for every active connector selected above.")
     ux.subhead("Only action-mode connectors can add LLM judge review in this setup flow.")
@@ -1541,7 +1702,7 @@ def _prompt_first_run_judge_llm_config(
     ):
         return llm_provider, llm_model, llm_api_key, llm_api_key_env, llm_base_url
 
-    from defenseclaw.commands._llm_picker import pick_key_env, pick_model, pick_provider
+    from defenseclaw.commands._llm_picker import pick_key_env, pick_local_runtime, pick_model, pick_provider
     from defenseclaw.commands.cmd_setup import (
         _LOCAL_LLM_DEFAULT_BASE_URL,
         _LOCAL_LLM_WIZARD_PROVIDERS,
@@ -1554,6 +1715,18 @@ def _prompt_first_run_judge_llm_config(
         flag_value=None,
         non_interactive=False,
     )
+    if provider in _LOCAL_LLM_WIZARD_PROVIDERS:
+        model, base_url = pick_local_runtime(
+            provider=provider,
+            current_model=llm_model or "",
+            current_base_url=llm_base_url or "",
+            default_base_url=_LOCAL_LLM_DEFAULT_BASE_URL.get(provider, ""),
+            flag_model=None,
+            flag_base_url=None,
+            non_interactive=False,
+        )
+        return provider, model, "", "", base_url
+
     model = pick_model(
         current=llm_model or "",
         provider=provider,
@@ -1561,13 +1734,6 @@ def _prompt_first_run_judge_llm_config(
         flag_value=None,
         non_interactive=False,
     )
-    if provider in _LOCAL_LLM_WIZARD_PROVIDERS:
-        base_url = click.prompt(
-            f"  {provider} base URL",
-            default=llm_base_url or _LOCAL_LLM_DEFAULT_BASE_URL.get(provider, ""),
-            show_default=True,
-        )
-        return provider, model, "", "", base_url
 
     key_env = pick_key_env(
         provider=provider,
@@ -1591,6 +1757,7 @@ def _activate_additional_connectors(
     start_gateway: bool,
     quiet: bool = False,
     allow_trusted_path_prompt: bool = False,
+    protected_selection: object | None = None,
 ) -> tuple[list[str], StepResult | None]:
     """Merge the extra first-run connectors into ``guardrail.connectors``.
 
@@ -1629,6 +1796,55 @@ def _activate_additional_connectors(
         key = connector_paths.normalize(s["connector"])
         if key not in selected_keys:
             selected_keys.append(key)
+
+    verified_selection = protected_selection
+    if platform_support.host_os() == "windows" and "opencode" in selected_keys:
+        from defenseclaw.agent_selection import setup_agent_selection_connectors
+        from defenseclaw.commands.cmd_setup import (
+            _capture_setup_config_snapshot,
+            _record_windows_setup_agent_selections,
+            _restore_setup_agent_selection_snapshot,
+            _restore_setup_hook_contract_lock_snapshot,
+            _revalidate_setup_agent_selections,
+        )
+
+        expected_selection = setup_agent_selection_connectors(selected_keys)
+        try:
+            verified_selection = _revalidate_setup_agent_selections(
+                cfg.data_dir,
+                verified_selection,
+            )
+            if verified_selection.connectors != expected_selection:
+                raise OSError("selection proof does not cover the complete first-run roster")
+        except (AttributeError, OSError, TypeError):
+            setup_snapshot = _capture_setup_config_snapshot(cfg)
+            try:
+                verified_selection = _record_windows_setup_agent_selections(
+                    cfg.data_dir,
+                    tuple(selected_keys),
+                    _prior_snapshot=setup_snapshot,
+                )
+            except Exception as exc:
+                rollback_errors: list[str] = []
+                for label, restore in (
+                    ("agent_selection.json", _restore_setup_agent_selection_snapshot),
+                    ("hook_contract_lock.json", _restore_setup_hook_contract_lock_snapshot),
+                ):
+                    try:
+                        restore(cfg, setup_snapshot)
+                    except Exception as rollback_exc:  # noqa: BLE001 — restore independent authority files.
+                        rollback_errors.append(f"{label}: {rollback_exc}")
+                if rollback_errors:
+                    raise click.ClickException(
+                        f"first-run extra executable selection failed ({exc}); "
+                        f"authority rollback was incomplete: {'; '.join(rollback_errors)}"
+                    ) from exc
+                raise
+        if verified_selection is None or verified_selection.record_for("opencode") is None:
+            raise click.ClickException(
+                "native-Windows OpenCode extras require a fresh receipt-bound exact SST selection"
+            )
+
     # Rebuild the multi map from the connector selection made in this init
     # run. Reusing the old map would keep unchecked/stale connectors active in
     # `guardrail status`.
@@ -1654,7 +1870,17 @@ def _activate_additional_connectors(
         }
         if trusted_prompt_cache is not None:
             version_check_kwargs["_trusted_prompt_cache"] = trusted_prompt_cache
-        if mode == "action" and not _check_connector_version_supported_for_setup(key, **version_check_kwargs):
+        exact_windows_opencode = (
+            key == "opencode"
+            and platform_support.host_os() == "windows"
+            and verified_selection is not None
+            and verified_selection.record_for(key) is not None
+        )
+        if (
+            mode == "action"
+            and not exact_windows_opencode
+            and not _check_connector_version_supported_for_setup(key, **version_check_kwargs)
+        ):
             warning = _fresh_action_downgrade_record(
                 key,
                 data_dir=getattr(cfg, "data_dir", None),
@@ -1682,9 +1908,7 @@ def _activate_additional_connectors(
     if gate != ["*"]:
         selected_set = set(selected_keys)
         gc.judge.hook_connectors = [
-            connector_paths.normalize(c)
-            for c in gate
-            if c and connector_paths.normalize(c) in selected_set
+            connector_paths.normalize(c) for c in gate if c and connector_paths.normalize(c) in selected_set
         ]
 
     # Keep the singular mirror pointing at the sorted-first connector so
@@ -1728,13 +1952,112 @@ def _normalize_connector_arg(
     if connector is None and discover_default:
         try:
             disc = agent_discovery.discover_agents(refresh=refresh_agents)
-            connector = agent_discovery.first_installed(disc, "codex")
+            discovered = agent_discovery.first_installed(disc, "codex")
+            if platform_support.connector_supported_on_os(discovered):
+                connector = discovered
+            else:
+                installed = _installed_hook_connectors(disc)
+                connector = installed[0] if installed else "codex"
         except Exception:
             connector = "codex"
     value = (connector or "codex").strip().lower()
     if value in {"claude-code", "claude_code", "claude"}:
         return "claudecode"
     return value
+
+
+def _native_setup_copilot_invocation_allowed(
+    *,
+    connector: str | None,
+    requested_connectors: list[str],
+    skip_install: bool,
+    non_interactive: bool,
+    yes: bool,
+    sandbox: bool,
+    observe_all: bool,
+    action_connectors: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+) -> bool:
+    """Recognize only Setup's narrow, backward-compatible Copilot bootstrap."""
+
+    return (
+        platform_support.host_os() == "windows"
+        and _normalize_connector_arg(connector) == "copilot"
+        and requested_connectors == ["copilot"]
+        and skip_install
+        and non_interactive
+        and yes
+        and not sandbox
+        and not observe_all
+        and not action_connectors.strip()
+        and start_gateway is False
+        and verify is False
+    )
+
+
+def _native_setup_antigravity_invocation_allowed(
+    *,
+    connector: str | None,
+    requested_connectors: list[str],
+    skip_install: bool,
+    non_interactive: bool,
+    yes: bool,
+    sandbox: bool,
+    observe_all: bool,
+    action_connectors: str,
+    start_gateway: bool | None,
+    verify: bool | None,
+) -> bool:
+    """Recognize only Setup's parent-bound Antigravity initialization."""
+
+    return (
+        platform_support.host_os() == "windows"
+        and _internal_antigravity_setup_parent_matches()
+        and _normalize_connector_arg(connector) == "antigravity"
+        and requested_connectors == ["antigravity"]
+        and skip_install
+        and non_interactive
+        and yes
+        and not sandbox
+        and not observe_all
+        and not action_connectors.strip()
+        and start_gateway is False
+        and verify is False
+    )
+
+
+def _internal_antigravity_setup_parent_matches() -> bool:
+    """Bind packaged Antigravity initialization to Setup through its launcher."""
+
+    if os.environ.get(_INTERNAL_SETUP_CONNECTOR_ENV, "").strip().lower() != "antigravity":
+        return False
+    expected = os.environ.get(_INTERNAL_SETUP_PARENT_ENV, "").strip()
+    if not expected or not os.path.isabs(expected):
+        return False
+    if os.path.basename(expected).casefold() != _WINDOWS_SETUP_EXECUTABLE.casefold():
+        return False
+    # The packaged launcher removes ambient copies and restores this value
+    # from its validated installer-owned state before starting Python.
+    install_root = os.environ.get(_INSTALL_ROOT_ENV, "").strip()
+    if not install_root or not os.path.isabs(install_root):
+        return False
+    expected_launcher = os.path.join(install_root, "bin", _WINDOWS_LAUNCHER_EXECUTABLE)
+    launcher_pid = os.getppid()
+    try:
+        actual_launcher = _process_image_path_windows(launcher_pid)
+        setup_pid = _process_parent_id_windows(launcher_pid)
+        actual_setup = _process_image_path_windows(setup_pid) if setup_pid else None
+    except OSError:
+        return False
+    if not actual_launcher or not actual_setup:
+        return False
+    return (
+        os.path.normcase(os.path.abspath(actual_launcher))
+        == os.path.normcase(os.path.abspath(expected_launcher))
+        and os.path.normcase(os.path.abspath(actual_setup))
+        == os.path.normcase(os.path.abspath(expected))
+    )
 
 
 def _render_first_run_report(report, renderer) -> None:
@@ -1823,7 +2146,10 @@ def _resolve_splunk_bridge_bundle():
     return bundled_splunk_bridge_dir()
 
 
-_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = ("bin", "run.sh")
+_OBSERVABILITY_STACK_REFRESH_PATHS: tuple[str, ...] = (
+    os.path.join("bin", "openclaw-observability-bridge"),
+    "run.sh",
+)
 
 
 def _seed_local_observability_stack(data_dir: str) -> None:
@@ -1837,11 +2163,9 @@ def _seed_local_observability_stack(data_dir: str) -> None:
     On a fresh data dir we copy the entire bundle. On a re-init, we
     *preserve* operator-editable config (dashboards, prom rules,
     compose overrides, OTel collector config) but *refresh* the
-    maintainer-owned bridge entry points (``bin/`` and ``run.sh``) so
+    maintainer-owned compatibility entry points (``bin/`` and ``run.sh``) so
     bug fixes shipped in the wheel actually reach previously-seeded
-    installs. Without this, a stale seeded bridge (e.g. one missing
-    the bash 3.2 ``set -u`` empty-array guard on macOS) would keep
-    crashing even after ``pip install --upgrade``.
+    installs continue to delegate to the packaged Python controller.
     """
     bundled = bundled_local_observability_dir()
     if not bundled.is_dir():
@@ -1849,7 +2173,24 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 
     dest = os.path.join(data_dir, "observability-stack")
     if not os.path.isdir(dest):
-        shutil.copytree(str(bundled), dest)
+        from defenseclaw.bundle_refresh import (
+            _assert_safe_bundle_destination,
+            _rsync_overwrite,
+        )
+
+        try:
+            _assert_safe_bundle_destination(Path(data_dir), Path(dest))
+            Path(dest).mkdir(parents=False)
+        except OSError as exc:
+            click.echo(f"  warning: could not seed observability stack: {exc}", err=True)
+            return
+        _refreshed, _preserved, errors = _rsync_overwrite(
+            src=Path(bundled), dest=Path(dest), preserve=()
+        )
+        if errors:
+            for error in errors[:3]:
+                click.echo(f"  warning: could not seed observability stack: {error}", err=True)
+            return
         _ensure_observability_stack_executables(dest)
         click.echo(f"  Observability stack: seeded in {dest}")
         return
@@ -1871,9 +2212,8 @@ def _seed_local_observability_stack(data_dir: str) -> None:
 def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     """Overwrite maintainer-owned scripts in ``dest`` from ``bundled``.
 
-    Only files under :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
-    refreshed — these are pure code (the ``openclaw-observability-bridge``
-    bash entry point and its ``run.sh`` shim) and have no operator
+    Only files in :data:`_OBSERVABILITY_STACK_REFRESH_PATHS` are
+    refreshed — these are compatibility shims and have no operator
     config baked in, so unconditional overwrite is safe.
 
     Returns the list of relative paths that were actually rewritten so
@@ -1881,20 +2221,30 @@ def _refresh_observability_stack_scripts(bundled, dest: str) -> list[str]:
     sources are skipped silently and copy failures are surfaced as
     warnings rather than failing ``init`` outright.
     """
+    from defenseclaw.bundle_refresh import (
+        _assert_safe_bundle_destination,
+        _atomic_copy_file,
+    )
+
     refreshed: list[str] = []
+    dest_root = Path(dest)
+    try:
+        _assert_safe_bundle_destination(dest_root.parent, dest_root)
+    except OSError as exc:
+        click.echo(
+            f"  warning: could not refresh observability stack: {exc}", err=True
+        )
+        return refreshed
     for rel in _OBSERVABILITY_STACK_REFRESH_PATHS:
         src = bundled / rel
-        if not src.exists():
+        if not src.is_file():
             continue
-        target = os.path.join(dest, rel)
+        target = dest_root / rel
         try:
-            if src.is_dir():
-                if os.path.isdir(target):
-                    shutil.rmtree(target)
-                shutil.copytree(str(src), target)
-            else:
-                os.makedirs(os.path.dirname(target) or ".", exist_ok=True)
-                shutil.copy2(str(src), target)
+            _assert_safe_bundle_destination(dest_root, target)
+            target.parent.mkdir(parents=True, exist_ok=True)
+            _assert_safe_bundle_destination(dest_root, target)
+            _atomic_copy_file(str(src), str(target), root=dest_root)
         except OSError as exc:
             click.echo(
                 f"  warning: could not refresh observability stack {rel}: {exc}",
@@ -1920,6 +2270,7 @@ def _ensure_observability_stack_executables(dest: str) -> None:
 
 
 def _install_scanners(cfg, logger, skip: bool) -> None:
+    """Verify bundled scanner SDKs; retained name preserves test/API patches."""
     if skip:
         click.echo("  Scanners:      skipped (--skip-install)")
         return
@@ -1946,7 +2297,12 @@ def _verify_scanner_sdk(name: str, import_name: str, min_python: tuple[int, ...]
         click.echo(f"  {label}{ux._style('available', fg='green')}")
     except ImportError:
         click.echo(f"  {label}{ux._style('not installed', fg='yellow')}")
-        click.echo("                 " + ux.dim("install with: pip install defenseclaw"))
+        click.echo(
+            "                 "
+            + ux.dim(
+                "repair the managed installation; source checkouts: uv sync"
+            )
+        )
 
 
 def _show_scanner_defaults(cfg) -> None:
@@ -1961,46 +2317,255 @@ def _show_scanner_defaults(cfg) -> None:
     click.echo("  Run 'defenseclaw setup' to customize scanner settings.")
 
 
-def _ensure_device_key(path: str) -> None:
-    """Create the Ed25519 device key file if it doesn't exist.
-
-    The Go gateway creates this on first start, but the guardrail setup
-    needs it earlier to derive the proxy master key. Uses the same PEM
-    format as internal/gateway/device.go.
-    """
-    if os.path.exists(path):
-        return
-    from cryptography.hazmat.primitives import serialization
-    from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
-
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    private_key = Ed25519PrivateKey.generate()
-    seed = private_key.private_bytes(
-        serialization.Encoding.Raw,
-        serialization.PrivateFormat.Raw,
-        serialization.NoEncryption(),
+def _validate_device_identity_windows_path_syntax(*paths: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _windows_path_has_alternate_data_stream,
     )
-    import base64
 
-    b64_seed = base64.b64encode(seed).decode()
-    pem_data = f"-----BEGIN ED25519 PRIVATE KEY-----\n{b64_seed}\n-----END ED25519 PRIVATE KEY-----\n"
-    # Create the file with 0o600 atomically so the key is never
-    # world-readable, even for the brief window between open() and
-    # the previous chmod(). ``O_EXCL`` ensures we don't overwrite a
-    # concurrently-created key (idempotent early-exit already covered
-    # the is-it-there case above).
-    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-    try:
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError:
-        # Another process won the race — trust its key and exit.
+    if os.name != "nt":
         return
-    with os.fdopen(fd, "w") as f:
-        f.write(pem_data)
+    if any(_windows_path_has_alternate_data_stream(path) for path in paths):
+        raise click.ClickException(
+            "cannot safely create device identity "
+            "(windows-alternate-data-stream-path)"
+        )
+
+
+def _validate_device_identity_artifact_layout(target: str, identity_root: str) -> None:
+    from defenseclaw.doctor_recovery import (
+        _device_identity_artifact_alias_reason,
+    )
+
+    if os.path.dirname(identity_root) == identity_root:
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-too-broad)"
+        )
+    reason = _device_identity_artifact_alias_reason(target, identity_root)
+    if reason is not None:
+        raise click.ClickException(
+            f"cannot safely create device identity ({reason})"
+        )
+
+
+def _validate_private_identity_directory(path: str) -> None:
+    import stat
+
+    from defenseclaw.file_permissions import (
+        darwin_acl_confidentiality_error,
+        darwin_acl_write_error,
+        reject_reparse_path,
+        windows_acl_confidentiality_error,
+        windows_acl_custody_write_error,
+    )
+
     try:
-        os.chmod(path, 0o600)
-    except OSError:
-        pass
+        reject_reparse_path(path)
+        info = os.lstat(path)
+    except OSError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (directory-custody-unavailable)"
+        ) from exc
+    attributes = int(getattr(info, "st_file_attributes", 0))
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or stat.S_ISLNK(info.st_mode)
+        or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    ):
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-not-regular)"
+        )
+    if os.name != "nt" and os.path.realpath(path) != os.path.normpath(path):
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-indirect)"
+        )
+    if os.name == "nt":
+        problem = windows_acl_custody_write_error(
+            path,
+            allow_current_user=True,
+            require_current_user_owner=True,
+        ) or windows_acl_confidentiality_error(path)
+    else:
+        problem = None
+        if info.st_uid == 0 and os.geteuid() != 0:
+            raise click.ClickException(
+                "cannot safely create device identity "
+                "(directory-chain-is-root-owned-sudo-leftover)"
+            )
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) & 0o077:
+            problem = "directory is not owner-private"
+        else:
+            problem = darwin_acl_write_error(path) or darwin_acl_confidentiality_error(path)
+    if problem is not None:
+        raise click.ClickException(
+            "cannot safely create device identity (directory-chain-is-not-private)"
+        )
+
+
+def _sync_new_device_identity_directory_parent(path: str) -> None:
+    if os.name == "nt":
+        # Windows has no supported directory-handle fsync. Each identity file
+        # handle is still flushed before publication completes.
+        return
+    from defenseclaw.doctor_recovery import _fsync_directory
+
+    _fsync_directory(path)
+
+
+def _prepare_device_identity_directories(
+    identity_root: str,
+    target_parent: str,
+    *,
+    protect_directory=None,
+    sync_directory=None,
+) -> None:
+    import stat
+
+    from defenseclaw.file_permissions import make_private_directory
+
+    protect_directory = protect_directory or make_private_directory
+    sync_directory = sync_directory or _sync_new_device_identity_directory_parent
+
+    _validate_private_identity_directory(identity_root)
+    try:
+        relative = os.path.relpath(target_parent, identity_root)
+    except ValueError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        ) from exc
+    if relative == os.pardir or relative.startswith(os.pardir + os.sep) or os.path.isabs(relative):
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        )
+    if relative == os.curdir:
+        return
+
+    current = identity_root
+    for component in relative.split(os.sep):
+        if component in ("", os.curdir, os.pardir):
+            raise click.ClickException(
+                "cannot safely create device identity (invalid-directory-component)"
+            )
+        _validate_private_identity_directory(current)
+        child = os.path.join(current, component)
+        try:
+            info = os.lstat(child)
+        except FileNotFoundError:
+            try:
+                # The validated current directory is owner-private. Create
+                # exactly one child so a nested link can never redirect a
+                # recursive mkdir into an outside tree.
+                protect_directory(child)
+            except OSError as exc:
+                raise click.ClickException(
+                    "cannot safely create device identity (directory-create-failed)"
+                ) from exc
+        except OSError as exc:
+            raise click.ClickException(
+                "cannot safely create device identity (directory-custody-unavailable)"
+            ) from exc
+        else:
+            if not stat.S_ISDIR(info.st_mode) or stat.S_ISLNK(info.st_mode):
+                raise click.ClickException(
+                    "cannot safely create device identity (directory-chain-is-not-regular)"
+                )
+        _validate_private_identity_directory(child)
+        # Re-sync existing entries too: a prior interrupted attempt may have
+        # created the child but failed before its containing directory became
+        # durable.
+        try:
+            sync_directory(current)
+        except OSError as exc:
+            raise click.ClickException(
+                "cannot safely create device identity (directory-sync-failed)"
+            ) from exc
+        current = child
+
+
+def _ensure_device_key(path: str, *, data_dir: str | None = None) -> None:
+    """Create one new device identity with HMAC-bound provenance.
+
+    Existing identities are deliberately left untouched. In particular, an
+    older unprovenanced key must remain visible to Doctor as legacy rather than
+    being blessed after the fact.
+    """
+    raw_path = os.fspath(path)
+    raw_data_dir = os.fspath(data_dir) if data_dir is not None else None
+    if raw_data_dir is not None and not os.path.isabs(raw_data_dir):
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-path-not-absolute)"
+        )
+    _validate_device_identity_windows_path_syntax(
+        raw_path,
+        *((raw_data_dir,) if raw_data_dir is not None else ()),
+    )
+
+    if raw_data_dir is None:
+        if not os.path.isabs(raw_path):
+            raise click.ClickException(
+                "cannot safely create device identity (device-key-path-not-absolute)"
+            )
+        target = os.path.normpath(os.path.abspath(raw_path))
+        identity_root = os.path.dirname(target)
+    else:
+        from defenseclaw.doctor_recovery import _normalize_device_identity_disk_paths
+
+        target, identity_root = _normalize_device_identity_disk_paths(
+            raw_path,
+            raw_data_dir,
+        )
+        if not target:
+            raise click.ClickException(
+                "cannot safely create device identity "
+                "(device-key-path-not-local-to-data-dir)"
+            )
+    target_parent = os.path.dirname(target)
+    _validate_device_identity_windows_path_syntax(target, identity_root)
+    _validate_device_identity_artifact_layout(target, identity_root)
+    if os.path.lexists(target):
+        return
+
+    from defenseclaw.doctor_recovery import (
+        RecoveryApplyStatus,
+        RecoveryDisposition,
+        RecoveryRefusedError,
+        _device_identity_paths_equal,
+        apply_device_key_recovery,
+        plan_missing_device_key,
+    )
+    try:
+        common = os.path.commonpath((target, identity_root))
+    except ValueError as exc:
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        ) from exc
+    if (
+        not _device_identity_paths_equal(common, identity_root)
+        or _device_identity_paths_equal(target, identity_root)
+    ):
+        raise click.ClickException(
+            "cannot safely create device identity (target-outside-data-dir)"
+        )
+    if os.name != "nt" and os.path.realpath(identity_root) != identity_root:
+        raise click.ClickException(
+            "cannot safely create device identity (data-dir-path-is-indirect)"
+        )
+    _prepare_device_identity_directories(identity_root, target_parent)
+
+    plan = plan_missing_device_key(target, data_dir=identity_root)
+    if plan.disposition is not RecoveryDisposition.READY:
+        raise click.ClickException(
+            f"cannot safely create device identity ({plan.reason_code})"
+        )
+    try:
+        result = apply_device_key_recovery(plan, approved=True)
+    except RecoveryRefusedError as exc:
+        raise click.ClickException(
+            f"cannot safely create device identity ({exc.code})"
+        ) from exc
+    if result.status is not RecoveryApplyStatus.CREATED:
+        raise click.ClickException(
+            f"could not create device identity ({result.reason_code})"
+        )
 
 
 def _resolve_openclaw_gateway(claw_config_file: str) -> dict[str, str | int]:
@@ -2076,7 +2641,7 @@ def _validate_gateway_token(env_name: str, token: str) -> None:
     is therefore untrusted. A value containing a newline, carriage return, or
     NUL would be parsed as a *second* KEY=VALUE assignment by the config
     loader, letting an attacker inject arbitrary environment entries (e.g.
-    DEFENSECLAW_DISABLE_REDACTION=1). Fail clearly at the boundary where the
+    DEFENSECLAW_GATEWAY_URL=https://attacker.invalid). Fail clearly at the boundary where the
     token enters rather than relying solely on the writer's sanitization.
     """
     try:
@@ -2136,7 +2701,7 @@ def _setup_gateway_defaults(cfg, logger, is_new_config: bool = True) -> None:
     if not cfg.gateway.device_key_file:
         cfg.gateway.device_key_file = os.path.join(cfg.data_dir, "device.key")
 
-    _ensure_device_key(cfg.gateway.device_key_file)
+    _ensure_device_key(cfg.gateway.device_key_file, data_dir=cfg.data_dir)
 
     click.echo(f"  Gateway:       {cfg.gateway.host}:{cfg.gateway.port} (connector: {connector})")
     # Plan B2 / S0.2: the sidecar synthesizes a CSPRNG token on first
@@ -2579,9 +3144,12 @@ def _is_sidecar_running(pid_file: str) -> bool:
     pid = _read_pid(pid_file)
     if pid is None or pid <= 1:
         return False
-    try:
-        os.kill(pid, 0)
-    except (ProcessLookupError, PermissionError, OSError):
+    # POSIX can probe with kill(pid, 0), but CPython maps that call to a
+    # console control event on Windows and can interrupt the calling process.
+    # The shared helper uses a real Win32 process handle there.
+    from defenseclaw.process_liveness import pid_alive
+
+    if not pid_alive(pid):
         return False
     return _pid_looks_like_gateway(pid)
 

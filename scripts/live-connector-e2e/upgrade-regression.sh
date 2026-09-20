@@ -152,7 +152,9 @@ HARNESS_EXIT_CODE=4
 
 dc_upgrade_copy_artifacts() {
   local name
-  for name in gateway.log gateway.jsonl watchdog.log; do
+  # The cleanup trap stops the gateway first, so these SQLite files are
+  # quiescent and can be copied byte-for-byte as canonical v8 evidence.
+  for name in gateway.log audit.db judge_bodies.db watchdog.log; do
     if [ -f "${DEFENSECLAW_HOME}/${name}" ]; then
       /bin/cp -p "${DEFENSECLAW_HOME}/${name}" "${ARTIFACTS_DIR}/gateway/${name}" 2>/dev/null || true
     fi
@@ -211,10 +213,10 @@ dc_upgrade_cleanup() {
   local original_rc=$?
   trap - EXIT INT TERM HUP
   set +e
-  dc_upgrade_copy_artifacts
   if [ "${GATEWAY_STARTED}" = "1" ]; then
     PATH="${ORIGINAL_PATH}" defenseclaw-gateway stop >/dev/null 2>&1 || true
   fi
+  dc_upgrade_copy_artifacts
   if [ "${SNAPSHOT_READY}" = "1" ]; then
     if ! dc_persist_restore_files; then
       RESTORE_OK=0
@@ -486,9 +488,17 @@ if ! dc_upgrade_setup_without_restart "${BASELINE_BIN}"; then
   exit 4
 fi
 dc_record_result "baseline:setup" pass "mode=${MODE}"
-if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" defenseclaw-gateway start; then
-  DETAIL="isolated gateway failed to start for the baseline"
-  exit 4
+baseline_gateway_start_log="${ARTIFACTS_DIR}/gateway/baseline-start.log"
+if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" \
+  defenseclaw-gateway start 2>&1 | tee "${baseline_gateway_start_log}"; then
+  if dc_file_looks_like_auth_failure "${baseline_gateway_start_log}"; then
+    CLASSIFICATION="auth_failure"
+    DETAIL="known-good baseline login prevented isolated gateway startup; refresh the connector login"
+    HARNESS_EXIT_CODE=3
+  else
+    DETAIL="isolated gateway failed to start for the baseline"
+  fi
+  exit "${HARNESS_EXIT_CODE}"
 fi
 GATEWAY_STARTED=1
 if ! PATH="$(dirname "${BASELINE_BIN}"):${ORIGINAL_PATH}" dc_wait_for_gateway 30; then

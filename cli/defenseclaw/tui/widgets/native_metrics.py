@@ -125,6 +125,7 @@ class MetricTile(Vertical):
     def __init__(self, metric: MetricDatum, **kwargs: object) -> None:
         super().__init__(id=f"overview-{metric.key}-metric", **kwargs)
         self.metric = metric
+        self._rendered_metric: MetricDatum | None = None
         self._title = Static(metric.label, classes="metric-title")
         self._digits = Digits(self._digits_text(metric), classes="metric-digits")
         self._progress = ProgressBar(
@@ -149,34 +150,43 @@ class MetricTile(Vertical):
     def refresh_metric(self, metric: MetricDatum) -> None:
         """Update the tile without rebuilding the widget tree."""
 
+        previous = self._rendered_metric
         self.metric = metric
-        self._title.update(metric.label)
-        self._digits.update(self._digits_text(metric))
-        self._progress.update(total=100, progress=_clamp(metric.progress))
-        self._sparkline.data = metric.trend or (0,)
-        self._detail.update(metric.detail)
-        self._apply_class_map(
-            {
-                "metric-ok": metric.state == "ok",
-                "metric-warn": metric.state == "warn",
-                "metric-error": metric.state == "error",
-                "tile-clickable": bool(metric.target_panel),
-            }
-        )
-        if metric.target_panel:
-            self.tooltip = f"Open {metric.target_panel.title()}"
-        else:
-            self.tooltip = None
+        if previous == metric:
+            return
+
+        if previous is None or previous.label != metric.label:
+            self._title.update(metric.label)
+
+        digits_text = self._digits_text(metric)
+        if previous is None or self._digits_text(previous) != digits_text:
+            self._digits.update(digits_text)
+
+        progress = _clamp(metric.progress)
+        if previous is None or _clamp(previous.progress) != progress:
+            self._progress.update(total=100, progress=progress)
+
+        trend = metric.trend or (0,)
+        if previous is None or (previous.trend or (0,)) != trend:
+            self._sparkline.data = trend
+
+        if previous is None or previous.detail != metric.detail:
+            self._detail.update(metric.detail)
+
+        class_map = self._class_map(metric)
+        if previous is None or self._class_map(previous) != class_map:
+            self._apply_class_map(class_map)
+
+        tooltip = self._tooltip_text(metric)
+        if previous is None or self._tooltip_text(previous) != tooltip:
+            self.tooltip = tooltip
+
+        self._rendered_metric = metric
 
     def _apply_class_map(self, classes: dict[str, bool]) -> None:
-        """Apply a class map across Textual 7.x and 8.x."""
+        """Apply a class map atomically using the Textual 8 API."""
 
-        update_classes = getattr(self, "update_classes", None)
-        if callable(update_classes):
-            update_classes(classes)
-            return
-        for class_name, enabled in classes.items():
-            self.set_class(enabled, class_name)
+        self.update_classes(classes)
 
     def on_click(self, event: events.Click) -> None:
         if not self.metric.target_panel:
@@ -189,6 +199,21 @@ class MetricTile(Vertical):
         if metric.value_text:
             return metric.value_text
         return str(max(metric.value, 0))
+
+    @staticmethod
+    def _class_map(metric: MetricDatum) -> dict[str, bool]:
+        return {
+            "metric-ok": metric.state == "ok",
+            "metric-warn": metric.state == "warn",
+            "metric-error": metric.state == "error",
+            "tile-clickable": bool(metric.target_panel),
+        }
+
+    @staticmethod
+    def _tooltip_text(metric: MetricDatum) -> str | None:
+        if metric.target_panel:
+            return f"Open {metric.target_panel.title()}"
+        return None
 
 
 class OverviewMetrics(Horizontal):
@@ -220,11 +245,15 @@ class OverviewMetrics(Horizontal):
     def refresh_metrics(self, metrics: Sequence[MetricDatum]) -> None:
         """Refresh an already-mounted metric row."""
 
-        self.metrics = tuple(metrics)
-        for metric in self.metrics:
+        incoming = tuple(metrics)
+        if incoming == self.metrics:
+            return
+
+        for metric in incoming:
             tile = self._tiles.get(metric.key)
             if tile is not None:
                 tile.refresh_metric(metric)
+        self.metrics = incoming
 
 
 def _clamp(value: float) -> float:

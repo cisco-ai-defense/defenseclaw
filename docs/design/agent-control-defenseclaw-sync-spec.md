@@ -177,7 +177,7 @@ The first release accounts for the following source-baseline constraints:
   longer than 2,048 characters, and replaces categories by category name.
 - `guardrail.rule_pack_dir` and per-connector overrides select a single base
   pack. There is no independent managed overlay list.
-- DefenseClaw supports Python 3.10+, while Agent Control SDK 8.2.x requires
+- DefenseClaw supports Python 3.10+, while Agent Control SDK 8.5.0 requires
   Python 3.12+.
 
 The implementation therefore gives OPA and rule packs independent projection
@@ -720,7 +720,7 @@ agent_control.init(
 )
 ```
 
-Agent Control SDK 8.2.x starts its refresh loop even when the first
+Agent Control SDK 8.5.0 starts its refresh loop even when the first
 registration does not produce a snapshot. A refresh alone may continue to
 fail if the agent was never registered. Until the first successful snapshot,
 the synchronizer must retry the complete `shutdown()` plus `init()` sequence
@@ -892,7 +892,7 @@ or activation.
 
 - DefenseClaw core remains Python 3.10+.
 - Add optional extra `defenseclaw[agent-control]` with
-  `agent-control-sdk>=8.2,<9` for Python 3.12+.
+  `agent-control-sdk==8.5.0` for Python 3.12+.
 - Import the Agent Control SDK lazily inside the integration command/process;
   importing the core DefenseClaw CLI on Python 3.10/3.11 must not require the
   optional package.
@@ -990,7 +990,7 @@ Persist state atomically as a diagnostic index, not as policy authority:
 {
   "schema_version": 1,
   "status": "active",
-  "sdk_version": "8.2.0",
+  "sdk_version": "8.5.0",
   "agent_name": "defenseclaw-policy-sync",
   "target_type": "log_stream",
   "target_id_hash": "sha256:...",
@@ -1112,7 +1112,7 @@ dependency order, not separately exposed product phases.
 - Finalize the two typed schemas using section 3.3.
 - Publish/discover both no-op evaluator types in the Agent Control server.
 - Verify target-bound control creation and exact cached envelope preservation.
-- Pin compatibility to Agent Control SDK 8.2.x.
+- Pin compatibility to Agent Control SDK 8.5.0.
 
 ### 17.2 DefenseClaw OPA foundation
 
@@ -1324,7 +1324,7 @@ Agent Control:
 
 - [Documentation](https://docs.agentcontrol.dev/)
 - [Controls overview](https://docs.agentcontrol.dev/concepts/overview)
-- [Python SDK source, v8.2.0](https://github.com/agentcontrol/agent-control/blob/v8.2.0/sdks/python/src/agent_control/__init__.py)
+- [Python SDK source, v8.5.0](https://github.com/agentcontrol/agent-control/blob/v8.5.0/sdks/python/src/agent_control/__init__.py)
 - Companion specification: *DefenseClaw External Evaluators — Technical
   Specification*
 

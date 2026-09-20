@@ -1,0 +1,376 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package connector
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"golang.org/x/sys/windows"
+
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
+)
+
+func TestAtomicPrivateTempPinsEffectiveUserOwnerAtCreation(t *testing.T) {
+	dir := t.TempDir()
+	file, path, err := atomicFileCreateTemp(dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	})
+
+	wantOwner, err := windowsEffectiveUserSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	descriptor, err := windows.GetSecurityInfo(
+		windows.Handle(file.Fd()),
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if owner == nil || !owner.Equals(wantOwner) {
+		t.Fatalf("private staging owner=%v, want effective user %s", owner, wantOwner)
+	}
+	if err := validateAtomicTransformBoundFilePrivatePlatform(file); err != nil {
+		t.Fatalf("private staging protection: %v", err)
+	}
+	if filepath.Dir(path) != dir || filepath.Base(path) == "" {
+		t.Fatalf("private staging path %q escaped directory %q", path, dir)
+	}
+}
+
+func TestAtomicPrivateTempProtectionUsesLockedCreationHandle(t *testing.T) {
+	dir := t.TempDir()
+	file, path, err := atomicFileCreateTemp(dir, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		_ = file.Close()
+		_ = os.Remove(path)
+	})
+
+	// The create handle excludes write sharing. A path-based DACL update would
+	// therefore fail against our own still-open handle, which is the regression
+	// this test guards. Protection validation must use the authenticated handle.
+	reopened, reopenErr := os.OpenFile(path, os.O_RDWR, 0)
+	if reopenErr == nil {
+		_ = reopened.Close()
+		t.Fatal("private staging handle unexpectedly permitted a write reopen")
+	}
+	if !errors.Is(reopenErr, windows.ERROR_SHARING_VIOLATION) {
+		t.Fatalf("write reopen error=%v, want ERROR_SHARING_VIOLATION", reopenErr)
+	}
+	if err := atomicFileValidateStagedProtection(file, 0o600); err != nil {
+		t.Fatalf("handle-bound private protection validation: %v", err)
+	}
+	if _, err := file.Write([]byte("managed\n")); err != nil {
+		t.Fatalf("write through authenticated creation handle: %v", err)
+	}
+}
+
+func TestAtomicWriteAcceptsVerifiedStateAfterVisibleLateReplaceFailure(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	data := []byte("managed\n")
+	lateFailure := errors.New("simulated late write-through failure")
+	calls := 0
+	replace := func(source, destination string) error {
+		calls++
+		if err := safefile.ReplaceFile(source, destination); err != nil {
+			return err
+		}
+		if calls == 1 {
+			return lateFailure
+		}
+		return nil
+	}
+
+	if err := atomicWriteFileWithReplace(path, data, 0o600, replace); err == nil {
+		t.Fatal("first write accepted an ambiguous late replacement failure")
+	}
+	visible, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(visible) != string(data) {
+		t.Fatalf("visible bytes after late failure = %q", visible)
+	}
+	if err := atomicWriteFileWithReplace(path, data, 0o600, replace); err != nil {
+		t.Fatalf("durability retry: %v", err)
+	}
+	if calls != 1 {
+		t.Fatalf("replace calls = %d, want 1; verified identical Windows state was rewritten", calls)
+	}
+}
+
+func TestAtomicWriteIdenticalWindowsConfigPreservesIdentityAndMetadata(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	data := []byte("managed\n")
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stream := path + ":operator-metadata"
+	if err := os.WriteFile(stream, []byte("preserve"), 0o600); err != nil {
+		if errors.Is(err, windows.ERROR_INVALID_NAME) || errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("test volume does not support NTFS alternate streams: %v", err)
+		}
+		t.Fatal(err)
+	}
+	wantModTime := time.Unix(1_700_000_000, 0)
+	if err := os.Chtimes(path, wantModTime, wantModTime); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("identical Windows config was replaced instead of treated as a no-op")
+	}
+	if !after.ModTime().Equal(wantModTime) {
+		t.Fatalf("modification time=%s, want preserved %s", after.ModTime(), wantModTime)
+	}
+	metadata, err := os.ReadFile(stream)
+	if err != nil || string(metadata) != "preserve" {
+		t.Fatalf("alternate stream=%q error=%v, want preserved", metadata, err)
+	}
+}
+
+func TestAtomicWritePrivatePublicationDoesNotPreserveRacedDestinationDACL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "settings.json")
+	if err := atomicWriteFile(path, []byte("old\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var attackerIdentity string
+	streamCreated := false
+	atomicFileBeforePrivatePublish = func(destination string) error {
+		if err := os.WriteFile(destination, []byte("attacker\n"), 0o600); err != nil {
+			return err
+		}
+		if err := setAtomicFileUnsafeReadDACL(destination); err != nil {
+			return err
+		}
+		attacker, err := os.Open(destination)
+		if err != nil {
+			return err
+		}
+		attackerIdentity, err = atomicTransformOpenFileIdentity(attacker)
+		closeErr := attacker.Close()
+		if err != nil {
+			return err
+		}
+		if closeErr != nil {
+			return closeErr
+		}
+		if err := os.WriteFile(destination+":attacker-metadata", []byte("unsafe"), 0o600); err == nil {
+			streamCreated = true
+		} else if !errors.Is(err, windows.ERROR_INVALID_NAME) && !errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			return err
+		}
+		return nil
+	}
+	t.Cleanup(func() { atomicFileBeforePrivatePublish = nil })
+
+	if err := atomicWriteFile(path, []byte("managed\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if attackerIdentity == "" {
+		t.Fatal("private-publication race hook was not invoked")
+	}
+	got, err := os.ReadFile(path)
+	if err != nil || string(got) != "managed\n" {
+		t.Fatalf("published bytes=%q error=%v", got, err)
+	}
+	published, err := os.Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	publishedIdentity, identityErr := atomicTransformOpenFileIdentity(published)
+	closeErr := published.Close()
+	if identityErr != nil || closeErr != nil {
+		t.Fatalf("published identity error=%v close=%v", identityErr, closeErr)
+	}
+	if attackerIdentity == publishedIdentity {
+		t.Fatal("private publication reused the raced destination inode")
+	}
+	if err := safefile.ValidatePrivateFile(path); err != nil {
+		t.Fatalf("published private file retained raced unsafe DACL: %v", err)
+	}
+	if streamCreated {
+		if metadata, err := os.ReadFile(path + ":attacker-metadata"); err == nil {
+			t.Fatalf("published private file retained raced alternate stream %q", metadata)
+		}
+	}
+}
+
+func setAtomicFileUnsafeReadDACL(path string) error {
+	currentUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return err
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		return err
+	}
+	entry := func(sid *windows.SID, sidType windows.TRUSTEE_TYPE, mask windows.ACCESS_MASK) windows.EXPLICIT_ACCESS {
+		return windows.EXPLICIT_ACCESS{
+			AccessPermissions: mask,
+			AccessMode:        windows.GRANT_ACCESS,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  sidType,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		}
+	}
+	acl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		entry(currentUser.User.Sid, windows.TRUSTEE_IS_USER, windows.GENERIC_ALL),
+		entry(everyone, windows.TRUSTEE_IS_WELL_KNOWN_GROUP, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(
+		path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, acl, nil,
+	)
+}
+
+func TestAtomicFileAlreadyMatchesRejectsHugeSparseFileWithoutSizingAllocationFromDisk(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "target-owned-runtime.json")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.DeviceIoControl(
+		windows.Handle(file.Fd()),
+		windows.FSCTL_SET_SPARSE,
+		nil,
+		0,
+		nil,
+		0,
+		nil,
+		nil,
+	); err != nil {
+		_ = file.Close()
+		if errors.Is(err, windows.ERROR_INVALID_FUNCTION) ||
+			errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("test volume does not support sparse files: %v", err)
+		}
+		t.Fatal(err)
+	}
+	const sparseSize = int64(1) << 40
+	if err := file.Truncate(sparseSize); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if atomicFileAlreadyMatches(path, []byte("managed\n"), 0o600) {
+		t.Fatal("huge sparse target-owned file matched a short canonical payload")
+	}
+}
+
+func TestRenameAtomicTransformBoundFileRetriesBusyWindowsErrors(t *testing.T) {
+	for _, transient := range []error{
+		windows.ERROR_ACCESS_DENIED,
+		windows.ERROR_SHARING_VIOLATION,
+		windows.ERROR_LOCK_VIOLATION,
+		windows.STATUS_ACCESS_DENIED,
+		windows.STATUS_SHARING_VIOLATION,
+	} {
+		transient := transient
+		t.Run(transient.Error(), func(t *testing.T) {
+			calls := 0
+			var sleeps []time.Duration
+			err := renameAtomicTransformBoundFileWithBusyRetryUsing(
+				nil, nil, "hooks.json", true,
+				func(*os.File, *os.File, string, bool) error {
+					calls++
+					if calls == 1 {
+						return transient
+					}
+					return nil
+				},
+				func(delay time.Duration) {
+					sleeps = append(sleeps, delay)
+				},
+			)
+			if err != nil {
+				t.Fatalf("retry: %v", err)
+			}
+			if calls != 2 {
+				t.Fatalf("rename calls=%d, want 2", calls)
+			}
+			if len(sleeps) != 1 || sleeps[0] != atomicFileRenameRetryDelay {
+				t.Fatalf("sleeps=%v, want [%s]", sleeps, atomicFileRenameRetryDelay)
+			}
+		})
+	}
+}
+
+func TestRenameAtomicTransformBoundFileDoesNotRetryPermanentErrors(t *testing.T) {
+	permanent := windows.ERROR_FILE_NOT_FOUND
+	calls := 0
+	sleeps := 0
+	got := renameAtomicTransformBoundFileWithBusyRetryUsing(
+		nil, nil, "hooks.json", true,
+		func(*os.File, *os.File, string, bool) error {
+			calls++
+			return permanent
+		},
+		func(time.Duration) { sleeps++ },
+	)
+	if !errors.Is(got, permanent) {
+		t.Fatalf("error=%v, want %v", got, permanent)
+	}
+	if calls != 1 || sleeps != 0 {
+		t.Fatalf("calls=%d sleeps=%d, want 1, 0", calls, sleeps)
+	}
+}
+
+func TestRenameAtomicTransformBoundFileStopsAtRetryBound(t *testing.T) {
+	wantErr := windows.ERROR_ACCESS_DENIED
+	calls := 0
+	got := renameAtomicTransformBoundFileWithBusyRetryUsing(
+		nil, nil, "hooks.json", true,
+		func(*os.File, *os.File, string, bool) error {
+			calls++
+			return wantErr
+		},
+		func(time.Duration) {},
+	)
+	if !errors.Is(got, wantErr) {
+		t.Fatalf("error=%v, want %v", got, wantErr)
+	}
+	if calls != atomicFileRenameMaxAttempts {
+		t.Fatalf("calls=%d, want %d", calls, atomicFileRenameMaxAttempts)
+	}
+}

@@ -15,7 +15,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 // Typed config-editor catalog — a port of the TUI's Setup config sections
-// (tui/panels/setup.py build of ConfigSection/ConfigField, DefenseClaw 0.8.3).
+// (tui/panels/setup.py build of ConfigSection/ConfigField, DefenseClaw 0.8.5).
 // Every editable field carries its exact config.yaml dotted key, kind, choice
 // options, and hint; read-only sections render as headers with guidance.
 
@@ -141,8 +141,8 @@ enum ConfigEditorCatalog {
     static var llmOverrideProviders: [String] { [""] + llmProviders }
     static let connectors = [
         "openclaw", "zeptoclaw", "codex", "claudecode", "hermes", "cursor",
-        "windsurf", "geminicli", "copilot", "openhands", "antigravity",
-        "opencode", "omnigent",
+        "devin", "copilot", "openhands", "antigravity",
+        "opencode", "amp", "omnigent",
     ]
     static let detectionStrategies = ["regex_only", "regex_judge", "judge_first"]
 
@@ -240,15 +240,6 @@ enum ConfigEditorCatalog {
             fields: [
                 .init(label: "Agent ID", key: "agent.id", hint: "Stable lower-kebab-case identity."),
                 .init(label: "Agent Name", key: "agent.name", hint: "Human-readable display name."),
-            ]
-        ))
-
-        sections.append(ConfigEditorSection(
-            name: "Privacy",
-            summary: "Redaction and privacy controls for audit DB, OTel, Splunk, webhooks, and terminal logs.",
-            fields: [
-                .init(label: "Disable Redaction", key: "privacy.disable_redaction", kind: .bool,
-                      hint: "true stores raw content in all sinks."),
             ]
         ))
 
@@ -553,10 +544,10 @@ enum ConfigEditorCatalog {
                       hint: "Detect env var names only."),
                 .init(label: "Provider Domains", key: "ai_discovery.include_network_domains", kind: .bool,
                       hint: "Detect provider domains."),
+                .init(label: "Online Model Provenance", key: "ai_discovery.lookup_model_provenance_online", kind: .bool,
+                      hint: "Send public-looking model IDs to Hugging Face for lineage enrichment."),
                 .init(label: "Max Files", key: "ai_discovery.max_files_per_scan", kind: .int, hint: "Max files per scan."),
                 .init(label: "Max File Bytes", key: "ai_discovery.max_file_bytes", kind: .int, hint: "Skip larger files."),
-                .init(label: "Emit OTel", key: "ai_discovery.emit_otel", kind: .bool,
-                      hint: "Emit sanitized AI visibility telemetry."),
                 .init(label: "Store Raw Local Paths", key: "ai_discovery.store_raw_local_paths", kind: .bool,
                       hint: "Store raw paths locally only."),
             ]
@@ -596,12 +587,12 @@ enum ConfigEditorCatalog {
         ))
 
         sections.append(ConfigEditorSection(
-            name: "Audit Sinks",
-            summary: "Read-only audit sink summary.",
-            help: "Manage via Setup → Observability (Splunk) or `defenseclaw setup observability`.",
+            name: "Observability",
+            summary: "Read-only config v8 destination summary.",
+            help: "Manage via Setup → Observability or `defenseclaw setup observability`.",
             fields: [
                 .init(label: "How to edit", key: "", kind: .header,
-                      headerValue: "Use the Observability / Splunk wizards; sinks appear in the Overview destinations table."),
+                      headerValue: "Use the Observability wizards; named destinations appear in the Overview destinations table."),
             ]
         ))
 
@@ -612,37 +603,6 @@ enum ConfigEditorCatalog {
             fields: [
                 .init(label: "How to edit", key: "", kind: .header,
                       headerValue: "Use the Webhooks wizard in Setup to add or change notifier webhooks."),
-            ]
-        ))
-
-        sections.append(ConfigEditorSection(
-            name: "OTel",
-            summary: "OpenTelemetry exporter config.",
-            fields: [
-                .init(label: ".. Process-wide policy ..", key: "", kind: .header),
-                .init(label: "Enabled", key: "otel.enabled", kind: .bool, hint: "Master OpenTelemetry export switch."),
-                .init(label: ".. Traces ..", key: "", kind: .header),
-                .init(label: "Sampler", key: "otel.traces.sampler", kind: .choice,
-                      options: ["always_on", "always_off", "traceidratio",
-                                "parentbased_always_on", "parentbased_always_off", "parentbased_traceidratio"],
-                      hint: "Trace sampler."),
-                .init(label: "Sampler Arg", key: "otel.traces.sampler_arg", hint: "Trace sampler argument."),
-                .init(label: ".. Logs ..", key: "", kind: .header),
-                .init(label: "Emit individual findings", key: "otel.logs.emit_individual_findings", kind: .bool,
-                      hint: "One record per finding."),
-                .init(label: ".. Metrics ..", key: "", kind: .header),
-                .init(label: "Export interval (s)", key: "otel.metrics.export_interval_s", kind: .int,
-                      hint: "Seconds between metric pushes."),
-                .init(label: "Temporality", key: "otel.metrics.temporality", kind: .choice,
-                      options: ["delta", "cumulative"], hint: "Metric temporality."),
-                .init(label: ".. Batch ..", key: "", kind: .header),
-                .init(label: "Max export batch size", key: "otel.batch.max_export_batch_size", kind: .int,
-                      hint: "Max records per request."),
-                .init(label: "Scheduled delay (ms)", key: "otel.batch.scheduled_delay_ms", kind: .int,
-                      hint: "Batch flush delay."),
-                .init(label: "Max queue size", key: "otel.batch.max_queue_size", kind: .int, hint: "In-memory queue size."),
-                .init(label: ".. Resource ..", key: "", kind: .header),
-                .init(label: "Attributes", key: "otel.resource.attributes", hint: "CSV resource attributes."),
             ]
         ))
 

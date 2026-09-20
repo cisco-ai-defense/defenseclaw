@@ -20,20 +20,27 @@ import SwiftUI
 import ServiceManagement
 
 struct AppSettingsView: View {
+    @Environment(AppState.self) private var appState
+
     var body: some View {
-        TabView {
+        @Bindable var state = appState
+        TabView(selection: $state.selectedSettingsTab) {
             GeneralSettings()
                 .frame(width: 560, height: 620)
                 .tabItem { Label("General", systemImage: "gearshape") }
+                .tag(AppSettingsTab.general)
             MonitoringSettings()
                 .frame(width: 560, height: 350)
                 .tabItem { Label("Monitoring", systemImage: "waveform.path.ecg") }
+                .tag(AppSettingsTab.monitoring)
             NotificationSettings()
                 .frame(width: 560, height: 300)
                 .tabItem { Label("Notifications", systemImage: "bell.badge") }
+                .tag(AppSettingsTab.notifications)
             ConnectionSettings()
-                .frame(width: 560, height: 420)
+                .frame(width: 560, height: 540)
                 .tabItem { Label("Connection", systemImage: "network") }
+                .tag(AppSettingsTab.connection)
         }
     }
 }
@@ -112,7 +119,7 @@ private struct GeneralSettings: View {
                         }
                         .controlSize(.small)
                     }
-                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.")
+                    Text("The app does not run a bare CLI upgrade. Choose Show Upgrade Command below, then copy the runnable command that authenticates the release-owned defenseclaw-upgrade.sh asset, checksums.txt manifest, signature, and certificate before running latest mode without --version. The same path is documented at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -125,7 +132,7 @@ private struct GeneralSettings: View {
                         Task { await appState.installBundledRuntime() }
                     }
                     .disabled(appState.runtimeInstallState.isRunning || runtimeActionDisabled)
-                    Text("Fresh installs only. If an existing or partial runtime is detected, this action makes no changes and directs you to the release-owned latest-mode upgrade resolver. A true fresh install lays the bundled runtime into ~/.defenseclaw and ~/.local/bin; dependency download from PyPI requires network.")
+                    Text("Fresh installs only. If an existing or partial runtime is detected, this action makes no changes and directs you to the release-owned latest-mode upgrade resolver. A true fresh install lays the bundled runtime into \(appState.installationContext.homeRoot.path) and ~/.local/bin. Configuration, tokens, and the audit database are never touched. Dependency download from PyPI requires network.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
@@ -287,6 +294,7 @@ private struct GeneralSettings: View {
     }
 
     private var runtimeActionDisabled: Bool {
+        if !appState.installationMutationsAllowed { return true }
         if appState.runtimeVersionCheckInProgress { return true }
         // Do not overlap bundled-payload installation with upgrade guidance.
         if appState.runtimeInstallState.isRunning { return true }
@@ -376,6 +384,9 @@ private struct NotificationSettings: View {
 private struct ConnectionSettings: View {
     @Environment(AppState.self) private var appState
     @AppStorage(CLIRunner.pathOverrideKey) private var binaryPath = ""
+    @State private var configPathOverride = UserDefaults.standard.string(
+        forKey: InstallationContext.configPathOverrideKey
+    ) ?? ""
 
     var body: some View {
         Form {
@@ -383,11 +394,48 @@ private struct ConnectionSettings: View {
                 LabeledContent("Endpoint", value: "http://\(appState.config.gatewayHost):\(appState.config.gatewayPort)")
                 LabeledContent("Token", value: appState.config.gatewayToken == nil ? "not set" : "configured (hidden)")
             }
+            Section("Installation") {
+                LabeledContent("Selected by", value: appState.installationContext.source.label)
+                LabeledContent("Access", value: appState.installationContext.accessMode.label)
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .textSelection(.enabled)
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Config path override")
+                    TextField("absolute path to config.yaml", text: $configPathOverride)
+                        .textFieldStyle(.roundedBorder)
+                    Text("DEFENSECLAW_CONFIG takes precedence. Leave blank to use DEFENSECLAW_HOME, the managed package, or ~/.defenseclaw.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                HStack {
+                    Button("Apply Installation") {
+                        appState.applyInstallationConfigOverride(configPathOverride)
+                    }
+                    .disabled(!appState.installationContextSwitchAllowed)
+                    Button("Use Automatic Selection") {
+                        configPathOverride = ""
+                        appState.applyInstallationConfigOverride("")
+                    }
+                    .disabled(
+                        !appState.installationContextSwitchAllowed
+                            || (configPathOverride.isEmpty
+                                && appState.installationContext.source != .appOverride)
+                    )
+                }
+            }
             // Paths get their own line, monospaced + selectable, so long
             // values aren't clipped by the label/value column truncation.
             Section("Files") {
-                pathRow("Config", ConfigStore.configURL.path)
-                pathRow("Audit DB", ConfigStore.auditDBURL.path)
+                pathRow("Config", appState.installationContext.configURL.path)
+                pathRow("Data", appState.installationContext.dataDirectory.path)
+                pathRow("Environment", appState.installationContext.environmentURL.path)
+                pathRow("Audit DB", appState.installationContext.auditDBURL.path)
+                pathRow("Virtual environment", appState.installationContext.venvURL.path)
+                pathRow("Gateway log", appState.installationContext.gatewayLogURL.path)
             }
             Section("defenseclaw CLI") {
                 VStack(alignment: .leading, spacing: 4) {

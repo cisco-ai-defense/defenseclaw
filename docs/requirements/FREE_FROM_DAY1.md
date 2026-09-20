@@ -1,7 +1,14 @@
 # DefenseClaw Free-From-Day-1 Requirement
 
-Status: Active  
+Status: Implemented; retained as an engineering requirement
+
 Date opened: 2026-04-02
+
+Current operator behavior is documented in the
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).
+The local bundle contract is implemented by
+`bundles/splunk_local_bridge/splunk/default.yml`, the compose profiles, and
+`bin/splunk-claw-bridge`; those sources and their tests are authoritative.
 
 ## Goal
 
@@ -24,3 +31,7 @@ Make the bundled DefenseClaw local Splunk experience start directly in
 - local licenser state shows `Free` active
 - bridge startup and DefenseClaw setup no longer return or print Splunk credentials
 - local HEC ingest still works
+
+These are acceptance requirements, not claims that a validation run was
+performed while reading this file. Runtime smoke and CLI tests provide the
+current evidence.

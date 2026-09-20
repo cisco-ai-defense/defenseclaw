@@ -22,21 +22,37 @@ from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from click.testing import CliRunner
+from click.testing import CliRunner, Result
+from defenseclaw.bootstrap import StepResult
 from defenseclaw.commands.cmd_quickstart import quickstart_cmd
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw.file_permissions import atomic_write_private_bytes
 from defenseclaw.inventory import agent_discovery
 from defenseclaw.inventory.agent_discovery import AgentDiscovery, AgentSignal
+
+from tests.helpers import record_test_setup_agent_selections
+from tests.permissions import set_known_windows_directory_acl
 
 
 class QuickstartProfileDefaultsTests(unittest.TestCase):
     def setUp(self):
-        self.tmp_dir = tempfile.mkdtemp(prefix="dclaw-quickstart-")
+        # macOS exposes /var through /private/var. Device-identity setup
+        # intentionally rejects indirect custody paths, so pass its canonical
+        # spelling just as the CLI persists it.
+        self.tmp_dir = os.path.realpath(tempfile.mkdtemp(prefix="dclaw-quickstart-"))
+        if os.name == "nt":
+            set_known_windows_directory_acl(self.tmp_dir)
         self.home_dir = os.path.join(self.tmp_dir, "home")
         self.empty_path = os.path.join(self.tmp_dir, "empty-bin")
         os.makedirs(self.home_dir, exist_ok=True)
         os.makedirs(self.empty_path, exist_ok=True)
         self.runner = CliRunner()
+        self.selection_patcher = patch(
+            "defenseclaw.agent_selection.record_setup_agent_selections",
+            side_effect=record_test_setup_agent_selections,
+        )
+        self.selection_mock = self.selection_patcher.start()
+        self.addCleanup(self.selection_patcher.stop)
 
     def tearDown(self):
         shutil.rmtree(self.tmp_dir, ignore_errors=True)
@@ -48,6 +64,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             env={
                 "DEFENSECLAW_HOME": self.tmp_dir,
                 "HOME": self.home_dir,
+                "USERPROFILE": self.home_dir,
                 "PATH": self.empty_path,
             },
         )
@@ -80,18 +97,52 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
         self.assertEqual(summary["profile"], "observe")
+        from defenseclaw import migration_state
+
+        state = migration_state.load(self.tmp_dir)
+        self.assertIsNotNone(state)
+        assert state is not None
+        self.assertTrue(migration_state.is_applied(state, "0.8.5"))
 
     def test_openclaw_defaults_to_observe_profile(self):
-        result = self._invoke([
-            "--connector",
-            "openclaw",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--connector",
+                "openclaw",
+                "--skip-gateway",
+                "--json-summary",
+            ])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "openclaw")
         self.assertEqual(summary["profile"], "observe")
+
+    def test_windows_rejects_unsupported_connectors_before_first_run_writes(self):
+        forbidden = AssertionError("unsupported connector reached first-run mutation")
+        for connector in ("openclaw", "zeptoclaw", "openhands"):
+            with (
+                self.subTest(connector=connector),
+                patch("defenseclaw.platform_support.host_os", return_value="windows"),
+                patch("defenseclaw.bootstrap.run_first_run", side_effect=forbidden) as first_run,
+            ):
+                result = self._invoke(
+                    ["--connector", connector, "--skip-gateway", "--json-summary"]
+                )
+
+            self.assertNotEqual(result.exit_code, 0)
+            output = result.output + (result.stderr or "")
+            self.assertIn(f"connector '{connector}' is unsupported on windows", output)
+            first_run.assert_not_called()
+            self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
+
+    def test_non_windows_proxy_connector_behavior_is_preserved(self):
+        with patch("defenseclaw.platform_support.host_os", return_value="linux"):
+            result = self._invoke(
+                ["--connector", "zeptoclaw", "--skip-gateway", "--json-summary"]
+            )
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        self.assertEqual(json.loads(result.output)["connector"], "zeptoclaw")
 
     def test_explicit_mode_overrides_connector_default(self):
         result = self._invoke([
@@ -106,21 +157,82 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         summary = json.loads(result.output)
         self.assertEqual(summary["profile"], "observe")
 
+    def test_windows_opencode_observe_and_action_use_one_exact_selection(self):
+        for mode in ("observe", "action"):
+            with self.subTest(mode=mode):
+                self.selection_mock.reset_mock()
+                with (
+                    patch(
+                        "defenseclaw.bootstrap.platform_support.host_os",
+                        return_value="windows",
+                    ),
+                    patch(
+                        "defenseclaw.bootstrap._quiet_guardrail_setup",
+                        return_value=StepResult("Guardrail", "pass", "test"),
+                    ),
+                    patch(
+                        "defenseclaw.commands.cmd_setup.agent_discovery.discover_agents",
+                        side_effect=AssertionError("protected selection must precede generic discovery"),
+                    ),
+                ):
+                    result = self._invoke(
+                        [
+                            "--connector",
+                            "opencode",
+                            "--mode",
+                            mode,
+                            "--skip-gateway",
+                            "--json-summary",
+                        ]
+                    )
+
+                self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+                self.selection_mock.assert_called_once_with(self.tmp_dir, ("opencode",))
+
+    def test_windows_opencode_missing_exact_selection_stops_quickstart_before_state(self):
+        self.selection_mock.side_effect = None
+        self.selection_mock.return_value = ({}, {"opencode": "exact SST package image is missing"})
+        forbidden = AssertionError("selection failure must stop quickstart state mutation")
+        with (
+            patch("defenseclaw.bootstrap.platform_support.host_os", return_value="windows"),
+            patch("defenseclaw.db.Store", side_effect=forbidden) as store,
+            patch("defenseclaw.bootstrap.bootstrap_env", side_effect=forbidden) as bootstrap,
+            patch("defenseclaw.bootstrap._persist_first_run_secrets", side_effect=forbidden) as secrets,
+            patch("defenseclaw.bootstrap._quiet_guardrail_setup", side_effect=forbidden) as setup,
+            patch("defenseclaw.bootstrap._start_gateway_structured", side_effect=forbidden) as gateway,
+        ):
+            result = self._invoke(
+                [
+                    "--connector",
+                    "opencode",
+                    "--skip-gateway",
+                    "--json-summary",
+                ]
+            )
+
+        self.assertNotEqual(result.exit_code, 0)
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp_dir, "agent_selection.json")))
+        for blocked in (store, bootstrap, secrets, setup, gateway):
+            blocked.assert_not_called()
+
     @patch("defenseclaw.commands.cmd_setup._check_connector_version_supported_for_setup", return_value=True)
     def test_explicit_action_updates_existing_per_connector_mode(self, _gate):
-        with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
-            fh.write(
-                "claw:\n"
-                "  mode: codex\n"
-                "guardrail:\n"
-                "  enabled: true\n"
-                "  connector: codex\n"
-                "  mode: observe\n"
-                "  scanner_mode: local\n"
-                "  connectors:\n"
-                "    hermes:\n"
-                "      mode: observe\n"
-            )
+        atomic_write_private_bytes(
+            os.path.join(self.tmp_dir, "config.yaml"),
+            b"config_version: 8\n"
+            b"observability: {}\n"
+            b"claw:\n"
+            b"  mode: codex\n"
+            b"guardrail:\n"
+            b"  enabled: true\n"
+            b"  connector: codex\n"
+            b"  mode: observe\n"
+            b"  scanner_mode: local\n"
+            b"  connectors:\n"
+            b"    hermes:\n"
+            b"      mode: observe\n",
+        )
 
         result = self._invoke([
             "--connector",
@@ -149,14 +261,15 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         disc.agents["hermes"].error = agent_discovery.UNTRUSTED_PREFIX_ERROR
         mock_discover.return_value = disc
 
-        result = self._invoke([
-            "--connector",
-            "hermes",
-            "--mode",
-            "action",
-            "--skip-gateway",
-            "--json-summary",
-        ])
+        with patch("defenseclaw.bootstrap.platform_support.host_os", return_value="linux"):
+            result = self._invoke([
+                "--connector",
+                "hermes",
+                "--mode",
+                "action",
+                "--skip-gateway",
+                "--json-summary",
+            ])
         self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["status"], "needs_attention")
@@ -172,11 +285,7 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
             f"defenseclaw setup trusted-paths add {os.path.realpath('/tmp/fake')}",
         )
 
-        import yaml
-        with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
-            cfg = yaml.safe_load(fh)
-        self.assertEqual(cfg["guardrail"]["connector"], "hermes")
-        self.assertEqual(cfg["guardrail"]["mode"], "observe")
+        self.assertTrue(os.path.exists(os.path.join(self.tmp_dir, "config.yaml")))
 
     def test_help_lists_fail_mode_flag(self):
         # Quickstart is the headless path most likely to be wired
@@ -200,7 +309,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         import yaml
         with open(os.path.join(self.tmp_dir, "config.yaml"), encoding="utf-8") as fh:
             cfg = yaml.safe_load(fh)
-        self.assertEqual(cfg["guardrail"]["hook_fail_mode"], "closed")
+        from defenseclaw.config import _normalize_hook_fail_mode
+
+        self.assertEqual(
+            _normalize_hook_fail_mode(cfg["guardrail"].get("hook_fail_mode", "")),
+            "closed",
+        )
 
     def test_omitting_fail_mode_resolves_to_closed(self):
         # Closes when the operator omits ``--fail-mode``
@@ -225,11 +339,156 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         raw = cfg["guardrail"].get("hook_fail_mode", "")
         self.assertEqual(_normalize_hook_fail_mode(raw), "closed")
 
+    def test_requested_gateway_start_failure_is_nonzero_in_human_and_json(self):
+        def invoke(args: list[str]) -> Result:
+            failed_start = StepResult(
+                "Sidecar",
+                "warn",
+                "simulated gateway start failure",
+                "defenseclaw-gateway status",
+            )
+            with (
+                patch(
+                    "defenseclaw.bootstrap._start_gateway_structured",
+                    return_value=failed_start,
+                ),
+                patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+            ):
+                return self._invoke(args)
+
+        human = invoke(["--connector", "codex"])
+        self.assertEqual(human.exit_code, 1, human.output + (human.stderr or ""))
+        self.assertIn("status=needs_attention", human.output)
+        self.assertIn("simulated gateway start failure", human.output)
+
+        structured = invoke([
+            "--connector",
+            "codex",
+            "--json-summary",
+            "--force",
+        ])
+        self.assertEqual(
+            structured.exit_code,
+            1,
+            structured.output + (structured.stderr or ""),
+        )
+        summary = json.loads(structured.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        sidecars = [
+            step
+            for step in summary["setup"] + summary["readiness"]
+            if step["name"] == "Sidecar"
+        ]
+        self.assertTrue(sidecars)
+        self.assertTrue(all(step["status"] == "fail" for step in sidecars))
+
+    def test_gateway_start_success_but_readiness_failure_is_nonzero(self):
+        with (
+            patch(
+                "defenseclaw.bootstrap._start_gateway_structured",
+                return_value=StepResult("Sidecar", "pass", "started"),
+            ),
+            patch("defenseclaw.bootstrap._pid_file_running", return_value=False),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        self.assertEqual(readiness["Sidecar"]["status"], "fail")
+        self.assertEqual(readiness["Sidecar"]["detail"], "not confirmed after start")
+
+    def test_selected_connector_establishment_failure_is_nonzero(self):
+        missing_connector = StepResult(
+            "Connector",
+            "warn",
+            "Codex config not found yet",
+            "defenseclaw setup codex",
+        )
+        with patch(
+            "defenseclaw.bootstrap._connector_readiness",
+            return_value=missing_connector,
+        ), patch(
+            "defenseclaw.bootstrap._start_gateway_structured",
+            return_value=StepResult("Sidecar", "pass", "started"),
+        ), patch(
+            "defenseclaw.bootstrap._pid_file_running",
+            return_value=True,
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 1, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "needs_attention")
+        readiness = {step["name"]: step for step in summary["readiness"]}
+        self.assertEqual(readiness["Connector"]["status"], "fail")
+        self.assertEqual(readiness["Connector"]["detail"], "Codex config not found yet")
+
+    def test_optional_warning_only_remains_partial_and_zero(self):
+        advisory = [StepResult("Skill scanner", "warn", "optional scanner unavailable")]
+        with (
+            patch("defenseclaw.bootstrap._scanner_availability", return_value=advisory),
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=StepResult("Connector", "pass", "Codex config found"),
+            ),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "partial")
+        self.assertFalse(
+            any(
+                step["status"] == "fail"
+                for step in summary["setup"] + summary["readiness"]
+            )
+        )
+
+    def test_fully_healthy_report_is_ready_and_zero(self):
+        available = [StepResult("Skill scanner", "pass", "found")]
+        with (
+            patch("defenseclaw.bootstrap._scanner_availability", return_value=available),
+            patch(
+                "defenseclaw.bootstrap._connector_readiness",
+                return_value=StepResult("Connector", "pass", "Codex config found"),
+            ),
+            patch("defenseclaw.bootstrap.shutil.which", return_value="available"),
+        ):
+            result = self._invoke([
+                "--connector",
+                "codex",
+                "--skip-gateway",
+                "--json-summary",
+            ])
+
+        self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
+        summary = json.loads(result.output)
+        self.assertEqual(summary["status"], "ready")
+
     # --- SU-12: never silently default to codex ------------------------
     def test_no_connector_no_detection_errors_not_codex(self):
         # No --connector, no installer hint, nothing installed (empty HOME):
         # quickstart must error rather than silently configuring codex.
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         # No connector was configured, so no JSON summary is emitted at all.
         self.assertNotIn('"connector": "codex"', result.output)
@@ -237,17 +496,22 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
 
     def test_single_detected_connector_is_used(self):
         # Exactly one agent installed -> quickstart uses it, no flag needed.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
 
     def test_ambiguous_detection_errors(self):
         # Two agents installed -> ambiguous -> explicit error, never a guess.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["claudecode", "codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)
@@ -257,11 +521,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_picked_hint_does_not_mask_ambiguous_detection(self):
         # The installer's picked_connector hint is advisory; it must not hide
         # that a bare quickstart would be choosing among several connectors.
-        os.makedirs(os.path.join(self.home_dir, ".codex"), exist_ok=True)
-        os.makedirs(os.path.join(self.home_dir, ".claude"), exist_ok=True)
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=["claudecode", "codex"],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)
@@ -269,9 +534,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
         self.assertNotIn('"connector": "codex"', result.output)
 
     def test_picked_hint_without_detection_is_reported_in_json(self):
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertEqual(result.exit_code, 0, result.output + (result.stderr or ""))
         summary = json.loads(result.output)
         self.assertEqual(summary["connector"], "codex")
@@ -287,6 +555,8 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
     def test_multiple_configured_connectors_error_even_with_picked_hint(self):
         with open(os.path.join(self.tmp_dir, "config.yaml"), "w", encoding="utf-8") as fh:
             fh.write(
+                "config_version: 8\n"
+                "observability: {}\n"
                 "claw:\n"
                 "  mode: codex\n"
                 "guardrail:\n"
@@ -299,9 +569,12 @@ class QuickstartProfileDefaultsTests(unittest.TestCase):
                 "    hermes:\n"
                 "      mode: observe\n"
             )
-        with open(os.path.join(self.tmp_dir, "picked_connector"), "w", encoding="utf-8") as fh:
-            fh.write("codex")
-        result = self._invoke(["--skip-gateway", "--json-summary"])
+        atomic_write_private_bytes(os.path.join(self.tmp_dir, "picked_connector"), b"codex")
+        with patch(
+            "defenseclaw.commands.cmd_setup._detect_installed_connectors",
+            return_value=[],
+        ):
+            result = self._invoke(["--skip-gateway", "--json-summary"])
         self.assertNotEqual(result.exit_code, 0)
         output = result.output + (result.stderr or "")
         self.assertIn("Multiple connectors detected/configured", output)

@@ -11,20 +11,62 @@
 package connector
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"gopkg.in/yaml.v3"
 )
+
+type omnigentSynchronizedBuffer struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (b *omnigentSynchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.Write(p)
+}
+
+func (b *omnigentSynchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.b.String()
+}
+
+func requireOmnigentHost(t *testing.T) {
+	t.Helper()
+	if runtime.GOOS == "windows" {
+		t.Skip("OmniGent has no supported native Windows policy bridge; platform rejection coverage remains active")
+	}
+}
+
+func omnigentTestPython(t *testing.T) string {
+	t.Helper()
+	for _, name := range []string{"python", "python3"} {
+		if path, err := exec.LookPath(name); err == nil {
+			return path
+		}
+	}
+	t.Skip("Python is required for the OmniGent policy bridge test")
+	return ""
+}
 
 func withOmnigentPathOverrides(t *testing.T, configPath, sitePackages string) {
 	t.Helper()
@@ -36,6 +78,21 @@ func withOmnigentPathOverrides(t *testing.T, configPath, sitePackages string) {
 		OmnigentConfigPathOverride = previousConfig
 		OmnigentSitePackagesPathOverride = previousSite
 	})
+}
+
+func writeOmnigentScopedToken(t *testing.T, dataDir, token string) string {
+	t.Helper()
+	tokenPath, err := HookAPITokenFilePath(dataDir, "omnigent")
+	if err != nil {
+		t.Fatalf("HookAPITokenFilePath: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(tokenPath), 0o700); err != nil {
+		t.Fatalf("create hook token directory: %v", err)
+	}
+	if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatalf("write scoped hook token: %v", err)
+	}
+	return tokenPath
 }
 
 func TestOmnigentSetupAndTeardown(t *testing.T) {
@@ -54,14 +111,24 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 	}
 
 	conn := NewOmnigentConnector()
+	scopedToken := strings.Repeat("a", 64)
 	opts := SetupOpts{
 		DataDir:      dataDir,
 		APIAddr:      "127.0.0.1:18970",
-		APIToken:     `token-with-"quotes"`,
+		APIToken:     scopedToken,
 		HookFailMode: "closed",
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatalf("create data dir: %v", err)
+	}
+	if _, err := EnsureHookAPIToken(dataDir, conn.Name()); err != nil {
+		t.Fatalf("seed scoped hook token: %v", err)
 	}
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
+	}
+	if token, err := LoadOTLPPathToken(dataDir, OTLPScopeOmnigent); err != nil || token == "" {
+		t.Fatalf("scoped OmniGent OTLP token after setup = %q, %v", token, err)
 	}
 	// Setup is intentionally idempotent; daemon restarts must not duplicate
 	// the module registration or default policy.
@@ -96,13 +163,24 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 		t.Fatal(err)
 	}
 	module := string(moduleBytes)
-	if strings.Contains(module, `token-with-"quotes"`) {
-		t.Fatal("policy module contains the raw gateway token; expected base64 rendering")
+	if strings.Contains(module, scopedToken) || strings.Contains(module, base64.StdEncoding.EncodeToString([]byte(scopedToken))) {
+		t.Fatal("policy module embeds the scoped credential instead of loading its sidecar")
 	}
-	for _, placeholder := range []string{"{{API_ADDR_B64}}", "{{API_TOKEN_B64}}", "{{FAIL_MODE_B64}}"} {
+	for _, placeholder := range []string{"{{API_ADDR_B64}}", "{{TOKEN_FILE_B64}}", "{{FAIL_MODE_B64}}"} {
 		if strings.Contains(module, placeholder) {
 			t.Fatalf("policy module contains unresolved template placeholder %s", placeholder)
 		}
+	}
+	tokenPath, err := HookAPITokenFilePath(opts.DataDir, "omnigent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(module, base64.StdEncoding.EncodeToString([]byte(tokenPath))) {
+		t.Fatal("policy module does not contain the safely encoded stable token-sidecar path")
 	}
 	if got := strings.Count(module, `"handler": "defenseclaw_omnigent_policy.defenseclaw_policy"`); got != 1 {
 		t.Fatalf("POLICY_REGISTRY handler declarations = %d, want exactly one", got)
@@ -144,6 +222,99 @@ func TestOmnigentSetupAndTeardown(t *testing.T) {
 	if err := conn.VerifyClean(opts); err != nil {
 		t.Fatalf("VerifyClean: %v", err)
 	}
+	if token, err := LoadOTLPPathToken(dataDir, OTLPScopeOmnigent); err != nil || token != "" {
+		t.Fatalf("scoped OmniGent OTLP token after teardown = %q, %v; want revoked", token, err)
+	}
+	if token, err := LoadHookAPIToken(dataDir, conn.Name()); err != nil || token != "" {
+		t.Fatalf("scoped OmniGent hook token after teardown = %q, %v; want revoked", token, err)
+	}
+}
+
+func TestOmnigentSetupRefreshesHookTokenInsideLifecycleTransaction(t *testing.T) {
+	root := testenv.PrivateTempDir(t)
+	dataDir := filepath.Join(root, "defenseclaw")
+	configPath := filepath.Join(root, "config", "config.yaml")
+	sitePackages := filepath.Join(root, "site-packages")
+	withOmnigentPathOverrides(t, configPath, sitePackages)
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldToken, err := EnsureHookAPIToken(dataDir, "omnigent")
+	if err != nil {
+		t.Fatalf("seed old hook token: %v", err)
+	}
+	opts := SetupOpts{
+		DataDir:            dataDir,
+		APIAddr:            "127.0.0.1:18970",
+		APIToken:           oldToken,
+		HookAPIToken:       oldToken,
+		HookAPITokenScoped: true,
+		HookFailMode:       "closed",
+	}
+
+	lockHeld := make(chan struct{})
+	releaseLock := make(chan struct{})
+	lockResult := make(chan error, 1)
+	go func() {
+		lockResult <- withOmnigentLifecycleTransaction(opts, func() error {
+			close(lockHeld)
+			<-releaseLock
+			return nil
+		})
+	}()
+	<-lockHeld
+	if err := RemoveHookAPIToken(dataDir, "omnigent"); err != nil {
+		t.Fatalf("simulate locked teardown token revocation: %v", err)
+	}
+
+	conn := NewOmnigentConnector()
+	setupStarted := make(chan struct{})
+	setupResult := make(chan error, 1)
+	go func() {
+		close(setupStarted)
+		setupResult <- conn.Setup(context.Background(), opts)
+	}()
+	<-setupStarted
+	close(releaseLock)
+	if err := <-lockResult; err != nil {
+		t.Fatalf("release lifecycle barrier: %v", err)
+	}
+	if err := <-setupResult; err != nil {
+		t.Fatalf("Setup after locked token revocation: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Teardown(context.Background(), opts) })
+
+	newToken, err := LoadHookAPIToken(dataDir, "omnigent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if newToken == "" || newToken == oldToken {
+		t.Fatalf("refreshed hook token = %q, want non-empty rotation", newToken)
+	}
+	if conn.gatewayToken != newToken {
+		t.Fatal("connector authentication state did not receive refreshed hook token")
+	}
+	module, err := os.ReadFile(omnigentPolicyModulePath(opts))
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldEncoded := base64.StdEncoding.EncodeToString([]byte(oldToken))
+	newEncoded := base64.StdEncoding.EncodeToString([]byte(newToken))
+	if bytes.Contains(module, []byte(oldEncoded)) || bytes.Contains(module, []byte(newEncoded)) {
+		t.Fatal("managed policy embedded a scoped token instead of loading the protected sidecar")
+	}
+	tokenPath, err := HookAPITokenFilePath(dataDir, "omnigent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokenPath, err = filepath.Abs(tokenPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encodedTokenPath := base64.StdEncoding.EncodeToString([]byte(tokenPath))
+	if !bytes.Contains(module, []byte(encodedTokenPath)) {
+		t.Fatal("managed policy was not bound to the token sidecar refreshed inside the lifecycle lock")
+	}
 }
 
 func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
@@ -158,7 +329,7 @@ func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
 	}
 	for name, body := range map[string]string{
 		"omnigent": "#!/bin/sh\nexit 0\n",
-		"python":   "#!/bin/sh\nprintf 'sitecustomize warning\\n' >&2\nprintf '%s\\n' \"$OMNIGENT_TEST_PURELIB\"\n",
+		"python":   "#!/bin/sh\nprintf 'sitecustomize warning\\n' >&2\nprintf '0.7.0\\n%s\\n' \"$OMNIGENT_TEST_PURELIB\"\n",
 	} {
 		path := filepath.Join(binDir, name)
 		if err := os.WriteFile(path, []byte(body), 0o700); err != nil {
@@ -172,7 +343,7 @@ func TestOmnigentSitePackagesIgnoresInterpreterStderr(t *testing.T) {
 	OmnigentSitePackagesPathOverride = ""
 	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })
 
-	got, err := omnigentSitePackages(context.Background())
+	got, err := omnigentSitePackages(context.Background(), SetupOpts{})
 	if err != nil {
 		t.Fatalf("omnigentSitePackages: %v", err)
 	}
@@ -201,7 +372,7 @@ func TestOmnigentSitePackagesRejectsUntrustedInterpreter(t *testing.T) {
 	OmnigentSitePackagesPathOverride = ""
 	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })
 
-	_, err := omnigentSitePackages(context.Background())
+	_, err := omnigentSitePackages(context.Background(), SetupOpts{})
 	if err == nil || !strings.Contains(err.Error(), "trusted install prefix") {
 		t.Fatalf("error = %v, want trusted-prefix refusal", err)
 	}
@@ -224,9 +395,32 @@ func TestOmnigentSitePackagesRejectsShebangArguments(t *testing.T) {
 	OmnigentSitePackagesPathOverride = ""
 	t.Cleanup(func() { OmnigentSitePackagesPathOverride = previous })
 
-	_, err := omnigentSitePackages(context.Background())
+	_, err := omnigentSitePackages(context.Background(), SetupOpts{})
 	if err == nil || !strings.Contains(err.Error(), "unsupported interpreter arguments") {
 		t.Fatalf("error = %v, want unsupported shebang arguments", err)
+	}
+}
+
+func TestOmnigentNativeMetadataProbeTimesOut(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native OmniGent metadata probes are Windows-only")
+	}
+	previous := omnigentProcessProbeTimeout
+	omnigentProcessProbeTimeout = 150 * time.Millisecond
+	t.Cleanup(func() { omnigentProcessProbeTimeout = previous })
+	// The package's Windows TestMain turns this test binary into a native
+	// stalling parent with an inheriting descendant before Go's test flag
+	// parser runs. The metadata helper must terminate the whole process tree.
+	t.Setenv("TEST_OMNIGENT_PROBE_MODE", "parent")
+
+	started := time.Now()
+	_, err := omnigentCommandOutput(context.Background(), os.Args[0], "tool", "dir", "--bin")
+	elapsed := time.Since(started)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("stalling native metadata probe error = %v, want deadline exceeded", err)
+	}
+	if elapsed > 5*time.Second {
+		t.Fatalf("stalling native metadata probe returned after %s, want prompt bounded termination", elapsed)
 	}
 }
 
@@ -298,11 +492,8 @@ func TestOmnigentSetupRefreshesBackupsWhenTargetsMove(t *testing.T) {
 	}
 }
 
-func TestOmnigentRawPolicyTemplateImportsFailOpen(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required for the raw-template import test")
-	}
+func TestOmnigentRawPolicyTemplateImportsFailClosedWithoutCredential(t *testing.T) {
+	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
 	if err != nil {
 		t.Fatal(err)
@@ -326,16 +517,49 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 	if err := json.Unmarshal(output, &verdict); err != nil {
 		t.Fatal(err)
 	}
-	if verdict["result"] != "ALLOW" {
-		t.Fatalf("raw template verdict = %v, want fail-open ALLOW", verdict)
+	if verdict["result"] != "DENY" || !strings.Contains(verdict["reason"], "credential is unavailable") {
+		t.Fatalf("raw template verdict = %v, want fail-closed missing-credential denial", verdict)
+	}
+}
+
+func TestOmnigentIdentityIgnoresAgentControlledUserEnvironment(t *testing.T) {
+	requireOmnigentHost(t)
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(t.TempDir(), "omnigent-policy.py")
+	if err := os.WriteFile(path, templateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("raw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module._identity_headers()))
+`
+	cmd := exec.Command(python, "-c", script, path)
+	cmd.Env = append(os.Environ(), "USER=forged-admin", "LOGNAME=forged-admin")
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve OmniGent identity: %v\n%s", err, output)
+	}
+	var headers map[string]string
+	if err := json.Unmarshal(output, &headers); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := headers["X-DefenseClaw-User-Id"], fmt.Sprintf("%d", os.Geteuid()); got != want {
+		t.Fatalf("OmniGent uid = %q, want %q", got, want)
+	}
+	if got := headers["X-DefenseClaw-User-Name"]; got == "forged-admin" {
+		t.Fatal("OmniGent trusted agent-controlled USER/LOGNAME")
 	}
 }
 
 func TestOmnigentPolicyPayloadRejectsNonFiniteNumbers(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required for the policy payload test")
-	}
+	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
 	if err != nil {
 		t.Fatal(err)
@@ -369,18 +593,16 @@ print(json.dumps(payload, allow_nan=False))
 }
 
 func TestOmnigentPolicyBridgeMapsBlockToDeny(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required for the policy bridge integration test")
-	}
+	python := omnigentTestPython(t)
 
 	var received map[string]interface{}
+	scopedToken := strings.Repeat("b", 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		defer r.Body.Close()
 		if got := r.URL.Path; got != "/api/v1/omnigent/hook" {
 			t.Errorf("path = %q", got)
 		}
-		if got := r.Header.Get("Authorization"); got != "Bearer tok-test" {
+		if got := r.Header.Get("Authorization"); got != "Bearer "+scopedToken {
 			t.Errorf("Authorization = %q", got)
 		}
 		if got := r.Header.Get("Traceparent"); got != "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01" {
@@ -397,16 +619,17 @@ func TestOmnigentPolicyBridgeMapsBlockToDeny(t *testing.T) {
 	}))
 	defer server.Close()
 
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	configPath := filepath.Join(root, ".omnigent", "config.yaml")
 	sitePackages := filepath.Join(root, "site-packages")
 	withOmnigentPathOverrides(t, configPath, sitePackages)
 	opts := SetupOpts{
 		DataDir:      filepath.Join(root, "defenseclaw"),
 		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
-		APIToken:     "tok-test",
+		APIToken:     scopedToken,
 		HookFailMode: "closed",
 	}
+	writeOmnigentScopedToken(t, opts.DataDir, scopedToken)
 	conn := NewOmnigentConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatalf("Setup: %v", err)
@@ -448,16 +671,132 @@ print(json.dumps(module.defenseclaw_policy({
 	if received["hook_event_name"] != "PreToolUse" || received["tool_name"] != "shell" || received["model"] != "test-model" {
 		t.Fatalf("normalized request = %#v", received)
 	}
-	if received["agent_id"] != "" {
-		t.Fatalf("agent_id leaked actor.run_as: %#v", received["agent_id"])
+	if _, invented := received["agent_id"]; invented {
+		t.Fatalf("actor identity was reclassified as agent_id: %#v", received)
+	}
+}
+
+func TestOmnigentPolicyBridgeReloadsScopedTokenForRotationAndRollback(t *testing.T) {
+	requireOmnigentHost(t)
+	python, err := exec.LookPath("python3")
+	if err != nil {
+		t.Skip("python3 is required for the policy bridge rotation test")
+	}
+	aToken := strings.Repeat("a", 64)
+	bToken := strings.Repeat("b", 64)
+	authorizations := make(chan string, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		authorizations <- r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"action":"allow"}`))
+	}))
+	defer server.Close()
+
+	root := t.TempDir()
+	withOmnigentPathOverrides(
+		t,
+		filepath.Join(root, ".omnigent", "config.yaml"),
+		filepath.Join(root, "site-packages"),
+	)
+	opts := SetupOpts{
+		DataDir:      filepath.Join(root, "defenseclaw"),
+		APIAddr:      strings.TrimPrefix(server.URL, "http://"),
+		APIToken:     aToken,
+		HookFailMode: "closed",
+	}
+	tokenPath := writeOmnigentScopedToken(t, opts.DataDir, aToken)
+	conn := NewOmnigentConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	t.Cleanup(func() { _ = conn.Teardown(context.Background(), opts) })
+
+	modulePath := omnigentPolicyModulePath(opts)
+	moduleBytes, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, secret := range []string{
+		aToken,
+		bToken,
+		base64.StdEncoding.EncodeToString([]byte(aToken)),
+		base64.StdEncoding.EncodeToString([]byte(bToken)),
+	} {
+		if strings.Contains(string(moduleBytes), secret) {
+			t.Fatal("rendered OmniGent module contains a rotation credential")
+		}
+	}
+
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+for _ in sys.stdin:
+    print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "data": {"name": "shell", "arguments": {}}})), flush=True)
+`
+	processCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(processCtx, python, "-u", "-c", script, modulePath)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr omnigentSynchronizedBuffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if cmd.Process != nil {
+			_ = cmd.Process.Kill()
+		}
+	})
+	decoder := json.NewDecoder(stdout)
+	for index, token := range []string{aToken, bToken, aToken} {
+		if index > 0 {
+			if err := atomicWriteFile(tokenPath, []byte(token+"\n"), 0o600); err != nil {
+				t.Fatalf("publish sidecar generation %d: %v", index, err)
+			}
+		}
+		if _, err := fmt.Fprintln(stdin, "evaluate"); err != nil {
+			t.Fatalf("trigger policy evaluation %d: %v", index, err)
+		}
+		var verdict map[string]string
+		if err := decoder.Decode(&verdict); err != nil {
+			t.Fatalf("decode policy evaluation %d: %v; stderr=%s", index, err, stderr.String())
+		}
+		if verdict["result"] != "ALLOW" {
+			t.Fatalf("policy evaluation %d = %v, want ALLOW", index, verdict)
+		}
+	}
+	if err := stdin.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("policy rotation process: %v; stderr=%s", err, stderr.String())
+	}
+
+	for index, want := range []string{"Bearer " + aToken, "Bearer " + bToken, "Bearer " + aToken} {
+		if got := <-authorizations; got != want {
+			t.Fatalf("policy authorization %d = %q, want restored generation", index, got)
+		}
+	}
+	moduleAfter, err := os.ReadFile(modulePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(moduleAfter) != string(moduleBytes) {
+		t.Fatal("sidecar rotation rewrote the stable OmniGent module")
 	}
 }
 
 func TestOmnigentPolicyBridgeFailMode(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required for the policy bridge fail-mode test")
-	}
+	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
 	if err != nil {
 		t.Fatal(err)
@@ -467,8 +806,13 @@ func TestOmnigentPolicyBridgeFailMode(t *testing.T) {
 		want string
 	}{{"open", "ALLOW"}, {"closed", "DENY"}} {
 		t.Run(tc.mode, func(t *testing.T) {
-			path := filepath.Join(t.TempDir(), "defenseclaw_omnigent_policy.py")
-			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", "", tc.mode)
+			root := t.TempDir()
+			path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			tokenPath := filepath.Join(root, ".hook-omnigent.token")
+			if err := os.WriteFile(tokenPath, []byte(strings.Repeat("c", 64)+"\n"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
 			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
 				t.Fatal(err)
 			}
@@ -494,6 +838,244 @@ print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})
 	}
 }
 
+func TestOmnigentPolicyBridgeTraceFailureHonorsFailMode(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys, types
+propagate = types.ModuleType("opentelemetry.propagate")
+def explode(_carrier):
+    raise AssertionError("propagator failed")
+propagate.inject = explode
+opentelemetry = types.ModuleType("opentelemetry")
+opentelemetry.__path__ = []
+sys.modules["opentelemetry"] = opentelemetry
+sys.modules["opentelemetry.propagate"] = propagate
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+event = {"type": "request", "data": {"user_content": "hello", "attachments": []}}
+print(json.dumps(module.defenseclaw_policy(event)))
+`
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{{"open", "ALLOW"}, {"closed", "DENY"}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			root := t.TempDir()
+			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
+			path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
+			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute policy: %v\n%s", err, output)
+			}
+			var verdict map[string]string
+			if err := json.Unmarshal(output, &verdict); err != nil {
+				t.Fatal(err)
+			}
+			if verdict["result"] != tc.want {
+				t.Fatalf("trace failure verdict = %v, want %s", verdict, tc.want)
+			}
+		})
+	}
+}
+
+func TestOmnigentPolicyBridgeRejectsAmbientProxyAndRedirect(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys, urllib.request
+# Force a default urllib opener to honor the ambient proxy even for loopback.
+# The managed bridge's explicit empty ProxyHandler must remain unaffected.
+urllib.request.proxy_bypass = lambda _host: False
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})))
+`
+	for _, mode := range []string{"open", "closed"} {
+		t.Run(mode, func(t *testing.T) {
+			var proxyCalls int
+			proxy := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				proxyCalls++
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(`{"action":"allow"}`))
+			}))
+			defer proxy.Close()
+
+			var gatewayCalls int
+			gateway := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				gatewayCalls++
+				http.Redirect(w, r, proxy.URL+"/leak", http.StatusFound)
+			}))
+			defer gateway.Close()
+			gatewayAddr := strings.TrimPrefix(gateway.URL, "http://")
+
+			root := t.TempDir()
+			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
+			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			rendered := renderOmnigentPolicy(string(templateBytes), gatewayAddr, tokenPath, mode)
+			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			cmd := exec.Command(python, "-c", script, modulePath)
+			cmd.Env = append(os.Environ(),
+				"HTTP_PROXY="+proxy.URL,
+				"HTTPS_PROXY="+proxy.URL,
+				"NO_PROXY=",
+			)
+			output, err := cmd.CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute policy: %v\n%s", err, output)
+			}
+			var verdict map[string]string
+			if err := json.Unmarshal(output, &verdict); err != nil {
+				t.Fatal(err)
+			}
+			want := "ALLOW"
+			if mode == "closed" {
+				want = "DENY"
+			}
+			if verdict["result"] != want {
+				t.Fatalf("redirect verdict = %v, want %s", verdict, want)
+			}
+			if gatewayCalls != 1 {
+				t.Fatalf("direct gateway calls = %d, want 1", gatewayCalls)
+			}
+			if proxyCalls != 0 {
+				t.Fatalf("ambient proxy/redirect receiver calls = %d, want 0", proxyCalls)
+			}
+		})
+	}
+}
+
+func TestOmnigentPolicyBridgeInvalidResponseHonorsFailMode(t *testing.T) {
+	python := omnigentTestPython(t)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer server.Close()
+
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.defenseclaw_policy({"type": "request", "data": "hello"})))
+`
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{{"open", "ALLOW"}, {"closed", "DENY"}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			root := t.TempDir()
+			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
+			path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			rendered := renderOmnigentPolicy(
+				string(templateBytes),
+				strings.TrimPrefix(server.URL, "http://"),
+				tokenPath,
+				tc.mode,
+			)
+			if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute policy: %v\n%s", err, output)
+			}
+			var verdict map[string]string
+			if err := json.Unmarshal(output, &verdict); err != nil {
+				t.Fatal(err)
+			}
+			if verdict["result"] != tc.want {
+				t.Fatalf("verdict = %v, want %s", verdict, tc.want)
+			}
+		})
+	}
+}
+
+func TestOmnigentPostPhaseAlertContinuesInFailClosedMode(t *testing.T) {
+	python := omnigentTestPython(t)
+	var received []string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer r.Body.Close()
+		var payload map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+			t.Errorf("decode request: %v", err)
+		}
+		received = append(received, fmt.Sprint(payload["hook_event_name"]))
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"action":"alert","reason":"post-phase confirm was audited"}`))
+	}))
+	defer server.Close()
+
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	root := testenv.PrivateTempDir(t)
+	tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("e", 64))
+	path := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+	rendered := renderOmnigentPolicy(
+		string(templateBytes),
+		strings.TrimPrefix(server.URL, "http://"),
+		tokenPath,
+		"closed",
+	)
+	if err := os.WriteFile(path, []byte(rendered), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+events = [
+    {"type": "tool_result", "target": "shell", "data": {"result": "done"},
+     "request_data": {"name": "shell", "arguments": {}}},
+    {"type": "response", "data": "assistant response"},
+    {"type": "llm_response", "data": {"text_preview": "model response"}},
+]
+print(json.dumps([module.defenseclaw_policy(event) for event in events]))
+`
+	output, err := exec.Command(python, "-c", script, path).CombinedOutput()
+	if err != nil {
+		t.Fatalf("execute post-phase policy: %v\n%s", err, output)
+	}
+	var verdicts []map[string]string
+	if err := json.Unmarshal(output, &verdicts); err != nil {
+		t.Fatalf("decode post-phase verdicts %q: %v", output, err)
+	}
+	if len(verdicts) != 3 {
+		t.Fatalf("post-phase verdicts = %v", verdicts)
+	}
+	for index, verdict := range verdicts {
+		if verdict["result"] != "ALLOW" {
+			t.Errorf("post-phase verdict %d = %v, want ALLOW", index, verdict)
+		}
+	}
+	wantEvents := []string{"PostToolUse", "AfterAgentResponse", "AfterModel"}
+	if !reflect.DeepEqual(received, wantEvents) {
+		t.Fatalf("post-phase gateway events = %v, want %v", received, wantEvents)
+	}
+}
+
 func TestOmnigentConfirmIsNativeOnlyBeforeActions(t *testing.T) {
 	profile := NewOmnigentConnector().HookProfile(SetupOpts{APIAddr: "127.0.0.1:18970"})
 	response := profile.Respond(HookRespondInput{Req: HookProfileRequest{ConnectorName: "omnigent"}, Action: "allow"})
@@ -514,15 +1096,13 @@ func TestOmnigentConfirmIsNativeOnlyBeforeActions(t *testing.T) {
 	}
 }
 
-func TestOmnigentPolicyBridgeVerdictMappingAndEmptyToken(t *testing.T) {
-	python, err := exec.LookPath("python3")
-	if err != nil {
-		t.Skip("python3 is required for the policy bridge integration test")
-	}
+func TestOmnigentPolicyBridgeVerdictMappingAndScopedToken(t *testing.T) {
+	python := omnigentTestPython(t)
 	responses := map[string]string{"deny-case": "block", "ask-case": "confirm", "allow-case": "allow"}
+	scopedToken := strings.Repeat("d", 64)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if got := r.Header.Get("Authorization"); got != "" {
-			t.Errorf("empty configured token emitted Authorization = %q", got)
+		if got := r.Header.Get("Authorization"); got != "Bearer "+scopedToken {
+			t.Errorf("Authorization = %q, want scoped credential", got)
 		}
 		var payload map[string]interface{}
 		if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
@@ -533,9 +1113,14 @@ func TestOmnigentPolicyBridgeVerdictMappingAndEmptyToken(t *testing.T) {
 	}))
 	defer server.Close()
 
-	root := t.TempDir()
+	root := testenv.PrivateTempDir(t)
 	withOmnigentPathOverrides(t, filepath.Join(root, "config.yaml"), filepath.Join(root, "site-packages"))
-	opts := SetupOpts{DataDir: filepath.Join(root, "dc"), APIAddr: strings.TrimPrefix(server.URL, "http://")}
+	opts := SetupOpts{
+		DataDir:  filepath.Join(root, "dc"),
+		APIAddr:  strings.TrimPrefix(server.URL, "http://"),
+		APIToken: scopedToken,
+	}
+	writeOmnigentScopedToken(t, opts.DataDir, scopedToken)
 	conn := NewOmnigentConnector()
 	if err := conn.Setup(context.Background(), opts); err != nil {
 		t.Fatal(err)
@@ -570,11 +1155,69 @@ for name in ("deny-case", "ask-case", "allow-case"):
 	}
 }
 
-func TestOmnigentPolicyEventFixture(t *testing.T) {
+func TestOmnigentPolicyBridgeCredentialFailureIsAlwaysClosed(t *testing.T) {
+	requireOmnigentHost(t)
 	python, err := exec.LookPath("python3")
 	if err != nil {
-		t.Skip("python3 is required for the policy event fixture test")
+		t.Skip("python3 is required for the policy bridge credential test")
 	}
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+print(json.dumps(module.defenseclaw_policy({"type": "tool_call", "data": {"name": "shell", "arguments": {}}})))
+`
+	for _, tc := range []struct {
+		name      string
+		withPath  bool
+		tokenBody []byte
+	}{
+		{name: "empty path"},
+		{name: "missing file", withPath: true},
+		{name: "malformed file", withPath: true, tokenBody: []byte("malformed-token\n")},
+		{name: "oversized file", withPath: true, tokenBody: []byte(strings.Repeat("x", 4097))},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			tokenPath := ""
+			if tc.withPath {
+				tokenPath = filepath.Join(root, ".hook-omnigent.token")
+			}
+			if tc.tokenBody != nil {
+				if err := os.WriteFile(tokenPath, tc.tokenBody, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, "open")
+			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, modulePath).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute policy module: %v\n%s", err, output)
+			}
+			var verdict map[string]string
+			if err := json.Unmarshal(output, &verdict); err != nil {
+				t.Fatal(err)
+			}
+			if verdict["result"] != "DENY" || !strings.Contains(verdict["reason"], "credential is unavailable") {
+				t.Fatalf("credential failure verdict = %v, want redacted unconditional DENY", verdict)
+			}
+			if tokenPath != "" && strings.Contains(string(output), tokenPath) {
+				t.Fatal("credential failure exposed the token sidecar path")
+			}
+		})
+	}
+}
+
+func TestOmnigentPolicyEventFixture(t *testing.T) {
+	python := omnigentTestPython(t)
 	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
 	if err != nil {
 		t.Fatal(err)
@@ -600,12 +1243,195 @@ with open(sys.argv[2], encoding="utf-8") as fh:
 	if err := json.Unmarshal(output, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if payload["hook_event_name"] != "PostToolUse" || payload["tool_name"] != "shell" || payload["agent_id"] != "client-123" {
+	if payload["hook_event_name"] != "PostToolUse" || payload["tool_name"] != "shell" ||
+		payload["omnigent_actor_client_id"] != "client-123" {
 		t.Fatalf("normalized fixture = %#v", payload)
+	}
+	if _, invented := payload["agent_id"]; invented {
+		t.Fatalf("official actor client_id was reclassified as an agent identity: %#v", payload)
 	}
 	input, _ := payload["tool_input"].(map[string]interface{})
 	if input["command"] != "pwd" {
 		t.Fatalf("tool_input = %#v", input)
+	}
+}
+
+func TestOmnigentOfficialSixPhaseFixturePreservesBoundedForensics(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modulePath := filepath.Join(t.TempDir(), "defenseclaw_omnigent_policy.py")
+	if err := os.WriteFile(modulePath, templateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	fixturePath := filepath.Join("testdata", "omnigent-policy-six-phase.json")
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    events = json.load(fh)
+payloads = [module._payload(event) for event in events]
+partial = module._payload({
+    "type": "request",
+    "data": "bounded labels",
+    "context": {"labels": {str(i): "value" for i in range(module._MAX_LABELS + 1)}},
+})
+print(json.dumps({"payloads": payloads, "partial": partial}, sort_keys=True))
+`
+	output, err := exec.Command(python, "-c", script, modulePath, fixturePath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("normalize official six-phase fixture: %v\n%s", err, output)
+	}
+	var result struct {
+		Payloads []map[string]interface{} `json:"payloads"`
+		Partial  map[string]interface{}   `json:"partial"`
+	}
+	if err := json.Unmarshal(output, &result); err != nil {
+		t.Fatal(err)
+	}
+	wantEvents := []string{"UserPromptSubmit", "PreToolUse", "PostToolUse", "AfterAgentResponse", "BeforeModel", "AfterModel"}
+	if len(result.Payloads) != len(wantEvents) {
+		t.Fatalf("normalized phase count = %d, want %d", len(result.Payloads), len(wantEvents))
+	}
+	for i, want := range wantEvents {
+		if got := result.Payloads[i]["hook_event_name"]; got != want {
+			t.Fatalf("phase[%d] event = %v, want %s", i, got, want)
+		}
+	}
+	beforeModel := result.Payloads[4]
+	prompt, _ := beforeModel["prompt"].(string)
+	for _, want := range []string{
+		"[OmniGent system_prompt_preview]\nFollow the system safety policy.",
+		"[OmniGent last_user_message]\nDo not skip the user request.",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("BeforeModel prompt %q missing %q", prompt, want)
+		}
+	}
+	usage, _ := beforeModel["usage"].(map[string]interface{})
+	labels, _ := beforeModel["omnigent_labels"].(map[string]interface{})
+	if beforeModel["model"] != "test-model" || beforeModel["omnigent_harness"] != "codex-native" ||
+		usage["total_cost_usd"] != 0.0012 || labels["environment"] != "fixture" {
+		t.Fatalf("bounded forensic metadata = %#v", beforeModel)
+	}
+	if _, invented := beforeModel["session_id"]; invented {
+		t.Fatalf("v0.7 PolicyEvent does not expose a session id: %#v", beforeModel)
+	}
+	if beforeModel["omnigent_session_id_status"] != "unavailable_in_v0.7_policy_event" {
+		t.Fatalf("missing truthful session-correlation status: %#v", beforeModel)
+	}
+	if result.Partial["omnigent_label_projection_partial"] != true {
+		t.Fatalf("oversized label projection was not marked partial: %#v", result.Partial)
+	}
+}
+
+func TestOmnigentOfficialShapedRequestSchemaFixture(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	modulePath := filepath.Join(t.TempDir(), "defenseclaw_omnigent_policy.py")
+	if err := os.WriteFile(modulePath, templateBytes, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// This is synthetic schema-shaped data, not a captured upstream event. Its
+	// fields mirror the request contract pinned at OmniGent v0.7.0 schema.py.
+	fixturePath := filepath.Join("testdata", "omnigent-policy-request-schema.json")
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with open(sys.argv[2], encoding="utf-8") as fh:
+    print(json.dumps(module._payload(json.load(fh)), sort_keys=True))
+`
+	output, err := exec.Command(python, "-c", script, modulePath, fixturePath).CombinedOutput()
+	if err != nil {
+		t.Fatalf("normalize official request fixture: %v\n%s", err, output)
+	}
+	var payload map[string]interface{}
+	if err := json.Unmarshal(output, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload["hook_event_name"] != "UserPromptSubmit" {
+		t.Fatalf("normalized official request fixture = %#v", payload)
+	}
+	prompt, _ := payload["prompt"].(string)
+	for _, want := range []string{
+		"Review the attached deployment plan.",
+		`[OmniGent attachment {"filename":"deployment.txt","content_type":"text/plain"}]`,
+		"production=false\nregion=us-east-1\n",
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("inspected request prompt %q missing %q", prompt, want)
+		}
+	}
+	attachments, ok := payload["omnigent_attachments"].([]interface{})
+	if !ok || len(attachments) != 1 {
+		t.Fatalf("normalized official attachments = %#v", payload["omnigent_attachments"])
+	}
+	attachment, _ := attachments[0].(map[string]interface{})
+	if attachment["filename"] != "deployment.txt" ||
+		attachment["content_type"] != "text/plain" ||
+		attachment["text"] != "production=false\nregion=us-east-1\n" ||
+		attachment["truncated"] != false {
+		t.Fatalf("normalized official attachment = %#v", attachment)
+	}
+}
+
+func TestOmnigentOversizedAttachmentHonorsFailMode(t *testing.T) {
+	python := omnigentTestPython(t)
+	templateBytes, err := hookFS.ReadFile("hooks/omnigent-policy.py")
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := `
+import importlib.util, json, sys
+spec = importlib.util.spec_from_file_location("defenseclaw_omnigent_policy", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+event = {
+    "type": "request",
+    "data": {
+        "user_content": "review attachment",
+        "attachments": [{
+            "filename": "oversized.txt",
+            "content_type": "text/plain",
+            "text": ("A" * module._MAX_ATTACHMENT_TEXT_CHARS) + "MALICIOUS_AFTER_LIMIT",
+        }],
+    },
+}
+print(json.dumps(module.defenseclaw_policy(event)))
+`
+	for _, tc := range []struct {
+		mode string
+		want string
+	}{{"open", "ALLOW"}, {"closed", "DENY"}} {
+		t.Run(tc.mode, func(t *testing.T) {
+			root := t.TempDir()
+			tokenPath := writeOmnigentScopedToken(t, filepath.Join(root, "dc"), strings.Repeat("c", 64))
+			modulePath := filepath.Join(root, "defenseclaw_omnigent_policy.py")
+			rendered := renderOmnigentPolicy(string(templateBytes), "127.0.0.1:1", tokenPath, tc.mode)
+			if err := os.WriteFile(modulePath, []byte(rendered), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			output, err := exec.Command(python, "-c", script, modulePath).CombinedOutput()
+			if err != nil {
+				t.Fatalf("execute oversized attachment policy: %v\n%s", err, output)
+			}
+			var verdict map[string]string
+			if err := json.Unmarshal(output, &verdict); err != nil {
+				t.Fatal(err)
+			}
+			if verdict["result"] != tc.want {
+				t.Fatalf("oversized attachment verdict = %v, want %s", verdict, tc.want)
+			}
+		})
 	}
 }
 
@@ -614,10 +1440,49 @@ func TestOmnigentConfigPathMatchesUpstreamGlobalConfigResolution(t *testing.T) {
 	OmnigentConfigPathOverride = ""
 	t.Cleanup(func() { OmnigentConfigPathOverride = previous })
 	configHome := t.TempDir()
+	t.Setenv("OMNIGENT_CONFIG", "")
 	t.Setenv("OMNIGENT_CONFIG_HOME", configHome)
 	t.Setenv("OMNIGENT_DATA_DIR", filepath.Join(t.TempDir(), "state-only"))
 	if got, want := omnigentConfigPath(), filepath.Join(configHome, "config.yaml"); got != want {
 		t.Fatalf("omnigentConfigPath() = %q, want %q", got, want)
+	}
+}
+
+func TestOmnigentExplicitConfigPathTakesPrecedence(t *testing.T) {
+	previous := OmnigentConfigPathOverride
+	OmnigentConfigPathOverride = ""
+	t.Cleanup(func() { OmnigentConfigPathOverride = previous })
+	explicit := filepath.Join(t.TempDir(), "server.yaml")
+	t.Setenv("OMNIGENT_CONFIG", explicit)
+	t.Setenv("OMNIGENT_CONFIG_HOME", t.TempDir())
+	if got := omnigentConfigPath(); got != explicit {
+		t.Fatalf("omnigentConfigPath() = %q, want explicit %q", got, explicit)
+	}
+}
+
+func TestOmnigentTelemetryAndInventoryCapabilitiesMatchV07(t *testing.T) {
+	spec := omnigentNativeOTLPSpec(SetupOpts{APIAddr: "127.0.0.1:18970"})
+	if spec.ExtraEnv["OMNIGENT_TELEMETRY_ENABLED"] != "true" ||
+		spec.ExtraEnv["OMNIGENT_OTEL_CAPTURE_CONTENT"] != "false" {
+		t.Fatalf("native OTLP environment = %#v", spec.ExtraEnv)
+	}
+	conn := NewOmnigentConnector()
+	if conn.SupportsComponentScanning() {
+		t.Fatal("OmniGent component inventory must remain unsupported until bounded vendor sources are implemented")
+	}
+	if targets := conn.ComponentTargets(""); len(targets) != 0 {
+		t.Fatalf("unsupported OmniGent inventory advertised targets: %#v", targets)
+	}
+}
+
+func TestOmnigentReviewedVersionRangeIsOnlyV07(t *testing.T) {
+	for _, tc := range []struct {
+		version string
+		want    bool
+	}{{"0.6.99", false}, {"0.7.0", true}, {"0.7.99", true}, {"0.8.0", true}, {"0.13.0", true}, {"0.14.0", false}} {
+		if got := omnigentVersionInReviewedRange(tc.version); got != tc.want {
+			t.Errorf("omnigentVersionInReviewedRange(%q) = %v, want %v", tc.version, got, tc.want)
+		}
 	}
 }
 
@@ -641,6 +1506,175 @@ func TestOmnigentRuntimeArtifactsAreLockedAndHashed(t *testing.T) {
 		if strings.HasPrefix(name, "inspect-") {
 			t.Fatalf("lock recorded unrelated generic script %q", name)
 		}
+	}
+}
+
+func TestOmnigentFreshLockSurvivesRemovedSetupReceipt(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("native protected executable evidence is Windows-only")
+	}
+	root := testenv.PrivateTempDir(t)
+	dataDir := filepath.Join(root, "defenseclaw")
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	executable := filepath.Join(root, "omnigent.exe")
+	if err := os.WriteFile(executable, []byte("MZ official omnigent fixture"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stableExecutable, digest, ok := setupSelectedAgentExecutableEvidence(executable)
+	if !ok {
+		t.Fatal("could not create stable executable evidence")
+	}
+	now := time.Now().UTC()
+	rawVersion := "omnigent 0.7.0"
+	receipt := agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections: map[string]agentSelectionEvidence{
+			"omnigent": {
+				Connector:         "omnigent",
+				Source:            "setup-selected",
+				Executable:        stableExecutable,
+				RawVersion:        rawVersion,
+				NormalizedVersion: "0.7.0",
+				SHA256:            digest,
+				SelectedAt:        now.Format(time.RFC3339),
+				ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+			},
+		},
+	}
+	body, err := json.Marshal(receipt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	receiptPath := filepath.Join(dataDir, agentSelectionFile)
+	if err := atomicWriteFile(receiptPath, body, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	opts := SetupOpts{
+		DataDir:         dataDir,
+		AgentExecutable: stableExecutable,
+		AgentVersion:    rawVersion,
+	}
+	entry := NewHookContractLockEntry(opts, NewOmnigentConnector(), "test-build")
+	if entry.AgentExecutableSource != "setup-selected" ||
+		!strings.EqualFold(entry.AgentExecutable, stableExecutable) ||
+		entry.AgentExecutableSHA256 != digest ||
+		!validSetupSelectedAgentExecutableEvidence(entry, "omnigent") {
+		t.Fatalf("sealed OmniGent executable evidence = %+v", entry)
+	}
+	if err := SaveFreshHookContractLockEntry(dataDir, entry); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(receiptPath); err != nil {
+		t.Fatal(err)
+	}
+	if locked, exists := loadProtectedHookContractEntry(dataDir, "omnigent"); !exists ||
+		!validSetupSelectedAgentExecutableEvidence(locked, "omnigent") {
+		t.Fatalf("protected OmniGent lock after receipt removal: exists=%v entry=%+v", exists, locked)
+	}
+
+	if got := LoadCachedAgentVersion(dataDir, "omnigent"); got != rawVersion {
+		t.Fatalf("locked OmniGent version = %q, want %q", got, rawVersion)
+	}
+	if got := LoadCachedAgentExecutable(dataDir, "omnigent"); !strings.EqualFold(got, stableExecutable) {
+		t.Fatalf("locked OmniGent executable = %q, want %q", got, stableExecutable)
+	}
+	if _, err := validateOmnigentWindowsExecutable(opts, stableExecutable); err != nil {
+		t.Fatalf("revalidate locked OmniGent executable after receipt removal: %v", err)
+	}
+}
+
+func TestOmnigentNewerSetupSelectionSupersedesThenFreshSealRegainsAuthority(t *testing.T) {
+	if runtime.GOOS != "windows" {
+		t.Skip("protected OmniGent setup selections are native-Windows authority")
+	}
+	root := testenv.PrivateTempDir(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	oldExecutable := filepath.Join(root, "old", "omnigent.exe")
+	if err := os.MkdirAll(filepath.Dir(oldExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(oldExecutable, []byte("old OmniGent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	oldEntry := NewHookContractLockEntry(
+		SetupOpts{DataDir: root, AgentVersion: "omnigent 0.7.0", AgentExecutable: oldExecutable},
+		NewOmnigentConnector(),
+		"old-build",
+	)
+	if !validSetupSelectedAgentExecutableEvidence(oldEntry, "omnigent") {
+		t.Fatalf("old OmniGent lock lacks sealed executable evidence: %+v", oldEntry)
+	}
+	oldEntry.UpdatedAt = now.Add(-2 * time.Minute).Format(time.RFC3339)
+	lock := hookContractLock{
+		Version:    hookContractLockVersion,
+		UpdatedAt:  oldEntry.UpdatedAt,
+		Connectors: map[string]HookContractLockEntry{"omnigent": oldEntry},
+	}
+	lockBody, err := json.Marshal(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(root, hookContractLockFile), lockBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	newExecutable := filepath.Join(root, "current", "omnigent.exe")
+	if err := os.MkdirAll(filepath.Dir(newExecutable), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(newExecutable, []byte("current OmniGent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	stableExecutable, digest, ok := setupSelectedAgentExecutableEvidence(newExecutable)
+	if !ok {
+		t.Fatal("could not create replacement OmniGent executable evidence")
+	}
+	selection := agentSelectionEvidence{
+		Connector:         "omnigent",
+		Source:            "setup-selected",
+		Executable:        stableExecutable,
+		RawVersion:        "omnigent 0.7.0",
+		NormalizedVersion: "0.7.0",
+		SHA256:            digest,
+		SelectedAt:        now.Format(time.RFC3339),
+		ExpiresAt:         now.Add(agentSelectionMaxLifetime).Format(time.RFC3339),
+	}
+	receiptBody, err := json.Marshal(agentSelectionReceipt{
+		SchemaVersion: agentSelectionSchemaVersion,
+		UpdatedAt:     now.Format(time.RFC3339),
+		Selections:    map[string]agentSelectionEvidence{"omnigent": selection},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := atomicWriteFile(filepath.Join(root, agentSelectionFile), receiptBody, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	if selected, supersedes := supersedingProtectedSetupSelection(root, "omnigent", oldEntry); !supersedes ||
+		selected.Executable != selection.Executable || selected.SHA256 != selection.SHA256 {
+		t.Fatalf("newer OmniGent selection did not supersede old lock: supersedes=%v selection=%+v", supersedes, selected)
+	}
+	if previous := LoadHookContractLockEntry(root, "omnigent"); previous.Connector != "" {
+		t.Fatalf("newer OmniGent selection remained blocked by the old lock: %+v", previous)
+	}
+
+	newEntry := NewHookContractLockEntry(
+		SetupOpts{DataDir: root, AgentVersion: selection.RawVersion, AgentExecutable: selection.Executable},
+		NewOmnigentConnector(),
+		"new-build",
+	)
+	if err := SaveFreshHookContractLockEntry(root, newEntry); err != nil {
+		t.Fatalf("persist repaired OmniGent lock: %v", err)
+	}
+	sealed := LoadHookContractLockEntry(root, "omnigent")
+	if !validSetupSelectedAgentExecutableEvidence(sealed, "omnigent") ||
+		!protectedSelectionMatchesLock(selection, sealed) {
+		t.Fatalf("fresh OmniGent seal did not regain authority: %+v", sealed)
 	}
 }
 
@@ -724,8 +1758,9 @@ func TestOmnigentVerifyCleanFindsEditedImportShimAtCustomPath(t *testing.T) {
 	if err := os.WriteFile(pthPath, []byte("/operator/edited/path\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := conn.Teardown(context.Background(), opts); err != nil {
-		t.Fatal(err)
+	if err := conn.Teardown(context.Background(), opts); err == nil ||
+		!strings.Contains(err.Error(), "managed pth remains") {
+		t.Fatalf("Teardown error = %v, want edited custom .pth residue", err)
 	}
 	if err := conn.VerifyClean(opts); err == nil || !strings.Contains(err.Error(), "managed pth remains") {
 		t.Fatalf("VerifyClean error = %v, want edited custom .pth residue", err)

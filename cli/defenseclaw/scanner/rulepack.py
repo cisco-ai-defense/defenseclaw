@@ -54,10 +54,12 @@ import logging
 import os
 import re
 from dataclasses import dataclass, field
+from typing import TypeAlias
 
 import yaml
 
 from defenseclaw.models import Finding
+from defenseclaw.scanner.plugin_scanner.self_identity import is_first_party_self_target
 
 _log = logging.getLogger(__name__)
 
@@ -83,6 +85,9 @@ _REGEX_FAMILIES = {
     "injection_regexes": ("HIGH", "RP-INJECTION", "Prompt-injection pattern", "prompt-injection"),
     "pii_data_regexes": ("MEDIUM", "RP-PII-DATA", "PII data pattern", "pii"),
 }
+_GO_UNICODE_SCALAR_ESCAPE = re.compile(
+    r"(?P<slashes>\\+)x\{(?P<codepoint>[0-9A-Fa-f]{1,6})\}"
+)
 
 
 @dataclass
@@ -165,6 +170,9 @@ class RulePack:
         return findings
 
 
+RulePackOverlayCache: TypeAlias = dict[str, RulePack]
+
+
 def _read_text(path: str) -> str | None:
     """Read *path* as UTF-8 text, or None if binary / too large / unreadable."""
     if os.path.splitext(path)[1].lower() in _BINARY_EXTS:
@@ -221,6 +229,10 @@ def _compile_rules_file(raw: dict, pack: RulePack) -> None:
     for rule in raw.get("rules", []) or []:
         if not isinstance(rule, dict):
             continue
+        # Tool-call-only rules are evaluated only at an authenticated tool
+        # boundary. Static artifact scanning cannot establish that context.
+        if rule.get("tool_call_only") is True:
+            continue
         # ``enabled: false`` disables a single rule; absent / true keeps it.
         if rule.get("enabled") is False:
             continue
@@ -271,11 +283,38 @@ def _compile_local_patterns(raw: dict, pack: RulePack) -> None:
 
 
 def _compile(pattern: str, rule_id: str) -> re.Pattern[str] | None:
+    # Go/RE2 accepts ``\x{10FFFF}`` Unicode scalar escapes while Python's
+    # ``re`` does not. Translate only that representational difference so the
+    # static-artifact overlay does not silently drop shipped rules containing
+    # zero-width or other non-ASCII scalars. This is not validation: the
+    # gateway's strict Go loader remains authoritative for the source pattern,
+    # and every other unsupported construct still fails closed to "no Python
+    # overlay rule" here.
+    translated = _translate_go_unicode_scalar_escapes(pattern)
     try:
-        return re.compile(pattern)
+        return re.compile(translated)
     except re.error as exc:
         _log.debug("rule-pack: invalid regex in %s (%s): %s", rule_id, exc, pattern)
         return None
+
+
+def _translate_go_unicode_scalar_escapes(pattern: str) -> str:
+    """Translate valid Go ``\\x{...}`` scalar escapes for Python ``re``."""
+
+    def _replace(match: re.Match[str]) -> str:
+        slashes = match.group("slashes")
+        # An even-length run escapes every backslash, so none remains to
+        # introduce the apparent ``\x{...}`` token at the end of the run.
+        # For an odd-length run, preserve the escaped pairs and translate only
+        # the final, unescaped scalar token.
+        if len(slashes) % 2 == 0:
+            return match.group(0)
+        value = int(match.group("codepoint"), 16)
+        if value > 0x10FFFF or 0xD800 <= value <= 0xDFFF:
+            return match.group(0)
+        return slashes[:-1] + re.escape(chr(value))
+
+    return _GO_UNICODE_SCALAR_ESCAPE.sub(_replace, pattern)
 
 
 def _resolve_dir(cfg, connector: str | None) -> str:
@@ -374,6 +413,19 @@ class RulePackOverlayScanner:
         return result
 
     def _apply_overlay(self, result, target, kwargs) -> None:
+        # The plugin scanner's exact self-identity exclusion also covers the
+        # optional rule-pack overlay. Without this guard the base scanner would
+        # return clean while the overlay immediately re-scanned the same
+        # bundled runtime and recreated the self-hits.
+        if (
+            isinstance(target, str)
+            and not kwargs.get("include_self", False)
+            and is_first_party_self_target(
+                target,
+                trusted_paths=kwargs.get("trusted_self_paths") or (),
+            )
+        ):
+            return
         new: list[Finding]
         if isinstance(target, str) and os.path.exists(target):
             new = self.pack.scan_path(target)
@@ -388,20 +440,43 @@ class RulePackOverlayScanner:
         existing = {(f.id, f.location) for f in result.findings}
         for f in new:
             if (f.id, f.location) not in existing:
+                # Canonical v8 attributes nested findings to the parent scan
+                # producer; retain the overlay engine as finding metadata.
+                provenance = f"analyzer:{f.scanner}" if f.scanner else ""
+                if provenance and provenance not in f.tags:
+                    f.tags.append(provenance)
+                f.scanner = result.scanner
                 result.findings.append(f)
 
 
-def maybe_wrap(inner, cfg, connector: str | None = None):
+def maybe_wrap(
+    inner,
+    cfg,
+    connector: str | None = None,
+    *,
+    pack_cache: RulePackOverlayCache | None = None,
+):
     """Wrap *inner* with the rule-pack overlay iff a rule pack is configured.
 
     Returns *inner* unchanged when no pack is set (or it is empty), so the common
     no-rule-pack path has zero behavior change and pays no extra disk reads.
+    Fan-out callers can provide a per-operation *pack_cache*: it de-duplicates
+    identical effective directories while preserving an explicit connector
+    lookup, so one peer's pack can never bleed into another peer's scan.
     """
     resolved = _active_connector(cfg, connector)
     dir_path = _resolve_dir(cfg, resolved)
     if not dir_path:
         return inner
-    pack = load_rule_pack(dir_path)
+    cache_key = os.path.normcase(
+        os.path.realpath(os.path.abspath(os.path.expanduser(dir_path)))
+    )
+    if pack_cache is not None and cache_key in pack_cache:
+        pack = pack_cache[cache_key]
+    else:
+        pack = load_rule_pack(dir_path)
+        if pack_cache is not None:
+            pack_cache[cache_key] = pack
     if pack.is_empty():
         return inner
     return RulePackOverlayScanner(inner, pack, resolved)

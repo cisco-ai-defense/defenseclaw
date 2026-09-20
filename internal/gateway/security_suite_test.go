@@ -16,9 +16,11 @@
 
 // Security + PII coverage suite.
 //
-// The suite is split into three tiers so it is always explicit WHICH layer
+// The suite is split into four tiers so it is always explicit WHICH layer
 // is under test:
 //
+//   - TestSecuritySuiteToolCall — trusted structured tool-call semantics.
+//     Deterministic ActionFacts + CEL/fallback dispatch. No LLM.
 //   - TestSecuritySuiteRegex  — the deterministic regex/rule layer
 //     (ScanAllRules + GuardrailInspector in regex_only mode). No LLM.
 //   - TestSecuritySuiteJudge  — the LLM-judge layer. Deterministic by
@@ -46,7 +48,6 @@ import (
 	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
 
 // ---------------------------------------------------------------------------
@@ -223,7 +224,8 @@ func judgeConfigForKind(kind string) *config.JudgeConfig {
 // stubJudge builds an LLMJudge backed by a scripted provider that returns
 // the case's canned judge JSON. The judge code path (parsing, suppressions,
 // severity mapping) runs for real — only the model answer is fixed.
-func stubJudge(c judgeCase) *LLMJudge {
+func stubJudge(t testing.TB, c judgeCase) *LLMJudge {
+	t.Helper()
 	prov := &mockLLMProvider{
 		response: &ChatResponse{
 			Choices: []ChatChoice{{Message: &ChatMessage{Content: string(c.Response)}}},
@@ -232,7 +234,7 @@ func stubJudge(c judgeCase) *LLMJudge {
 	return &LLMJudge{
 		cfg:      judgeConfigForKind(c.Kind),
 		provider: prov,
-		rp:       guardrail.LoadRulePack(""),
+		rp:       mustLoadRulePack(t, ""),
 	}
 }
 
@@ -246,7 +248,7 @@ func liveJudge(t *testing.T, kind string) *LLMJudge {
 		model = "us.anthropic.claude-sonnet-4-6"
 	}
 	llm := config.LLMConfig{Model: model, APIKeyEnv: "DEFENSECLAW_LLM_KEY"}
-	j := NewLLMJudge(cfg, llm, "", guardrail.LoadRulePack(""), nil)
+	j := NewLLMJudge(cfg, llm, "", mustLoadRulePack(t, ""), nil)
 	if j == nil {
 		t.Skipf("live judge %q failed to init; check DEFENSECLAW_LLM_KEY and model %q", kind, model)
 	}
@@ -274,7 +276,7 @@ func TestSecuritySuiteJudge(t *testing.T) {
 				if len(c.Response) == 0 {
 					t.Skip("no scripted response; set GUARDRAIL_BENCHMARK_LLM=1 to score live")
 				}
-				j = stubJudge(c)
+				j = stubJudge(t, c)
 			}
 
 			var v *ScanVerdict

@@ -23,6 +23,7 @@ import hashlib
 import ipaddress
 import json
 import os
+import sys
 import time
 from collections.abc import Mapping
 from dataclasses import asdict
@@ -32,6 +33,14 @@ from typing import Any
 import click
 import requests
 
+from defenseclaw.config import (
+    FULL_RUNTIME_PLANES,
+    USER_RUNTIME_PLANES,
+    AIRuntimeConfig,
+    enable_all_runtime_planes,
+    enable_user_runtime_planes,
+)
+from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.context import AppContext, pass_ctx
 from defenseclaw.gateway import OrchestratorClient
 from defenseclaw.inventory import agent_discovery, ai_signatures
@@ -128,6 +137,7 @@ def discover(
     _load_dotenv_into_os(str(default_data_path()))
     started = time.monotonic()
     disc = agent_discovery.discover_agents(use_cache=not no_cache, refresh=refresh)
+    _apply_discovery_config_state(app, disc)
     duration_ms = int((time.monotonic() - started) * 1000)
 
     otel_result = {"attempted": False, "emitted": False, "error": ""}
@@ -375,7 +385,10 @@ def processes(
         raise click.ClickException(f"sidecar request failed: {exc}") from exc
 
     raw_signals = payload.get("signals", []) or []
-    process_signals = [s for s in raw_signals if s.get("runtime")]
+    process_signals = [
+        s for s in raw_signals
+        if s.get("runtime") and str(s.get("state", "")).lower() != "gone"
+    ]
     # Most-recently-seen first so an operator hunting a runaway agent
     # sees fresh activity at the top.
     process_signals.sort(
@@ -383,9 +396,21 @@ def processes(
         reverse=True,
     )
 
+    process_error = str(
+        ((payload.get("summary") or {}).get("detector_errors") or {}).get("process", "")
+    )
+
     if as_json:
-        click.echo(json.dumps({"processes": process_signals}, indent=2, sort_keys=True))
+        output: dict[str, Any] = {"processes": process_signals}
+        if process_error:
+            output["errors"] = [{"detector": "process", "message": process_error}]
+        click.echo(json.dumps(output, indent=2, sort_keys=True))
+        if process_error:
+            raise click.exceptions.Exit(1)
         return
+
+    if process_error:
+        raise click.ClickException(f"process snapshot failed: {process_error}")
 
     click.echo(_render_ai_processes_table(process_signals, limit=limit).rstrip())
 
@@ -897,6 +922,8 @@ _AI_DISCOVERY_MODES: tuple[str, ...] = ("passive", "enhanced")
 _SCAN_INTERVAL_MIN_RANGE = (1, 24 * 60)        # 1 minute … 24 hours
 _PROCESS_INTERVAL_S_RANGE = (5, 60 * 60)        # 5 seconds … 1 hour
 _MAX_FILES_PER_SCAN_RANGE = (10, 100_000)
+_RUNTIME_POLL_INTERVAL_S_RANGE = (5, 60 * 60)   # 5 seconds … 1 hour
+_RUNTIME_MIN_RISK_RANGE = (1, 100)              # the score band findings are cut at
 # 4 KiB up to 16 MiB — anything beyond that almost certainly means
 # the operator has a runaway log file in scan_roots and would
 # benefit from rejecting the value.
@@ -986,10 +1013,13 @@ def discovery() -> None:
     ),
 )
 @click.option(
-    "--emit-otel/--no-emit-otel",
-    "emit_otel",
+    "--lookup-model-provenance-online/--no-lookup-model-provenance-online",
+    "lookup_model_provenance_online",
     default=None,
-    help="Forward sanitized discovery telemetry through the sidecar (default: on).",
+    help=(
+        "Send trusted exact model repository IDs to the fixed Hugging Face "
+        "API for lineage enrichment (default: off)."
+    ),
 )
 @click.option(
     "--allow-workspace-signatures/--no-allow-workspace-signatures",
@@ -1009,6 +1039,14 @@ def discovery() -> None:
         "Persist raw local paths in the discovery state file. Off by "
         "default for privacy; only enable for diagnostics on a trusted "
         "machine."
+    ),
+)
+@click.option(
+    "--enable-host-plane/--no-enable-host-plane",
+    default=None,
+    help=(
+        "Opt into privileged kernel process, file, and identity telemetry "
+        "(new configurations default off; omitted preserves existing state)."
     ),
 )
 @click.option("--restart/--no-restart", default=True,
@@ -1036,9 +1074,10 @@ def discovery_enable(
     include_package_manifests: bool | None,
     include_env_var_names: bool | None,
     include_network_domains: bool | None,
-    emit_otel: bool | None,
+    lookup_model_provenance_online: bool | None,
     allow_workspace_signatures: bool | None,
     store_raw_local_paths: bool | None,
+    enable_host_plane: bool | None,
     restart: bool,
     scan: bool,
     yes: bool,
@@ -1074,42 +1113,43 @@ def discovery_enable(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
 
     from defenseclaw import ux
 
-    if ad.enabled:
+    diff = _preview_discovery_changes(ad, pending)
+    runtime_diff = _preview_runtime_planes(ad, enable_host_plane=enable_host_plane)
+    if ad.enabled and not diff and not runtime_diff:
         # If the operator passed tuning flags alongside --yes, treat
         # this as an idempotent "apply these new settings" rather
-        # than a no-op. Otherwise the only way to nudge the scan
-        # interval on an already-enabled install would be to disable
-        # then re-enable, which is an unnecessary downtime window
-        # and surprises scripts that pipeline these commands.
-        diff = _preview_discovery_changes(ad, pending)
-        if not diff:
-            click.echo(
-                f"  {ux.dim('AI discovery is already enabled')} "
-                f"(mode={ad.mode!r}, scan_interval_min={ad.scan_interval_min}).",
+        # than a no-op. Runtime planes are part of the same enable
+        # contract: an already-enabled discovery with planes still
+        # off is incomplete.
+        click.echo(
+            f"  {ux.dim('AI discovery is already enabled')} "
+            f"(mode={ad.mode!r}, scan_interval_min={ad.scan_interval_min}).",
+        )
+        if scan and restart:
+            _trigger_post_enable_scan(
+                app,
+                gateway_host=gateway_host,
+                gateway_port=gateway_port,
+                gateway_token_env=gateway_token_env,
             )
-            if scan and restart:
-                _trigger_post_enable_scan(
-                    app,
-                    gateway_host=gateway_host,
-                    gateway_port=gateway_port,
-                    gateway_token_env=gateway_token_env,
-                )
-            return
+        return
 
+    if ad.enabled:
         ux.section("Updating AI discovery settings")
     else:
         ux.section("Enabling AI discovery")
 
-    diff = _preview_discovery_changes(ad, pending)
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
+    for field, before, after in runtime_diff:
+        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar starts the discovery service.",
@@ -1139,12 +1179,21 @@ def discovery_enable(
     ad.enabled = True
     if not ad.mode:
         ad.mode = "enhanced"
+    runtime_changes = _apply_runtime_planes(ad, enable_host_plane=enable_host_plane)
+    if any(field == "enable_host_plane" and after is True for field, _before, after in runtime_changes):
+        ux.warn(
+            "runtime plane C (agent actions) reads kernel process, file, and "
+            "identity events. Every signal it raises is gated on an AI agent "
+            "in the process lineage.",
+            indent="  ",
+        )
 
     try:
         cfg.save()
         ux.ok(
             "Config saved (ai_discovery.enabled = true, "
-            f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min})",
+            f"mode={ad.mode}, scan_interval_min={ad.scan_interval_min}, "
+            f"runtime planes {'a/b/c' if _discovery_runtime(ad).enable_host_plane else 'a/b'} on)",
             indent="  ",
         )
     except OSError as exc:
@@ -1152,7 +1201,10 @@ def discovery_enable(
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
     connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1161,8 +1213,16 @@ def discovery_enable(
             cfg.gateway.host,
             cfg.gateway.port,
             connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is live.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is live.", indent="  ")
         click.echo()
 
         if scan:
@@ -1179,7 +1239,8 @@ def discovery_enable(
         action=f"ai_discovery-{action_suffix}",
         details=(
             f"mode={ad.mode} scan_interval_min={ad.scan_interval_min} "
-            f"restart={restart} scan={scan} changes={len(diff)}"
+            f"restart={restart} scan={scan} changes={len(diff)} "
+            f"connectors={','.join(connectors) or 'none'}"
         ),
     )
 
@@ -1232,6 +1293,10 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
         ux.subhead("Re-run after fixing the underlying I/O error.", indent="    ")
         raise SystemExit(1)
 
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
     if restart:
         from defenseclaw.commands import cmd_setup
 
@@ -1239,15 +1304,23 @@ def discovery_disable(app: AppContext, restart: bool, yes: bool) -> None:
             cfg.data_dir,
             cfg.gateway.host,
             cfg.gateway.port,
-            connector=_resolve_connector_for_restart(cfg),
+            connector=connector,
+            connectors=connectors,
         )
-        ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
+        if len(connectors) > 1:
+            ux.ok(
+                f"Sidecar restarted for {len(connectors)} active connectors "
+                f"({', '.join(connectors)}); AI discovery is stopped.",
+                indent="  ",
+            )
+        else:
+            ux.ok("Sidecar restarted; AI discovery is stopped.", indent="  ")
         click.echo()
 
     _log_discovery_action(
         app,
         action="ai_discovery-disable",
-        details=f"restart={restart}",
+        details=f"restart={restart} connectors={','.join(connectors) or 'none'}",
     )
 
 
@@ -1270,10 +1343,10 @@ def discovery_status(
 ) -> None:
     """Show on-disk + live AI discovery status.
 
-    Reports the value persisted in ``config.yaml`` *and* what the
-    running sidecar reports via ``GET /api/v1/ai-usage`` so operators
-    can spot the "configured-on, sidecar-stale" drift that produces
-    the HTTP 503 from ``defenseclaw agent usage --refresh``.
+    Reports values persisted in ``config.yaml`` alongside the fields
+    the running sidecar exposes via ``GET /api/v1/ai-usage``. Drift is
+    evaluated only for fields present in the live response; the JSON
+    comparison block identifies settings that could not be verified.
     """
     cfg = _require_loaded_config(app)
     ad = cfg.ai_discovery
@@ -1287,10 +1360,18 @@ def discovery_status(
         "include_package_manifests": bool(ad.include_package_manifests),
         "include_env_var_names": bool(ad.include_env_var_names),
         "include_network_domains": bool(ad.include_network_domains),
-        "emit_otel": bool(ad.emit_otel),
+        "lookup_model_provenance_online": bool(
+            ad.lookup_model_provenance_online
+        ),
     }
 
-    live: dict[str, Any] = {"reachable": False, "enabled": None, "summary": None, "error": ""}
+    live: dict[str, Any] = {
+        "reachable": False,
+        "enabled": None,
+        "lookup_model_provenance_online": None,
+        "summary": None,
+        "error": "",
+    }
     try:
         client = _usage_client(
             app,
@@ -1301,7 +1382,16 @@ def discovery_status(
         try:
             payload = client.ai_usage()
             live["reachable"] = True
-            live["enabled"] = bool(payload.get("enabled", False))
+            enabled = payload.get("enabled")
+            if isinstance(enabled, bool):
+                live["enabled"] = enabled
+            lookup_model_provenance_online = payload.get(
+                "lookup_model_provenance_online"
+            )
+            if isinstance(lookup_model_provenance_online, bool):
+                live["lookup_model_provenance_online"] = (
+                    lookup_model_provenance_online
+                )
             live["summary"] = payload.get("summary") or {}
         except requests.ConnectionError as exc:
             live["error"] = f"sidecar unavailable: {exc}"
@@ -1313,15 +1403,29 @@ def discovery_status(
     except click.ClickException as exc:
         live["error"] = str(exc.message)
 
-    drift = (
-        live["reachable"]
-        and live["enabled"] is not None
-        and live["enabled"] != on_disk["enabled"]
+    checked_fields = tuple(
+        key
+        for key in ("enabled", "lookup_model_provenance_online")
+        if live[key] is not None
     )
+    drift_fields = tuple(
+        key for key in checked_fields if live[key] != on_disk[key]
+    )
+    unverified_fields = tuple(key for key in on_disk if key not in checked_fields)
+    drift = bool(drift_fields)
 
     if as_json:
         click.echo(json.dumps(
-            {"on_disk": on_disk, "live": live, "drift": drift},
+            {
+                "on_disk": on_disk,
+                "live": live,
+                "drift": drift,
+                "comparison": {
+                    "checked_fields": checked_fields,
+                    "drift_fields": drift_fields,
+                    "unverified_fields": unverified_fields,
+                },
+            },
             indent=2,
             sort_keys=True,
         ))
@@ -1334,6 +1438,11 @@ def discovery_status(
     ux.kv("Mode", on_disk["mode"] or "(unset)", indent="  ")
     ux.kv("Scan roots", ", ".join(on_disk["scan_roots"]) or "(none)", indent="  ")
     ux.kv("Scan interval", f"{on_disk['scan_interval_min']} min", indent="  ")
+    ux.kv(
+        "Online model provenance",
+        "enabled" if on_disk["lookup_model_provenance_online"] else "disabled",
+        indent="  ",
+    )
 
     click.echo()
     ux.section("Live (sidecar)")
@@ -1345,16 +1454,36 @@ def discovery_status(
             indent="  ",
         )
     else:
-        ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
+        if live["enabled"] is None:
+            ux.kv("Service", "not reported", indent="  ")
+        else:
+            ux.kv("Service", "running" if live["enabled"] else "disabled", indent="  ")
         summary = live["summary"] or {}
         ux.kv("Last scan", str(summary.get("scanned_at") or "-"), indent="  ")
         ux.kv("Active signals", str(summary.get("active_signals", 0)), indent="  ")
         ux.kv("New signals", str(summary.get("new_signals", 0)), indent="  ")
+        if live["lookup_model_provenance_online"] is None:
+            ux.kv(
+                "Online model provenance",
+                "not reported (live setting unverified)",
+                indent="  ",
+            )
+        else:
+            ux.kv(
+                "Online model provenance",
+                (
+                    "enabled"
+                    if live["lookup_model_provenance_online"]
+                    else "disabled"
+                ),
+                indent="  ",
+            )
 
     if drift:
         click.echo()
         ux.warn(
-            "Drift: config and sidecar disagree — restart the gateway "
+            "Drift: sidecar disagrees with on-disk config for "
+            f"{', '.join(drift_fields)} — restart the gateway "
             "('defenseclaw-gateway restart') to sync.",
             indent="  ",
         )
@@ -1489,14 +1618,14 @@ def discovery_setup(
         "  Inspect provider domains and vetted loopback model metadata APIs?",
         default=bool(ad.include_network_domains),
     )
-
-    # ----- Output ---------------------------------------------------------
-    click.echo()
-    ux.section("Output")
-    emit_otel = click.confirm(
-        "  Forward sanitized telemetry through the sidecar (OTel)?",
-        default=bool(ad.emit_otel),
+    lookup_model_provenance_online = click.confirm(
+        "  Look up trusted exact model IDs on Hugging Face for provenance?",
+        default=bool(ad.lookup_model_provenance_online),
     )
+
+    # ----- Safety ---------------------------------------------------------
+    click.echo()
+    ux.section("Safety")
     allow_workspace_signatures = click.confirm(
         "  Honor signature packs found inside scanned workspaces? "
         "(off is safer)",
@@ -1520,12 +1649,25 @@ def discovery_setup(
         include_package_manifests=include_package_manifests,
         include_env_var_names=include_env_var_names,
         include_network_domains=include_network_domains,
-        emit_otel=emit_otel,
+        lookup_model_provenance_online=lookup_model_provenance_online,
         allow_workspace_signatures=allow_workspace_signatures,
         store_raw_local_paths=store_raw_local_paths,
     )
     diff = _preview_discovery_changes(ad, pending)
     enabled_changed = bool(ad.enabled) != bool(enable_pref)
+    runtime = _discovery_runtime(ad)
+    host_plane_requested = bool(
+        getattr(runtime, "enable_host_plane", False)
+        and "c" in {
+            str(plane).strip().lower()
+            for plane in (getattr(runtime, "planes", []) or [])
+        }
+    )
+    runtime_diff = (
+        _preview_runtime_planes(ad, enable_host_plane=host_plane_requested)
+        if enable_pref
+        else []
+    )
 
     click.echo()
     ux.section("Summary")
@@ -1534,11 +1676,13 @@ def discovery_setup(
             f"enabled: {bool(ad.enabled)!r} → {bool(enable_pref)!r}",
             indent="  ",
         )
-    if not diff and not enabled_changed:
+    if not diff and not enabled_changed and not runtime_diff:
         click.echo(f"  {ux.dim('No changes — current config already matches your answers.')}")
         return
     for label, before, after in diff:
         ux.subhead(f"{label}: {before!r} → {after!r}", indent="  ")
+    for field, before, after in runtime_diff:
+        ux.subhead(f"runtime.{field}: {before!r} → {after!r}", indent="  ")
     if restart:
         ux.subhead(
             "Will restart the gateway so the sidecar applies these settings.",
@@ -1570,13 +1714,23 @@ def discovery_setup(
     ad.enabled = bool(enable_pref)
     if not ad.mode:
         ad.mode = "enhanced"
+    if enable_pref:
+        _apply_runtime_planes(ad, enable_host_plane=host_plane_requested)
 
     try:
         cfg.save()
         ux.ok(
             "Config saved (ai_discovery.enabled = "
             f"{str(ad.enabled).lower()}, mode={ad.mode}, "
-            f"scan_interval_min={ad.scan_interval_min})",
+            f"scan_interval_min={ad.scan_interval_min}"
+            + (
+                ", runtime planes a/b/c on"
+                if enable_pref and host_plane_requested
+                else ", runtime planes a/b on"
+                if enable_pref
+                else ""
+            )
+            + ")",
             indent="  ",
         )
     except OSError as exc:
@@ -1688,6 +1842,1116 @@ def discovery_scan(
     )
 
 
+# ---------------------------------------------------------------------------
+# ``agent discovery runtime`` -- the runtime planes.
+#
+# Nested under ``discovery`` rather than hung off ``agent`` directly because
+# presence and behaviour are two halves of one question. An operator who has
+# just run ``agent discovery status`` should find "and what actually ran" one
+# level down, not in a sibling namespace.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_SEVERITY_ORDER = ("critical", "high", "medium", "low", "info")
+
+
+def _runtime_severity_rank(value: object) -> int:
+    """Rank a severity from the gateway, treating anything unknown as lowest.
+
+    ``findings`` is a network payload produced by the Go sensor, so the two
+    vocabularies can drift -- a new band, a different casing. ``tuple.index``
+    raises on a value it does not hold, which would end ``--severity`` in a
+    traceback rather than a result. Ranking an unrecognised band last is the
+    safe direction: it is excluded from every narrowing filter instead of
+    being silently promoted into one.
+    """
+    text = str(value or "").strip().lower()
+    if text in _RUNTIME_SEVERITY_ORDER:
+        return _RUNTIME_SEVERITY_ORDER.index(text)
+    return len(_RUNTIME_SEVERITY_ORDER)
+
+_RUNTIME_GATEWAY_OPTIONS = (
+    click.option("--gateway-host", default=None, help="Sidecar API host override."),
+    click.option("--gateway-port", type=int, default=None, help="Sidecar API port override."),
+    click.option(
+        "--gateway-token-env",
+        default=None,
+        help="Environment variable containing the sidecar API token override.",
+    ),
+)
+
+
+def _runtime_gateway_options(command):
+    for option in reversed(_RUNTIME_GATEWAY_OPTIONS):
+        command = option(command)
+    return command
+
+
+def _render_runtime_table(headers: list[str], rows: list[list[str]]) -> str:
+    """Render a table, falling back to a pipe-delimited form without Rich.
+
+    Mirrors _render_signatures_table: the fallback exists because the CLI runs
+    in packaging and CI contexts where Rich is not importable, and a traceback
+    there would be a worse outcome than an unaligned table.
+    """
+    try:
+        from io import StringIO
+
+        from rich.console import Console
+        from rich.table import Table
+    except Exception:
+        lines = [" | ".join(headers)]
+        lines.extend(" | ".join(row) for row in rows)
+        return "\n".join(lines) + "\n"
+
+    stream = StringIO()
+    console = Console(file=stream, force_terminal=False, color_system=None, width=140)
+    table = Table()
+    for header in headers:
+        table.add_column(header)
+    for row in rows:
+        table.add_row(*row)
+    console.print(table)
+    return stream.getvalue()
+
+
+@discovery.group("runtime")
+def discovery_runtime() -> None:
+    """Inspect the AI discovery runtime planes.
+
+    Where the surrounding ``discovery`` commands inventory what is present,
+    these report what actually ran: sustained inference compute, per-process
+    egress to a provider, and -- when the host plane is enabled -- the sequence
+    of actions an agent took.
+    """
+
+
+def _runtime_snapshot(
+    app: AppContext,
+    *,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+    refresh: bool = False,
+) -> dict:
+    client = _usage_client(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    try:
+        return client.scan_ai_runtime() if refresh else client.ai_runtime()
+    except requests.ConnectionError as exc:
+        raise click.ClickException(f"sidecar unavailable: {exc}") from exc
+    except requests.HTTPError as exc:
+        status = exc.response.status_code if exc.response is not None else "unknown"
+        if status == 503:
+            raise click.ClickException(
+                "the runtime planes are disabled in config. Run "
+                "'defenseclaw agent discovery runtime enable' first."
+            ) from exc
+        raise click.ClickException(f"sidecar rejected the request: HTTP {status}") from exc
+    except requests.RequestException as exc:
+        raise click.ClickException(f"sidecar request failed: {exc}") from exc
+
+
+def _render_plane_health(payload: dict, *, indent: str = "  ") -> None:
+    """Render the plane strip.
+
+    Always printed, healthy or not. A detector reporting clean because it was
+    never able to look is indistinguishable, on a dashboard, from a host that
+    is genuinely clean -- so the coverage line is not optional output.
+    """
+    from defenseclaw import ux
+
+    for plane in payload.get("planes") or []:
+        name = str(plane.get("name") or plane.get("plane") or "plane")
+        if plane.get("running"):
+            ux.ok(f"{name}: running via {plane.get('mechanism') or 'unknown mechanism'}", indent=indent)
+        elif plane.get("available"):
+            ux.warn(f"{name}: available but not running -- {plane.get('reason') or 'no reason given'}", indent=indent)
+        else:
+            ux.warn(f"{name}: unavailable -- {plane.get('reason') or 'no reason given'}", indent=indent)
+
+
+def _render_coverage(payload: dict, *, indent: str = "  ") -> None:
+    from defenseclaw import ux
+
+    observed = int(payload.get("processes_observed") or 0)
+    skipped = int(payload.get("processes_skipped") or 0)
+    connections = int(payload.get("connections_observed") or 0)
+    unattributed = int(payload.get("connections_unattributed") or 0)
+    host_observations = int(payload.get("host_plane_observations") or 0)
+    host_gated = int(payload.get("host_plane_gated") or 0)
+    ux.subhead(
+        f"processes: {observed} read, {skipped} not fully readable | "
+        f"connections: {connections} seen, {unattributed} with no owner",
+        indent=indent,
+    )
+    ux.subhead(
+        f"host plane: {host_observations} kernel events classified, "
+        f"{host_gated} excluded outside AI-agent lineage",
+        indent=indent,
+    )
+    if unattributed and connections:
+        share = round(100 * unattributed / connections)
+        if share >= 50:
+            ux.warn(
+                f"{share}% of connections could not be attributed to a process. "
+                "Run the gateway with elevated privilege for machine-wide egress attribution.",
+                indent=indent,
+            )
+
+
+@discovery_runtime.command("status")
+@click.option("--json", "as_json", is_flag=True, help="Output status as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_status(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Show what the runtime planes can and cannot see right now."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime planes")
+    if not payload.get("enabled"):
+        ux.warn("disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    scanned = payload.get("scanned_at") or "never"
+    ux.ok(f"last poll: {scanned}", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    findings = payload.get("findings") or []
+    ux.subhead(f"{len(findings)} finding(s) at or above the reporting floor", indent="  ")
+
+
+@discovery_runtime.command("findings")
+@click.option("--json", "as_json", is_flag=True, help="Output findings as JSON.")
+@click.option("--refresh", is_flag=True, help="Poll immediately instead of reading the last snapshot.")
+@click.option(
+    "--severity",
+    type=click.Choice(_RUNTIME_SEVERITY_ORDER),
+    default=None,
+    help="Only show findings at or above this severity.",
+)
+@click.option("--limit", type=int, default=50, help="Maximum rows to render.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_findings(
+    app: AppContext,
+    as_json: bool,
+    refresh: bool,
+    severity: str | None,
+    limit: int,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """List scored runtime findings."""
+    from defenseclaw import ux
+
+    if limit < 0:
+        raise click.BadParameter("--limit must not be negative")
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=refresh,
+    )
+    if as_json:
+        # The JSON is the complete snapshot on purpose. Filtering is a
+        # rendering concern; a caller piping to jq wants the raw view, and
+        # silently dropping rows from a machine-readable export is how
+        # coverage gaps get hidden.
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+
+    ux.section("AI discovery runtime findings")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        return
+
+    findings = list(payload.get("findings") or [])
+    if severity:
+        cutoff = _RUNTIME_SEVERITY_ORDER.index(severity)
+        findings = [
+            finding for finding in findings
+            if _runtime_severity_rank(finding.get("severity")) <= cutoff
+        ]
+    if not findings:
+        ux.ok("no findings at or above the reporting floor", indent="  ")
+        # Coverage is printed even with nothing to show, because "nothing
+        # found" and "nothing could be looked at" are different results.
+        _render_plane_health(payload)
+        _render_coverage(payload)
+        return
+
+    rows = []
+    for finding in findings[:limit]:
+        providers = ", ".join(
+            str(provider.get("hostname") or "") for provider in (finding.get("providers") or [])
+        )
+        rows.append([
+            str(finding.get("severity") or ""),
+            str(finding.get("score") or 0),
+            str(finding.get("process") or ""),
+            str(finding.get("pid") or ""),
+            str(finding.get("agent_name") or "-"),
+            providers or "-",
+            str((finding.get("correlation") or {}).get("verdict") or ""),
+        ])
+    click.echo(_render_runtime_table(
+        ["Severity", "Score", "Process", "PID", "Agent", "Providers", "Inventory"], rows,
+    ), nl=False)
+    if len(findings) > limit:
+        ux.subhead(f"{len(findings) - limit} more not shown; raise --limit", indent="  ")
+    _render_plane_health(payload)
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("selftest")
+@click.option("--json", "as_json", is_flag=True, help="Output the capability report as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_selftest(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Report what this host's planes can and cannot see, and why.
+
+    Exists because an unprivileged or blinded plane reporting clean is
+    indistinguishable, on a dashboard, from a host that is genuinely clean.
+    This states the difference out loud before anyone relies on the result.
+    """
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+    )
+    if as_json:
+        click.echo(json.dumps(
+            {
+                "enabled": bool(payload.get("enabled")),
+                "planes": payload.get("planes") or [],
+                "degraded": bool(payload.get("degraded")),
+                "degraded_reasons": payload.get("degraded_reasons") or [],
+                "processes_observed": payload.get("processes_observed") or 0,
+                "processes_skipped": payload.get("processes_skipped") or 0,
+                "connections_observed": payload.get("connections_observed") or 0,
+                "connections_unattributed": payload.get("connections_unattributed") or 0,
+                "host_plane_observations": payload.get("host_plane_observations") or 0,
+                "host_plane_gated": payload.get("host_plane_gated") or 0,
+            },
+            indent=2,
+            sort_keys=True,
+        ))
+        return
+
+    ux.section("AI discovery runtime self-test")
+    if not payload.get("enabled"):
+        ux.warn("the runtime planes are disabled in config", indent="  ")
+        ux.subhead("Enable with 'defenseclaw agent discovery runtime enable'.", indent="  ")
+        return
+    _render_plane_health(payload)
+    _render_coverage(payload)
+    reasons = payload.get("degraded_reasons") or []
+    if reasons:
+        ux.warn("coverage is partial:", indent="  ")
+        for reason in reasons:
+            ux.subhead(f"- {reason}", indent="    ")
+    else:
+        ux.ok("every selected plane is running", indent="  ")
+
+
+def _probe_root() -> bool | None:
+    """Whether this process is running with full privilege."""
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            return bool(ctypes.windll.shell32.IsUserAnAdmin())
+        except Exception:  # noqa: BLE001 - an unanswerable probe reports unknown
+            return None
+    try:
+        return os.geteuid() == 0
+    except AttributeError:
+        return None
+
+
+def _probe_full_disk_access() -> bool | None:
+    """Whether this process holds macOS Full Disk Access.
+
+    TCC.db is readable only with the grant, which makes opening it the
+    cheapest honest probe available. It answers for *this* process, which is
+    the right question: the grant attaches to the responsible process, so
+    asking about anything else would report someone else's permission.
+    """
+    if sys.platform != "darwin":
+        return None
+    candidate = Path.home() / "Library/Application Support/com.apple.TCC/TCC.db"
+    try:
+        with candidate.open("rb") as handle:
+            handle.read(1)
+        return True
+    except PermissionError:
+        return False
+    except OSError:
+        # Missing or unreadable for some other reason: unknown, not denied.
+        return None
+
+
+def _probe_linux_capability(name: str) -> bool | None:
+    """Whether this process holds a capability, read from /proc/self/status."""
+    if not sys.platform.startswith("linux"):
+        return None
+    if _probe_root():
+        return True
+    try:
+        status = Path("/proc/self/status").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    for line in status.splitlines():
+        if not line.startswith("CapEff:"):
+            continue
+        try:
+            effective = int(line.split()[1], 16)
+        except (IndexError, ValueError):
+            return None
+        bit = _LINUX_CAPABILITY_BITS.get(name)
+        if bit is None:
+            return None
+        return bool(effective & (1 << bit))
+    return None
+
+
+# Capability bit numbers from linux/capability.h. Only the ones the planes
+# ask for, because an incomplete map is better than a stale copy of a header.
+_LINUX_CAPABILITY_BITS = {
+    "CAP_DAC_READ_SEARCH": 2,
+    "CAP_NET_RAW": 13,
+    "CAP_SYS_ADMIN": 21,
+}
+
+
+def _probe_windows_audit(subcategory: str) -> bool | None:
+    """Whether an audit subcategory is enabled, via auditpol."""
+    if sys.platform != "win32":
+        return None
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    try:
+        completed = subprocess.run(
+            ["auditpol", "/get", f"/subcategory:{subcategory}"],
+            capture_output=True, text=True, timeout=15, check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if completed.returncode != 0:
+        return None
+    for line in completed.stdout.splitlines():
+        if subcategory.lower() in line.lower():
+            return "success" in line.lower()
+    return None
+
+
+def _probe_windows_cmdline_audit() -> bool | None:
+    """Whether process-creation events carry command lines."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg  # noqa: PLC0415 - Windows only
+    except ImportError:
+        return None
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_LOCAL_MACHINE,
+            r"SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit",
+        ) as key:
+            value, _ = winreg.QueryValueEx(key, "ProcessCreationIncludeCmdLine_Enabled")
+            return bool(value)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return None
+
+
+# _RUNTIME_GRANTS is what each plane needs, per OS, stated as something an
+# operator can actually do.
+#
+# It is static on purpose. The point of this command is to be answerable
+# *before* anything is running -- at install time, or on a host where the
+# planes came up blind and the operator needs to know what to change. A
+# reason derived from a live snapshot cannot answer "what should I grant
+# before I start", which is the question people actually ask.
+#
+# `check` is a callable returning None when this process cannot tell. It is
+# deliberately allowed to be uncertain: claiming a grant is missing when it
+# is merely unverifiable would send an operator to change something that was
+# already correct.
+_RUNTIME_GRANTS: dict[str, list[dict[str, object]]] = {
+    "darwin": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads the process table through ps(1), which any user may do",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root, for machine-wide attribution",
+            "probe": "root",
+            "why": (
+                "unprivileged lsof returns only this user's sockets, so other users' "
+                "egress is invisible rather than merely unattributed"
+            ),
+            "how": "run the gateway as root (the packaged LaunchDaemon already does)",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "root, for /dev/bpf",
+            "probe": "root",
+            "why": (
+                "naming a peer from the answer this host resolved is a direct "
+                "observation; without it peers are named by reverse DNS, less "
+                "confidently"
+            ),
+            "how": "run the gateway as root, or set dns_capture: false to stop asking",
+        },
+        {
+            "plane": "agent actions (C)",
+            "needs": "root AND Full Disk Access",
+            "probe": "darwin_fda",
+            "why": (
+                "Endpoint Security refuses a client without the TCC grant, and "
+                "refuses it for the *responsible* process -- the terminal or "
+                "daemon that launched the gateway, not the gateway binary"
+            ),
+            "how": (
+                "System Settings > Privacy & Security > Full Disk Access, add the "
+                "process that launches the gateway. Managed installs ship this as "
+                "an MDM PPPC profile"
+            ),
+        },
+    ],
+    "linux": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing",
+            "why": "reads /proc, which is world-readable for process stat",
+            "how": None,
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "root or CAP_DAC_READ_SEARCH, for machine-wide attribution",
+            "probe": "cap_dac",
+            "why": (
+                "/proc/net/tcp lists every connection to anyone, but the "
+                "/proc/<pid>/fd links that attribute a socket to a process are "
+                "readable only by the owner or root"
+            ),
+            "how": "run the gateway as root, or grant CAP_DAC_READ_SEARCH",
+        },
+        {
+            "plane": "shadow egress (B), DNS naming",
+            "needs": "CAP_NET_RAW",
+            "probe": "cap_net_raw",
+            "why": "AF_PACKET capture needs it; without it peers fall back to reverse DNS",
+            "how": "setcap cap_net_raw+ep on the gateway, or run it as root",
+        },
+        {
+            "plane": "agent actions (C), process events",
+            "needs": "nothing",
+            "why": (
+                "the cn_proc netlink connector is readable unprivileged on most "
+                "kernels; a sandbox that blocks AF_NETLINK is the exception"
+            ),
+            "how": None,
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "CAP_SYS_ADMIN",
+            "probe": "cap_sys_admin",
+            "why": (
+                "fanotify needs it. Without it credential reads are inferred from "
+                "argv instead of observed, which sees the command but not the read"
+            ),
+            "how": "run the gateway as root, or grant CAP_SYS_ADMIN",
+        },
+    ],
+    "windows": [
+        {
+            "plane": "inference heartbeat (A)",
+            "needs": "nothing for this user's processes; elevation for all",
+            "probe": "root",
+            "why": "OpenProcess on another user's process needs an elevated token",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "shadow egress (B)",
+            "needs": "elevated token",
+            "probe": "root",
+            "why": "GetExtendedTcpTable returns owning pids machine-wide only when elevated",
+            "how": "run the gateway elevated",
+        },
+        {
+            "plane": "agent actions (C), process and identity events",
+            "needs": "elevated token AND Advanced Audit Policy",
+            "probe": "win_audit_proc",
+            "why": "the Security channel carries nothing until the subcategories are on",
+            "how": (
+                'auditpol /set /subcategory:"Process Creation" /success:enable '
+                "/failure:enable   (also User Account Management, Sensitive "
+                "Privilege Use)"
+            ),
+        },
+        {
+            "plane": "agent actions (C), command lines",
+            "needs": "the separate command-line audit policy",
+            "probe": "win_cmdline",
+            "why": (
+                "without it lineage still works and every argument-vector tactic "
+                "goes undetected, which is most of them"
+            ),
+            "how": (
+                "reg add HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion"
+                "\\Policies\\System\\Audit /v "
+                "ProcessCreationIncludeCmdLine_Enabled /t REG_DWORD /d 1 /f"
+            ),
+        },
+        {
+            "plane": "agent actions (C), file events",
+            "needs": "a SACL on each audited object",
+            "why": (
+                "event 4663 is only emitted for objects with an audit ACE, so "
+                "credential reads and persistence writes are not observable without one"
+            ),
+            "how": "set an audit ACE on the credential paths you care about",
+        },
+    ],
+}
+
+
+def _evaluate_grant(probe: str | None, for_this_host: bool) -> bool | None:
+    """Resolve a grant's current state, or None when it cannot be known.
+
+    Unknown is a real answer and is reported as such. Telling an operator a
+    grant is missing when it is merely unverifiable sends them to change
+    something that was already correct, which is worse than saying so.
+    """
+    if not probe or not for_this_host:
+        return None
+    if probe == "root":
+        return _probe_root()
+    if probe == "darwin_fda":
+        granted = _probe_full_disk_access()
+        if granted is None:
+            return None
+        return bool(granted and _probe_root())
+    if probe == "cap_dac":
+        return _probe_linux_capability("CAP_DAC_READ_SEARCH")
+    if probe == "cap_net_raw":
+        return _probe_linux_capability("CAP_NET_RAW")
+    if probe == "cap_sys_admin":
+        return _probe_linux_capability("CAP_SYS_ADMIN")
+    if probe == "win_audit_proc":
+        return _probe_windows_audit("Process Creation")
+    if probe == "win_cmdline":
+        return _probe_windows_cmdline_audit()
+    return None
+
+
+# _GRANT_PLANS are the commands that close a gap, per OS.
+#
+# Every one is idempotent, scoped to exactly what a plane needs, and printed
+# before it runs. None of them widens anything beyond the requirement it
+# names -- notably there is no blanket SACL on Windows, because auditing
+# every object on a filesystem to catch credential reads would generate far
+# more exposure than the detection is worth.
+#
+# macOS is absent on purpose. Its remaining grant is Full Disk Access, which
+# TCC does not let any process grant to itself or to another, at any
+# privilege level. The command opens the exact settings pane instead and
+# waits for the operator, which is the whole of what is achievable.
+_LINUX_GRANT_CAPS = "cap_dac_read_search,cap_net_raw,cap_sys_admin+ep"
+
+_WINDOWS_AUDIT_SUBCATEGORIES = (
+    "Process Creation",
+    "User Account Management",
+    "Sensitive Privilege Use",
+)
+
+_WINDOWS_AUDIT_REG_KEY = (
+    r"HKLM\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System\Audit"
+)
+
+
+def _linux_grant_commands(binary: str, revert: bool) -> list[list[str]]:
+    if revert:
+        return [["setcap", "-r", binary]]
+    return [["setcap", _LINUX_GRANT_CAPS, binary]]
+
+
+def _windows_grant_commands(revert: bool) -> list[list[str]]:
+    setting = "disable" if revert else "enable"
+    commands = [
+        ["auditpol", "/set", f"/subcategory:{name}",
+         f"/success:{setting}", f"/failure:{setting}"]
+        for name in _WINDOWS_AUDIT_SUBCATEGORIES
+    ]
+    commands.append([
+        "reg", "add", _WINDOWS_AUDIT_REG_KEY,
+        "/v", "ProcessCreationIncludeCmdLine_Enabled",
+        "/t", "REG_DWORD", "/d", "0" if revert else "1", "/f",
+    ])
+    return commands
+
+
+def _render_command(command: list[str]) -> str:
+    return " ".join(part if " " not in part else f'"{part}"' for part in command)
+
+
+def _run_grant_commands(commands: list[list[str]], *, elevate: bool) -> int:
+    """Run the grant commands, returning how many failed."""
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
+
+    failed = 0
+    for command in commands:
+        runnable = command
+        if elevate and sys.platform != "win32":
+            # -n so a host with no cached credential fails loudly instead of
+            # blocking on a prompt nobody is watching.
+            runnable = ["sudo", "-n", *command]
+        try:
+            completed = subprocess.run(
+                runnable, capture_output=True, text=True, timeout=60, check=False,
+            )
+        except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+            ux.warn(f"{_render_command(command)}: {exc}", indent="    ")
+            failed += 1
+            continue
+        if completed.returncode != 0:
+            detail = (completed.stderr or completed.stdout or "").strip().splitlines()
+            reason = detail[0] if detail else f"exit {completed.returncode}"
+            ux.warn(f"{_render_command(command)}: {reason}", indent="    ")
+            failed += 1
+            continue
+        ux.ok(_render_command(command), indent="    ")
+    return failed
+
+
+def _open_full_disk_access_pane() -> None:
+    """Open the Full Disk Access pane, which is as far as automation goes."""
+    import subprocess  # noqa: PLC0415 - only needed on this path
+
+    from defenseclaw import ux
+
+    target = (
+        "x-apple.systempreferences:com.apple.preference.security"
+        "?Privacy_AllFiles"
+    )
+    try:
+        subprocess.run(["open", target], capture_output=True, timeout=15, check=False)
+        ux.ok("opened Privacy & Security > Full Disk Access", indent="    ")
+    except (OSError, subprocess.SubprocessError) as exc:  # noqa: BLE001
+        ux.warn(f"could not open System Settings: {exc}", indent="    ")
+    ux.subhead(
+        "Add the process that launches the gateway -- the terminal or the "
+        "daemon, not the gateway binary. TCC grants to the responsible "
+        "process, and no privilege level can set this for you.",
+        indent="    ",
+    )
+
+
+@discovery_runtime.command("permissions")
+@click.option("--json", "as_json", is_flag=True, help="Output the grants as JSON.")
+@click.option("--os", "target_os",
+              type=click.Choice(["darwin", "linux", "windows"]),
+              default=None, help="Report for another OS instead of this one.")
+@click.option("--grant", is_flag=True,
+              help="Apply the grants this host is missing. Shows every command first.")
+@click.option("--revert", is_flag=True,
+              help="Undo what --grant applied.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_permissions(
+    app: AppContext,
+    as_json: bool,
+    target_os: str | None,
+    grant: bool,
+    revert: bool,
+    yes: bool,
+) -> None:
+    """What each runtime plane needs, and how to grant it.
+
+    Answerable before anything is running, which is the point: an operator
+    installing DefenseClaw needs to know what to grant up front, and
+    'runtime selftest' can only explain a gateway that is already up.
+    """
+    from defenseclaw import ux
+
+    resolved = target_os or sys.platform
+    if resolved.startswith("linux"):
+        resolved = "linux"
+    elif resolved == "win32":
+        resolved = "windows"
+    grants = _RUNTIME_GRANTS.get(resolved)
+    if grants is None:
+        raise SystemExit(f"no permission guidance for {resolved}")
+
+    for_this_host = target_os is None
+    evaluated = []
+    for entry in grants:
+        if entry["needs"] == "nothing":
+            # Nothing to grant is not an unknown. Rendering it as one would
+            # bury the entries that do need action among ones that never will.
+            state: bool | None = True
+        else:
+            state = _evaluate_grant(entry.get("probe"), for_this_host)  # type: ignore[arg-type]
+        evaluated.append({**entry, "granted": state})
+
+    if as_json:
+        click.echo(json.dumps(
+            {"os": resolved, "checked_this_host": for_this_host, "grants": evaluated},
+            indent=2, sort_keys=True,
+        ))
+        return
+
+    ux.section(f"AI discovery runtime permissions ({resolved})")
+    ux.subhead(
+        "Every plane runs without these and reports what it cannot see. "
+        "Granting them is how the coverage gets complete, not how it starts.",
+        indent="  ",
+    )
+    missing = 0
+    for entry in evaluated:
+        # Deliberately not named `grant`: that is the flag parameter, and
+        # shadowing it left the loop's last dict bound to the name, so the
+        # command believed --grant had been passed on every invocation.
+        state = entry["granted"]
+        if state is True:
+            mark = "[granted]"
+        elif state is False:
+            mark = "[MISSING]"
+            missing += 1
+        else:
+            mark = "[unknown]"
+        ux.subhead(f"{mark} {entry['plane']}", indent="  ")
+        ux.subhead(f"needs: {entry['needs']}", indent="    ")
+        ux.subhead(f"why:   {entry['why']}", indent="    ")
+        if entry["how"] and state is not True:
+            ux.subhead(f"grant: {entry['how']}", indent="    ")
+    if for_this_host:
+        if missing:
+            ux.warn(f"{missing} grant(s) missing on this host", indent="  ")
+        else:
+            ux.ok("nothing this check can see is missing", indent="  ")
+        ux.subhead(
+            "An [unknown] is not a failure: it is a grant this process cannot "
+            "verify from where it is running, and reporting it as missing "
+            "would send you to change something already correct.",
+            indent="  ",
+        )
+    ux.subhead(
+        "In a managed enterprise install the gateway is deliberately "
+        "de-privileged and a separate sensor helper holds these instead; see "
+        "the AI Discovery docs.",
+        indent="  ",
+    )
+
+    if not (grant or revert):
+        return
+    if not for_this_host:
+        raise SystemExit("--grant and --revert only apply to the host you are on")
+    _apply_grants(resolved, revert=revert, assume_yes=yes)
+
+
+def _apply_grants(resolved: str, *, revert: bool, assume_yes: bool) -> None:
+    """Apply, or undo, the grants that can be automated on this host.
+
+    Everything here changes privileged machine state, so it prints the exact
+    commands first and asks. An operator who cannot see what is about to run
+    cannot consent to it, and these are not changes to discover afterwards.
+    """
+    from defenseclaw import ux
+    from defenseclaw.gateway import resolve_gateway_binary
+
+    verb = "revert" if revert else "grant"
+    ux.section(f"AI discovery runtime permissions: {verb}")
+
+    commands: list[list[str]] = []
+    elevate = False
+    manual: list[str] = []
+
+    if resolved == "linux":
+        binary = resolve_gateway_binary()
+        if not binary:
+            raise SystemExit(
+                "cannot find defenseclaw-gateway on PATH; capabilities attach to "
+                "the binary, so there is nothing to grant them to")
+        commands = _linux_grant_commands(binary, revert)
+        # _probe_root rather than os.geteuid: that name does not exist on
+        # Windows, and this function is reachable there -- both from the
+        # tests that assert the Linux plan and from anyone diagnosing a
+        # cross-platform deployment. Unknown privilege elevates, because
+        # attempting sudo and being refused is recoverable while silently
+        # skipping it produces a grant that did not happen.
+        elevate = _probe_root() is not True
+    elif resolved == "windows":
+        commands = _windows_grant_commands(revert)
+        if _probe_root() is False:
+            raise SystemExit(
+                "machine-wide audit policy needs an elevated token; re-run this "
+                "from an elevated prompt")
+    elif resolved == "darwin":
+        # Root is a matter of how the gateway is launched, not something to
+        # set here, and Full Disk Access cannot be granted by any process.
+        manual.append(
+            "run the gateway as root -- the packaged LaunchDaemon already does")
+        if not revert:
+            manual.append("grant Full Disk Access, opened below")
+
+    if not commands and not manual:
+        ux.ok("nothing to do on this platform", indent="  ")
+        return
+
+    if commands:
+        ux.subhead("These commands will run:", indent="  ")
+        for command in commands:
+            prefix = "sudo " if elevate and sys.platform != "win32" else ""
+            ux.subhead(f"{prefix}{_render_command(command)}", indent="    ")
+    for note in manual:
+        ux.subhead(f"manual: {note}", indent="    ")
+
+    if commands and not assume_yes and not click.confirm(
+        f"Apply {len(commands)} change(s) to this machine?", default=False,
+    ):
+        raise SystemExit(1)
+
+    failed = _run_grant_commands(commands, elevate=elevate) if commands else 0
+
+    if resolved == "darwin" and not revert:
+        _open_full_disk_access_pane()
+
+    if failed:
+        raise SystemExit(
+            f"{failed} of {len(commands)} change(s) failed; nothing was retried "
+            "and the rest were applied. Re-run to see the current state")
+    if commands:
+        ux.ok(f"{len(commands)} change(s) applied", indent="  ")
+    ux.subhead(
+        "Re-run 'defenseclaw agent discovery runtime permissions' to confirm, "
+        "and restart the gateway so the planes pick the new privilege up.",
+        indent="  ",
+    )
+
+
+@discovery_runtime.command("scan")
+@click.option("--json", "as_json", is_flag=True, help="Output the poll result as JSON.")
+@_runtime_gateway_options
+@pass_ctx
+def runtime_scan(
+    app: AppContext,
+    as_json: bool,
+    gateway_host: str | None,
+    gateway_port: int | None,
+    gateway_token_env: str | None,
+) -> None:
+    """Poll the runtime planes immediately."""
+    from defenseclaw import ux
+
+    payload = _runtime_snapshot(
+        app,
+        gateway_host=gateway_host,
+        gateway_port=gateway_port,
+        gateway_token_env=gateway_token_env,
+        refresh=True,
+    )
+    if as_json:
+        click.echo(json.dumps(payload, indent=2, sort_keys=True))
+        return
+    ux.section("AI discovery runtime scan")
+    ux.ok(f"poll complete: {len(payload.get('findings') or [])} finding(s)", indent="  ")
+    _render_coverage(payload)
+
+
+@discovery_runtime.command("enable")
+@click.option("--enable-host-plane/--no-enable-host-plane", default=None,
+              help="Kernel process, file, and identity events. Needs elevated privilege.")
+@click.option("--dns-capture/--no-dns-capture", default=None,
+              help="Passive DNS observation so peers are named rather than inferred.")
+@click.option("--poll-interval-s", type=click.IntRange(*_RUNTIME_POLL_INTERVAL_S_RANGE),
+              default=None, help="Seconds between polls.")
+@click.option("--min-risk-to-report", type=click.IntRange(*_RUNTIME_MIN_RISK_RANGE),
+              default=None, help="Reporting floor: the score a finding must reach to be reported.")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_enable(
+    app: AppContext,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+) -> None:
+    """Turn on the runtime planes."""
+    _apply_runtime_settings(
+        app,
+        enabled=True,
+        enable_host_plane=enable_host_plane,
+        dns_capture=dns_capture,
+        poll_interval_s=poll_interval_s,
+        min_risk_to_report=min_risk_to_report,
+        restart=restart,
+        yes=yes,
+        action="enable",
+    )
+
+
+@discovery_runtime.command("disable")
+@click.option("--restart/--no-restart", default=True, help="Restart the gateway to apply.")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt.")
+@pass_ctx
+def runtime_disable(app: AppContext, restart: bool, yes: bool) -> None:
+    """Turn off the runtime planes. Recorded findings are preserved."""
+    _apply_runtime_settings(
+        app, enabled=False, enable_host_plane=None, dns_capture=None,
+        poll_interval_s=None, min_risk_to_report=None,
+        restart=restart, yes=yes, action="disable",
+    )
+
+
+def _apply_runtime_settings(
+    app: AppContext,
+    *,
+    enabled: bool,
+    enable_host_plane: bool | None,
+    dns_capture: bool | None,
+    poll_interval_s: int | None,
+    min_risk_to_report: int | None,
+    restart: bool,
+    yes: bool,
+    action: str,
+) -> None:
+    """Preview, confirm, persist, restart -- the same shape as ``discovery enable``."""
+    from defenseclaw import ux
+
+    cfg = _require_loaded_config(app)
+    runtime = cfg.ai_discovery.runtime
+
+    changes: list[tuple[str, object, object]] = []
+
+    def stage(field: str, value: object) -> None:
+        if value is None:
+            return
+        current = getattr(runtime, field)
+        if current != value:
+            changes.append((field, current, value))
+            setattr(runtime, field, value)
+
+    stage("enabled", enabled)
+    if enabled:
+        host_plane_requested = _runtime_host_plane_requested(runtime, enable_host_plane)
+        desired_planes = (
+            list(FULL_RUNTIME_PLANES)
+            if host_plane_requested
+            else list(USER_RUNTIME_PLANES)
+        )
+        stage("planes", desired_planes)
+        stage("enable_host_plane", host_plane_requested)
+    stage("dns_capture", dns_capture)
+    stage("poll_interval_s", poll_interval_s)
+    stage("min_risk_to_report", min_risk_to_report)
+
+    ux.section(f"AI discovery runtime {action}")
+    if not changes:
+        ux.ok("no configuration changes needed", indent="  ")
+    else:
+        for field, before, after in changes:
+            ux.subhead(f"{field}: {before!r} -> {after!r}", indent="  ")
+        if runtime.enable_host_plane:
+            ux.warn(
+                "the host plane reads kernel process, file, and identity events. Every "
+                "signal it raises is gated on an AI agent in the process lineage.",
+                indent="  ",
+            )
+        if not yes and not click.confirm("Apply these changes?", default=True):
+            raise SystemExit(1)
+        try:
+            cfg.save()
+        except Exception as exc:  # noqa: BLE001 - surfaced verbatim to the operator
+            raise SystemExit(f"failed to save config: {exc}") from exc
+        ux.ok("configuration saved", indent="  ")
+
+    if not changes:
+        return
+
+    if not restart:
+        ux.subhead(
+            "--no-restart specified: the setting is saved but the running gateway keeps "
+            "its current planes until you restart it "
+            "('defenseclaw setup restart').",
+            indent="  ",
+        )
+        return
+
+    # Same restart path the sibling `agent discovery enable/disable` commands
+    # use. Printing instructions instead would make --restart, which is on by
+    # default, silently mean --no-restart: enabling would not start collecting
+    # and, worse, disabling would leave the planes reading argv and sockets.
+    from defenseclaw.commands import cmd_setup
+
+    connectors = _resolve_connectors_for_restart(cfg)
+    connector = _resolve_connector_for_restart(cfg)
+    if connector not in connectors:
+        connector = connectors[0] if connectors else ""
+    try:
+        cmd_setup._restart_services(
+            cfg.data_dir,
+            cfg.gateway.host,
+            cfg.gateway.port,
+            connector=connector,
+            connectors=connectors,
+        )
+    except Exception as exc:  # noqa: BLE001 - the config is already saved
+        ux.err(f"Gateway restart failed: {exc}", indent="  ")
+        ux.subhead(
+            "The configuration is saved. Restart the gateway to apply it: "
+            "'defenseclaw setup restart'.",
+            indent="    ",
+        )
+        raise SystemExit(1) from exc
+    if runtime.enabled:
+        ux.ok("Sidecar restarted; the runtime planes are live.", indent="  ")
+    else:
+        ux.ok("Sidecar restarted; the runtime planes are stopped.", indent="  ")
+
+
 def _normalize_scan_roots(raw: str) -> list[str]:
     return [part.strip() for part in raw.split(",") if part.strip()]
 
@@ -1720,7 +2984,7 @@ def _build_discovery_overrides(
     include_package_manifests: bool | None = None,
     include_env_var_names: bool | None = None,
     include_network_domains: bool | None = None,
-    emit_otel: bool | None = None,
+    lookup_model_provenance_online: bool | None = None,
     allow_workspace_signatures: bool | None = None,
     store_raw_local_paths: bool | None = None,
 ) -> dict[str, Any]:
@@ -1758,13 +3022,78 @@ def _build_discovery_overrides(
         overrides["include_env_var_names"] = bool(include_env_var_names)
     if include_network_domains is not None:
         overrides["include_network_domains"] = bool(include_network_domains)
-    if emit_otel is not None:
-        overrides["emit_otel"] = bool(emit_otel)
+    if lookup_model_provenance_online is not None:
+        overrides["lookup_model_provenance_online"] = bool(
+            lookup_model_provenance_online
+        )
     if allow_workspace_signatures is not None:
         overrides["allow_workspace_signatures"] = bool(allow_workspace_signatures)
     if store_raw_local_paths is not None:
         overrides["store_raw_local_paths"] = bool(store_raw_local_paths)
     return overrides
+
+
+def _discovery_runtime(ad: Any) -> AIRuntimeConfig:
+    """Return the AI discovery runtime block, creating one if missing."""
+
+    runtime = getattr(ad, "runtime", None)
+    if isinstance(runtime, AIRuntimeConfig):
+        return runtime
+    created = AIRuntimeConfig()
+    if runtime is not None:
+        for field_name in ("enabled", "planes", "enable_host_plane"):
+            if hasattr(runtime, field_name):
+                setattr(created, field_name, getattr(runtime, field_name))
+    try:
+        ad.runtime = created
+    except Exception:  # noqa: BLE001 - fixtures may be read-only namespaces
+        pass
+    return created
+
+
+def _preview_runtime_planes(
+    ad: Any, *, enable_host_plane: bool | None
+) -> list[tuple[str, object, object]]:
+    """Diff the requested runtime planes without mutating the live config."""
+
+    runtime = getattr(ad, "runtime", None)
+    host_plane_requested = _runtime_host_plane_requested(runtime, enable_host_plane)
+    if runtime is None:
+        return [
+            ("enabled", False, True),
+            ("planes", [], list(FULL_RUNTIME_PLANES if host_plane_requested else USER_RUNTIME_PLANES)),
+            ("enable_host_plane", False, host_plane_requested),
+        ]
+    probe = AIRuntimeConfig(
+        enabled=bool(getattr(runtime, "enabled", False)),
+        planes=list(getattr(runtime, "planes", []) or []),
+        enable_host_plane=bool(getattr(runtime, "enable_host_plane", False)),
+    )
+    if host_plane_requested:
+        return enable_all_runtime_planes(probe)
+    return enable_user_runtime_planes(probe)
+
+
+def _apply_runtime_planes(
+    ad: Any, *, enable_host_plane: bool | None
+) -> list[tuple[str, object, object]]:
+    """Turn on the requested runtime planes on the live config and return the diff."""
+
+    runtime = _discovery_runtime(ad)
+    if _runtime_host_plane_requested(runtime, enable_host_plane):
+        return enable_all_runtime_planes(runtime)
+    return enable_user_runtime_planes(runtime)
+
+
+def _runtime_host_plane_requested(runtime: Any, requested: bool | None) -> bool:
+    """Resolve an explicit Plane C flag or preserve a complete prior opt-in."""
+
+    if requested is not None:
+        return requested
+    if runtime is None:
+        return False
+    planes = {str(plane).strip().lower() for plane in (getattr(runtime, "planes", None) or [])}
+    return bool(getattr(runtime, "enable_host_plane", False) and "c" in planes)
 
 
 def _preview_discovery_changes(
@@ -1815,20 +3144,48 @@ def _resolve_connector_for_restart(cfg: Any) -> str:
     try:
         active = cfg.active_connector()
         if active:
-            return str(active).strip().lower()
+            return normalize_connector(str(active))
     except Exception:
         pass
     gc = getattr(cfg, "guardrail", None)
     if gc is not None:
         connector = getattr(gc, "connector", "")
         if connector:
-            return str(connector).strip().lower()
+            return normalize_connector(str(connector))
     claw = getattr(cfg, "claw", None)
     if claw is not None:
         mode = getattr(claw, "mode", "")
         if mode:
-            return str(mode).strip().lower()
+            return normalize_connector(str(mode))
     return "openclaw"
+
+
+def _resolve_connectors_for_restart(cfg: Any) -> list[str]:
+    """Return the authoritative active connector roster for a restart.
+
+    Config.active_connectors() is authoritative when present, including its
+    explicit empty-list result for an unconfigured install. The singular
+    resolver remains only as compatibility for older Config-like objects.
+    """
+    resolver = getattr(cfg, "active_connectors", None)
+    if callable(resolver):
+        try:
+            raw_connectors = resolver()
+        except Exception:
+            pass
+        else:
+            roster: list[str] = []
+            seen: set[str] = set()
+            for raw in raw_connectors or []:
+                connector = normalize_connector(str(raw))
+                if not connector or connector in seen:
+                    continue
+                seen.add(connector)
+                roster.append(connector)
+            return roster
+
+    connector = normalize_connector(_resolve_connector_for_restart(cfg))
+    return [connector] if connector else []
 
 
 def _trigger_post_enable_scan(
@@ -1972,7 +3329,7 @@ def signatures_install(app: AppContext, pack_path: Path, replace: bool) -> None:
 @pass_ctx
 def signatures_disable(app: AppContext, signature_id: str) -> None:
     """Disable one signature id in ai_discovery.disabled_signature_ids."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     if not normalized:
         raise click.ClickException("signature id must not be empty")
@@ -1989,7 +3346,7 @@ def signatures_disable(app: AppContext, signature_id: str) -> None:
 @pass_ctx
 def signatures_enable(app: AppContext, signature_id: str) -> None:
     """Re-enable one signature id previously disabled in config."""
-    cfg = _load_config_best_effort(app)
+    cfg = _require_loaded_config(app)
     normalized = ai_signatures.normalize_signature_id(signature_id)
     disabled = list(getattr(cfg.ai_discovery, "disabled_signature_ids", []) or [])
     if normalized in disabled:
@@ -2010,6 +3367,37 @@ def _load_config_best_effort(app: AppContext):
         cfg = cfg_mod.default_config()
     app.cfg = cfg
     return cfg
+
+
+def _apply_discovery_config_state(
+    app: AppContext,
+    disc: agent_discovery.AgentDiscovery,
+) -> agent_discovery.AgentDiscovery:
+    """Annotate discovery with active/mode state when config.yaml exists.
+
+    ``agent discover`` remains safe before ``init``: a missing or invalid
+    config simply leaves every connector inactive instead of manufacturing
+    the default OpenClaw state.
+    """
+    cfg = getattr(app, "cfg", None)
+    if cfg is None:
+        from defenseclaw import config as cfg_mod  # noqa: PLC0415
+
+        cfg_path = cfg_mod.default_data_path() / cfg_mod.CONFIG_FILE_NAME
+        if not cfg_path.is_file():
+            return disc
+        try:
+            # Discovery should not mix unrelated migration/deprecation prose
+            # into its table or JSON output. Config loading is read-only here;
+            # any warning remains available on commands that manage config.
+            from contextlib import redirect_stderr  # noqa: PLC0415
+            from io import StringIO  # noqa: PLC0415
+
+            with redirect_stderr(StringIO()):
+                cfg = cfg_mod.load()
+        except Exception:
+            return disc
+    return agent_discovery.apply_config_state(disc, cfg)
 
 
 def _require_loaded_config(app: AppContext):
@@ -2034,10 +3422,15 @@ def _require_loaded_config(app: AppContext):
     """
     cfg = getattr(app, "cfg", None)
     if cfg is not None:
+        if getattr(cfg, "_source_config_version", None) != 8:
+            raise click.ClickException(
+                "Configuration schema v8 is required — run 'defenseclaw upgrade' first."
+            )
         return cfg
     from defenseclaw import config as cfg_mod
 
     try:
+        cfg_mod.require_v8_config()
         cfg = cfg_mod.load()
     except Exception as exc:
         raise click.ClickException(
@@ -2673,6 +4066,40 @@ def _format_csv_truncated(items: list[str], *, limit: int = 2) -> str:
     return sample
 
 
+def _format_ai_usage_scan_diagnostics(summary: dict[str, Any]) -> str:
+    """Render bounded detector failures without hiding successful discoveries."""
+
+    result = str(summary.get("result", "") or "").strip().lower()
+    detector_errors = _mapping_block(summary.get("detector_errors"))
+    try:
+        error_count = max(0, int(summary.get("errors", 0) or 0))
+    except (TypeError, ValueError, OverflowError):
+        error_count = 0
+    if result not in {"partial", "failed", "error"} and error_count == 0 and not detector_errors:
+        return ""
+
+    label = result if result in {"partial", "failed", "error"} else "partial"
+    count = max(error_count, len(detector_errors))
+    note = f" Scan {label}"
+    if count:
+        note += f": {count} detector {_pluralize(count, 'error', 'errors')}"
+    details: list[str] = []
+    ordered_errors = sorted(detector_errors.items(), key=lambda item: str(item[0]))
+    for detector, message in ordered_errors[:3]:
+        one_line = " ".join(str(message).split())
+        if len(one_line) > 256:
+            one_line = one_line[:253] + "..."
+        if one_line:
+            details.append(f"{detector}: {one_line}")
+    if details:
+        note += " (" + "; ".join(details)
+        hidden = len(detector_errors) - len(details)
+        if hidden > 0:
+            note += f"; +{hidden} more"
+        note += ")"
+    return note + "."
+
+
 def _render_ai_usage_table(
     payload: dict[str, Any],
     *,
@@ -2868,6 +4295,7 @@ def _render_ai_usage_table(
         )
         if hidden > 0:
             footer += f" {hidden} more hidden by --limit; raise it or use --json for the full list."
+        footer += _format_ai_usage_scan_diagnostics(summary)
         console.print(footer)
         return stream.getvalue()
 
@@ -2967,6 +4395,7 @@ def _render_ai_usage_table(
     hidden = len(full_groups) - len(displayed_full)
     if hidden > 0:
         footer += f" {hidden} more {_pluralize(hidden, 'group', 'groups')} hidden by --limit."
+    footer += _format_ai_usage_scan_diagnostics(summary)
     footer += (
         " Use --detail for per-signal rows, --by-detector to split by "
         "category/detector, --json for raw, --state/--category/--product"
@@ -3078,6 +4507,9 @@ def _render_ai_usage_plain(
         f"changed={summary.get('changed_signals', 0)} "
         f"gone={summary.get('gone_signals', 0)}"
     )
+    diagnostic = _format_ai_usage_scan_diagnostics(summary).strip()
+    if diagnostic:
+        lines.append(diagnostic)
     return "\n".join(lines) + "\n"
 
 
@@ -3520,8 +4952,7 @@ def _render_component_show(
                 cells.append(str(loc.get("raw_path", "")))
             plain.append(" | ".join(cells))
         if not has_raw:
-            plain.append("(raw paths hidden — flip privacy.disable_redaction "
-                         "and ai_discovery.store_raw_local_paths to surface them)")
+            plain.append("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
         return "\n".join(plain) + "\n"
 
     from io import StringIO
@@ -3554,10 +4985,7 @@ def _render_component_show(
         table.add_row(*cells)
     console.print(table)
     if not has_raw:
-        console.print(
-            "(raw paths hidden — flip privacy.disable_redaction and "
-            "ai_discovery.store_raw_local_paths to surface them)"
-        )
+        console.print("(raw paths hidden — set ai_discovery.store_raw_local_paths=true to surface them)")
     return stream.getvalue()
 
 
@@ -3777,7 +5205,7 @@ def _sanitized_discovery_report(disc: agent_discovery.AgentDiscovery, *, duratio
             "has_binary": bool(signal.binary_path),
             "binary_basename": _basename(signal.binary_path),
             "binary_path_hash": _path_hash(signal.binary_path),
-            "version": _bounded(signal.version, 160),
+            "version": _safe_version_label(signal.version, 160),
             "version_probe_status": _probe_status(signal),
             "error_class": _error_class(signal.error),
         }
@@ -3806,6 +5234,25 @@ def _bounded(value: str, max_len: int) -> str:
     if len(value) <= max_len:
         return value
     return value[: max_len - 3] + "..."
+
+
+def _safe_version_label(value: str, max_len: int) -> str:
+    """Return a bounded version accepted by the gateway inventory schema.
+
+    Version commands are third-party output and occasionally include Unicode
+    decoration (for example Hermes uses a middle dot).  The gateway correctly
+    rejects those characters from telemetry labels, so normalize them at the
+    CLI trust boundary instead of letting one connector reject the complete
+    discovery report.
+    """
+    allowed_punctuation = " .,_+@():-"
+    sanitized = "".join(
+        character if character.isascii() and (character.isalnum() or character in allowed_punctuation) else " "
+        for character in (value or "")
+    )
+    sanitized = " ".join(sanitized.split())
+    sanitized = sanitized.lstrip(allowed_punctuation)
+    return _bounded(sanitized, max_len)
 
 
 def _probe_status(signal: agent_discovery.AgentSignal) -> str:

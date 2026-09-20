@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -67,7 +68,7 @@ func piiCompletionHitProvider() *mockLLMProvider {
 func TestToolCallJudge_DefaultOffRegexOnly(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"regex_only", mock)
 
 	verdict := a.inspectToolPolicy(&ToolInspectRequest{
@@ -89,7 +90,7 @@ func TestToolCallJudge_DefaultOffRegexOnly(t *testing.T) {
 func TestToolCallJudge_OptInRunsJudge(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
 	verdict := a.inspectToolPolicy(&ToolInspectRequest{
@@ -106,12 +107,15 @@ func TestToolCallJudge_OptInRunsJudge(t *testing.T) {
 	if !judgeTaggedFinding(verdict.Findings) {
 		t.Fatalf("no llm-judge: tagged finding in %v", verdict.Findings)
 	}
+	if got := mock.captured[0].Messages[0].Content; !strings.Contains(got, "tool call security") || !strings.Contains(got, "fetch_url") {
+		t.Fatalf("tool-call lane used the wrong judge prompt: %q", got)
+	}
 }
 
 func TestToolCallJudge_ProviderErrorFailsOpen(t *testing.T) {
 	mock := &mockLLMProvider{err: errors.New("provider down")}
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
 	verdict := a.inspectToolPolicy(&ToolInspectRequest{
@@ -137,7 +141,7 @@ func TestToolCallJudge_ProviderErrorFailsOpen(t *testing.T) {
 func TestToolCallJudge_PerDirectionStrategyDrivesLane(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"regex_only", mock)
 	a.scannerCfg.Guardrail.DetectionStrategyToolCall = "judge_first"
 
@@ -158,7 +162,7 @@ func TestToolCallJudge_PerDirectionStrategyDrivesLane(t *testing.T) {
 func TestToolCallJudge_UngatedConnectorSkipsJudge(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
 	a.inspectToolPolicy(&ToolInspectRequest{
@@ -180,7 +184,7 @@ func TestToolCallJudge_UngatedConnectorSkipsJudge(t *testing.T) {
 func TestToolCallJudge_GenericEndpoint200msShortCircuits(t *testing.T) {
 	mock := injectionHitProvider()
 	a := newHookJudgeAPIServer(t,
-		config.JudgeConfig{Enabled: true, Injection: true, HookConnectors: []string{"hermes"}},
+		config.JudgeConfig{Enabled: true, ToolInjection: true, HookConnectors: []string{"hermes"}},
 		"judge_first", mock)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)

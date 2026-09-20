@@ -1,5 +1,11 @@
 # Connector Architecture v3 — Executive Summary
 
+> **Status: historical branch summary (2026-04-24).** Connector counts,
+> topology, setup flags, extensibility claims, test totals, and remaining-work
+> statements below describe that review branch, not current support. Use the
+> [published compatibility matrix](https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/compatibility/)
+> and `internal/gateway/connector/` for the current contract.
+
 **Branch**: `feature/connector-architecture-v3`
 **Date**: 2026-04-24
 

@@ -61,6 +61,14 @@ class CodeGuardAssetStatus:
 def codeguard_status(cfg, connector: str | None = None, target: str = "skill") -> CodeGuardAssetStatus:
     connector = _resolve_connector(cfg, connector)
     target = _normalize_target(target)
+    if connector_paths.is_cleanup_only(connector):
+        return CodeGuardAssetStatus(
+            connector,
+            target,
+            "",
+            "unsupported",
+            connector_paths.cleanup_only_guidance(connector),
+        )
     path = _target_path(cfg, connector, target)
     if not path:
         return CodeGuardAssetStatus(connector, target, "", "unsupported", f"{connector} has no {target} install target")
@@ -173,25 +181,26 @@ def _normalize_target(target: str) -> str:
 
 def _target_path(cfg, connector: str, target: str) -> str:
     if target == "skill":
-        dirs = connector_paths.skill_dirs(
-            connector,
-            openclaw_home=getattr(getattr(cfg, "claw", object()), "home_dir", None),
-            openclaw_config=getattr(getattr(cfg, "claw", object()), "config_file", None),
-        )
+        resolver = getattr(cfg, "skill_write_dirs", None)
+        if callable(resolver):
+            dirs = resolver(connector)
+        else:
+            claw = getattr(cfg, "claw", object())
+            workspace_dir = getattr(claw, "workspace_dir", None)
+            dirs = connector_paths.skill_write_dirs(
+                connector,
+                openclaw_home=getattr(claw, "home_dir", None),
+                openclaw_config=getattr(claw, "config_file", None),
+                workspace_dir=workspace_dir,
+            )
         return os.path.join(dirs[0], "codeguard") if dirs else ""
     cwd = os.getcwd()
     if connector == "cursor":
         return os.path.join(cwd, ".cursor", "rules", "codeguard.mdc")
     if connector == "copilot":
         return os.path.join(cwd, ".github", "instructions", "codeguard.instructions.md")
-    if connector == "windsurf":
-        for parent in (
-            os.path.join(cwd, ".windsurf", "rules"),
-            os.path.join(cwd, ".codeium", "windsurf", "rules"),
-        ):
-            if os.path.isdir(parent):
-                return os.path.join(parent, "codeguard.md")
-        return ""
+    if connector == "devin":
+        return os.path.join(cwd, ".devin", "rules", "codeguard.md")
     return ""
 
 
@@ -318,7 +327,11 @@ def _makedirs_owner_only(path: str, *, stop_at: str = "") -> None:
             # (typically permissions on the parent), instead of
             # silently failing to archive.
             raise
-        if not existed:
+        if not existed and os.name == "nt":
+            from defenseclaw.file_permissions import make_private_directory
+
+            make_private_directory(comp)
+        elif not existed:
             try:
                 os.chmod(comp, 0o700)
             except OSError:

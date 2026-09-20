@@ -33,7 +33,14 @@ import (
 // from the audit store. Defined here so the correlator can be
 // exercised in tests with a fake store.
 type SessionFindingReader interface {
-	ListRecentFindingsInSession(sessionID, agentInstanceID string, limit int) ([]SessionFindingRow, error)
+	ListRecentFindingsInSession(
+		sessionID, agentInstanceID, agentID string,
+		limit int,
+	) ([]SessionFindingRow, error)
+	ListFiredCorrelationRuleIDsInSession(
+		sessionID, agentInstanceID, agentID string,
+		candidateRuleIDs []string,
+	) ([]string, error)
 }
 
 // SessionFindingRow mirrors the projection returned by the audit
@@ -42,9 +49,13 @@ type SessionFindingReader interface {
 // via scan_persist for the CorrelationFindingRow type).
 type SessionFindingRow struct {
 	ID                  string
+	AgentID             string
+	AgentInstanceID     string
+	Scanner             string
 	RuleID              sql.NullString
 	Category            sql.NullString
 	Severity            string
+	Tags                []string
 	DataAxis            sql.NullString
 	ToolCapabilityClass sql.NullString
 	ContentFingerprint  sql.NullString
@@ -57,11 +68,16 @@ type SessionFindingRow struct {
 // library against a session's recent findings and writes back CORR-*
 // synthetic findings when any pattern fires.
 type SessionCorrelator struct {
-	reader       SessionFindingReader
-	patterns     []CorrelationPattern
-	windowLimit  int
-	firedPerSess sync.Map // map[sessKey]map[patternID]struct{} to avoid firing the same pattern repeatedly in a session
+	reader      SessionFindingReader
+	patterns    []CorrelationPattern
+	windowLimit int
+	// Partition locks close the in-process check-then-persist race without
+	// retaining attacker-controlled session keys. The persisted CORR-* ledger
+	// remains the durable once-per-session authority after a lock is released.
+	partitionLocks [sessionCorrelatorPartitionLockStripes]sync.Mutex
 }
+
+const sessionCorrelatorPartitionLockStripes = 64
 
 // NewSessionCorrelator builds a correlator from a reader and a
 // pre-loaded pattern set. The reader is how it reaches into persisted
@@ -98,11 +114,14 @@ func (c *SessionCorrelator) RunForSession(
 	if c == nil || c.reader == nil || len(c.patterns) == 0 {
 		return nil
 	}
-	if sessionID == "" || agentInstanceID == "" {
+	partition, ok := newCorrelationAgentPartition(sessionID, agentInstanceID, meta.AgentID)
+	if !ok {
 		return nil
 	}
 
-	rows, err := c.reader.ListRecentFindingsInSession(sessionID, agentInstanceID, c.windowLimit)
+	rows, err := c.reader.ListRecentFindingsInSession(
+		partition.sessionID, partition.agentInstanceID, partition.agentID, c.windowLimit,
+	)
 	if err != nil {
 		return fmt.Errorf("correlator: read session window: %w", err)
 	}
@@ -110,9 +129,31 @@ func (c *SessionCorrelator) RunForSession(
 		return nil
 	}
 
-	window := make([]CorrelationFinding, 0, len(rows))
-	for _, r := range rows {
-		window = append(window, rowToCorrelationFinding(r))
+	// Rows arrive newest-first. Walk oldest-first while deduplicating so an
+	// exact later replay cannot replace the original primitive and reorder an
+	// otherwise valid ingress -> sensitive-access -> egress sequence. Reverse
+	// the result back to the evaluator's newest-first contract afterward.
+	oldestFirst := make([]CorrelationFinding, 0, len(rows))
+	seenPrimitive := make(map[string]struct{}, len(rows))
+	for index := len(rows) - 1; index >= 0; index-- {
+		r := rows[index]
+		if !partition.includes(r) || !correlationInputEligible(r) {
+			continue
+		}
+		if key, deduplicate := correlationPrimitiveKey(r); deduplicate {
+			if _, seen := seenPrimitive[key]; seen {
+				continue
+			}
+			seenPrimitive[key] = struct{}{}
+		}
+		oldestFirst = append(oldestFirst, rowToCorrelationFinding(r))
+	}
+	if len(oldestFirst) == 0 {
+		return nil
+	}
+	window := make([]CorrelationFinding, len(oldestFirst))
+	for index := range oldestFirst {
+		window[len(oldestFirst)-1-index] = oldestFirst[index]
 	}
 
 	matches := Evaluate(c.patterns, window)
@@ -120,15 +161,47 @@ func (c *SessionCorrelator) RunForSession(
 		return nil
 	}
 
-	sessKey := sessionID + "|" + agentInstanceID
-	firedAny, _ := c.firedPerSess.LoadOrStore(sessKey, &sync.Map{})
-	fired := firedAny.(*sync.Map)
+	// Serialize the durable-ledger read and synthetic write for this partition
+	// inside one process. A fixed stripe table bounds memory independently of
+	// client-controlled session cardinality; collisions only serialize work.
+	partitionLock := &c.partitionLocks[correlationPartitionLockIndex(partition.key())]
+	partitionLock.Lock()
+	defer partitionLock.Unlock()
+
+	// Query persisted CORR-* identities for currently matched patterns as the
+	// durable once-per-session ledger. These rows never enter the contributor
+	// window, and an evicted/previous partition needs no retained in-memory key.
+	candidateRuleIDs := make([]string, 0, len(matches))
+	candidateSet := make(map[string]struct{}, len(matches))
+	for _, match := range matches {
+		key := strings.ToLower(strings.TrimSpace(match.SyntheticFindingRuleID()))
+		if _, exists := candidateSet[key]; !exists {
+			candidateSet[key] = struct{}{}
+			candidateRuleIDs = append(candidateRuleIDs, match.SyntheticFindingRuleID())
+		}
+	}
+	persistedRuleIDs, err := c.reader.ListFiredCorrelationRuleIDsInSession(
+		partition.sessionID, partition.agentInstanceID, partition.agentID, candidateRuleIDs,
+	)
+	if err != nil {
+		return fmt.Errorf("correlator: read persisted firing ledger: %w", err)
+	}
+	persisted := make(map[string]struct{}, len(persistedRuleIDs))
+	for _, ruleID := range persistedRuleIDs {
+		persisted[strings.ToLower(strings.TrimSpace(ruleID))] = struct{}{}
+	}
 
 	var synthetic []scanner.Finding
+	scheduled := make(map[string]struct{}, len(matches))
 	for _, m := range matches {
-		if _, already := fired.LoadOrStore(m.Pattern.ID, struct{}{}); already {
+		key := strings.ToLower(strings.TrimSpace(m.SyntheticFindingRuleID()))
+		if _, already := persisted[key]; already {
 			continue
 		}
+		if _, already := scheduled[key]; already {
+			continue
+		}
+		scheduled[key] = struct{}{}
 		synthetic = append(synthetic, syntheticFindingFromMatch(m, meta))
 	}
 	if len(synthetic) == 0 {
@@ -144,8 +217,9 @@ func (c *SessionCorrelator) RunForSession(
 		FindingCount:    len(synthetic),
 		MaxSeverity:     "CRITICAL",
 		Verdict:         "block",
-		SessionID:       sessionID,
-		AgentInstanceID: agentInstanceID,
+		SessionID:       partition.sessionID,
+		AgentInstanceID: partition.agentInstanceID,
+		AgentID:         partition.agentID,
 		RunID:           meta.RunID,
 		RequestID:       meta.RequestID,
 		TraceID:         meta.TraceID,
@@ -158,6 +232,101 @@ func (c *SessionCorrelator) RunForSession(
 		return fmt.Errorf("correlator: insert synthetic findings: %w", err)
 	}
 	return nil
+}
+
+// correlationAgentPartition is the identity boundary for a synthetic attack
+// chain. AgentInstanceID is the primary execution identity when present, but
+// Codex can report one session-scoped instance for multiple logical subagents.
+// Therefore an available AgentID is also required to match inside that
+// instance. If an instance is absent, AgentID is the conservative fallback.
+// Rows with missing identity only correlate with rows missing the same tier;
+// they are never folded into a known agent's chain. With neither identity the
+// correlator stays disabled rather than constructing a cross-agent session
+// chain from ambiguous evidence.
+type correlationAgentPartition struct {
+	sessionID       string
+	agentInstanceID string
+	agentID         string
+}
+
+func newCorrelationAgentPartition(sessionID, agentInstanceID, agentID string) (correlationAgentPartition, bool) {
+	partition := correlationAgentPartition{
+		sessionID:       strings.TrimSpace(sessionID),
+		agentInstanceID: strings.TrimSpace(agentInstanceID),
+		agentID:         strings.TrimSpace(agentID),
+	}
+	return partition, partition.sessionID != "" &&
+		(partition.agentInstanceID != "" || partition.agentID != "")
+}
+
+func (p correlationAgentPartition) key() string {
+	return p.sessionID + "\x00" + p.agentInstanceID + "\x00" + p.agentID
+}
+
+func correlationPartitionLockIndex(key string) int {
+	// FNV-1a is sufficient for lock striping: collisions affect scheduling,
+	// never identity or authorization, and the table size is fixed.
+	const (
+		fnvOffset32 = uint32(2166136261)
+		fnvPrime32  = uint32(16777619)
+	)
+	hash := fnvOffset32
+	for index := 0; index < len(key); index++ {
+		hash ^= uint32(key[index])
+		hash *= fnvPrime32
+	}
+	return int(hash % uint32(sessionCorrelatorPartitionLockStripes))
+}
+
+func (p correlationAgentPartition) includes(row SessionFindingRow) bool {
+	rowInstanceID := strings.TrimSpace(row.AgentInstanceID)
+	rowAgentID := strings.TrimSpace(row.AgentID)
+	if p.agentInstanceID != "" {
+		if rowInstanceID != p.agentInstanceID {
+			return false
+		}
+		if p.agentID != "" {
+			return rowAgentID == p.agentID
+		}
+		return rowAgentID == ""
+	}
+	return rowInstanceID == "" && p.agentID != "" && rowAgentID == p.agentID
+}
+
+func correlationInputEligible(row SessionFindingRow) bool {
+	if strings.EqualFold(strings.TrimSpace(row.Scanner), "correlator") {
+		return false
+	}
+	for _, tag := range row.Tags {
+		if strings.EqualFold(strings.TrimSpace(tag), scanner.FindingTagDetectionOnly) {
+			return false
+		}
+	}
+	return true
+}
+
+// correlationPrimitiveKey collapses repeat observations of the same concrete
+// primitive. A non-empty fingerprint is required: findings without a value
+// identity may be distinct events and therefore remain separate. Rule and
+// category stay in the key so two independent detectors can still establish a
+// real multi-step chain even when they refer to the same value.
+func correlationPrimitiveKey(row SessionFindingRow) (string, bool) {
+	if !row.ContentFingerprint.Valid {
+		return "", false
+	}
+	fingerprint := strings.ToLower(strings.TrimSpace(row.ContentFingerprint.String))
+	if fingerprint == "" {
+		return "", false
+	}
+	ruleID := ""
+	if row.RuleID.Valid {
+		ruleID = strings.ToLower(strings.TrimSpace(row.RuleID.String))
+	}
+	category := ""
+	if row.Category.Valid {
+		category = strings.ToLower(strings.TrimSpace(row.Category.String))
+	}
+	return ruleID + "\x00" + category + "\x00" + fingerprint, true
 }
 
 func rowToCorrelationFinding(r SessionFindingRow) CorrelationFinding {

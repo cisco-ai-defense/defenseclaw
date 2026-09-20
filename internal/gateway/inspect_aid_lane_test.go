@@ -27,7 +27,7 @@ import (
 func TestHookAIDInspect_GateBehavior(t *testing.T) {
 	t.Run("nil_inspector_returns_nil", func(t *testing.T) {
 		a := &APIServer{scannerCfg: &config.Config{}}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", "summary=test"); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", "summary=test"); v != nil {
 			t.Fatalf("expected nil when inspector unset, got %+v", v)
 		}
 	})
@@ -43,7 +43,7 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 			scannerCfg:     cfg,
 			ciscoInspector: &CiscoInspectClient{apiKey: "any"}, // wired but disabled
 		}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", "x"); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", "x"); v != nil {
 			t.Fatalf("expected nil when ScanHookSurface=false, got %+v", v)
 		}
 	})
@@ -53,7 +53,7 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 			scannerCfg:     &config.Config{},
 			ciscoInspector: &CiscoInspectClient{apiKey: "any"},
 		}
-		if v := a.hookAIDInspect("mcp__jira__createJiraIssue", ""); v != nil {
+		if v := a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", ""); v != nil {
 			t.Fatalf("expected nil for empty content, got %+v", v)
 		}
 	})
@@ -61,18 +61,23 @@ func TestHookAIDInspect_GateBehavior(t *testing.T) {
 
 func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 	cases := []struct {
-		connector string
-		path      string
-		event     string
+		connector      string
+		path           string
+		event          string
+		wantAction     string
+		wantWouldBlock bool
 	}{
-		{"codex", "/api/v1/codex/hook", "PreToolUse"},
-		{"claudecode", "/api/v1/claude-code/hook", "PreToolUse"},
-		{"cursor", "/api/v1/cursor/hook", "beforeShellExecution"},
-		{"geminicli", "/api/v1/geminicli/hook", "BeforeTool"},
-		{"hermes", "/api/v1/hermes/hook", "pre_tool_call"},
-		{"windsurf", "/api/v1/windsurf/hook", "pre_run_command"},
-		{"copilot", "/api/v1/copilot/hook", "PreToolUse"},
-		{"openhands", "/api/v1/openhands/hook", "PreToolUse"},
+		{"codex", "/api/v1/codex/hook", "PreToolUse", "block", false},
+		{"claudecode", "/api/v1/claude-code/hook", "PreToolUse", "block", false},
+		// Cursor's documented user hook accepts a native deny on this
+		// pre-action event. Higher-priority hooks may override it, but Cursor
+		// exposes no safe conflict-detection API, so the connector does not
+		// infer a conflict at this integration boundary.
+		{"cursor", "/api/v1/cursor/hook", "beforeShellExecution", "block", false},
+		{"hermes", "/api/v1/hermes/hook", "pre_tool_call", "block", false},
+		{"devin", "/api/v1/devin/hook", "PreToolUse", "block", false},
+		{"copilot", "/api/v1/copilot/hook", "preToolUse", "block", false},
+		{"openhands", "/api/v1/openhands/hook", "pre_tool_use", "block", false},
 	}
 
 	for _, tc := range cases {
@@ -115,6 +120,12 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 				t.Fatalf("marshal: %v", err)
 			}
 			req := httptest.NewRequest(http.MethodPost, tc.path, bytes.NewReader(body))
+			if tc.connector == "copilot" {
+				req.Header.Set("X-DefenseClaw-Copilot-Event", tc.event)
+			}
+			if tc.connector == "codex" {
+				setTestCodexHookBinding(req, tc.event, defaultTestCodexHookContract)
+			}
 			w := httptest.NewRecorder()
 			api.handleAgentHook(tc.connector).ServeHTTP(w, req)
 			if w.Code != http.StatusOK {
@@ -127,8 +138,11 @@ func TestHandleAgentHook_AIDAppliesAcrossHookProfiles(t *testing.T) {
 			if err := json.Unmarshal(w.Body.Bytes(), &got); err != nil {
 				t.Fatalf("decode response: %v", err)
 			}
-			if got["action"] != "block" {
-				t.Fatalf("%s action=%v want block body=%s", tc.connector, got["action"], w.Body.String())
+			if got["action"] != tc.wantAction {
+				t.Fatalf("%s action=%v want %s body=%s", tc.connector, got["action"], tc.wantAction, w.Body.String())
+			}
+			if got["would_block"] != tc.wantWouldBlock {
+				t.Fatalf("%s would_block=%v want %v body=%s", tc.connector, got["would_block"], tc.wantWouldBlock, w.Body.String())
 			}
 			findings, _ := got["findings"].([]interface{})
 			hasAID := false
@@ -179,7 +193,7 @@ func TestHookAIDInspect_PrependsToolName(t *testing.T) {
 		scannerCfg:     &config.Config{},
 		ciscoInspector: cisco,
 	}
-	_ = a.hookAIDInspect("mcp__jira__createJiraIssue", `{"summary":"test"}`)
+	_ = a.hookAIDInspect(t.Context(), "mcp__jira__createJiraIssue", `{"summary":"test"}`)
 
 	msgs, _ := captured["messages"].([]interface{})
 	if len(msgs) == 0 {
@@ -235,6 +249,88 @@ func TestMergeWithAIDVerdict_StrictestWins(t *testing.T) {
 		merged := mergeWithAIDVerdict(nil, aid)
 		if merged.Action != "block" {
 			t.Errorf("expected block, got %q", merged.Action)
+		}
+	})
+}
+
+// TestMergeWithLaneVerdict_SynthesizesDetailedFindings pins the fix for
+// the IPC total_scans stat: the AID / LLM-judge lanes only populate the
+// stringy verdict.Findings slice, so before this synthesis step
+// emitInspectVerdictFindings early-returned on empty DetailedFindings and
+// no scan_results row was ever written for a managed_enterprise hook
+// inspection — total_scans stayed at 0 even though every hook call ran
+// an inspection. The merge helper must synthesize one DetailedFinding
+// per lane finding so the downstream pipeline persists a scan row.
+func TestMergeWithLaneVerdict_SynthesizesDetailedFindings(t *testing.T) {
+	t.Run("aid_findings_become_detailed_findings", func(t *testing.T) {
+		aid := &ScanVerdict{
+			Action:   "block",
+			Severity: "HIGH",
+			Findings: []string{"pii.email", "policy.jira"},
+		}
+		merged := mergeWithAIDVerdict(nil, aid)
+		if len(merged.DetailedFindings) != 2 {
+			t.Fatalf("DetailedFindings = %d, want 2 (one per AID finding)", len(merged.DetailedFindings))
+		}
+		got := merged.DetailedFindings[0]
+		if got.RuleID != "pii.email" {
+			t.Errorf("RuleID = %q, want pii.email (raw name; lane category is in Tags)", got.RuleID)
+		}
+		if got.Title != "pii.email" {
+			t.Errorf("Title = %q, want pii.email", got.Title)
+		}
+		if got.Severity != "HIGH" {
+			t.Errorf("Severity = %q, want HIGH (from verdict)", got.Severity)
+		}
+		if len(got.Tags) != 1 || got.Tags[0] != "ai-defense" {
+			t.Errorf("Tags = %v, want [ai-defense]", got.Tags)
+		}
+	})
+
+	t.Run("judge_findings_become_detailed_findings_with_judge_tag", func(t *testing.T) {
+		judge := &ScanVerdict{
+			Action:   "alert",
+			Severity: "MEDIUM",
+			Findings: []string{"prompt_injection"},
+		}
+		merged := mergeWithJudgeVerdict(nil, judge)
+		if len(merged.DetailedFindings) != 1 {
+			t.Fatalf("DetailedFindings = %d, want 1", len(merged.DetailedFindings))
+		}
+		if got := merged.DetailedFindings[0].RuleID; got != "prompt_injection" {
+			t.Errorf("RuleID = %q, want prompt_injection (raw name; lane category is in Tags)", got)
+		}
+		if got := merged.DetailedFindings[0].Tags; len(got) != 1 || got[0] != "llm-judge" {
+			t.Errorf("Tags = %v, want [llm-judge]", got)
+		}
+	})
+
+	t.Run("no_findings_no_synthesis", func(t *testing.T) {
+		aid := &ScanVerdict{Action: "block", Severity: "HIGH"}
+		merged := mergeWithAIDVerdict(nil, aid)
+		if len(merged.DetailedFindings) != 0 {
+			t.Errorf("DetailedFindings = %d, want 0 when lane returned no findings", len(merged.DetailedFindings))
+		}
+	})
+
+	t.Run("preserves_existing_detailed_findings", func(t *testing.T) {
+		local := &ToolInspectVerdict{
+			Action:   "alert",
+			Severity: "MEDIUM",
+			DetailedFindings: []RuleFinding{
+				{RuleID: "LOCAL-1", Severity: "MEDIUM"},
+			},
+		}
+		aid := &ScanVerdict{Action: "block", Severity: "HIGH", Findings: []string{"pii.email"}}
+		merged := mergeWithAIDVerdict(local, aid)
+		if len(merged.DetailedFindings) != 2 {
+			t.Fatalf("DetailedFindings = %d, want 2 (local + synthesized)", len(merged.DetailedFindings))
+		}
+		if merged.DetailedFindings[0].RuleID != "LOCAL-1" {
+			t.Errorf("local finding not preserved at head: %+v", merged.DetailedFindings)
+		}
+		if merged.DetailedFindings[1].RuleID != "pii.email" {
+			t.Errorf("synthesized finding not appended: %+v", merged.DetailedFindings)
 		}
 	})
 }

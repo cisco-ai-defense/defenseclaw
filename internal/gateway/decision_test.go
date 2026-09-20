@@ -237,7 +237,7 @@ func TestClampPromptDirectionAction(t *testing.T) {
 //   - non-prompt directions: untouched at any severity
 //
 // Demotions also preserve Severity, Findings, and the original Reason so
-// gateway.jsonl readers can grep for the original (more aggressive) policy
+// canonical event readers can search for the original (more aggressive) policy
 // decision via the "policy-action=<original>" marker.
 func TestClampPromptDirectionVerdict(t *testing.T) {
 	t.Run("nil verdict is a no-op", func(t *testing.T) {
@@ -250,7 +250,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		v := &ScanVerdict{
 			Action:   guardrailActionBlock,
 			Severity: "HIGH",
-			Reason:   "matched: CMD-NETCAT-LISTEN:Netcat listener",
+			Reason:   "matched: CMD-NETCAT-LISTEN:Netcat network-listener exposure",
 			Findings: []string{"CMD-NETCAT-LISTEN"},
 		}
 		clampPromptDirectionVerdict(v, "prompt")
@@ -266,7 +266,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		// Reason must keep the original match text AND add the
 		// audit marker — otherwise operators who grep for the
 		// rule ID lose the original signal.
-		if !strings.Contains(v.Reason, "CMD-NETCAT-LISTEN:Netcat listener") {
+		if !strings.Contains(v.Reason, "CMD-NETCAT-LISTEN:Netcat network-listener exposure") {
 			t.Errorf("original reason lost; got %q", v.Reason)
 		}
 		if !strings.Contains(v.Reason, "policy-action=block") {
@@ -280,7 +280,7 @@ func TestClampPromptDirectionVerdict(t *testing.T) {
 		// CRITICAL prompts (clear injection chains, exfil payloads,
 		// known credential dumps) get the [DefenseClaw] block
 		// response. The Reason is not annotated because no demotion
-		// occurred — operators reading gateway.jsonl see the raw
+		// occurred — operators reading the canonical event see the raw
 		// rule match exactly as the scanner produced it.
 		v := &ScanVerdict{
 			Action:   guardrailActionBlock,

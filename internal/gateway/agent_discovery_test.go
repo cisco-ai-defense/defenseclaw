@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 func validAgentDiscoveryBody() string {
@@ -69,6 +70,40 @@ func TestAgentDiscoveryEndpoint_AcceptsSanitizedReport(t *testing.T) {
 	}
 }
 
+func TestAgentDiscoveryEndpoint_AcceptsExplicitCompleteEmptyReport(t *testing.T) {
+	withManagedEnterprise(t, true)
+	capture := &endpointInventoryCapture{}
+	api := &APIServer{observabilityV8: capture}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/agents/discovery",
+		strings.NewReader(`{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{}}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleAgentDiscovery(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
+	}
+	var resp agentDiscoveryResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status != "ok" || resp.Agents != 0 || resp.Installed != 0 {
+		t.Fatalf("empty report response=%+v", resp)
+	}
+	records := recordsWithAction(capture.snapshot(), config.ObservabilityV8ManagedAgentInventoryAction)
+	if len(records) != 1 || records[0].Action() != string(config.ObservabilityV8ManagedAgentInventoryAction) ||
+		records[0].Outcome() != observability.OutcomeCompleted {
+		t.Fatalf("empty report canonical records=%+v", records)
+	}
+	body := canonicalBody(t, records[0])
+	if len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryAgentIdentifiers])) != 0 ||
+		len(canonicalObjectArray(t, body[observability.TelemetryAttributeDefenseClawInventoryAgentMetadata])) != 0 {
+		t.Fatalf("empty report carrier=%#v", body)
+	}
+}
+
 func TestAgentDiscoveryEndpoint_RejectsMalformedReports(t *testing.T) {
 	api := &APIServer{}
 	cases := []struct {
@@ -80,12 +115,32 @@ func TestAgentDiscoveryEndpoint_RejectsMalformedReports(t *testing.T) {
 			body: `{not json`,
 		},
 		{
+			name: "missing agents rejected",
+			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z"}`,
+		},
+		{
 			name: "raw path field rejected",
 			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{"codex":{"installed":true,"has_config":true,"has_binary":false,"config_path":"/Users/alice/.codex/config.toml"}}}`,
 		},
 		{
 			name: "basename with slash rejected",
 			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{"codex":{"installed":true,"has_config":true,"config_basename":"alice/config.toml","has_binary":false}}}`,
+		},
+		{
+			name: "basename with shell syntax rejected",
+			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{"codex":{"installed":true,"has_config":true,"config_basename":"config.toml;secret","has_binary":false}}}`,
+		},
+		{
+			name: "non timestamp scanned at rejected",
+			body: `{"source":"cli","scanned_at":"private workstation scan","agents":{"codex":{"installed":true,"has_config":false,"has_binary":false}}}`,
+		},
+		{
+			name: "multiline version rejected",
+			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{"codex":{"installed":true,"has_config":false,"has_binary":true,"version":"codex 1.2.3\nprivate material"}}}`,
+		},
+		{
+			name: "credential-like version syntax rejected",
+			body: `{"source":"cli","scanned_at":"2026-05-04T18:21:00Z","agents":{"codex":{"installed":true,"has_config":false,"has_binary":true,"version":"token=secret"}}}`,
 		},
 		{
 			name: "all-unknown report rejected",
@@ -112,7 +167,9 @@ func TestAgentDiscoveryEndpoint_RejectsMalformedReports(t *testing.T) {
 // rollouts must NOT discard legitimate observability for already-shipped
 // agents in the same batch.
 func TestAgentDiscoveryEndpoint_DropsUnknownConnectorsButKeepsKnown(t *testing.T) {
-	api := &APIServer{}
+	withManagedEnterprise(t, true)
+	capture := &endpointInventoryCapture{}
+	api := &APIServer{observabilityV8: capture}
 	body := `{
 		"source": "cli",
 		"scanned_at": "2026-05-04T18:21:00Z",
@@ -141,6 +198,65 @@ func TestAgentDiscoveryEndpoint_DropsUnknownConnectorsButKeepsKnown(t *testing.T
 	if resp.Status != "ok" || resp.Agents != 1 || resp.Installed != 1 {
 		t.Fatalf("response=%+v want ok/1/1 (unknowns dropped, codex preserved)", resp)
 	}
+	records := recordsWithAction(capture.snapshot(), config.ObservabilityV8LocalInventoryDiagnosticAction)
+	if len(records) != 2 {
+		t.Fatalf("mixed known/unknown managed inventory records=%d want local summary + known component", len(records))
+	}
+	for _, record := range records {
+		if record.Action() != string(config.ObservabilityV8LocalInventoryDiagnosticAction) {
+			t.Fatalf("mixed known/unknown escaped managed action: %s/%q", record.EventName(), record.Action())
+		}
+	}
+	bodyMap := canonicalBody(t, records[0])
+	if records[0].Outcome() != observability.OutcomePartial {
+		t.Fatalf("mixed known/unknown summary outcome=%q", records[0].Outcome())
+	}
+	if _, present := bodyMap[observability.TelemetryAttributeDefenseClawInventoryAgentIdentifiers]; present {
+		t.Fatalf("mixed known/unknown emitted authoritative carrier=%#v", bodyMap)
+	}
+}
+
+func TestAgentDiscoveryEndpoint_AllUnknownEmitsOnlyLocalPartialDiagnostic(t *testing.T) {
+	withManagedEnterprise(t, true)
+	capture := &endpointInventoryCapture{}
+	api := &APIServer{observabilityV8: capture}
+	req := httptest.NewRequest(
+		http.MethodPost,
+		"/api/v1/agents/discovery",
+		strings.NewReader(`{
+			"source":"cli",
+			"scanned_at":"2026-05-04T18:21:00Z",
+			"agents":{"future-agent":{"installed":true,"has_config":false,"has_binary":false}}
+		}`),
+	)
+	req.Header.Set("Content-Type", "application/json")
+	w := httptest.NewRecorder()
+	api.handleAgentDiscovery(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("status=%d want 400 body=%s", w.Code, w.Body.String())
+	}
+	records := recordsWithAction(capture.snapshot(), config.ObservabilityV8LocalInventoryDiagnosticAction)
+	if len(records) != 1 || records[0].Action() != string(config.ObservabilityV8LocalInventoryDiagnosticAction) ||
+		records[0].Outcome() != observability.OutcomePartial {
+		t.Fatalf("all-unknown canonical records=%+v", records)
+	}
+	body := canonicalBody(t, records[0])
+	if _, present := body[observability.TelemetryAttributeDefenseClawInventoryAgentIdentifiers]; present {
+		t.Fatalf("all-unknown emitted authoritative carrier=%#v", body)
+	}
+}
+
+func recordsWithAction(
+	records []observability.Record,
+	action observability.ProducerKey,
+) []observability.Record {
+	result := make([]observability.Record, 0, len(records))
+	for _, record := range records {
+		if record.Action() == string(action) {
+			result = append(result, record)
+		}
+	}
+	return result
 }
 
 func TestAgentDiscoveryEndpoint_RejectsNonPOST(t *testing.T) {

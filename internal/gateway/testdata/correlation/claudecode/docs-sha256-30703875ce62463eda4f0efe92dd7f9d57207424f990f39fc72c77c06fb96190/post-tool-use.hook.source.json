@@ -1,0 +1,6 @@
+{
+  "hook_event_name": "PostToolUse",
+  "session_id": "claude-session-source-backed-1",
+  "tool_name": "Read",
+  "tool_use_id": "claude-tool-source-backed-1"
+}

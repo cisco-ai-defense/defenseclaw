@@ -21,36 +21,52 @@ import SwiftUI
 /// stays consistent in one place.
 private struct CatalogListScaffold<Content: View, Action: View>: View {
     @Binding var error: String?
+    @Binding var warning: String?
     let isEmpty: Bool
+    let isUnavailable: Bool
     let emptyMessage: String
     let searchPrompt: String
     @Binding var search: String
     let load: () async -> Void
+    let recoveryCommand: (() async -> String?)?
     @ViewBuilder let action: Action
     @ViewBuilder let content: Content
 
     init(
         error: Binding<String?>,
+        warning: Binding<String?>,
         isEmpty: Bool,
+        isUnavailable: Bool,
         emptyMessage: String,
         searchPrompt: String,
         search: Binding<String>,
         load: @escaping () async -> Void,
+        recoveryCommand: (() async -> String?)? = nil,
         @ViewBuilder action: () -> Action,
         @ViewBuilder content: () -> Content
     ) {
         _error = error
+        _warning = warning
         self.isEmpty = isEmpty
+        self.isUnavailable = isUnavailable
         self.emptyMessage = emptyMessage
         self.searchPrompt = searchPrompt
         _search = search
         self.load = load
+        self.recoveryCommand = recoveryCommand
         self.action = action()
         self.content = content()
     }
 
     var body: some View {
-        CatalogContainer(error: $error, isEmpty: isEmpty, emptyMessage: emptyMessage) {
+        CatalogContainer(
+            error: $error,
+            warning: $warning,
+            isEmpty: isEmpty,
+            isUnavailable: isUnavailable,
+            emptyMessage: emptyMessage,
+            recoveryCommand: recoveryCommand
+        ) {
             content
         }
         .searchable(text: $search, placement: .toolbar, prompt: searchPrompt)
@@ -73,7 +89,11 @@ struct SkillsView: View {
     @State private var items: [SkillItem] = []
     @State private var search = ""
     @State private var error: String?
+    @State private var warning: String?
     @State private var loaded = false
+    @State private var actionsAvailable = false
+    @State private var loadedInstallationGeneration = -1
+    @State private var loadedBinaryPath: String?
     @State private var invocation: CatalogInvocation?
     @State private var showingInstall = false
 
@@ -86,15 +106,25 @@ struct SkillsView: View {
     var body: some View {
         CatalogListScaffold(
             error: $error,
-            isEmpty: loaded && filtered.isEmpty,
+            warning: $warning,
+            isEmpty: loaded && error == nil && filtered.isEmpty,
+            isUnavailable: loaded && error != nil && items.isEmpty,
             emptyMessage: "No skills were reported by `defenseclaw skill list --json`.",
             searchPrompt: "Search skills",
             search: $search,
-            load: load
+            load: load,
+            recoveryCommand: {
+                await appState.auditStoreRecoveryCommand(
+                    expectedGeneration: loadedInstallationGeneration,
+                    expectedBinaryPath: loadedBinaryPath
+                )
+            }
         ) {
             Button { showingInstall = true } label: {
                 Label("Install Skill", systemImage: "square.and.arrow.down")
             }
+            .dcQuickHelp("Install a skill")
+            .disabled(!actionsAvailable)
         } content: {
             Table(filtered) {
                 TableColumn("Status") { item in CatalogStatusLabel(status: item.status, verdict: item.verdict) }
@@ -110,6 +140,7 @@ struct SkillsView: View {
                     CatalogActionMenu(actions: CatalogActions.skills(item)) { action in
                         invocation = CatalogActions.invocation(action, skill: item)
                     }
+                    .disabled(!actionsAvailable)
                 }
                 .width(34)
             }
@@ -127,11 +158,31 @@ struct SkillsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
+        actionsAvailable = false
         do {
-            items = try await CatalogCLI.skills(using: appState.cli)
+            let listing = try await CatalogCLI.skills(using: appState.cli)
+            guard installationGeneration == appState.installationGeneration else { return }
+            items = listing.items
+            loadedInstallationGeneration = installationGeneration
+            loadedBinaryPath = listing.selectedBinaryPath
+            actionsAvailable = !listing.auditHistoryUnavailable
+            warning = listing.auditHistoryUnavailable
+                ? CatalogCLI.auditHistoryUnavailableMessage
+                : nil
+            if listing.auditHistoryUnavailable {
+                invocation = nil
+                showingInstall = false
+            }
             error = nil
         } catch {
+            guard installationGeneration == appState.installationGeneration else { return }
             self.error = error.localizedDescription
+            warning = nil
+            actionsAvailable = false
+            loadedBinaryPath = nil
+            invocation = nil
+            showingInstall = false
         }
         loaded = true
     }
@@ -148,7 +199,11 @@ struct MCPsView: View {
     @State private var items: [MCPItem] = []
     @State private var search = ""
     @State private var error: String?
+    @State private var warning: String?
     @State private var loaded = false
+    @State private var actionsAvailable = false
+    @State private var loadedInstallationGeneration = -1
+    @State private var loadedBinaryPath: String?
     @State private var invocation: CatalogInvocation?
     @State private var showingSetForm = false
 
@@ -163,16 +218,25 @@ struct MCPsView: View {
     var body: some View {
         CatalogListScaffold(
             error: $error,
-            isEmpty: loaded && filtered.isEmpty,
+            warning: $warning,
+            isEmpty: loaded && error == nil && filtered.isEmpty,
+            isUnavailable: loaded && error != nil && items.isEmpty,
             emptyMessage: "No MCP servers were reported by `defenseclaw mcp list --json`.",
             searchPrompt: "Search MCPs",
             search: $search,
-            load: load
+            load: load,
+            recoveryCommand: {
+                await appState.auditStoreRecoveryCommand(
+                    expectedGeneration: loadedInstallationGeneration,
+                    expectedBinaryPath: loadedBinaryPath
+                )
+            }
         ) {
             Button { showingSetForm = true } label: {
                 Label("Set MCP Server", systemImage: "plus")
             }
-            .help("Scan and add or update an MCP server")
+            .dcQuickHelp("Scan and add or update an MCP server")
+            .disabled(!actionsAvailable)
         } content: {
             Table(filtered) {
                 TableColumn("Status") { item in CatalogStatusLabel(status: item.status, verdict: item.verdict) }
@@ -188,6 +252,7 @@ struct MCPsView: View {
                     CatalogActionMenu(actions: CatalogActions.mcps(item)) { action in
                         invocation = CatalogActions.invocation(action, mcp: item)
                     }
+                    .disabled(!actionsAvailable)
                 }
                 .width(34)
             }
@@ -205,11 +270,31 @@ struct MCPsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
+        actionsAvailable = false
         do {
-            items = try await CatalogCLI.mcps(using: appState.cli)
+            let listing = try await CatalogCLI.mcps(using: appState.cli)
+            guard installationGeneration == appState.installationGeneration else { return }
+            items = listing.items
+            loadedInstallationGeneration = installationGeneration
+            loadedBinaryPath = listing.selectedBinaryPath
+            actionsAvailable = !listing.auditHistoryUnavailable
+            warning = listing.auditHistoryUnavailable
+                ? CatalogCLI.auditHistoryUnavailableMessage
+                : nil
+            if listing.auditHistoryUnavailable {
+                invocation = nil
+                showingSetForm = false
+            }
             error = nil
         } catch {
+            guard installationGeneration == appState.installationGeneration else { return }
             self.error = error.localizedDescription
+            warning = nil
+            actionsAvailable = false
+            loadedBinaryPath = nil
+            invocation = nil
+            showingSetForm = false
         }
         loaded = true
     }
@@ -222,7 +307,11 @@ struct PluginsView: View {
     @State private var items: [PluginItem] = []
     @State private var search = ""
     @State private var error: String?
+    @State private var warning: String?
     @State private var loaded = false
+    @State private var actionsAvailable = false
+    @State private var loadedInstallationGeneration = -1
+    @State private var loadedBinaryPath: String?
     @State private var invocation: CatalogInvocation?
     @State private var showingInstall = false
 
@@ -237,15 +326,25 @@ struct PluginsView: View {
     var body: some View {
         CatalogListScaffold(
             error: $error,
-            isEmpty: loaded && filtered.isEmpty,
+            warning: $warning,
+            isEmpty: loaded && error == nil && filtered.isEmpty,
+            isUnavailable: loaded && error != nil && items.isEmpty,
             emptyMessage: "No plugins were reported by `defenseclaw plugin list --json`.",
             searchPrompt: "Search plugins",
             search: $search,
-            load: load
+            load: load,
+            recoveryCommand: {
+                await appState.auditStoreRecoveryCommand(
+                    expectedGeneration: loadedInstallationGeneration,
+                    expectedBinaryPath: loadedBinaryPath
+                )
+            }
         ) {
             Button { showingInstall = true } label: {
                 Label("Install Plugin", systemImage: "square.and.arrow.down")
             }
+            .dcQuickHelp("Install a plugin")
+            .disabled(!actionsAvailable)
         } content: {
             Table(filtered) {
                 TableColumn("Status") { item in CatalogStatusLabel(status: item.status, verdict: item.verdict) }
@@ -260,6 +359,7 @@ struct PluginsView: View {
                     CatalogActionMenu(actions: CatalogActions.plugins(item)) { action in
                         invocation = CatalogActions.invocation(action, plugin: item)
                     }
+                    .disabled(!actionsAvailable)
                 }
                 .width(34)
             }
@@ -277,11 +377,31 @@ struct PluginsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
+        actionsAvailable = false
         do {
-            items = try await CatalogCLI.plugins(using: appState.cli)
+            let listing = try await CatalogCLI.plugins(using: appState.cli)
+            guard installationGeneration == appState.installationGeneration else { return }
+            items = listing.items
+            loadedInstallationGeneration = installationGeneration
+            loadedBinaryPath = listing.selectedBinaryPath
+            actionsAvailable = !listing.auditHistoryUnavailable
+            warning = listing.auditHistoryUnavailable
+                ? CatalogCLI.auditHistoryUnavailableMessage
+                : nil
+            if listing.auditHistoryUnavailable {
+                invocation = nil
+                showingInstall = false
+            }
             error = nil
         } catch {
+            guard installationGeneration == appState.installationGeneration else { return }
             self.error = error.localizedDescription
+            warning = nil
+            actionsAvailable = false
+            loadedBinaryPath = nil
+            invocation = nil
+            showingInstall = false
         }
         loaded = true
     }
@@ -294,6 +414,7 @@ struct ToolsView: View {
     @State private var items: [ToolItem] = []
     @State private var search = ""
     @State private var error: String?
+    @State private var warning: String?
     @State private var loaded = false
     @State private var invocation: CatalogInvocation?
 
@@ -314,7 +435,9 @@ struct ToolsView: View {
     var body: some View {
         CatalogListScaffold(
             error: $error,
-            isEmpty: loaded && filtered.isEmpty,
+            warning: $warning,
+            isEmpty: loaded && error == nil && filtered.isEmpty,
+            isUnavailable: loaded && error != nil && items.isEmpty,
             emptyMessage: "No tool policy rows. Unblocked tools do not appear in this table.",
             searchPrompt: "Search tools",
             search: $search,
@@ -345,14 +468,25 @@ struct ToolsView: View {
     }
 
     private func load() async {
+        let installationGeneration = appState.installationGeneration
         do {
             let cliItems = try await CatalogCLI.tools(using: appState.cli)
-            items = cliItems.isEmpty ? await appState.audit.toolOverrideRows() : cliItems
+            guard installationGeneration == appState.installationGeneration else { return }
+            let freshItems: [ToolItem]
+            if cliItems.isEmpty {
+                freshItems = await appState.audit.toolOverrideRows()
+                guard installationGeneration == appState.installationGeneration else { return }
+            } else {
+                freshItems = cliItems
+            }
+            items = freshItems
             error = nil
         } catch {
+            let failure = error.localizedDescription
             let fallback = await appState.audit.toolOverrideRows()
+            guard installationGeneration == appState.installationGeneration else { return }
             items = fallback
-            self.error = fallback.isEmpty ? error.localizedDescription : nil
+            self.error = fallback.isEmpty ? failure : nil
         }
         loaded = true
     }
@@ -401,8 +535,10 @@ private struct CatalogCommandSheet: View {
     @Environment(AppState.self) private var appState
     @Environment(\.dismiss) private var dismiss
     @State private var phase: Phase = .ready
-    @State private var output = ""
+    @State private var runID: UUID?
+    @State private var finalOutput = ""
     @State private var exitCode: Int32?
+    @State private var finalStatus: CommandActivityStatus?
 
     private enum Phase { case ready, running, done }
 
@@ -415,6 +551,8 @@ private struct CatalogCommandSheet: View {
                 Spacer()
                 Button { dismiss() } label: { Image(systemName: "xmark.circle.fill") }
                     .buttonStyle(.borderless)
+                    .disabled(phase == .running)
+                    .help(phase == .running ? "Cancel the command before closing" : "Close")
             }
 
             Text(invocation.detail).font(.callout).foregroundStyle(.secondary)
@@ -429,13 +567,13 @@ private struct CatalogCommandSheet: View {
                 HStack {
                     if phase == .running { ProgressView().controlSize(.small) }
                     if phase == .done {
-                        Image(systemName: exitCode == 0 ? "checkmark.circle.fill" : "xmark.circle.fill")
-                            .foregroundStyle(exitCode == 0 ? Cisco.green : Cisco.red)
+                        Image(systemName: terminalSystemImage)
+                            .foregroundStyle(terminalColor)
                     }
                     Text(statusText).font(.subheadline.weight(.semibold))
                 }
                 ScrollView {
-                    Text(output.isEmpty ? "Waiting for output…" : output)
+                    Text(displayedOutput.isEmpty ? "Waiting for output…" : displayedOutput)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
@@ -449,6 +587,11 @@ private struct CatalogCommandSheet: View {
                       systemImage: "exclamationmark.shield")
                     .font(.caption)
                     .foregroundStyle(invocation.destructive ? Cisco.red : Cisco.orange)
+                if let reason = appState.installationReadOnlyReason {
+                    Label(reason, systemImage: "lock.shield")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Spacer()
@@ -460,6 +603,13 @@ private struct CatalogCommandSheet: View {
                         .buttonStyle(.borderedProminent)
                         .tint(invocation.destructive ? Cisco.red : Cisco.blue)
                         .keyboardShortcut(.defaultAction)
+                        .disabled(
+                            invocation.requiresConfirmation
+                                && !appState.installationMutationsAllowed
+                        )
+                } else if phase == .running {
+                    Button(runningActionTitle) { cancel() }
+                        .disabled(activityEntry?.status != .running)
                 } else if phase == .done {
                     Button("Close") { dismiss() }.keyboardShortcut(.defaultAction)
                 }
@@ -470,36 +620,93 @@ private struct CatalogCommandSheet: View {
         .task {
             if !invocation.requiresConfirmation && phase == .ready { run() }
         }
+        .interactiveDismissDisabled(phase == .running)
+    }
+
+    private var activityEntry: CommandActivityEntry? {
+        guard let runID else { return nil }
+        return appState.activity.entries.first(where: { $0.id == runID })
+    }
+
+    private var displayedOutput: String {
+        let liveOutput = activityEntry?.output ?? ""
+        return liveOutput.isEmpty ? finalOutput : liveOutput
+    }
+
+    private var displayedStatus: CommandActivityStatus? {
+        activityEntry?.status ?? finalStatus
+    }
+
+    private var runningActionTitle: String {
+        switch activityEntry?.status {
+        case .running: "Cancel Command"
+        case .cancelling: "Cancelling…"
+        case .finishing: "Finishing…"
+        case .succeeded, .failed, .cancelled: "Finishing…"
+        case nil: "Starting…"
+        }
+    }
+
+    private var terminalSystemImage: String {
+        switch displayedStatus {
+        case .succeeded: "checkmark.circle.fill"
+        case .cancelled: "stop.circle.fill"
+        default: "xmark.circle.fill"
+        }
+    }
+
+    private var terminalColor: Color {
+        switch displayedStatus {
+        case .succeeded: Cisco.green
+        case .cancelled: .secondary
+        default: Cisco.red
+        }
     }
 
     private var statusText: String {
         switch phase {
         case .ready: "Ready"
+        case .running where displayedStatus == .cancelling: "Cancelling…"
+        case .running where displayedStatus == .finishing: "Finishing…"
         case .running: "Running…"
-        case .done where exitCode == 0: "Completed"
+        case .done where displayedStatus == .succeeded: "Completed"
+        case .done where displayedStatus == .cancelled: "Cancelled"
         case .done: "Failed (exit \(exitCode ?? -1))"
         }
     }
 
     private func run() {
         guard phase == .ready else { return }
+        let commandID = UUID()
+        runID = commandID
         phase = .running
         Task {
             let result = await appState.runCommand(
+                runID: commandID,
                 title: invocation.title,
                 arguments: invocation.arguments,
+                mutation: invocation.changesState,
                 category: "catalog",
                 origin: "Catalog",
                 refreshOnSuccess: true
             )
-            if let entry = appState.activity.entries.first(where: { $0.id == appState.activity.selectedID }) {
-                output = entry.output
+            if let entry = appState.activity.entries.first(where: { $0.id == commandID }) {
+                finalOutput = entry.output
+                finalStatus = entry.status
             }
             exitCode = result.exitCode
-            if output.isEmpty { output = result.output }
+            if finalOutput.isEmpty { finalOutput = result.output }
+            if finalStatus == nil {
+                finalStatus = result.cancelled ? .cancelled : (result.succeeded ? .succeeded : .failed)
+            }
             phase = .done
             if result.succeeded { onComplete() }
         }
+    }
+
+    private func cancel() {
+        guard phase == .running, let runID else { return }
+        appState.activity.cancel(runID)
     }
 }
 
@@ -588,6 +795,7 @@ private struct CatalogInstallSheet: View {
     let onReview: (CatalogInvocation) -> Void
 
     @Environment(\.dismiss) private var dismiss
+    @Environment(AppState.self) private var appState
     @State private var target = ""
     @State private var connector = "all"
     @State private var force = false
@@ -612,6 +820,11 @@ private struct CatalogInstallSheet: View {
                 Toggle("Apply configured enforcement policy after scanning", isOn: $applyPolicy)
             }
             .formStyle(.grouped)
+            if let reason = appState.installationReadOnlyReason {
+                Label(reason, systemImage: "lock.shield")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
             Spacer()
             HStack {
                 Spacer()
@@ -620,7 +833,7 @@ private struct CatalogInstallSheet: View {
                     .buttonStyle(.borderedProminent)
                     .tint(Cisco.blue)
                     .keyboardShortcut(.defaultAction)
-                    .disabled(trimmedTarget.isEmpty)
+                    .disabled(trimmedTarget.isEmpty || !appState.installationMutationsAllowed)
             }
         }
         .padding(18)
@@ -724,9 +937,13 @@ private struct SourceText: View {
 
 private struct CatalogContainer<Content: View>: View {
     @Binding var error: String?
+    @Binding var warning: String?
     let isEmpty: Bool
+    let isUnavailable: Bool
     let emptyMessage: String
+    let recoveryCommand: (() async -> String?)?
     @ViewBuilder var content: Content
+    @State private var recoveryStatus: String?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -742,12 +959,52 @@ private struct CatalogContainer<Content: View>: View {
                 .padding(8)
                 .background(Cisco.red.opacity(0.08))
             }
-            if isEmpty {
+            if let warning {
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack(spacing: 8) {
+                        Label(warning, systemImage: "exclamationmark.shield")
+                            .font(.caption)
+                            .foregroundStyle(Cisco.orange)
+                        Spacer()
+                        if recoveryCommand != nil {
+                            Button("Copy Repair Command") { copyRecoveryCommand() }
+                                .controlSize(.small)
+                        }
+                    }
+                    if let recoveryStatus {
+                        Text(recoveryStatus)
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                .padding(8)
+                .background(Cisco.orange.opacity(0.08))
+            }
+            if isUnavailable {
+                DCEmptyState(
+                    title: "Catalog unavailable",
+                    message: "DefenseClaw could not load this catalog. Review the error above and refresh after it is resolved.",
+                    systemImage: "exclamationmark.triangle"
+                )
+                .frame(maxHeight: .infinity)
+            } else if isEmpty {
                 DCEmptyState(title: "Nothing here", message: emptyMessage, systemImage: "tray")
                     .frame(maxHeight: .infinity)
             } else {
                 content
             }
+        }
+    }
+
+    private func copyRecoveryCommand() {
+        guard let recoveryCommand else { return }
+        Task {
+            guard let command = await recoveryCommand() else {
+                error = "Could not prepare an audit repair command for this DefenseClaw installation. Refresh the panel and verify the installation is writable."
+                return
+            }
+            copyToPasteboard(command)
+            recoveryStatus = "Copied. Quit DefenseClaw completely, then run the command in Terminal. The runtime preserves the corrupt database family before creating a healthy store."
         }
     }
 }
@@ -759,6 +1016,7 @@ struct RefreshButton: ToolbarContent {
             Button { Task { await action() } } label: {
                 Label("Refresh", systemImage: "arrow.clockwise")
             }
+            .dcQuickHelp("Refresh catalog")
         }
     }
 }

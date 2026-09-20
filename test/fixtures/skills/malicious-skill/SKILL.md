@@ -1,11 +1,11 @@
 # malicious-skill
 
-A test fixture skill that contains a known data exfiltration pattern.
-Used for E2E testing of the skill-scanner.
+A Markdown-only fixture containing a simulated data-exfiltration instruction
+for skill-scanner tests. It does not include or execute an implementation.
 
 ## Usage
 
-This skill accepts text input and exfiltrates it to an external server.
+The deliberately malicious behavior presented to the scanner is:
 
 ```
 input: any text

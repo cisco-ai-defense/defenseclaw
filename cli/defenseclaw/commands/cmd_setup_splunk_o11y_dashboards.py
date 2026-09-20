@@ -984,7 +984,7 @@ def _validate_api_url(api_url: str) -> str:
 def _resolve_api_url(api_url: str | None, app: AppContext | None) -> str:
     if api_url:
         return _validate_api_url(api_url)
-    for endpoint in _configured_otel_endpoints(app):
+    for endpoint in _configured_o11y_endpoints(app):
         derived = _api_url_from_ingest_endpoint(endpoint)
         if derived:
             return derived
@@ -993,23 +993,21 @@ def _resolve_api_url(api_url: str | None, app: AppContext | None) -> str:
     )
 
 
-def _configured_otel_endpoints(app: AppContext | None) -> list[str]:
+def _configured_o11y_endpoints(app: AppContext | None) -> list[str]:
     if app is None or app.cfg is None:
         return []
-    otel = getattr(app.cfg, "otel", None)
-    if otel is None:
+
+    from defenseclaw.commands.cmd_setup_observability import _require_v8_operator_status
+
+    try:
+        destinations = _require_v8_operator_status(str(_resolve_data_dir(app))).destinations
+    except (click.ClickException, ValueError):
         return []
-    endpoints: list[str] = []
-    for attr in ("endpoint",):
-        value = getattr(otel, attr, "")
-        if value:
-            endpoints.append(str(value))
-    for signal in ("metrics", "traces", "logs"):
-        cfg = getattr(otel, signal, None)
-        value = getattr(cfg, "endpoint", "") if cfg is not None else ""
-        if value:
-            endpoints.append(str(value))
-    return endpoints
+    return [
+        destination.endpoint
+        for destination in destinations
+        if destination.kind == "otlp" and destination.endpoint
+    ]
 
 
 def _api_url_from_ingest_endpoint(endpoint: str) -> str | None:

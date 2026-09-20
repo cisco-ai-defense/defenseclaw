@@ -1,0 +1,820 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package safefile
+
+import (
+	"errors"
+	"fmt"
+	"os"
+	"path/filepath"
+	"unsafe"
+
+	"github.com/defenseclaw/defenseclaw/internal/winpath"
+	"golang.org/x/sys/windows"
+)
+
+func protectFile(path string, _ *os.File) error { return setPrivateDACL(path, false) }
+
+func protectDirectory(path string) error {
+	if err := rejectReparsePath(path); err != nil {
+		return err
+	}
+	owned, err := windowsPathOwnedByCurrentUser(path)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("safefile: refusing foreign-owned directory: %s", path)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		return err
+	}
+	if safe {
+		return preserveExistingProtection(path, path)
+	}
+	return setPrivateDACL(path, true)
+}
+
+func validatePrivateProtection(path string, wantDirectory bool) error {
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
+		(!wantDirectory && !info.Mode().IsRegular()) {
+		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	owned, err := windowsPathOwnedByCurrentUser(path)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
+	}
+	safe, err := privateDACLIsSafe(path)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("safefile: private path has an unsafe DACL: %s", path)
+	}
+	return nil
+}
+
+// ValidatePrivateDirectoryOwnership verifies the non-reparse type,
+// current-user ownership, and absence of untrusted write authority needed by
+// an installer writer before it repairs a drifted DACL. Unlike
+// ValidatePrivateDirectory it permits harmless read-only or incomplete DACL
+// drift.
+func ValidatePrivateDirectoryOwnership(path string) error {
+	return validatePrivateOwnership(path, true)
+}
+
+// ValidatePrivateFileOwnership is the file counterpart to
+// ValidatePrivateDirectoryOwnership.
+func ValidatePrivateFileOwnership(path string) error {
+	return validatePrivateOwnership(path, false)
+}
+
+// ValidatePrivateHandle verifies that handle names an object owned by the
+// current user with the same fail-closed private DACL required by
+// ValidatePrivateDirectory and ValidatePrivateFile. Callers that already hold
+// a non-reparse handle can use this to keep security validation bound to the
+// object that they subsequently operate on.
+func ValidatePrivateHandle(handle windows.Handle) error {
+	sd, err := windows.GetSecurityInfo(
+		handle,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return err
+	}
+	safe, err := privateSecurityDescriptorIsSafe(sd)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		return fmt.Errorf("safefile: private handle has an unsafe owner or DACL")
+	}
+	return nil
+}
+
+func validatePrivateOwnership(path string, wantDirectory bool) error {
+	if err := rejectReparseChain(path); err != nil {
+		return err
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || (wantDirectory && !info.IsDir()) ||
+		(!wantDirectory && !info.Mode().IsRegular()) {
+		return fmt.Errorf("safefile: private path has an unexpected type: %s", path)
+	}
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return err
+	}
+	owned, err := windowsPathOwnedBySubject(path, identity)
+	if err != nil {
+		return err
+	}
+	if !owned {
+		return fmt.Errorf("safefile: private path is not owned by the current user: %s", path)
+	}
+	repairable, err := privateDACLIsWriterRepairableForSubject(path, identity)
+	if err != nil {
+		return err
+	}
+	if !repairable {
+		return fmt.Errorf("safefile: private path DACL is unsafe to repair: %s", path)
+	}
+	return nil
+}
+
+func withLockedDirectory(path string, write func() error) error {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	handle, err := windows.CreateFile(
+		ptr,
+		windows.FILE_LIST_DIRECTORY|windows.FILE_READ_ATTRIBUTES,
+		windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_FLAG_BACKUP_SEMANTICS|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		return fmt.Errorf("safefile: lock private directory %s: %w", path, err)
+	}
+	defer windows.CloseHandle(handle)
+	if err := rejectReparsePath(path); err != nil {
+		return err
+	}
+	return write()
+}
+
+func windowsPathOwnedByCurrentUser(path string) (bool, error) {
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return false, err
+	}
+	return windowsPathOwnedBySubject(path, identity)
+}
+
+func windowsPathOwnedBySubject(
+	path string,
+	identity windowsProtectionSubject,
+) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return false, err
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	if identity.sid == nil {
+		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
+	}
+	return owner != nil && owner.Equals(identity.sid), nil
+}
+
+// windowsProtectionIdentity preserves the historical process-token behavior
+// whenever no thread token is installed, as in ordinary DefenseClaw
+// invocations. The LocalSystem enterprise guardian installs a target-user
+// thread token for its bounded profile mutation callback; that explicit token
+// selects the stricter effective-user branch below.
+type windowsProtectionSubject struct {
+	sid          *windows.SID
+	impersonated bool
+}
+
+func windowsProtectionIdentity() (windowsProtectionSubject, error) {
+	var token windows.Token
+	impersonated := true
+	if err := windows.OpenThreadToken(
+		windows.CurrentThread(),
+		windows.TOKEN_QUERY,
+		true,
+		&token,
+	); errors.Is(err, windows.ERROR_NO_TOKEN) {
+		token = windows.GetCurrentProcessToken()
+		impersonated = false
+	} else if err != nil {
+		return windowsProtectionSubject{}, err
+	} else {
+		defer token.Close()
+	}
+	user, err := token.GetTokenUser()
+	if err != nil {
+		return windowsProtectionSubject{}, err
+	}
+	if user == nil || user.User.Sid == nil {
+		return windowsProtectionSubject{}, fmt.Errorf("safefile: current token user is unavailable")
+	}
+	sid, err := user.User.Sid.Copy()
+	if err != nil {
+		return windowsProtectionSubject{}, err
+	}
+	return windowsProtectionSubject{sid: sid, impersonated: impersonated}, nil
+}
+
+// windowsPathOwner returns the owner SID of the given path. Kept alongside
+// windowsPathOwnedBySubject so callers that only need the raw owner (tests,
+// owner-repair fast paths) can skip the identity lookup.
+func windowsPathOwner(path string) (*windows.SID, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return nil, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION)
+	if err != nil {
+		return nil, err
+	}
+	if sd == nil {
+		return nil, fmt.Errorf("safefile: path has no security descriptor: %s", path)
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return nil, err
+	}
+	return owner, nil
+}
+
+// currentWindowsUserSID returns the current process token's user SID. Unlike
+// windowsProtectionIdentity, it never consults the thread token, so it is the
+// right primitive when the caller specifically wants "the process owner" —
+// for example the desired-owner argument to setWindowsOwnerIfDifferent.
+func currentWindowsUserSID() (*windows.SID, error) {
+	user, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		return nil, err
+	}
+	if user == nil || user.User.Sid == nil {
+		return nil, fmt.Errorf("safefile: current token user is unavailable")
+	}
+	return user.User.Sid, nil
+}
+
+// windowsOwnerSetter matches windows.SetNamedSecurityInfo's signature so
+// setWindowsOwnerIfDifferent can be exercised in tests without hitting the
+// real security-info syscall.
+type windowsOwnerSetter func(
+	objectName string,
+	objectType windows.SE_OBJECT_TYPE,
+	securityInformation windows.SECURITY_INFORMATION,
+	owner *windows.SID,
+	group *windows.SID,
+	dacl *windows.ACL,
+	sacl *windows.ACL,
+) error
+
+// setWindowsOwnerIfDifferent skips the owner update when the current owner is
+// already the desired one. File owners receive implicit WRITE_DAC but not
+// WRITE_OWNER, so re-applying an already-correct owner would fail for a
+// normal (non-elevated) user.
+func setWindowsOwnerIfDifferent(
+	path string,
+	currentOwner *windows.SID,
+	desiredOwner *windows.SID,
+	setOwner windowsOwnerSetter,
+) error {
+	if currentOwner != nil && currentOwner.Equals(desiredOwner) {
+		return nil
+	}
+	return setOwner(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION,
+		desiredOwner,
+		nil,
+		nil,
+		nil,
+	)
+}
+
+func preserveExistingProtection(source, destination string) error {
+	if _, err := os.Lstat(source); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return err
+	}
+	safe, err := privateDACLIsSafe(source)
+	if err != nil {
+		return err
+	}
+	if !safe {
+		// ReplaceFileW deliberately preserves the replaced file's DACL. Tighten
+		// an unsafe DefenseClaw-owned destination before publication so the
+		// metadata-preserving replace cannot retain a foreign read/write ACE.
+		if err := setPrivateDACL(source, false); err != nil {
+			return err
+		}
+	}
+	extendedSource, err := winpath.Extended(source)
+	if err != nil {
+		return err
+	}
+	extendedDestination, err := winpath.Extended(destination)
+	if err != nil {
+		return err
+	}
+	sd, err := windows.GetNamedSecurityInfo(extendedSource, windows.SE_FILE_OBJECT, windows.DACL_SECURITY_INFORMATION)
+	if err != nil {
+		return err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil {
+		return err
+	}
+	return windows.SetNamedSecurityInfo(
+		extendedDestination, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil,
+	)
+}
+
+func rejectReparsePath(path string) error {
+	ptr, err := winpath.UTF16Ptr(path)
+	if err != nil {
+		return err
+	}
+	attributes, err := windows.GetFileAttributes(ptr)
+	if err != nil {
+		if err == windows.ERROR_FILE_NOT_FOUND || err == windows.ERROR_PATH_NOT_FOUND {
+			return nil
+		}
+		return err
+	}
+	if attributes&windows.FILE_ATTRIBUTE_REPARSE_POINT != 0 {
+		return fmt.Errorf("safefile: refusing reparse point: %s", path)
+	}
+	return nil
+}
+
+func rejectReparseChain(path string) error {
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	for {
+		if err := rejectReparsePath(current); err != nil {
+			return err
+		}
+		parent := filepath.Dir(current)
+		if parent == current {
+			return nil
+		}
+		current = parent
+	}
+}
+
+// CreatePrivateDirectory creates path and any missing parents with the private
+// Windows DACL, returning true only when this call created path itself. If path
+// already exists (including a concurrent creator winning the race), its ACL is
+// left untouched so callers can validate rather than rewrite operator state.
+func CreatePrivateDirectory(path string) (bool, error) {
+	if path == "" {
+		return false, fmt.Errorf("safefile: empty directory path")
+	}
+	if err := rejectReparseChain(path); err != nil {
+		return false, err
+	}
+	created, err := makePrivateDirectoriesCreationAware(path, false)
+	if err != nil {
+		return false, fmt.Errorf("safefile: mkdir %s: %w", path, err)
+	}
+	return created, nil
+}
+
+func makePrivateDirectories(path string) error {
+	_, err := makePrivateDirectoriesCreationAware(path, true)
+	return err
+}
+
+func makePrivateDirectoriesCreationAware(path string, protectConcurrentExisting bool) (bool, error) {
+	missing := make([]string, 0, 2)
+	current, err := filepath.Abs(path)
+	if err != nil {
+		return false, err
+	}
+	for {
+		_, statErr := os.Lstat(current)
+		if statErr == nil {
+			break
+		}
+		if !os.IsNotExist(statErr) {
+			return false, statErr
+		}
+		missing = append(missing, current)
+		parent := filepath.Dir(current)
+		if parent == current {
+			break
+		}
+		current = parent
+	}
+	if len(missing) == 0 {
+		return false, nil
+	}
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return false, fmt.Errorf("safefile: current token user: %w", err)
+	}
+	descriptor, err := windows.SecurityDescriptorFromString(
+		fmt.Sprintf("O:%sD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;OW)", identity.sid),
+	)
+	if err != nil {
+		return false, err
+	}
+	attributes := windows.SecurityAttributes{
+		Length:             uint32(unsafe.Sizeof(windows.SecurityAttributes{})),
+		SecurityDescriptor: descriptor,
+	}
+	targetCreated := false
+	for index := len(missing) - 1; index >= 0; index-- {
+		directory := missing[index]
+		ptr, err := winpath.UTF16Ptr(directory)
+		if err != nil {
+			return false, err
+		}
+		createErr := windows.CreateDirectory(ptr, &attributes)
+		created := createErr == nil
+		if createErr != nil && createErr != windows.ERROR_ALREADY_EXISTS {
+			return false, createErr
+		}
+		if index == 0 {
+			targetCreated = created
+		}
+		if !created && !protectConcurrentExisting {
+			// A concurrent creator changed the path topology after the
+			// initial walk. Leave its ACL untouched and stop before using
+			// that directory as an ancestor for any further creation.
+			return false, nil
+		}
+		if err := rejectReparsePath(directory); err != nil {
+			return false, err
+		}
+		if err := protectDirectory(directory); err != nil {
+			return false, err
+		}
+	}
+	return targetCreated, nil
+}
+
+func setPrivateDACL(path string, inherit bool) error {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return err
+	}
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return err
+	}
+	if identity.impersonated {
+		owned, err := windowsPathOwnedByCurrentUser(path)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("safefile: refusing to protect foreign-owned path: %s", path)
+		}
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return err
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inherit {
+		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
+	for _, sid := range []*windows.SID{identity.sid, system} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return err
+	}
+	if !identity.impersonated {
+		// A file owner receives implicit WRITE_DAC but NOT WRITE_OWNER, so
+		// re-applying an already-correct owner from a non-elevated process
+		// fails with ERROR_ACCESS_DENIED. Read the current owner and skip
+		// the write when the path is already owned by identity.sid.
+		currentSD, err := windows.GetNamedSecurityInfo(
+			extended, windows.SE_FILE_OBJECT, windows.OWNER_SECURITY_INFORMATION,
+		)
+		if err != nil {
+			return err
+		}
+		currentOwner, _, err := currentSD.Owner()
+		if err != nil {
+			return err
+		}
+		if err := setWindowsOwnerIfDifferent(
+			extended, currentOwner, identity.sid, windows.SetNamedSecurityInfo,
+		); err != nil {
+			return err
+		}
+	}
+	return windows.SetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		acl,
+		nil,
+	)
+}
+
+// privateDACLForCurrentUser remains the process-token helper used by the
+// in-use-file protection path. Target-user impersonation uses setPrivateDACL's
+// windowsProtectionIdentity path above instead.
+func privateDACLForCurrentUser(inherit bool) (*windows.SID, *windows.ACL, error) {
+	user, err := currentWindowsUserSID()
+	if err != nil {
+		return nil, nil, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return nil, nil, err
+	}
+	inheritance := uint32(windows.NO_INHERITANCE)
+	if inherit {
+		inheritance = uint32(windows.SUB_CONTAINERS_AND_OBJECTS_INHERIT)
+	}
+	entries := make([]windows.EXPLICIT_ACCESS, 0, 2)
+	for _, sid := range []*windows.SID{user, system} {
+		entries = append(entries, windows.EXPLICIT_ACCESS{
+			AccessPermissions: windows.GENERIC_ALL,
+			AccessMode:        windows.GRANT_ACCESS,
+			Inheritance:       inheritance,
+			Trustee: windows.TRUSTEE{
+				TrusteeForm:  windows.TRUSTEE_IS_SID,
+				TrusteeType:  windows.TRUSTEE_IS_USER,
+				TrusteeValue: windows.TrusteeValueFromSID(sid),
+			},
+		})
+	}
+	acl, err := windows.ACLFromEntries(entries, nil)
+	if err != nil {
+		return nil, nil, err
+	}
+	return user, acl, nil
+}
+
+func privateDACLIsSafe(path string) (bool, error) {
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return false, err
+	}
+	return privateDACLIsSafeForSubject(path, identity)
+}
+
+func privateDACLIsSafeForSubject(
+	path string,
+	identity windowsProtectionSubject,
+) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(
+		extended, windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false, err
+	}
+	return privateSecurityDescriptorIsSafeForSubject(sd, identity)
+}
+
+func privateSecurityDescriptorIsSafe(sd *windows.SECURITY_DESCRIPTOR) (bool, error) {
+	identity, err := windowsProtectionIdentity()
+	if err != nil {
+		return false, err
+	}
+	return privateSecurityDescriptorIsSafeForSubject(sd, identity)
+}
+
+func privateSecurityDescriptorIsSafeForSubject(
+	sd *windows.SECURITY_DESCRIPTOR,
+	identity windowsProtectionSubject,
+) (bool, error) {
+	if sd == nil {
+		return false, nil
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return false, err
+	}
+	if identity.sid == nil {
+		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
+	}
+	if owner == nil || !owner.Equals(identity.sid) {
+		return false, nil
+	}
+	var administrators *windows.SID
+	if identity.impersonated {
+		administrators, err = windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+		if err != nil {
+			return false, err
+		}
+		control, _, controlErr := sd.Control()
+		if controlErr != nil || control&windows.SE_DACL_PROTECTED == 0 {
+			return false, controlErr
+		}
+	}
+	foundOwner := false
+	foundSystem := false
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil {
+			continue
+		}
+		// Object, callback, conditional, and other extended ACE layouts do not
+		// share ACCESS_ALLOWED_ACE's SID offset. Treat them as unsafe instead of
+		// mis-parsing or silently skipping a potentially writable principal.
+		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			if identity.impersonated && ace.Mask != 0 {
+				return false, nil
+			}
+			if !identity.impersonated &&
+				(sid.Equals(identity.sid) || sid.Equals(system) ||
+					sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)) &&
+				ace.Mask != 0 {
+				return false, nil
+			}
+		}
+		if ace.Header.AceType != windows.ACCESS_ALLOWED_ACE_TYPE {
+			continue
+		}
+		if ace.Mask == 0 {
+			continue
+		}
+		if sid.IsWellKnown(windows.WinCreatorOwnerRightsSid) {
+			if identity.impersonated {
+				if ace.Mask != windows.READ_CONTROL || ace.Header.AceFlags != 0 {
+					return false, nil
+				}
+				continue
+			}
+			foundOwner = true
+			continue
+		}
+		if sid.Equals(identity.sid) {
+			foundOwner = true
+			continue
+		}
+		if sid.Equals(system) {
+			foundSystem = true
+			continue
+		}
+		if identity.impersonated && sid.Equals(administrators) {
+			// Under impersonation, an Administrators ACE must be bounded
+			// to the same read-only shape as the Creator Owner Rights
+			// rule above. Accepting any mask (including GENERIC_ALL) or
+			// any inheritance flag would let a DACL that grants
+			// Administrators full write access on the target user's
+			// private file report as safe and skip repair.
+			if ace.Mask != windows.READ_CONTROL || ace.Header.AceFlags != 0 {
+				return false, nil
+			}
+			continue
+		}
+		return false, nil
+	}
+	return foundOwner && foundSystem, nil
+}
+
+func privateDACLIsWriterRepairableForSubject(
+	path string,
+	identity windowsProtectionSubject,
+) (bool, error) {
+	extended, err := winpath.Extended(path)
+	if err != nil {
+		return false, err
+	}
+	sd, err := windows.GetNamedSecurityInfo(
+		extended,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil {
+		return false, err
+	}
+	return privateSecurityDescriptorIsWriterRepairableForSubject(sd, identity)
+}
+
+func privateSecurityDescriptorIsWriterRepairableForSubject(
+	sd *windows.SECURITY_DESCRIPTOR,
+	identity windowsProtectionSubject,
+) (bool, error) {
+	if sd == nil {
+		return false, nil
+	}
+	owner, _, err := sd.Owner()
+	if err != nil {
+		return false, err
+	}
+	dacl, _, err := sd.DACL()
+	if err != nil || dacl == nil {
+		return false, err
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		return false, err
+	}
+	if identity.sid == nil {
+		return false, fmt.Errorf("safefile: protection subject SID is unavailable")
+	}
+	if owner == nil || !owner.Equals(identity.sid) {
+		return false, nil
+	}
+	untrustedWrite := windows.ACCESS_MASK(
+		windows.GENERIC_ALL |
+			windows.GENERIC_WRITE |
+			windows.DELETE |
+			windows.WRITE_DAC |
+			windows.WRITE_OWNER |
+			windows.FILE_WRITE_DATA |
+			windows.FILE_APPEND_DATA |
+			windows.FILE_WRITE_EA |
+			windows.FILE_WRITE_ATTRIBUTES |
+			0x00000040, // FILE_DELETE_CHILD
+	)
+	for index := uint16(0); index < dacl.AceCount; index++ {
+		var ace *windows.ACCESS_ALLOWED_ACE
+		if err := windows.GetAce(dacl, uint32(index), &ace); err != nil {
+			return false, err
+		}
+		if ace == nil {
+			continue
+		}
+		if !isSimpleDiscretionaryACE(ace.Header.AceType) {
+			return false, nil
+		}
+		sid := (*windows.SID)(unsafe.Pointer(&ace.SidStart))
+		trusted := sid.Equals(identity.sid) || sid.Equals(system) ||
+			sid.IsWellKnown(windows.WinCreatorOwnerRightsSid)
+		if ace.Header.AceType == windows.ACCESS_DENIED_ACE_TYPE {
+			if trusted && ace.Mask != 0 {
+				return false, nil
+			}
+			continue
+		}
+		if !trusted && ace.Mask&untrustedWrite != 0 {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
+// isSimpleDiscretionaryACE deliberately recognizes only the two ACE layouts
+// whose SID offset privateDACLIsSafe parses. Object, callback, conditional, and
+// callback-object ACEs carry additional fields or application data; accepting
+// one as a basic ACCESS_ALLOWED_ACE can validate the wrong SID. Unknown future
+// ACE types are therefore unsafe by default.
+func isSimpleDiscretionaryACE(aceType byte) bool {
+	return aceType == windows.ACCESS_ALLOWED_ACE_TYPE ||
+		aceType == windows.ACCESS_DENIED_ACE_TYPE
+}

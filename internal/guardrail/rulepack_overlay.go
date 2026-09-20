@@ -101,7 +101,7 @@ func AgentControlRulePackStatus(overlayDirs []string) (ManagedRulePackStatus, er
 func LoadRulePackForRegexSource(baseDir string, overlayDirs []string, source string) (*RulePack, error) {
 	switch strings.ToLower(strings.TrimSpace(source)) {
 	case "", RegexSourceLocal:
-		return LoadRulePack(baseDir), nil
+		return LoadRulePack(baseDir)
 	case RegexSourceHybrid:
 		return LoadRulePackWithOverlays(baseDir, overlayDirs)
 	case RegexSourceAgentControl:
@@ -112,7 +112,10 @@ func LoadRulePackForRegexSource(baseDir string, overlayDirs []string, source str
 }
 
 func loadAgentControlOnlyRulePack(baseDir string, overlayDirs []string) (*RulePack, error) {
-	localAssets := LoadRulePack(baseDir)
+	localAssets, err := LoadRulePack(baseDir)
+	if err != nil {
+		return nil, err
+	}
 	result := *localAssets
 	result.RuleFiles = nil
 	result.LocalPatterns = nil
@@ -173,7 +176,10 @@ func loadAgentControlOnlyRulePack(baseDir string, overlayDirs []string) (*RulePa
 // directories in order. It never lets a managed overlay replace suppressions,
 // judge prompts, sensitive tools, or local patterns.
 func LoadRulePackWithOverlays(baseDir string, overlayDirs []string) (*RulePack, error) {
-	base := LoadRulePack(baseDir)
+	base, err := LoadRulePack(baseDir)
+	if err != nil {
+		return nil, err
+	}
 	if len(overlayDirs) == 0 {
 		return base, nil
 	}
@@ -256,7 +262,13 @@ func loadRuleOverlayDir(
 	var usedBytes int64
 	usedRules := 0
 	for _, entry := range entries {
-		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 || filepath.Ext(entry.Name()) != ".yaml" {
+		if entry.IsDir() || entry.Type()&os.ModeSymlink != 0 {
+			return nil, 0, 0, fmt.Errorf("guardrail: overlay rules %s contains unsupported entry %s", rulesDir, entry.Name())
+		}
+		if filepath.Ext(entry.Name()) != ".yaml" {
+			if hardLinkedRuleEntry(rulesDir, entry.Name()) {
+				return nil, 0, 0, fmt.Errorf("guardrail: overlay rule file %s has hard links", filepath.Join(rulesDir, entry.Name()))
+			}
 			return nil, 0, 0, fmt.Errorf("guardrail: overlay rules %s contains unsupported entry %s", rulesDir, entry.Name())
 		}
 		path := filepath.Join(rulesDir, entry.Name())
@@ -308,6 +320,27 @@ func loadRuleOverlayDir(
 		files = append(files, &file)
 	}
 	return files, usedBytes, usedRules, nil
+}
+
+func hardLinkedRuleEntry(dir, name string) bool {
+	info, err := os.Stat(filepath.Join(dir, name))
+	if err != nil || !info.Mode().IsRegular() {
+		return false
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, entry := range entries {
+		if entry.Name() == name {
+			continue
+		}
+		other, err := os.Stat(filepath.Join(dir, entry.Name()))
+		if err == nil && other.Mode().IsRegular() && os.SameFile(info, other) {
+			return true
+		}
+	}
+	return false
 }
 
 func validateManagedRulesFile(file *RulesFileYAML, seenRuleIDs map[string]struct{}, priorRules int) error {

@@ -18,7 +18,10 @@ package cli
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -27,21 +30,32 @@ import (
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
-	"github.com/defenseclaw/defenseclaw/internal/gateway"
+	"github.com/defenseclaw/defenseclaw/internal/daemon"
 	"github.com/defenseclaw/defenseclaw/internal/managed"
-	"github.com/defenseclaw/defenseclaw/internal/managed/cloudreg"
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
+	"github.com/defenseclaw/defenseclaw/internal/safefile"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 var (
-	cfg          *config.Config
-	auditStore   *audit.Store
-	auditLog     *audit.Logger
-	otelProvider *telemetry.Provider
-	appVersion   string
+	cfg                          *config.Config
+	auditStore                   *audit.Store
+	auditLog                     *audit.Logger
+	appVersion                   string
+	appCommit                    string
+	appBuildDate                 string
+	versionJSON                  bool
+	activeObservabilityV8Startup *observabilityV8Startup
 )
+
+// observabilityV8Startup is the immutable source snapshot that was validated
+// before any v8-owned stores or exporters were constructed. The sidecar passes
+// this exact byte sequence to the authoritative runtime bootstrap immediately
+// before Run, preventing a file change between validation and activation from
+// producing a mixed generation.
+type observabilityV8Startup struct {
+	sourceName string
+	raw        []byte
+}
 
 func SetVersion(v string) {
 	appVersion = v
@@ -49,9 +63,100 @@ func SetVersion(v string) {
 }
 
 func SetBuildInfo(commit, date string) {
+	appCommit = commit
+	appBuildDate = date
 	rootCmd.SetVersionTemplate(
 		fmt.Sprintf("{{.Name}} version {{.Version}} (commit=%s, built=%s)\n", commit, date),
 	)
+}
+
+type machineVersionReport struct {
+	SchemaVersion int    `json:"schema_version"`
+	Name          string `json:"name"`
+	Version       string `json:"version"`
+	Commit        string `json:"commit,omitempty"`
+	Built         string `json:"built,omitempty"`
+}
+
+func writeMachineVersion(w io.Writer) error {
+	return json.NewEncoder(w).Encode(machineVersionReport{
+		SchemaVersion: 1,
+		Name:          "defenseclaw-gateway",
+		Version:       appVersion,
+		Commit:        appCommit,
+		Built:         appBuildDate,
+	})
+}
+
+func rootPersistentPreRunE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
+	// Skip the full-daemon bootstrap (config load + audit store + PID
+	// registration + telemetry) for lifecycle utilities that operate on
+	// operator-supplied paths and do not touch DefenseClaw state. These
+	// subcommands must run on hosts where the daemon has NOT been
+	// installed yet (e.g. inside macOS uninstall.sh's --purge path,
+	// which runs on hosts that may be halfway through a partial
+	// install with no v8 config). Opting-in via the shared annotation
+	// keeps the exemption discoverable in one place.
+	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return nil
+	}
+	// Enterprise hook commands also use this initializer so they receive the
+	// same authenticated v8 runtime context as the root sidecar command.
+	// A Windows daemon may explicitly break away from the TUI's Job Object.
+	// Claim its strong PID identity before any fallible/slow initialization so
+	// an abruptly cancelled launcher cannot leave an unmanaged live sidecar.
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	activeObservabilityV8Startup = nil
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+	var err error
+	cfgPath := config.ConfigPath()
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+	if err != nil {
+		// Spec 003 B2: in managed_enterprise, tolerate a missing
+		// config.yaml at startup by fsnotify-waiting for UCB to drop
+		// it. Non-managed-enterprise deployments (OSS / SaaS / DP /
+		// CP) retain the existing fail-fast; the pin-based gate
+		// makes sure a wait loop never starts outside its intended
+		// scope. See docs/specs/003-windows-deferred-config/.
+		retry, waitErr := enterConfigWaitLoopIfManaged(cmd.Context(), cfgPath, err, cmd.ErrOrStderr())
+		if waitErr != nil {
+			return waitErr
+		}
+		if !retry {
+			return fmt.Errorf("failed to load config: %w", err)
+		}
+		cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(cfgPath)
+		if err != nil {
+			// The wait declared config.yaml present; a second
+			// failure now is a real parse/permission problem, not
+			// another missing-file case worth waiting through.
+			return fmt.Errorf("failed to load config after wait: %w", err)
+		}
+	}
+	version.SetBinaryVersion(appVersion)
+	if auditDir := filepath.Dir(cfg.AuditDB); auditDir != "." {
+		if err := managed.PrepareServiceRuntimeDir(cfg.DeploymentMode, auditDir, "audit store directory"); err != nil {
+			return fmt.Errorf("failed to prepare audit store directory: %w", err)
+		}
+	}
+	auditStore, err = audit.NewStore(cfg.AuditDB)
+	if err != nil {
+		return fmt.Errorf("failed to open audit store: %w", err)
+	}
+	if err := auditStore.Init(); err != nil {
+		return fmt.Errorf("failed to init audit store: %w", err)
+	}
+	auditLog = audit.NewLogger(auditStore)
+	installCorrelator(auditStore, os.Stderr)
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	return nil
 }
 
 var rootCmd = &cobra.Command{
@@ -62,72 +167,8 @@ monitors tool_call and tool_result events, enforces policy in real time,
 and exposes a local REST API for the Python CLI.
 
 Run without arguments to start the sidecar daemon.`,
-	PersistentPreRunE: func(cmd *cobra.Command, _ []string) error {
-		// Load the data-dir .env BEFORE config.Load() so that
-		// token_env-style references in audit_sinks (e.g.
-		// SplunkHECSinkConfig.TokenEnv → os.Getenv) can resolve against
-		// secrets persisted by `defenseclaw setup` / `defenseclaw init`.
-		// config.Load() validates each sink at startup, and the sidecar
-		// daemon runs without the user's interactive shell environment,
-		// so reading .env first is what makes token_env usable at all.
-		loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
-
-		var err error
-		cfg, err = config.Load()
-		if err != nil {
-			return fmt.Errorf("failed to load config — run 'defenseclaw init' first: %w", err)
-		}
-		// Apply the persisted redaction kill-switch BEFORE any
-		// audit-store / telemetry init so even the very first
-		// log lines emitted during startup honor the operator's
-		// choice. The setter is idempotent and atomic, so a TUI
-		// that flips the flag at runtime can call it directly
-		// without restarting the sidecar — but the canonical
-		// surface is this startup wiring, so a config + restart
-		// gives the same effect with a clearer audit trail.
-		applyPrivacyConfig(cfg)
-		version.SetBinaryVersion(appVersion)
-
-		auditStore, err = audit.NewStore(cfg.AuditDB)
-		if err != nil {
-			return fmt.Errorf("failed to open audit store: %w", err)
-		}
-		if err := auditStore.Init(); err != nil {
-			return fmt.Errorf("failed to init audit store: %w", err)
-		}
-
-		auditLog = audit.NewLogger(auditStore)
-
-		// Register the sliding-window correlator so EmitScanResult
-		// runs it against every persisted scan's session window.
-		// A failure to load the embedded pattern set logs to stderr
-		// and leaves correlation disabled — the rest of the guardrail
-		// stack is unaffected.
-		installCorrelator(auditStore, os.Stderr)
-
-		// Re-run with the resolved data dir in case DEFENSECLAW_HOME
-		// redirected it; second call is a no-op when paths match.
-		if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
-			loadDotEnvIntoOS(resolved)
-		}
-		initAuditSinks()
-		initOTelProvider()
-		return nil
-	},
+	PersistentPreRunE: rootPersistentPreRunE,
 	PersistentPostRun: func(_ *cobra.Command, _ []string) {
-		if otelProvider != nil {
-			if err := otelProvider.Shutdown(context.Background()); err != nil && !isTransientOTelShutdownError(err) {
-				// We swallow the common "no collector reachable"
-				// flavours here (see isTransientOTelShutdownError):
-				// the same condition is already surfaced inside the
-				// TUI by cmd_doctor's "OTel (OTLP)" check, and
-				// printing it again to stderr trashes the prompt
-				// the user just got back when they pressed `q` in
-				// the TUI. Genuine SDK failures still print so
-				// real bugs aren't hidden.
-				fmt.Fprintf(os.Stderr, "warning: otel shutdown: %v\n", err)
-			}
-		}
 		if auditLog != nil {
 			auditLog.Close()
 		}
@@ -135,86 +176,258 @@ Run without arguments to start the sidecar daemon.`,
 			auditStore.Close()
 		}
 	},
-	RunE:         runSidecar,
+	RunE: func(cmd *cobra.Command, args []string) error {
+		if versionJSON {
+			return writeMachineVersion(cmd.OutOrStdout())
+		}
+		return runSidecar(cmd, args)
+	},
 	SilenceUsage: true,
+}
+
+// rootPersistentPreRunNoAuditE mirrors rootPersistentPreRunE minus the
+// audit.db open. Used by co-resident subcommands that never read or write the
+// audit store — most importantly the hook-guardian's `enterprise hooks watch`,
+// which runs as a long-lived LaunchDaemon beside the main gateway. SQLite
+// cannot accept two RW owners on the same file, so opening audit.db from a
+// co-resident daemon consistently fails with SQLITE_BUSY (5); and the same
+// unlink-on-close hazard flagged in loadGatewayCommandConfigOnly's comment
+// applies to long-lived hooks daemons too. The enterprise hooks pathway does
+// not read auditStore / auditLog anywhere, so skipping the open is dead-work
+// removal, not a feature drop.
+func rootPersistentPreRunNoAuditE(cmd *cobra.Command, _ []string) error {
+	if versionJSON {
+		return nil
+	}
+	// Skip the daemon bootstrap (PID registration + config load) for
+	// lifecycle utilities that operate on operator-supplied paths and
+	// do not touch DefenseClaw state. These subcommands must run on
+	// hosts where the daemon has NOT been installed yet — most
+	// importantly `enterprise hooks scrub` invoked from macOS
+	// uninstall.sh's --purge path against a host with no v8
+	// config.yaml. Mirrors the same exemption in
+	// rootPersistentPreRunE above; the two initializers must agree on
+	// the annotation contract or scrub regresses whenever it's routed
+	// through the no-audit variant.
+	if cmd != nil && cmd.Annotations["defenseclaw.skip-daemon-bootstrap"] == "true" {
+		return nil
+	}
+	if err := daemon.RegisterCurrentProcess(); err != nil {
+		return err
+	}
+	if err := loadGatewayCommandConfigOnly(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// loadGatewayCommandConfigOnly performs the strict v8 configuration phase
+// shared by the daemon and read-only control commands. It deliberately does
+// not open audit.db: a short-lived `status` process must never become a second
+// SQLite owner beside the running daemon, because closing that connection can
+// unlink the daemon's live WAL/SHM files on supported SQLite implementations.
+func loadGatewayCommandConfigOnly() error {
+	// Cobra normally executes this process once, but tests and embedders can
+	// execute the command tree repeatedly. Never retain a previous source.
+	activeObservabilityV8Startup = nil
+
+	// Load the default installation .env before strict v8 compilation so
+	// destination token_env/bearer_env references work for a daemon without
+	// an interactive shell. loadConfigV8File repeats this for the source's
+	// resolved data_dir before validating destination secrets.
+	loadDotEnvIntoOS(filepath.Join(config.DefaultDataPath(), ".env"))
+
+	var err error
+	cfg, activeObservabilityV8Startup, err = loadGatewayConfigV8(config.ConfigPath())
+	if err != nil {
+		return fmt.Errorf("failed to load config: %w", err)
+	}
+	version.SetBinaryVersion(appVersion)
+
+	// Re-run with the resolved data dir in case DEFENSECLAW_HOME redirected
+	// it; the second call is a no-op when paths match.
+	if resolved := filepath.Join(cfg.DataDir, ".env"); resolved != filepath.Join(config.DefaultDataPath(), ".env") {
+		loadDotEnvIntoOS(resolved)
+	}
+	return nil
+}
+
+// loadGatewayConfigV8 strict-parses and compiles the exact source snapshot
+// before the general Config decoder sees it. The target gateway therefore
+// never invokes v7 compatibility decoding or runtime migration; those belong
+// exclusively to `defenseclaw upgrade`.
+func loadGatewayConfigV8(path string) (*config.Config, *observabilityV8Startup, error) {
+	loaded, err := loadConfigV8File(path, config.DefaultDataPath())
+	if err != nil {
+		return nil, nil, err
+	}
+	candidate, err := config.LoadRuntimeV8FromBytes(loaded.source, loaded.raw)
+	if err != nil {
+		return nil, nil, err
+	}
+	if candidate.ConfigVersion != config.ObservabilityV8ConfigVersion {
+		return nil, nil, fmt.Errorf("schema v8 is required; run 'defenseclaw upgrade' first")
+	}
+	startup, err := prepareCompiledObservabilityV8Startup(candidate, loaded)
+	if err != nil {
+		return nil, nil, err
+	}
+	return candidate, startup, nil
+}
+
+// prepareObservabilityV8Startup remains a testable exact-source seam for
+// callers that already hold a proven v8 Config. Production startup uses
+// loadGatewayConfigV8 so strict parsing always precedes Config decoding.
+func prepareObservabilityV8Startup(c *config.Config) (*observabilityV8Startup, error) {
+	if c == nil || c.ConfigVersion != config.ObservabilityV8ConfigVersion {
+		return nil, fmt.Errorf("schema version 8 is required")
+	}
+	sourceName := strings.TrimSpace(c.ConfigFilePath)
+	if sourceName == "" {
+		sourceName = config.ConfigPath()
+	}
+	loaded, err := loadConfigV8File(sourceName, c.DataDir)
+	if err != nil {
+		return nil, err
+	}
+	return prepareCompiledObservabilityV8Startup(c, loaded)
+}
+
+func prepareCompiledObservabilityV8Startup(c *config.Config, loaded *loadedConfigV8File) (*observabilityV8Startup, error) {
+	if c == nil || loaded == nil || loaded.compiled == nil || loaded.compiled.Plan == nil {
+		return nil, fmt.Errorf("canonical compiler returned no effective plan")
+	}
+	snapshot := loaded.compiled.Plan.Snapshot()
+	if strings.TrimSpace(snapshot.Local.Path) == "" || strings.TrimSpace(snapshot.Local.JudgeBodiesPath) == "" {
+		return nil, fmt.Errorf("effective local store paths are incomplete")
+	}
+	if err := config.ApplyRuntimeV8DataDirDefaultsFromBytes(
+		c, loaded.source, loaded.raw, loaded.compiled.DataDir,
+	); err != nil {
+		return nil, err
+	}
+
+	c.DataDir = loaded.compiled.DataDir
+	c.AuditDB = snapshot.Local.Path
+	c.JudgeBodiesDB = snapshot.Local.JudgeBodiesPath
+	return &observabilityV8Startup{
+		sourceName: loaded.source,
+		raw:        append([]byte(nil), loaded.raw...),
+	}, nil
+}
+
+// SetCommandName selects one of the two release-owned names for the shared Go
+// executable. The enterprise package installs the same command surface as
+// defenseclaw.exe for administrator lifecycle operations and as
+// defenseclaw-gateway.exe for SCM hosting. Arbitrary argv[0] values are never
+// reflected into help or diagnostics.
+func SetCommandName(name string) {
+	switch name {
+	case "defenseclaw", "defenseclaw-gateway":
+		rootCmd.Use = name
+	}
+}
+
+func init() {
+	rootCmd.Flags().BoolVar(&versionJSON, "version-json", false, "emit the exact build version as JSON and exit")
 }
 
 // Execute runs the root command and returns the exit code. The actual
 // os.Exit call belongs in main() so deferred cleanup (PersistentPostRun)
 // always executes.
 func Execute() int {
-	if err := rootCmd.Execute(); err != nil {
-		return 1
-	}
-	return 0
+	return ExecuteContext(context.Background())
 }
 
-// applyPrivacyConfig honours the persisted Privacy.DisableRedaction
-// flag at sidecar startup. Two reasons it lives here as a tiny
-// dedicated function rather than inline in PersistentPreRunE:
+// ExecuteContext runs the root command with a caller-owned lifetime.
 //
-//  1. Tests can call it with a synthesized *config.Config to assert
-//     the redaction package picks up the flag without spinning up
-//     a full Cobra root.
-//  2. Future privacy fields (per-sink scope, custom redactor
-//     profiles) land here too, keeping the wiring local to one
-//     auditable touchpoint instead of growing PreRunE.
+// Interactive invocations use Execute, which preserves the historical
+// background context. A native Windows Service Control Manager host uses this
+// entry point so SERVICE_CONTROL_STOP and SERVICE_CONTROL_SHUTDOWN can cancel
+// the long-running gateway or hook-guardian command without terminating the
+// process abruptly.
 //
-// The config loader emits the loud warning when the kill-switch is
-// present, so this startup hook only mirrors the loaded value into
-// the redaction package.
-func applyPrivacyConfig(c *config.Config) {
-	if c == nil {
-		return
+// Two error-carrier contracts converge here after the
+// windows-enterprise-integration merge:
+//
+//   - *scrubExitError (main-branch, see enterprise_hooks_scrub.go)
+//     ships a specific rc for `enterprise hooks scrub` (rc 2/3/4/5).
+//   - *exitCodeError (integration-branch, see exit_code.go) ships a
+//     specific rc for the withExitCode helper the Windows enterprise
+//     lifecycle command uses (rc 1603 on preflight failures).
+//
+// exitCodeFor handles the scrub carrier; commandExitCode handles the
+// integration carrier. Layered so exitCodeFor wins on ambiguity —
+// scrub is the more specific subcommand.
+func ExecuteContext(ctx context.Context) int {
+	if ctx == nil {
+		ctx = context.Background()
 	}
-	redaction.SetDisableAll(c.Privacy.DisableRedaction)
-	// managed_enterprise carve-out: the local coding agent must always
-	// see the full, non-redacted verdict reason in its own UI regardless
-	// of DisableRedaction. Scoped to ReasonForAgent only — persistent and
-	// enterprise sinks keep redacting.
-	managedEnterprise := managed.IsManagedEnterprise(c.DeploymentMode)
-	redaction.SetAgentReasonRedactionDisabled(managedEnterprise)
-	// Gate the cloud-controlled per-inspection redaction directive
-	// (Cisco AI Defense is_redaction_enabled) on managed_enterprise so
-	// the gateway emit choke points only honor it in that mode.
-	gateway.SetManagedEnterpriseActive(managedEnterprise)
+	err := rootCmd.ExecuteContext(ctx)
+	if err == nil {
+		return 0
+	}
+	// Cancellation is the expected completion path for an SCM stop. Do not
+	// report it as a service failure or trigger failure-recovery restarts.
+	if errors.Is(err, context.Canceled) {
+		return 0
+	}
+	// scrubExitError check first (main-branch contract).
+	if rc := exitCodeFor(err); rc != 1 {
+		return rc
+	}
+	// integration-branch withExitCode helper.
+	return commandExitCode(err)
 }
 
-func initOTelProvider() {
-	if cfg == nil || !cfg.OTel.Enabled {
-		return
+// exitCodeFor is the pure error-to-int mapping for the scrub subcommand.
+// Kept split so tests can drive it directly without spinning up the
+// root Cobra command.
+//
+// Contract:
+//
+//   - err == nil                       -> rc 0
+//   - err chain contains a
+//     *scrubExitError                  -> that specific exit code
+//   - anything else                    -> rc 1
+//
+// Matched against the CONCRETE type (*scrubExitError) rather than a
+// generic `interface{ ExitCode() int }` on purpose. Go's stdlib
+// exposes several unrelated error types that satisfy the same
+// interface — most importantly *os/exec.ExitError (returned when a
+// spawned subprocess exits non-zero). If a future RunE calls out to
+// a helper binary and returns the resulting *exec.ExitError up the
+// chain, an interface-based match would silently propagate that
+// subprocess's exit code as OUR exit code (e.g. rc 127 = "command
+// not found" from a broken PATH, rc 2 from unrelated tools) —
+// meaningless in DefenseClaw's contract and prone to colliding with
+// our own well-defined codes (uninstall.sh: rc 2 = missing file, rc
+// 3 = unknown connector, rc 4 = parse failure). Anchoring on the
+// concrete type keeps the contract auditable: exit-code propagation
+// requires an explicit scrubExitError construction, never a
+// coincidental interface satisfaction.
+//
+// errors.As still walks the wrap chain so
+// `fmt.Errorf("context: %w", scrubExitErr)` continues to propagate
+// correctly — the concrete-type constraint only affects what
+// counts as a "carrier".
+func exitCodeFor(err error) int {
+	if err == nil {
+		return 0
 	}
-
-	var opts []telemetry.ProviderOption
-	// In managed_enterprise, construct the CMID credential provider once and
-	// share it with the telemetry provider so the Cisco AI Defense telemetry
-	// sink and the managed inspector coordinate one token cache. Best-effort:
-	// on OSS builds cloudreg.New returns ErrNoProviderRegistered and the sink
-	// fail-closes inside NewProvider.
-	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
-		if prov, provErr := cloudreg.New(cloudreg.Config{LibPath: cfg.CloudAuth.LibPath}); provErr == nil {
-			opts = append(opts, telemetry.WithCloudAuthProvider(prov))
-		}
+	var ec *scrubExitError
+	if errors.As(err, &ec) {
+		return ec.ExitCode()
 	}
-
-	p, err := telemetry.NewProvider(context.Background(), cfg, appVersion, opts...)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: otel init: %v\n", err)
-		return
-	}
-
-	otelProvider = p
-	auditLog.SetOTelProvider(p)
+	return 1
 }
 
 // loadDotEnvIntoOS reads KEY=VALUE pairs from path and sets them as
-// environment variables unless already present. This ensures secrets
-// persisted by `defenseclaw setup` (Splunk HEC tokens, OTLP bearer
-// tokens, generic webhook auth) are visible to the audit-sink Manager
-// and OTel provider when the sidecar runs as a daemon without the
-// user's interactive shell environment.
+// environment variables unless already present. This makes v8 destination
+// token_env/bearer_env references and non-observability application secrets
+// available when the sidecar runs without an interactive shell.
 func loadDotEnvIntoOS(path string) {
-	data, err := os.ReadFile(path)
+	data, err := safefile.ReadRegularFileBounded(path, safefile.MaxDotEnvBytes)
 	if err != nil {
 		return
 	}
@@ -229,6 +442,9 @@ func loadDotEnvIntoOS(path string) {
 		}
 		k = strings.TrimSpace(k)
 		v = strings.TrimSpace(v)
+		if !dotEnvKeyIsValid(k) || strings.IndexByte(v, 0) >= 0 || dotEnvKeyIsProcessControl(k) {
+			continue
+		}
 		if len(v) >= 2 && ((v[0] == '"' && v[len(v)-1] == '"') || (v[0] == '\'' && v[len(v)-1] == '\'')) {
 			v = v[1 : len(v)-1]
 		}
@@ -238,27 +454,52 @@ func loadDotEnvIntoOS(path string) {
 	}
 }
 
-// initAuditSinks builds every enabled `audit_sinks:` entry from config
-// and installs them on the audit logger. Build errors are logged but
-// non-fatal — a misconfigured sink should not take down the sidecar.
-//
-// Per-sink construction lives in internal/cli/audit_sinks.go to keep
-// root.go focused on lifecycle.
-func initAuditSinks() {
-	if cfg == nil {
-		return
+func dotEnvKeyIsProcessControl(key string) bool {
+	normalized := strings.ToUpper(strings.TrimSpace(key))
+	switch normalized {
+	case "ALL_PROXY", "BASH_ENV", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "COMSPEC",
+		"CURL_CA_BUNDLE",
+		"DEFENSECLAW_CODEX_LOOPBACK_TRUST",
+		"DEFENSECLAW_CONFIG", "DEFENSECLAW_DATA_DIR", "DEFENSECLAW_GATEWAY_BIN",
+		"DEFENSECLAW_HOME", "DEFENSECLAW_DEV", "DEFENSECLAW_DISABLE_AWS_HTTP1_SHIM",
+		"DEFENSE" + "CLAW_DISABLE_REDACTION", "DEFENSECLAW_DUMP_RAW_SECRETS",
+		"DEFENSECLAW_FAIL_MODE", "DEFENSECLAW_FORCE_AWS_HTTP1_SHIM",
+		"DEFENSECLAW_JSONL_DISABLE", "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+		"DEFENSECLAW_OTEL_TLS_INSECURE", "DEFENSECLAW_POLICY_VALIDATE_ALLOW_NO_OPA",
+		"DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY", "DEFENSECLAW_REVEAL_PII",
+		"DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", "DEFENSECLAW_STRICT_AVAILABILITY",
+		"DEFENSECLAW_TEST", "DEFENSECLAW_TOOL_INSPECT_FAIL_OPEN",
+		"DEFENSECLAW_TRUSTED_PROXY_CIDRS", "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES",
+		"DEFENSECLAW_UPGRADE_ALLOW_UNVERIFIED", "DEFENSECLAW_WEBHOOK_ALLOW_LOCALHOST",
+		daemon.EnvDaemon,
+		"ENV", "GIT_SSL_NO_VERIFY", "HOME", "HTTP_PROXY", "HTTPS_PROXY",
+		"LOCPATH", "NODE_EXTRA_CA_CERTS", "NODE_OPTIONS", "NO_PROXY", "PATH", "PATHEXT",
+		"PYTHONHOME", "PYTHONPATH",
+		"PYTHONSTARTUP", "SYSTEMROOT", "TEMP", "TMP", "TMPDIR", "USERPROFILE",
+		"REQUESTS_CA_BUNDLE", "SSL_CERT_DIR", "SSL_CERT_FILE", "WINDIR",
+		"XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+		"XDG_RUNTIME_DIR", "XDG_STATE_HOME":
+		return true
+	default:
+		return strings.HasPrefix(normalized, "LD_") ||
+			strings.HasPrefix(normalized, "DYLD_") ||
+			strings.HasPrefix(normalized, "DEFENSE"+"CLAW_ALLOW_")
 	}
-	// Build when there is any global sink OR any per-connector
-	// observability override (D5b) — a global-empty install that only
-	// routes a connector to its own sink must still install the manager.
-	if len(cfg.AuditSinks) == 0 && len(cfg.Observability.Connectors) == 0 {
-		return
+}
+
+func dotEnvKeyIsValid(key string) bool {
+	if key == "" {
+		return false
 	}
-	mgr, err := buildAuditSinks(cfg.AuditSinks, cfg.Observability, appVersion)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "warning: audit sinks init: %v\n", err)
+	for index := 0; index < len(key); index++ {
+		character := key[index]
+		if character >= 'a' && character <= 'z' ||
+			character >= 'A' && character <= 'Z' ||
+			character == '_' ||
+			index > 0 && character >= '0' && character <= '9' {
+			continue
+		}
+		return false
 	}
-	if mgr != nil && mgr.Len() > 0 {
-		auditLog.SetSinks(mgr)
-	}
+	return true
 }

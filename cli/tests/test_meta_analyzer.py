@@ -23,20 +23,30 @@ consensus removal from LLM client.
 import os
 import sys
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext
+from defenseclaw.scanner.plugin_scanner.analyzer import ScanContext, SourceFile
 from defenseclaw.scanner.plugin_scanner.analyzer_classes import MetaAnalyzer
 from defenseclaw.scanner.plugin_scanner.types import Finding
 
 
-def _make_finding(rule_id: str, severity: str = "HIGH", tags: list[str] | None = None) -> Finding:
+def _make_finding(
+    rule_id: str,
+    severity: str = "HIGH",
+    tags: list[str] | None = None,
+    *,
+    confidence: float = 0.9,
+    location: str = "src/index.js:1",
+) -> Finding:
     return Finding(
         id=f"F-{rule_id}",
         severity=severity,
         title=f"Test finding {rule_id}",
         rule_id=rule_id,
+        confidence=confidence,
+        location=location,
         tags=tags or [],
     )
 
@@ -376,6 +386,138 @@ class TestMetaAnalyzerEdgeCases(unittest.TestCase):
         self.assertGreater(ctx.finding_counter[0], 100)
         ids = [f.id for f in result]
         self.assertEqual(len(ids), len(set(ids)), "Finding IDs must be unique")
+
+    def test_documentation_finding_is_not_a_correlation_input(self):
+        findings = [
+            _make_finding(
+                "COG-TAMPER",
+                tags=["cognitive-tampering"],
+                confidence=0.99,
+                location="docs/walkthrough.md:163",
+            ),
+            _make_finding(
+                "CRED-READFILE-SECRETS",
+                tags=["credential-theft"],
+                confidence=0.99,
+                location="src/secrets.js:99",
+            ),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+
+        self.assertNotIn("META-AGENT-TAKEOVER", [finding.rule_id for finding in result])
+
+    def test_benchmark_finding_is_not_a_correlation_input(self):
+        findings = [
+            _make_finding(
+                "COG-TAMPER",
+                tags=["cognitive-tampering"],
+                confidence=0.99,
+                location="src/persist.js:42",
+            ),
+            _make_finding(
+                "CRED-READFILE-SECRETS",
+                tags=["credential-theft"],
+                confidence=0.99,
+                location="benchmarks/robustness-audit.js:99",
+            ),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+
+        self.assertNotIn("META-AGENT-TAKEOVER", [finding.rule_id for finding in result])
+
+    def test_low_confidence_leg_cannot_create_meta_finding(self):
+        findings = [
+            _make_finding("DYN-IMPORT", tags=["code-execution"], confidence=0.9),
+            _make_finding("SRC-FETCH", tags=["network-access"], confidence=0.3),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+
+        self.assertNotIn("META-REMOTE-CODE-EXEC", [finding.rule_id for finding in result])
+
+    def test_non_finite_confidence_cannot_create_meta_finding(self):
+        findings = [
+            _make_finding("DYN-IMPORT", tags=["code-execution"], confidence=0.9),
+            _make_finding("SRC-FETCH", tags=["network-access"], confidence=float("nan")),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+
+        self.assertNotIn("META-REMOTE-CODE-EXEC", [finding.rule_id for finding in result])
+
+    def test_meta_finding_propagates_confidence_and_lists_evidence_chain(self):
+        findings = [
+            _make_finding(
+                "COG-TAMPER",
+                tags=["cognitive-tampering"],
+                confidence=0.92,
+                location="src/persist.ts:7",
+            ),
+            _make_finding(
+                "CRED-OPENCLAW-DIR",
+                tags=["credential-theft"],
+                confidence=0.88,
+                location="src/secrets.ts:9",
+            ),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+        meta = next(finding for finding in result if finding.rule_id == "META-AGENT-TAKEOVER")
+
+        self.assertEqual(meta.confidence, 0.88)
+        self.assertEqual(meta.severity, "HIGH")
+        self.assertIn("Agent-takeover pattern (correlated, 2 signals)", meta.title)
+        self.assertIn("COG-TAMPER@src/persist.ts:7", meta.evidence or "")
+        self.assertIn("CRED-OPENCLAW-DIR@src/secrets.ts:9", meta.evidence or "")
+        self.assertIn("not proof that execution occurred", meta.description)
+
+    def test_meta_finding_never_exceeds_atomic_evidence_severity(self):
+        findings = [
+            _make_finding(
+                "COG-TAMPER",
+                severity="MEDIUM",
+                tags=["cognitive-tampering"],
+                confidence=0.99,
+            ),
+            _make_finding(
+                "CRED-OPENCLAW-DIR",
+                severity="MEDIUM",
+                tags=["credential-theft"],
+                confidence=0.99,
+            ),
+        ]
+
+        result = MetaAnalyzer().analyze(_ctx_with_findings(findings))
+        meta = next(finding for finding in result if finding.rule_id == "META-AGENT-TAKEOVER")
+
+        self.assertEqual(meta.severity, "MEDIUM")
+
+    def test_docs_only_llm_context_is_excluded_without_false_coverage_warning(self):
+        previous = [_make_finding("SRC-EVAL")]
+        ctx = _ctx_with_findings(previous)
+        ctx.source_files = [
+            SourceFile(
+                path="/tmp/docs/walkthrough.md",
+                rel_path="docs/walkthrough.md",
+                content="eval(example)",
+                lines=["eval(example)"],
+                code_lines=["eval(example)"],
+                in_test_path=False,
+            )
+        ]
+
+        with patch(
+            "defenseclaw.scanner.plugin_scanner.llm_analyzer.call_llm",
+            side_effect=AssertionError("docs-only input reached the LLM provider"),
+        ) as call_llm:
+            result = MetaAnalyzer({"enabled": True, "model": "unused"}).analyze(ctx)
+
+        self.assertNotIn("SCAN-LLM-NO-SOURCE", [finding.rule_id for finding in result])
+        self.assertIs(ctx.previous_findings, previous)
+        self.assertEqual(ctx.source_files[0].rel_path, "docs/walkthrough.md")
+        call_llm.assert_not_called()
 
 
 class TestConsensusRemoved(unittest.TestCase):

@@ -25,12 +25,15 @@ import os
 import sys
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
 from defenseclaw import connector_paths
 
 from tests.connector_fixtures import make_zeptoclaw_config
+from tests.environment import isolated_home_env
 
 
 class _IsolatedHome:
@@ -51,15 +54,12 @@ class _IsolatedHome:
     def __enter__(self) -> str:
         self._tmp = tempfile.TemporaryDirectory(prefix="dc-zc-")
         self.home = self._tmp.name
-        self._prev_home = os.environ.get("HOME")
-        os.environ["HOME"] = self.home
+        self._env = patch.dict(os.environ, isolated_home_env(self.home), clear=False)
+        self._env.start()
         return self.home
 
     def __exit__(self, *exc):
-        if self._prev_home is None:
-            os.environ.pop("HOME", None)
-        else:
-            os.environ["HOME"] = self._prev_home
+        self._env.stop()
         if self._tmp is not None:
             self._tmp.cleanup()
 
@@ -70,7 +70,7 @@ class MakeZeptoClawConfigShapeTests(unittest.TestCase):
     def test_default_seeds_anthropic_provider(self):
         with _IsolatedHome() as home:
             cfg_path = make_zeptoclaw_config(home)
-            self.assertTrue(cfg_path.endswith(".zeptoclaw/config.json"))
+            self.assertEqual(Path(cfg_path).parts[-2:], (".zeptoclaw", "config.json"))
             with open(cfg_path) as fh:
                 doc = json.load(fh)
             self.assertIn("providers", doc)

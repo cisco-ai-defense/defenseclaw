@@ -1,0 +1,5 @@
+version: 1
+protection: ssh-authorized-keys
+# Presence is opt-in. An empty list means no SSH public key is approved.
+approved_key_fingerprints:
+  - SHA256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA

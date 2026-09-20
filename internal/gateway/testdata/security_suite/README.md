@@ -2,13 +2,15 @@
 
 A single labeled corpus, split by the layer under test, replayed by
 `internal/gateway/security_suite_test.go`. The split makes it explicit
-whether a case is exercising the **regex/rule layer**, the **LLM-judge
-layer**, or the **end-to-end HTTP** surface.
+whether a case is exercising the **trusted tool-call semantic layer**, the
+**regex/rule layer**, the **LLM-judge layer**, or the **end-to-end HTTP**
+surface.
 
 ## Tiers
 
 | Tier | Corpus | Go test | LLM? | CI |
 |------|--------|---------|------|----|
+| Trusted tool-call semantics | `toolcall/corpus.jsonl` | `TestSecuritySuiteToolCall` | No (deterministic) | Yes |
 | Regex / rule layer | `regex/corpus.jsonl`| `TestSecuritySuiteRegex` | No (deterministic) | Yes |
 | LLM-judge layer (targeted) | `judge/corpus.jsonl` | `TestSecuritySuiteJudge` | Stubbed by default; live with `GUARDRAIL_BENCHMARK_LLM=1` | Yes (stubbed) |
 | LLM-judge benchmark (broad) | `eval_corpus/{injection,pii,exfil,tool_injection}/corpus.jsonl` | `TestEval*` | Live only | No (opt-in) |
@@ -17,8 +19,11 @@ layer**, or the **end-to-end HTTP** surface.
 ## Running
 
 ```sh
-# deterministic tiers (regex + stubbed judge), no secrets:
-go test ./internal/gateway/ -run 'TestSecuritySuite(Regex|Judge)' -v
+# deterministic tiers (tool-call semantics + regex + stubbed judge), no secrets:
+go test ./internal/gateway/ -run 'TestSecuritySuite(ToolCall|Regex|Judge)' -v
+
+# exact typed-CEL matrix for every shipped profile and applicable ActionFacts case:
+go test ./internal/gateway/ -run '^TestGuardrailProfilesCELActionFactsCorpusMatrix$' -v
 
 # live judge scoring against a real model:
 GUARDRAIL_BENCHMARK_LLM=1 DEFENSECLAW_LLM_KEY=... \
@@ -41,6 +46,33 @@ Common contract fields (all tiers):
   strictly below this tier.
 - `must_include_findings_substr` — optional substrings every finding list
   must contain (e.g. a rule ID prefix).
+
+### `toolcall/corpus.jsonl`
+
+This compact corpus replays inert command-shaped payloads through the private
+trusted-action dispatcher. It asserts both true positives and paired benign
+neighbors, the canonical owner ID, semantic-versus-fallback routing, duplicate
+suppression, and whether a finding can contribute to enforcement. Payloads are
+parsed but never executed. Parser grammar edge cases remain in the focused
+ActionFacts tests instead of being duplicated here.
+
+The typed-CEL matrix treats a row as evaluable only when its target rule owns a
+CEL expression and `ActionFacts` is authoritative and projects successfully.
+CEL-targeted rows with partial or unsupported facts remain fallback-only.
+Every other corpus tier is text-only and is explicitly reported as
+non-applicable to the ActionFacts CEL activation.
+
+- `rule_id` — canonical owner expected to match or remain absent.
+- `command`, `argv`, `args`, `dialect`, `cwd`, and `active_home` — structured
+  action inputs.
+- `active_agent_files` — optional trusted harness context containing exact
+  absolute `AGENTS.md` or `MEMORY.md` paths for active-file mutation cases. It
+  models connector-authenticated, same-session `InstructionsLoaded` state, not
+  a caller-controlled tool argument or generic payload field.
+- `expect_route` — `semantic`, `fallback`, or `none`.
+- `detection_only` — the finding must not contribute to a block.
+- `no_other_finding` — assert an exact zero-or-one finding result to catch
+  noisy overlap.
 
 ### `regex/corpus.jsonl`
 

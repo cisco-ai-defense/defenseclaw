@@ -1,5 +1,4 @@
 // Copyright 2026 Cisco Systems, Inc. and its affiliates
-//
 // SPDX-License-Identifier: Apache-2.0
 
 package scanner
@@ -10,198 +9,81 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
-type mockTel struct {
-	byRule     [][3]string // scanner, ruleID, severity
-	connectors []string    // connector recorded alongside each byRule entry
-}
-
-func (m *mockTel) RecordScanFindingByRule(_ context.Context, scanner, ruleID, severity, connector string) {
-	m.byRule = append(m.byRule, [3]string{scanner, ruleID, severity})
-	m.connectors = append(m.connectors, connector)
-}
-
-func TestEmitScanResult_TableDriven(t *testing.T) {
-	cases := []struct {
-		name        string
-		scanner     string
-		wantScanner string // v7 gateway-event-envelope schema enum
-		findings    []Finding
-		wantN       int // EventScanFinding count
-	}{
-		{"skill", "skill-scanner", "skill", []Finding{{ID: "1", Severity: SeverityHigh, Title: "t", Scanner: "skill-scanner", Category: "x"}}, 1},
-		{"mcp", "mcp-scanner", "mcp", []Finding{{ID: "1", Severity: SeverityMedium, Title: "m", Scanner: "mcp-scanner"}}, 1},
-		{"plugin", "plugin-scanner", "plugin", []Finding{{ID: "1", Severity: SeverityLow, Title: "p", Scanner: "plugin-scanner", RuleID: "r1"}}, 1},
-		{"aibom", "aibom", "aibom", []Finding{{ID: "1", Severity: SeverityInfo, Title: "i", Scanner: "aibom"}}, 1},
-		{"codeguard", "codeguard", "codeguard", []Finding{{ID: "CG-1", Severity: SeverityCritical, Title: "c", Scanner: "codeguard", RuleID: "CG-1"}}, 1},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			var emitted []gatewaylog.Event
-			w, err := gatewaylog.New(gatewaylog.Config{})
-			if err != nil {
-				t.Fatal(err)
-			}
-			w.WithFanout(func(e gatewaylog.Event) { emitted = append(emitted, e) })
-
-			r := &ScanResult{
-				Scanner:   tc.scanner,
-				Target:    "/tmp/target",
-				Timestamp: time.Now().UTC(),
-				Findings:  tc.findings,
-				Duration:  time.Millisecond * 100,
-			}
-			_, err = EmitScanResult(context.Background(), w, nil, &mockTel{}, r, AgentIdentity{
-				AgentID: "agent-1", AgentName: "n", AgentInstanceID: "i1", SidecarInstanceID: "s1",
-			})
-			if err != nil {
-				t.Fatalf("EmitScanResult: %v", err)
-			}
-			var scanCount, findingCount int
-			for _, e := range emitted {
-				switch e.EventType {
-				case gatewaylog.EventScan:
-					scanCount++
-					if e.Scan == nil || e.Scan.Scanner != tc.wantScanner {
-						t.Fatalf("EventScan scanner=%q want=%q payload=%+v", func() string {
-							if e.Scan == nil {
-								return ""
-							}
-							return e.Scan.Scanner
-						}(), tc.wantScanner, e.Scan)
-					}
-				case gatewaylog.EventScanFinding:
-					findingCount++
-					if e.ScanFinding == nil || e.ScanFinding.Scanner != tc.wantScanner {
-						t.Fatalf("EventScanFinding scanner=%q want=%q payload=%+v", func() string {
-							if e.ScanFinding == nil {
-								return ""
-							}
-							return e.ScanFinding.Scanner
-						}(), tc.wantScanner, e.ScanFinding)
-					}
-					if e.ScanFinding.RuleID == "" {
-						t.Fatal("expected non-empty rule_id")
-					}
-				}
-			}
-			if scanCount != 1 {
-				t.Fatalf("want 1 EventScan, got %d", scanCount)
-			}
-			if findingCount != tc.wantN {
-				t.Fatalf("want %d EventScanFinding, got %d", tc.wantN, findingCount)
-			}
-		})
-	}
-}
-
-func TestEmitScanResult_RecordsConnectorOnFindingMetric(t *testing.T) {
-	w, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	tel := &mockTel{}
-	r := &ScanResult{
-		Scanner: "skill-scanner", Target: "t", Timestamp: time.Now().UTC(),
-		Findings: []Finding{
-			{ID: "a", Severity: SeverityHigh, Title: "one", RuleID: "skill.secret", Scanner: "skill-scanner"},
-		},
-		Duration: time.Second,
-	}
-	// AgentIdentity.Connector must flow through to the per-rule finding metric
-	// so dashboards can split scan findings by connector.
-	if _, err := EmitScanResult(context.Background(), w, nil, tel, r, AgentIdentity{Connector: "codex"}); err != nil {
-		t.Fatal(err)
-	}
-	if len(tel.connectors) != 1 || tel.connectors[0] != "codex" {
-		t.Fatalf("RecordScanFindingByRule connector = %v, want [codex]", tel.connectors)
-	}
-}
-
-func TestEmitScanResult_SharedScanID(t *testing.T) {
-	var emitted []gatewaylog.Event
-	w, err := gatewaylog.New(gatewaylog.Config{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	w.WithFanout(func(e gatewaylog.Event) { emitted = append(emitted, e) })
-
-	r := &ScanResult{
-		Scanner: "skill-scanner", Target: "t", Timestamp: time.Now().UTC(),
+func TestEmitScanResultAllocatesSharedCanonicalIdentifiers(t *testing.T) {
+	result := &ScanResult{
+		Scanner: "skill-scanner", Target: "target", Timestamp: time.Now().UTC(),
 		Findings: []Finding{
 			{ID: "a", Severity: SeverityHigh, Title: "one", Scanner: "skill-scanner"},
 			{ID: "b", Severity: SeverityLow, Title: "two", Scanner: "skill-scanner"},
 		},
 		Duration: time.Second,
 	}
-	scanID, err := EmitScanResult(context.Background(), w, nil, &mockTel{}, r, AgentIdentity{})
+	scanID, err := EmitScanResult(context.Background(), nil, result, AgentIdentity{})
 	if err != nil {
 		t.Fatal(err)
 	}
-	var sawScan, sawIDs []string
-	for _, e := range emitted {
-		if e.Scan != nil {
-			sawScan = append(sawScan, e.Scan.ScanID)
-		}
-		if e.ScanFinding != nil {
-			sawIDs = append(sawIDs, e.ScanFinding.ScanID)
-		}
+	if scanID == "" || result.ScanID != scanID {
+		t.Fatalf("result scan ID = %q, returned %q", result.ScanID, scanID)
 	}
-	if len(sawScan) != 1 || len(sawIDs) != 2 {
-		t.Fatalf("scan payloads: %d %d", len(sawScan), len(sawIDs))
-	}
-	for _, id := range append(sawScan, sawIDs...) {
-		if id != scanID {
-			t.Fatalf("scan_id mismatch: want %q got %q", scanID, id)
+	seen := map[string]bool{}
+	for index := range result.Findings {
+		finding := result.Findings[index]
+		if finding.FindingOccurrenceID == "" || seen[finding.FindingOccurrenceID] {
+			t.Fatalf("finding %d occurrence ID = %q", index, finding.FindingOccurrenceID)
+		}
+		seen[finding.FindingOccurrenceID] = true
+		if finding.RuleID == "" {
+			t.Fatalf("finding %d has no canonical rule ID", index)
 		}
 	}
 }
 
-func TestEnsureRuleID_Synthesis(t *testing.T) {
-	f := Finding{ID: "x", Severity: SeverityHigh, Title: "Hello World!", Scanner: "skill-scanner"}
-	got := EnsureRuleID(&f, "skill-scanner")
+func TestEmitScanResultPreservesProvidedScanIDAndRejectsInvalid(t *testing.T) {
+	const scanID = "57ab7d45-1ac3-4afd-9b9f-b7b684d73995"
+	result := &ScanResult{ScanID: scanID, Scanner: "skill-scanner", Timestamp: time.Now().UTC()}
+	got, err := EmitScanResult(t.Context(), nil, result, AgentIdentity{})
+	if err != nil || got != scanID {
+		t.Fatalf("provided scan ID = %q error=%v", got, err)
+	}
+	result.ScanID = "not-a-uuid"
+	if _, err := EmitScanResult(t.Context(), nil, result, AgentIdentity{}); err == nil ||
+		strings.Contains(err.Error(), result.ScanID) {
+		t.Fatalf("invalid scan ID error = %v", err)
+	}
+}
+
+func TestEnsureRuleIDSynthesis(t *testing.T) {
+	finding := Finding{ID: "x", Severity: SeverityHigh, Title: "Hello World!", Scanner: "skill-scanner"}
+	got := EnsureRuleID(&finding, "skill-scanner")
 	if got == "" || !strings.Contains(got, "skill.") {
-		t.Fatalf("got %q", got)
+		t.Fatalf("rule ID = %q", got)
 	}
 }
 
-func TestEmitScanResult_ConcurrentScanIDs(t *testing.T) {
-	const n = 10
-	var wg sync.WaitGroup
-	ids := make([]string, n)
-	var mu sync.Mutex
-	for i := 0; i < n; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			w, _ := gatewaylog.New(gatewaylog.Config{})
-			r := &ScanResult{
-				Scanner: "mcp-scanner", Target: "t", Timestamp: time.Now().UTC(),
-				Findings: []Finding{{ID: "1", Severity: SeverityInfo, Title: "t", Scanner: "mcp-scanner"}},
-				Duration: time.Millisecond,
-			}
-			id, err := EmitScanResult(context.Background(), w, nil, nil, r, AgentIdentity{})
+func TestEmitScanResultConcurrentScanIDs(t *testing.T) {
+	const count = 10
+	var wait sync.WaitGroup
+	ids := make([]string, count)
+	for index := 0; index < count; index++ {
+		wait.Add(1)
+		go func(index int) {
+			defer wait.Done()
+			result := &ScanResult{Scanner: "mcp-scanner", Target: "target", Timestamp: time.Now().UTC()}
+			id, err := EmitScanResult(context.Background(), nil, result, AgentIdentity{})
 			if err != nil {
-				t.Error(err)
+				t.Errorf("emit scan %d: %v", index, err)
 				return
 			}
-			mu.Lock()
-			ids[i] = id
-			mu.Unlock()
-		}(i)
+			ids[index] = id
+		}(index)
 	}
-	wg.Wait()
+	wait.Wait()
 	seen := map[string]bool{}
 	for _, id := range ids {
-		if id == "" {
-			t.Fatal("empty scan id")
-		}
-		if seen[id] {
-			t.Fatalf("duplicate scan_id %q", id)
+		if id == "" || seen[id] {
+			t.Fatalf("non-unique scan ID %q", id)
 		}
 		seen[id] = true
 	}

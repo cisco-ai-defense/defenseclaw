@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 func TestEnsureGatewayToken_GeneratesAndPersists(t *testing.T) {
@@ -46,13 +47,7 @@ func TestEnsureGatewayToken_GeneratesAndPersists(t *testing.T) {
 		}
 	}
 
-	info, err := os.Stat(dotenv)
-	if err != nil {
-		t.Fatalf("stat dotenv: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o600 {
-		t.Errorf("dotenv mode = %v, want 0o600", mode)
-	}
+	testenv.AssertPrivateFile(t, dotenv)
 
 	data, err := os.ReadFile(dotenv)
 	if err != nil {

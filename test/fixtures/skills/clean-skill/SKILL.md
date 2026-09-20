@@ -1,11 +1,11 @@
 # clean-skill
 
-A test fixture skill with no security issues.
-Used for E2E testing of the skill-scanner.
+A benign Markdown-only fixture used by skill-scanner tests. It contains no
+executable implementation.
 
 ## Usage
 
-This skill accepts text input and echoes it back.
+The fictional behavior supplied to the scanner is an echo operation:
 
 ```
 input: any text

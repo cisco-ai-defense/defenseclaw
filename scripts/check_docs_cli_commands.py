@@ -19,6 +19,7 @@ from pathlib import Path
 
 import click
 from click.testing import CliRunner
+from defenseclaw.commands import cmd_setup
 from defenseclaw.main import cli
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -26,6 +27,21 @@ PUBLIC_DOCS_ROOT = REPO_ROOT / "docs-site" / "content" / "docs"
 SUPPORTING_DOCS_ROOT = REPO_ROOT / "docs"
 SHELL_FENCE_LANGUAGES = {"bash", "console", "sh", "shell", "zsh"}
 COMMAND_NAME = "defenseclaw"
+
+# Public Windows enterprise lifecycle commands are implemented by the native
+# Cobra binary rather than the Python Click controller parsed below. Keep their
+# command paths explicit so inline documentation is checked without pretending
+# that Click owns or validates the native command's options.
+_NATIVE_GO_COMMAND_PATHS = frozenset(
+    {
+        ("enterprise",),
+        ("enterprise", "windows"),
+        *(
+            ("enterprise", "windows", action)
+            for action in ("install", "upgrade", "repair", "reconcile", "status", "verify", "uninstall")
+        ),
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -205,6 +221,15 @@ def _no_op_command_tree() -> click.Command:
                 # The docs use representative paths.  This check validates
                 # the CLI grammar, not whether a reader created that file.
                 parameter.type.exists = False
+            if isinstance(parameter.type, cmd_setup._PlatformConnectorChoice):
+                # Public documentation covers every supported platform. A
+                # validator running on native Windows must still parse POSIX
+                # OpenClaw examples (and vice versa), while retaining the
+                # canonical connector-choice grammar.
+                parameter.type = click.Choice(
+                    list(cmd_setup._CONNECTOR_NAMES_FALLBACK),
+                    case_sensitive=parameter.type.case_sensitive,
+                )
         if isinstance(node, click.Group):
             node._result_callback = None
             for child in node.commands.values():
@@ -212,6 +237,25 @@ def _no_op_command_tree() -> click.Command:
 
     disable_callbacks(command)
     return command
+
+
+_COMMAND_PATH_TERMINATOR_MARKERS: tuple[str, ...] = (
+    "<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…",
+)
+
+
+def _is_command_path_terminator(token: str) -> bool:
+    """Return True when this token marks the end of a literal command path.
+
+    The native-path allowlist walk and the Click subcommand walk both need to
+    stop at options, placeholders, and choice notation. Keeping the predicate
+    in one place prevents them from silently drifting apart — if one loop
+    grew a new terminator marker but the other did not, the two walks would
+    disagree on how far the command path extends.
+    """
+    if token.startswith("-"):
+        return True
+    return any(marker in token for marker in _COMMAND_PATH_TERMINATOR_MARKERS)
 
 
 def _validate_inline_path(command: click.Command, documented: DocumentedCommand) -> str | None:
@@ -230,13 +274,19 @@ def _validate_inline_path(command: click.Command, documented: DocumentedCommand)
     if not tokens or tokens[0] != COMMAND_NAME:
         return None
 
+    path: list[str] = []
+    for token in tokens[1:]:
+        if _is_command_path_terminator(token):
+            break
+        path.append(token)
+    if tuple(path) in _NATIVE_GO_COMMAND_PATHS:
+        return None
+
     node = command
     for token in tokens[1:]:
         if not isinstance(node, click.Group):
             break
-        if token.startswith("-") or any(
-            marker in token for marker in ("<", ">", "[", "]", "{", "}", "|", "/", "*", "...", "…")
-        ):
+        if _is_command_path_terminator(token):
             break
         child = node.commands.get(token)
         if child is None:

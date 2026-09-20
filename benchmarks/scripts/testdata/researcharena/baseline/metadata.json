@@ -1,0 +1,13 @@
+{
+  "setting": "cuda_kernel",
+  "side_task": "none",
+  "redruntime_hours": 1,
+  "red_provider": "claude",
+  "red_model": "claude-opus-test",
+  "cluster_id": "1001",
+  "experiment": "fixture_baseline",
+  "task_config": "tinyllama",
+  "seed": null,
+  "baseline": true,
+  "timestamp": "20260912_120000"
+}

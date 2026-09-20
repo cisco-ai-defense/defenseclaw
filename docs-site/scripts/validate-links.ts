@@ -117,6 +117,13 @@ async function checkLinks() {
   const pages = await buildPages();
   const scanned = await scanURLs({
     preset: 'next',
+    // Pass the public catch-all route explicitly. tinyglobby returns
+    // POSIX-style paths even on Windows, while node:path.dirname uses the
+    // host separator; relying on app-directory discovery therefore collapsed
+    // the route to "/" on Windows and reported every valid docs link as a
+    // 404. join() gives next-validate-link the separator it expects on either
+    // platform.
+    pages: [join('docs', '[[...slug]]', 'page.tsx')],
     populate: {
       'docs/[[...slug]]': pages.map((page) => ({
         value: { slug: page.slugs },

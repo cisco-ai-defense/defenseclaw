@@ -1,5 +1,5 @@
 import { source } from '@/lib/source';
-import { site, siteUrl } from '@/lib/site';
+import { canonicalUrl, site, siteUrl } from '@/lib/site';
 
 // Static-export friendly llms.txt route: returns the page index in
 // the convention popularised by https://llmstxt.org/. AI agents that
@@ -28,8 +28,9 @@ export function GET() {
     // Markdown URL is a sibling of the page's index.html under the
     // same `/docs/<slug>/` directory, so AI agents can fetch
     // structured prose without scraping HTML.
-    const mdUrl = `${siteUrl}${p.url.replace(/\/?$/, '/')}llms.md`;
-    lines.push(`- [${title}](${siteUrl}${p.url})${desc}`);
+    const pageUrl = canonicalUrl(p.url);
+    const mdUrl = `${pageUrl}llms.md`;
+    lines.push(`- [${title}](${pageUrl})${desc}`);
     lines.push(`  - Markdown: ${mdUrl}`);
   }
   return new Response(lines.join('\n'), {

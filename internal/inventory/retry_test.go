@@ -6,10 +6,18 @@ package inventory
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 )
 
 var fakeBusyErr = errors.New("database is locked (synthetic)")
+
+type inventorySQLiteBusyCapture struct{ operations []string }
+
+func (capture *inventorySQLiteBusyCapture) RecordSQLiteBusyMetric(_ context.Context, operation string) error {
+	capture.operations = append(capture.operations, operation)
+	return nil
+}
 
 // TestInvRetryBusy_RetriesOnBusy keeps the inventory retry helper
 // in lockstep with the audit store one: BUSY errors retry until the
@@ -28,6 +36,24 @@ func TestInvRetryBusy_RetriesOnBusy(t *testing.T) {
 	}
 	if calls != 3 {
 		t.Fatalf("expected 3 calls, got %d", calls)
+	}
+}
+
+func TestInvRetryBusyObservedUsesCanonicalObserver(t *testing.T) {
+	capture := &inventorySQLiteBusyCapture{}
+	var calls int
+	err := retryBusyObserved(t.Context(), "inventory_insert", capture, func() error {
+		calls++
+		if calls < 3 {
+			return fakeBusyErr
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(capture.operations) != "[inventory_insert inventory_insert]" {
+		t.Fatalf("observed operations = %v", capture.operations)
 	}
 }
 

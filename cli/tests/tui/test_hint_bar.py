@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import pytest
 from defenseclaw.tui.models import HintState, ServiceStatus, StatusModel
-from defenseclaw.tui.widgets.hint_bar import HintEngine
+from defenseclaw.tui.widgets.hint_bar import HintBar, HintEngine
 
 
 @pytest.mark.parametrize(
@@ -42,12 +42,33 @@ def test_skills_hint_surfaces_unscanned_count() -> None:
 
     assert "3 skills unscanned" in hint
     assert "scan skill --all" in hint
+    assert 'Press "u" to unblock' in hint
+
+
+@pytest.mark.parametrize("panel", ("skills", "mcps"))
+def test_skill_and_mcp_hints_expose_unblock_shortcut(panel: str) -> None:
+    hint = HintEngine().hint_for(HintState(active_panel=panel))
+
+    assert "u unblock" in hint
 
 
 def test_new_panel_filter_hints_keep_generic_filter_style() -> None:
     hint = HintEngine().hint_for(HintState(active_panel="ai", filter_active="provider=openai"))
 
     assert hint == "Filtered to: provider=openai. Esc clears the filter, / changes it."
+
+
+@pytest.mark.parametrize(
+    ("count", "expected"),
+    (
+        (1, "1 recent critical/high alert event needs review. Press 2 for Alerts."),
+        (461, "461 recent critical/high alert events need review. Press 2 for Alerts."),
+    ),
+)
+def test_overview_hint_describes_combined_critical_and_high_history(count: int, expected: str) -> None:
+    hint = HintEngine().hint_for(HintState(active_panel="overview", critical_alerts=count))
+
+    assert hint == expected
 
 
 def test_activity_command_running_hint_is_preserved() -> None:
@@ -119,3 +140,18 @@ def test_first_run_missing_credentials_hint_uses_status_detail() -> None:
 
     assert "Required credentials are missing" in hint
     assert "r refresh" in hint
+
+
+def test_hint_bar_skips_static_update_when_rendered_text_is_unchanged(monkeypatch) -> None:
+    bar = HintBar()
+    updates: list[str] = []
+    monkeypatch.setattr(bar, "update", updates.append)
+
+    # These distinct states intentionally render the same generic hint. The
+    # engine must still be consulted, but the Static should only be painted once.
+    bar.refresh_hint(HintState(active_panel="unknown-one"))
+    bar.refresh_hint(HintState(active_panel="unknown-two"))
+
+    assert updates == [
+        "KEYS  j/k move | Enter detail | o actions | r refresh | / filter | Esc close | Ctrl+K commands."
+    ]

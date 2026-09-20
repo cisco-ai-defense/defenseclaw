@@ -11,6 +11,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/observability"
 )
 
 func TestExtractRawForwardCompletionNonStreaming(t *testing.T) {
@@ -151,6 +153,42 @@ func TestRawForwardNonStreamingInspectsToolCalls(t *testing.T) {
 	}
 }
 
+func TestPassthroughNonStreamingPreservesReportedV8ResponseModel(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"id":"chatcmpl-passthrough-model","object":"chat.completion","model":"gpt-4-0613","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer upstream.Close()
+
+	registerRawForwardProviderDomain(t, upstream.URL, "openai")
+	allowRawForwardPrivateTargets(t)
+
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	proxy.bindObservabilityV8Trace(runtime)
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-4", "messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handlePassthrough(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("passthrough status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	terminal := latestStoredModelTerminalV8(t, capture)
+	if terminal.attributes["gen_ai.request.model"] != "gpt-4" ||
+		terminal.attributes["gen_ai.response.model"] != "gpt-4-0613" ||
+		terminal.attributes["gen_ai.response.id"] != "chatcmpl-passthrough-model" {
+		t.Fatalf("passthrough model response identity=%v", terminal.attributes)
+	}
+}
+
 func TestRawForwardStreamingFlushesChunksIncrementally(t *testing.T) {
 	releaseSecond := make(chan struct{})
 	defer func() {
@@ -222,6 +260,43 @@ func TestRawForwardStreamingFlushesChunksIncrementally(t *testing.T) {
 	}
 }
 
+func TestRawForwardStreamingInspectsAllChoicesBeforeForwardingToolCalls(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(w, `data: {"id":"multi-tool","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"call_safe","type":"function","function":{"name":"read_file","arguments":"{\"path\":\"/tmp/safe\"}"}}]},"finish_reason":"tool_calls"},{"index":1,"delta":{"tool_calls":[{"index":0,"id":"call_late","type":"function","function":{"name":"bash","arguments":"{\"command\":\"echo safe; "}}]},"finish_reason":null}]}`+"\n\n")
+		_, _ = io.WriteString(w, `data: {"id":"multi-tool","object":"chat.completion.chunk","model":"gpt-4","choices":[{"index":1,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"rm -rf /\"}"}}]},"finish_reason":"tool_calls"}]}`+"\n\n")
+		_, _ = io.WriteString(w, "data: [DONE]\n\n")
+	}))
+	defer upstream.Close()
+
+	registerRawForwardProviderDomain(t, upstream.URL, "openai")
+	allowRawForwardPrivateTargets(t)
+
+	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "action")
+	body := mustJSON(t, map[string]interface{}{
+		"model": "gpt-4", "stream": true,
+		"messages": []map[string]interface{}{{"role": "user", "content": "call two tools"}},
+	})
+	req := httptest.NewRequest(http.MethodPost, "/v1/chat/completions", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-DC-Target-URL", upstream.URL)
+	req.Header.Set("X-AI-Auth", "Bearer sk-test")
+	req.RemoteAddr = "127.0.0.1:12345"
+	rec := httptest.NewRecorder()
+
+	proxy.handleChatCompletion(rec, req)
+
+	response := rec.Body.String()
+	if rec.Code != http.StatusOK || !strings.Contains(response, "blocked") || !strings.Contains(response, "[DONE]") {
+		t.Fatalf("late multi-choice tool call was not blocked: status=%d body=%s", rec.Code, response)
+	}
+	for _, leaked := range []string{"call_safe", "call_late", "rm -rf"} {
+		if strings.Contains(response, leaked) {
+			t.Fatalf("uninspected multi-choice tool data %q leaked: %s", leaked, response)
+		}
+	}
+}
+
 func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	var gotOrg, gotProject, gotAuth, gotAPIKey string
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -238,6 +313,8 @@ func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	allowRawForwardPrivateTargets(t)
 
 	proxy := newTestProxy(t, &mockProvider{}, newMockInspector(), "observe")
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	proxy.bindObservabilityV8Trace(runtime)
 	body := mustJSON(t, map[string]interface{}{
 		"model":    "gpt-4",
 		"messages": []map[string]interface{}{{"role": "user", "content": "hello"}},
@@ -264,6 +341,25 @@ func TestRawForwardPreservesHeadersAndAzureAuth(t *testing.T) {
 	}
 	if gotAPIKey != "azure-key" {
 		t.Fatalf("Azure api-key = %q, want azure-key", gotAPIKey)
+	}
+	var forwarded int64
+	for _, metric := range capture.metricSnapshot() {
+		if metric.Descriptor().Name != observability.TelemetryInstrumentDefenseClawGatewayForwardedHeaders {
+			continue
+		}
+		if attributes := metric.Attributes(); attributes["defenseclaw.metric.path"] != "chat-completions" ||
+			attributes["defenseclaw.metric.result"] != "ok" {
+			t.Fatalf("generated forwarded-header attributes=%v", attributes)
+		}
+		value, ok := metric.Value().Int64()
+		if !ok {
+			t.Fatalf("generated forwarded-header value=%v", metric.Value())
+		}
+		forwarded += value
+	}
+	// Content-Type plus the two allowed OpenAI metadata headers are forwarded.
+	if forwarded != 3 {
+		t.Fatalf("generated forwarded-header count=%d want=3", forwarded)
 	}
 }
 

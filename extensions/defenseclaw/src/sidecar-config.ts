@@ -17,7 +17,7 @@
  */
 
 import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, normalize } from "node:path";
 import { homedir } from "node:os";
 import yaml from "js-yaml";
 
@@ -56,6 +56,18 @@ interface SidecarConfig {
 
 let cached: SidecarConfig | undefined;
 
+/** Resolve the exact DefenseClaw data root selected by the host process. */
+function resolveDefenseClawHome(): string {
+  const override = process.env.DEFENSECLAW_HOME;
+  if (override === undefined || override === "") {
+    return join(homedir(), ".defenseclaw");
+  }
+  if (!isAbsolute(override)) {
+    throw new Error("DEFENSECLAW_HOME must be an absolute path");
+  }
+  return normalize(override);
+}
+
 /**
  * Read gateway.host, gateway.api_port, and gateway token from
  * ~/.defenseclaw/config.yaml. Token resolution mirrors the Go sidecar:
@@ -65,6 +77,11 @@ let cached: SidecarConfig | undefined;
  */
 export function loadSidecarConfig(): SidecarConfig {
   if (cached) return cached;
+
+  // Resolve outside the permissive config-file fallback below. An invalid
+  // explicit data-root override must fail closed instead of silently reading
+  // an unrelated account-level installation.
+  const defenseClawHome = resolveDefenseClawHome();
 
   let host = DEFAULT_HOST;
   let apiPort = DEFAULT_API_PORT;
@@ -77,7 +94,7 @@ export function loadSidecarConfig(): SidecarConfig {
   let enforcementMode: "observe" | "action" = "observe";
 
   try {
-    const cfgPath = join(homedir(), ".defenseclaw", "config.yaml");
+    const cfgPath = join(defenseClawHome, "config.yaml");
     const raw = yaml.load(readFileSync(cfgPath, "utf8")) as Record<string, unknown> | null;
     if (raw && typeof raw === "object") {
       const gw = raw["gateway"] as Record<string, unknown> | undefined;
@@ -97,7 +114,7 @@ export function loadSidecarConfig(): SidecarConfig {
         // common case in production because the Go bootstrap writes
         // DEFENSECLAW_GATEWAY_TOKEN there but does not export it
         // into the Node process that loads this extension.
-        const envVal = process.env[tokenEnv] || readDotEnvToken(tokenEnv);
+        const envVal = process.env[tokenEnv] || readDotEnvToken(defenseClawHome, tokenEnv);
         if (envVal) token = envVal;
       }
       const gr = raw["guardrail"] as Record<string, unknown> | undefined;
@@ -134,7 +151,7 @@ export function loadSidecarConfig(): SidecarConfig {
       token = envVal;
       break;
     }
-    const dotenvVal = readDotEnvToken(name);
+    const dotenvVal = readDotEnvToken(defenseClawHome, name);
     if (dotenvVal) {
       token = dotenvVal;
       break;
@@ -159,9 +176,9 @@ export function loadSidecarConfig(): SidecarConfig {
  * The Go sidecar loads this file into its own process env, but the
  * OpenClaw Node.js process is separate and won't have it.
  */
-function readDotEnvToken(key: string): string {
+function readDotEnvToken(defenseClawHome: string, key: string): string {
   try {
-    const envPath = join(homedir(), ".defenseclaw", ".env");
+    const envPath = join(defenseClawHome, ".env");
     const content = readFileSync(envPath, "utf8");
     for (const line of content.split("\n")) {
       const trimmed = line.trim();

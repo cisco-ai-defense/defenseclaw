@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import click
 
+SETUP_RESTART_HANDLED_META_KEY = "defenseclaw._setup_restart_handled"
+
 
 class AppContext:
     """Shared application context passed through Click."""
@@ -28,9 +30,29 @@ class AppContext:
         self.cfg = None
         self.store = None
         self.logger = None
+        # Set only by the root CLI when ``setup`` starts without config.yaml.
+        # The setup group uses it to admit the trusted-paths bootstrap and
+        # reject every other setup mutation until init has completed.
+        self.preinit_setup_bootstrap = False
+        # Set only when the root CLI deliberately defers setup's canonical
+        # validation and runtime initialization until the setup group can see
+        # its nested child command. Direct command-unit invocations retain
+        # their existing already-initialized AppContext contract.
+        self.setup_runtime_deferred = False
 
 
 pass_ctx = click.make_pass_decorator(AppContext, ensure=True)
 
 # Alias for command modules that import `pass_context`.
 pass_context = pass_ctx
+
+
+def mark_setup_restart_handled() -> None:
+    """Prevent the setup group's generic result hook from restarting again."""
+
+    try:
+        ctx = click.get_current_context(silent=True)
+    except RuntimeError:
+        ctx = None
+    if ctx is not None:
+        ctx.meta[SETUP_RESTART_HANDLED_META_KEY] = True

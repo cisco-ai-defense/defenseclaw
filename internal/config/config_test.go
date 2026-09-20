@@ -26,6 +26,7 @@ import (
 	"testing"
 
 	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
@@ -188,6 +189,29 @@ func TestLoadFromFile_ConfigOverrideKeepsRuntimeDataInDefenseClawHome(t *testing
 	}
 }
 
+func TestLoadLegacySplunkPointsToReleaseUpgrade(t *testing.T) {
+	t.Setenv("DEFENSECLAW_HOME", t.TempDir())
+	configPath := filepath.Join(DefaultDataPath(), DefaultConfigName)
+	if err := os.WriteFile(configPath, []byte("config_version: 3\nsplunk:\n  enabled: true\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load()
+	if err == nil {
+		t.Fatal("Load() error=nil, want legacy Splunk migration guidance")
+	}
+	message := err.Error()
+	if !strings.Contains(message, "defenseclaw upgrade --yes") || !strings.Contains(message, "config v8") {
+		t.Fatalf("Load() error=%q, want release-upgrade config-v8 guidance", message)
+	}
+	if !strings.Contains(message, "https://cisco-ai-defense.github.io/defenseclaw/docs/reference/configuration/") {
+		t.Fatalf("Load() error=%q, want canonical configuration documentation URL", message)
+	}
+	if strings.Contains(message, "migrate-splunk") || strings.Contains(message, "--apply") {
+		t.Fatalf("Load() error=%q still advertises the removed migration command", message)
+	}
+}
+
 func TestLoadFromFile_ManagedEnterpriseRejectsUntrustedConfigPath(t *testing.T) {
 	dir := t.TempDir()
 	if runtime.GOOS != "windows" {
@@ -261,6 +285,9 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.AIDiscovery.RequireTrustedBinaryPaths {
 		t.Error("ai_discovery.require_trusted_binary_paths = true, want false")
 	}
+	if cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Error("ai_discovery.lookup_model_provenance_online = true, want false")
+	}
 	if len(cfg.AIDiscovery.TrustedBinaryPrefixes) != 0 {
 		t.Errorf("ai_discovery.trusted_binary_prefixes = %v, want empty", cfg.AIDiscovery.TrustedBinaryPrefixes)
 	}
@@ -305,6 +332,22 @@ func TestDefaultConfig(t *testing.T) {
 	}
 	if cfg.Scanners.PluginScanner != "defenseclaw" {
 		t.Errorf("expected plugin scanner binary %q, got %q", "defenseclaw", cfg.Scanners.PluginScanner)
+	}
+}
+
+func TestLoadFromFileEnablesOnlineModelProvenanceOnlyWhenConfigured(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, DefaultConfigName)
+	raw := "config_version: 6\ndata_dir: " + dir + "\nai_discovery:\n  enabled: true\n  lookup_model_provenance_online: true\n"
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatalf("write config: %v", err)
+	}
+	cfg, err := LoadFromFile(path)
+	if err != nil {
+		t.Fatalf("LoadFromFile: %v", err)
+	}
+	if !cfg.AIDiscovery.LookupModelProvenanceOnline {
+		t.Fatal("lookup_model_provenance_online was not loaded")
 	}
 }
 
@@ -508,6 +551,159 @@ func TestValidateDeploymentMode_Invalid(t *testing.T) {
 	}
 }
 
+func TestManagedEnterpriseListenerBindingsModeMatrix(t *testing.T) {
+	tests := []struct {
+		name          string
+		mode          string
+		apiBind       string
+		guardrailHost string
+		guardrail     bool
+		wantErr       string
+		wantAPIBind   string
+	}{
+		{
+			name:          "normal mode preserves explicit remote binds",
+			mode:          string(DeploymentModeUnmanagedBYOD),
+			apiBind:       "0.0.0.0",
+			guardrailHost: "192.0.2.10",
+			guardrail:     true,
+			wantAPIBind:   "0.0.0.0",
+		},
+		{
+			name:          "managed defaults stay loopback",
+			mode:          string(DeploymentModeManagedEnterprise),
+			guardrailHost: "127.0.0.1",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:          "managed API remains IPv4 with independent IPv6 guardrail",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "[::1]",
+			guardrail:     true,
+			wantAPIBind:   "127.0.0.1",
+		},
+		{
+			name:    "managed API IPv6 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "::1",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API localhost rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "localhost",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API alternate IPv4 loopback rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "127.99.1.2",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API whitespace spelling rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: " 127.0.0.1 ",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:    "managed API wildcard rejected",
+			mode:    string(DeploymentModeManagedEnterprise),
+			apiBind: "0.0.0.0",
+			wantErr: "gateway API must bind to exact canonical 127.0.0.1",
+		},
+		{
+			name:          "managed proxy wildcard rejected",
+			mode:          string(DeploymentModeManagedEnterprise),
+			apiBind:       "127.0.0.1",
+			guardrailHost: "0.0.0.0",
+			guardrail:     true,
+			wantErr:       "guardrail proxy must bind to loopback",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = test.mode
+			cfg.Gateway.APIBind = test.apiBind
+			cfg.Guardrail.Host = test.guardrailHost
+			cfg.Guardrail.Enabled = test.guardrail
+			err := validateManagedEnterpriseListenerBindings(cfg)
+			if test.wantErr == "" && err != nil {
+				t.Fatalf("validateManagedEnterpriseListenerBindings: %v", err)
+			}
+			if test.wantErr != "" && (err == nil || !strings.Contains(err.Error(), test.wantErr)) {
+				t.Fatalf("error = %v, want %q", err, test.wantErr)
+			}
+			if test.wantErr == "" && cfg.Gateway.APIBind != test.wantAPIBind {
+				t.Fatalf(
+					"Gateway.APIBind = %q, want %q",
+					cfg.Gateway.APIBind,
+					test.wantAPIBind,
+				)
+			}
+		})
+	}
+}
+
+func TestManagedEnterpriseWindowsPeerAuthKnobsAreRejected(t *testing.T) {
+	// Runs on all platforms via the same predicate; validator's
+	// runtime.GOOS check means only the Windows branch enforces
+	// rejection. On non-Windows we still exercise the happy path.
+	cases := []struct {
+		name          string
+		mode          string
+		team, sig, id []string
+		wantOnWindows string // substring that must appear on Windows
+	}{
+		{name: "unmanaged_allows_anything", mode: "", team: []string{"team"}, wantOnWindows: ""},
+		{name: "managed_empty_allowed", mode: "managed_enterprise", wantOnWindows: ""},
+		{name: "managed_team_ids_windows_rejects", mode: "managed_enterprise", team: []string{"team"}, wantOnWindows: "managed.allowed_team_ids"},
+		{name: "managed_signing_ids_windows_rejects", mode: "managed_enterprise", sig: []string{"sig"}, wantOnWindows: "managed.allowed_signing_ids"},
+		{name: "managed_bundle_ids_windows_rejects", mode: "managed_enterprise", id: []string{"bundle"}, wantOnWindows: "managed.allowed_bundle_ids"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.DeploymentMode = c.mode
+			cfg.Managed.AllowedTeamIDs = c.team
+			cfg.Managed.AllowedSigningIDs = c.sig
+			cfg.Managed.AllowedBundleIDs = c.id
+			err := validateManagedEnterpriseWindowsPeerAuthKnobs(cfg)
+			if runtime.GOOS != "windows" {
+				if err != nil {
+					t.Fatalf("non-windows: got err=%v, want nil (validator scoped to windows)", err)
+				}
+				return
+			}
+			if c.wantOnWindows == "" {
+				if err != nil {
+					t.Fatalf("windows: got err=%v, want nil", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), c.wantOnWindows) {
+				t.Fatalf("windows: err = %v, want substring %q", err, c.wantOnWindows)
+			}
+		})
+	}
+}
+
+func TestIsLoopbackListenerHost(t *testing.T) {
+	for _, host := range []string{"127.0.0.1", "127.99.1.2", "::1", "[::1]", "localhost", " LOCALHOST "} {
+		if !isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = false, want true", host)
+		}
+	}
+	for _, host := range []string{"", "0.0.0.0", "::", "192.0.2.10", "example.test", "localhost.example"} {
+		if isLoopbackListenerHost(host) {
+			t.Errorf("isLoopbackListenerHost(%q) = true, want false", host)
+		}
+	}
+}
+
 func TestValidateGatewayConfigReloadMode(t *testing.T) {
 	for _, mode := range []string{"", "hot", "restart", "HOT", " Restart "} {
 		t.Run(mode, func(t *testing.T) {
@@ -701,15 +897,16 @@ func TestParseMCPServersJSON_Empty(t *testing.T) {
 }
 
 func TestSkillDirsForOpenClaw_NoOpenclawJSON(t *testing.T) {
-	dirs := SkillDirsForOpenClaw("/tmp/nonexistent-home")
+	home := filepath.Join(t.TempDir(), "nonexistent-home")
+	dirs := SkillDirsForOpenClaw(home)
 	if len(dirs) < 2 {
 		t.Fatalf("expected workspace and global skill dirs, got %v", dirs)
 	}
-	if dirs[0] != "/tmp/nonexistent-home/workspace/skills" {
-		t.Errorf("first dir = %q, want /tmp/nonexistent-home/workspace/skills", dirs[0])
+	if want := filepath.Join(home, "workspace", "skills"); dirs[0] != want {
+		t.Errorf("first dir = %q, want %q", dirs[0], want)
 	}
-	if dirs[len(dirs)-1] != "/tmp/nonexistent-home/skills" {
-		t.Errorf("last dir = %q, want /tmp/nonexistent-home/skills", dirs[len(dirs)-1])
+	if want := filepath.Join(home, "skills"); dirs[len(dirs)-1] != want {
+		t.Errorf("last dir = %q, want %q", dirs[len(dirs)-1], want)
 	}
 }
 
@@ -800,7 +997,7 @@ func TestConfig_InstalledSkillCandidates(t *testing.T) {
 func TestConfig_WorkspaceScopedOpenHandsPathsUsePinnedWorkspace(t *testing.T) {
 	root := t.TempDir()
 	home := filepath.Join(root, "home")
-	t.Setenv("HOME", home)
+	testenv.SetHome(t, home)
 	workspace := filepath.Join(root, "repo")
 	cfg := &Config{
 		Claw: ClawConfig{
@@ -915,14 +1112,15 @@ func TestDefaultConfigPluginActions(t *testing.T) {
 }
 
 func TestConfig_PluginDirs(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "test-oc-home")
 	cfg := &Config{
-		Claw: ClawConfig{HomeDir: "/tmp/test-oc-home"},
+		Claw: ClawConfig{HomeDir: home},
 	}
 	dirs := cfg.PluginDirs()
 	if len(dirs) != 1 {
 		t.Fatalf("expected 1 plugin dir, got %d", len(dirs))
 	}
-	want := "/tmp/test-oc-home/extensions"
+	want := filepath.Join(home, "extensions")
 	if dirs[0] != want {
 		t.Errorf("PluginDirs()[0] = %q, want %q", dirs[0], want)
 	}

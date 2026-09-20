@@ -5,6 +5,7 @@
 package gateway
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -20,6 +21,23 @@ func TestGuardrailActionToScanVerdict(t *testing.T) {
 	}
 	if got := guardrailActionToScanVerdict(guardrailActionAllow); got != "clean" {
 		t.Fatalf("allow: got %q", got)
+	}
+}
+
+func TestBuildSessionPromptScanResultSanitizesEvidence(t *testing.T) {
+	v := &ScanVerdict{
+		Action:   "alert",
+		Severity: "HIGH",
+		Findings: []string{"PATH-AWS-CREDS:line one\r\nforged\x1b[31m"},
+		Scanner:  "local-pattern",
+	}
+	res := buildSessionPromptScanResult(v, "msg-evidence", time.Millisecond)
+	if res == nil || len(res.Findings) != 1 {
+		t.Fatalf("got %+v", res)
+	}
+	evidence := res.Findings[0].EvidenceSummary
+	if strings.ContainsAny(evidence, "\r\n\x1b") {
+		t.Fatalf("evidence retained log-injection controls: %q", evidence)
 	}
 }
 

@@ -10,7 +10,7 @@
 
 package gateway
 
-import "github.com/defenseclaw/defenseclaw/internal/telemetry"
+import "context"
 
 // Inspector abstracts a Cisco AI Defense remote inspection client so the
 // gateway can pick between the opensource API-key path
@@ -27,8 +27,8 @@ import "github.com/defenseclaw/defenseclaw/internal/telemetry"
 // interface whose Inspect() call NPEs. See guardrail_test.go for the
 // canary that locks this behavior in.
 type Inspector interface {
-	Inspect(messages []ChatMessage) *ScanVerdict
-	SetTelemetry(p *telemetry.Provider)
+	Inspect(ctx context.Context, messages []ChatMessage) *ScanVerdict
+	bindObservabilityV8(runtime hookLifecycleMetricV8Runtime)
 }
 
 // Compile-time assertion: the existing API-key client satisfies Inspector.

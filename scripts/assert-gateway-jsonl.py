@@ -15,7 +15,7 @@
 #
 # SPDX-License-Identifier: Apache-2.0
 
-"""Validate a gateway.jsonl file emitted by the DefenseClaw sidecar.
+"""Validate the retained pre-v8 gateway-event envelope compatibility format.
 
 Intended for use inside CI after an e2e run — the sidecar must have
 written to this file during the run (otherwise the file won't
@@ -24,7 +24,7 @@ Go definitions in internal/gatewaylog/events.go; if those change,
 this script must move with them.
 
 Usage:
-    scripts/assert-gateway-jsonl.py <path-to-gateway.jsonl>
+    scripts/assert-gateway-jsonl.py <path-to-historical-gateway.jsonl>
     scripts/assert-gateway-jsonl.py --require-type verdict <path>
 """
 

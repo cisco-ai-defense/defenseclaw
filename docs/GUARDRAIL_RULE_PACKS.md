@@ -1,188 +1,104 @@
-# Guardrail Rule Packs & Suppressions
+# Guardrail rule-pack engineering contract
 
-Use this guide when the guardrail is working, but you need to tune a false
-positive without turning off the entire judge. The most common example is a
-real application username being flagged as `JUDGE-PII-USER`.
+Operator CEL authoring and engine behavior are maintained in the published
+[CEL authoring guide](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/authoring/)
+and [CEL engine reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/cel/engine/).
+The complete shipped detector inventory and enforcement boundaries are in the
+[deterministic detection reference](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/deterministic-detection/).
+Recipes, suppressions, and verification steps remain in the broader
+[policies documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/policies/).
 
-## Two layers control guardrail behavior
+## Two policy layers
 
-DefenseClaw splits guardrail behavior across two separate layers:
+DefenseClaw deliberately ships two distinct policy mechanisms:
 
-| Layer | What it controls | Typical way to change it |
-|---|---|---|
-| OPA policy | Block / alert thresholds, severity-to-action behavior, enforcement rules | `defenseclaw policy activate default|strict|permissive` |
-| Guardrail rule pack | Judge prompts, PII category severity, pre-judge strips, `suppressions.yaml`, sensitive tool rules | `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml` |
+| Layer | Repository authority | Purpose |
+| --- | --- | --- |
+| Admission and policy domains | [`../policies/rego/`](../policies/rego/) | OPA decisions for admission, guardrail actions, firewall, audit, sandbox, and skill actions |
+| Guardrail rule packs | [`../policies/guardrail/`](../policies/guardrail/) | Trusted tool-call CEL rules with bounded regex fallback, unstructured runtime rules, sensitive-tool metadata, judge prompts, and suppressions |
 
-### Regex source and managed rules
+Activating an admission policy does not select a rule-pack directory, and
+selecting `guardrail.rule_pack_dir` does not activate an admission policy. Keep
+that separation explicit in code and tests.
 
-`guardrail.regex_source` chooses the regex authority explicitly. Agent Control
-stores its validated `rules/*.yaml` snapshot in
-`guardrail.rule_pack_overlay_dirs`, but that storage mechanism does not imply
-that managed rules are always added to local rules:
+## Implementation ownership
 
-```yaml
-guardrail:
-  regex_source: agent_control  # local | agent_control | hybrid
-  rule_pack_dir: ~/.defenseclaw/policies/guardrail/default
-  rule_pack_overlay_dirs:
-    - ~/.defenseclaw/agent-control/rule-pack/current
-```
+- Go parsing and evaluation inputs:
+  [`../internal/guardrail/rulepack.go`](../internal/guardrail/rulepack.go) and
+  [`../internal/guardrail/suppress.go`](../internal/guardrail/suppress.go).
+- Reload-aware caching:
+  [`../internal/guardrail/rulepack_cache.go`](../internal/guardrail/rulepack_cache.go).
+- Effective global/per-connector lookup:
+  [`../internal/config/config.go`](../internal/config/config.go) and
+  [`../internal/config/application_protection.go`](../internal/config/application_protection.go).
+- Python scanner overlay:
+  [`../cli/defenseclaw/scanner/rulepack.py`](../cli/defenseclaw/scanner/rulepack.py).
+- Bundled profile data:
+  [`../policies/guardrail/default/`](../policies/guardrail/default/),
+  [`../policies/guardrail/permissive/`](../policies/guardrail/permissive/), and
+  [`../policies/guardrail/strict/`](../policies/guardrail/strict/).
+- Opt-in high-assurance use cases:
+  [`../policies/guardrail-use-cases/`](../policies/guardrail-use-cases/).
 
-| Source | Regex behavior |
-|---|---|
-| `local` | Run bundled rules, operator rule files, and local pattern families. Managed snapshots are not evaluated. |
-| `agent_control` | Run only the validated Agent Control snapshot. Local regex contributions are excluded, including local patterns and file-backed rules. |
-| `hybrid` | Run both sources. Duplicate file-backed IDs are rejected; overlapping patterns with different IDs may both report findings. |
+Any format or precedence change must update both language implementations and
+their focused tests.
 
-The source switch affects only regex detection. In every mode, the selected
-local profile still owns judge prompts, suppressions, sensitive-tool
-configuration, HILT, connector settings, and failure behavior. Selecting
-`agent_control` excludes local regex at evaluation time; it does not delete or
-rewrite the local pack.
+## Trusted tool-call boundary
 
-Managed overlays are strict: missing directories, unexpected files, unknown
-fields, duplicate rule IDs, invalid Go/RE2 patterns, unsupported severities,
-or exceeded size/count limits prevent activation. Rule packs are loaded into
-a process-lifetime cache, so changing an overlay requires a gateway restart.
-The synchronizer requests that restart through authenticated
-`POST /policy/restart`, waits for the gateway to return, and verifies the new
-exact digest through `GET /policy/status`. A restart request alone is not
-activation proof; failures restore and verify the previous overlay.
+CEL expressions run only inside the existing authenticated tool-call
+evaluation path. They do not replace OPA, scan arbitrary prompt or result
+text, or expose another policy endpoint. `tool_call_only` independently limits
+the rule's regex fallback to that path; omitting it preserves legacy
+prompt/result regex coverage while CEL remains tool-call scoped.
+Authoritative ActionFacts own the semantic decision; unsupported or ambiguous
+input keeps the legacy fallback. Each migrated owner emits one canonical
+finding rather than independent regex and CEL findings.
 
-The important gotcha is that these are **not the same switch**.
+Semantic-only rules use the intentionally never-matching RE2 sentinel `a^`
+when a raw command mention cannot safely serve as fallback evidence.
 
-`defenseclaw policy activate strict` updates the OPA-backed policy data, but it
-does **not** change `guardrail.rule_pack_dir`. If you want the strict rule
-pack, point `guardrail.rule_pack_dir` at the strict profile as well.
+All trusted-action findings cross a final same-rule proof gate before they can
+affect a block decision. A complete code-owned semantic proof, a complete exact
+built-in CodeGuard proof, or a bounded code-owned exact fallback proof may
+independently authorize enforcement. Raw or custom regex matches, custom
+CodeGuard matches, parser-shadow evidence, partial or invalid facts, and proof
+for another rule remain detection-only unless a separate complete proof is
+pinned to that same rule; lexical metadata alone never authorizes.
 
-## Where the files live
+Durable ordered-chain enforcement is limited to authenticated connector hooks
+with canonical connector/session correlation. The audit store persists only
+bounded masks and fingerprints, never raw commands, arguments, paths, URLs, or
+ActionFacts.
 
-The active rule pack is selected by `guardrail.rule_pack_dir` in
-`~/.defenseclaw/config.yaml`.
+## Opt-in high-assurance profiles
 
-Common built-in locations are:
+The `policies/guardrail-use-cases/` directories are complete selectable rule
+packs layered over the embedded balanced defaults by the existing partial-pack
+inheritance contract. They are intentionally not enabled by the default,
+permissive, or strict profiles.
 
-- `~/.defenseclaw/policies/guardrail/default/`
-- `~/.defenseclaw/policies/guardrail/strict/`
-- `~/.defenseclaw/policies/guardrail/permissive/`
+- `privacy-high-assurance` blocks only the selected structured PII families
+  that have the strongest deterministic validation and excludes noisier
+  email, phone, passport, driver's-license, unformatted-SSN, and NHS patterns.
+- `cloud-production-protection` blocks a closed set of destructive AWS,
+  Google Cloud, and Azure CLI operations. Assign it to a production-scoped
+  connector; resource-name heuristics are not treated as production proof.
+- `database-destruction-protection` blocks statically supplied unbounded SQL
+  deletes and schema-wide destructive statements for a closed list of clients.
+- `kubernetes-production-protection` blocks named namespace deletion and a
+  closed set of `delete --all` workload forms for production-scoped contexts.
+- `infrastructure-destruction-protection` blocks unscoped Terraform, OpenTofu,
+  and Pulumi destruction while allowing plans, previews, and targeted changes.
 
-Inside each profile directory you will usually see:
+Cloud, SQL, Kubernetes, and infrastructure rules use semantic-only `a^` regex fallbacks. A complete
+ActionFacts parse, an exact code-owned prerequisite, a successful CEL result,
+and same-rule proof are all required for enforcement. Unsupported or dynamic
+forms do not gain blocking authority.
 
-- `judge/*.yaml` for category prompts and severities
-- `sensitive_tools.yaml` for tool-level rules
-- `suppressions.yaml` for false-positive tuning
-
-DefenseClaw ships built-in defaults for these files. In a normal install,
-`defenseclaw init` seeds editable copies under `~/.defenseclaw/policies/`.
-If your install does not have a guardrail directory yet, create the active
-profile directory and add `suppressions.yaml` yourself.
-
-## Check which rule pack is active
-
-Look at `guardrail.rule_pack_dir` in `~/.defenseclaw/config.yaml`.
-
-```bash
-grep -n "rule_pack_dir" ~/.defenseclaw/config.yaml
-```
-
-If it is missing, DefenseClaw defaults to the `default` rule pack under your
-data directory.
-
-To use the strict rule pack, set the value to the full path for your machine,
-for example:
-
-```yaml
-guardrail:
-  rule_pack_dir: /home/alice/.defenseclaw/policies/guardrail/strict
-```
-
-Use the matching profile path if you want `default` or `permissive` instead.
-
-## Add a targeted suppression
-
-If the active profile already has a `suppressions.yaml`, keep the file and add
-just the new item under `finding_suppressions:`.
-
-If the file does not exist yet, create it with this shape:
-
-```yaml
-version: 1
-
-pre_judge_strips: []
-
-finding_suppressions:
-  - id: SUPP-APP-USERNAME
-    finding_pattern: JUDGE-PII-USER
-    entity_pattern: '^(REPLACE_WITH_ESCAPED_USERNAME)$'
-    reason: "Allowed application username"
-
-tool_suppressions: []
-```
-
-What each field means:
-
-- `finding_pattern`: the judge finding to suppress
-- `entity_pattern`: a regular expression for the exact value to allow
-- `reason`: why this is safe in your environment
-
-For a username false positive, prefer a narrow exact-match regex like
-`'^(REPLACE_WITH_ESCAPED_USERNAME)$'` instead of a broad pattern that could
-hide real findings.
-
-Replace `REPLACE_WITH_ESCAPED_USERNAME` with the literal username. If the
-username contains regex characters like `.`, `+`, `?`, `(`, or `)`, escape
-them first. For example, `john.doe` should become `'^(john\.doe)$'`.
-
-## Restart after editing
-
-Restart the gateway so the sidecar reloads the rule pack:
-
-```bash
-defenseclaw-gateway restart
-```
-
-If the binary is not on your `PATH`, use the installed path instead:
-
-```bash
-~/.local/bin/defenseclaw-gateway restart
-```
-
-Then replay the original prompt that was being blocked.
-
-## Which lever should you use?
-
-Use a targeted suppression when:
-
-- one known-safe value is noisy
-- you still want the judge enabled for everything else
-- the false positive is tied to a specific entity such as a username, host,
-  or internal ID
-
-Switch from `strict` to `default` or `permissive` when:
-
-- the whole profile is too aggressive for your environment
-- you want broader changes to severity and blocking behavior
-
-Disable only prompt-side PII judging when:
-
-- prompt-side PII blocks are the issue
-- you still want completion-side PII inspection
-
-Example:
-
-```yaml
-guardrail:
-  judge:
-    pii: true
-    pii_prompt: false
-    pii_completion: true
-```
-
-## Common gotchas
-
-- `policy activate strict` does not switch `guardrail.rule_pack_dir`
-- editing `default/suppressions.yaml` has no effect if the active rule pack is
-  `strict`
-- if the file is missing on disk, built-in defaults can still load, so create
-  the file if you want a persistent local override
-- restart `defenseclaw-gateway` after changing rule pack files
+The vendored low-support conformance matrices live in
+`benchmarks/fixtures/cloud-production-conformance-v1.jsonl` and
+`benchmarks/fixtures/database-destruction-conformance-v1.jsonl`, with matching
+Kubernetes and infrastructure matrices beside them. They verify covered
+positives and parser hard negatives without executing any command.
+Population noise must be reported from the much larger benign trace corpora,
+not inferred from these authored matrices.

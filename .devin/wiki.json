@@ -78,7 +78,7 @@
     },
     {
       "title": "Observability, Audit, and SIEM",
-      "purpose": "Explain audit persistence, JSONL gateway events, event schemas, redaction, OTLP metrics/logs/traces, Splunk HEC, webhook notifications, local observability stack, dashboards, and runbooks. Reference docs/OBSERVABILITY.md, docs/OBSERVABILITY-CONTRACT.md, docs/OTEL.md, docs/SPLUNK_APP.md, internal/audit/, internal/gatewaylog/, internal/telemetry/, internal/redaction/, cli/defenseclaw/observability/, and bundles/local_observability_stack/.",
+      "purpose": "Explain audit persistence, canonical records, event schemas, redaction, OTLP metrics/logs/traces, Splunk HEC, webhook notifications, local observability, dashboards, and runbooks. Reference docs/OBSERVABILITY.md, docs/SPLUNK_APP.md, schemas/telemetry/v8/, schemas/config/v8/, internal/audit/, internal/observability/, internal/redaction/, cli/defenseclaw/observability/, and bundles/local_observability_stack/.",
       "parent": "Home"
     },
     {

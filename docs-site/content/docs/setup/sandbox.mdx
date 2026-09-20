@@ -1,0 +1,292 @@
+---
+title: OpenShell sandbox
+description: Configure and operate DefenseClaw's experimental Linux-only OpenClaw sandbox mode.
+keywords:
+  - DefenseClaw sandbox
+  - OpenShell sandbox
+  - OpenClaw isolation
+  - Landlock
+  - seccomp
+---
+
+DefenseClaw's sandbox commands configure an experimental, Linux-only
+OpenShell standalone environment for OpenClaw. The sandbox combines Linux
+network namespaces with OpenShell's Landlock and seccomp isolation, while the
+DefenseClaw sidecar remains the policy and audit authority.
+
+<Callout type="warning" title="Experimental, Linux-only, OpenClaw-only">
+Native Windows and macOS are rejected. The implemented sandbox lifecycle
+supports only an active OpenClaw connector. Run `defenseclaw init` first and
+use configuration schema v8.
+</Callout>
+
+<Callout type="warning" title="Current endpoint wiring is incomplete">
+The current commands generate the sandbox, policy, launcher, and host-side
+network rules, but they do not copy a DefenseClaw config/token into
+`/home/sandbox/.defenseclaw` or redirect the OpenClaw extension's loopback
+sidecar calls to the host bridge. `sandbox setup` also does not write
+`gateway.api_bind`; with `--no-guardrail`, the host API remains loopback-only
+while the generated launcher probes the host bridge address. The model
+provider base URL is rewritten to the host bridge, but that alone does not
+make plugin inspection, health, or fetch-interceptor egress calls
+end-to-end functional.
+
+Treat the generated topology as experimental scaffolding, not a verified
+enforcement boundary. Do not use it to protect a workload until the harmless
+prompt acceptance gate below succeeds from inside the sandbox and you have
+independently reviewed the endpoint/token wiring.
+</Callout>
+
+## Before you start
+
+You need:
+
+- a Linux host and permission to run the narrowly scoped privileged operations
+  requested through `sudo`;
+- a completed DefenseClaw v8 initialization with OpenClaw active;
+- an existing OpenClaw home containing `openclaw.json`; and
+- a verified `openshell-sandbox` on `PATH`.
+
+Install the binary independently for source checkouts, virtual environments,
+and other per-user layouts. When the binary is absent, `sandbox init` can invoke
+the bundled installer for the OpenShell `0.0.16` OCI image only when the
+installer itself and every ancestor directory form a root-owned,
+non-group/world-writable packaged layout. An ordinary user-owned checkout does
+not satisfy that trust boundary, so automatic acquisition is skipped.
+
+Because the OCI tag is mutable, the installer refuses before downloading a
+layer unless `OPENSHELL_SANDBOX_SHA256` (or the legacy
+`DEFENSECLAW_OPENSHELL_BINARY_SHA256`) pins the final binary. An optional
+`DEFENSECLAW_OPENSHELL_ARCH_DIGEST` also pins the platform manifest. Those
+values are explicitly preserved through the narrow `sudo` invocation. The
+explicit `DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED=1` escape hatch gives up that
+integrity guarantee and is not recommended.
+
+Initialization also checks for `iptables` when host networking or the
+guardrail redirect needs it; on systems with `apt-get`, it attempts that
+installation. Treat a failed automatic dependency installation as a stop
+condition and install the reported dependency through your normal
+host-management process.
+
+## Initialize
+
+<Steps>
+
+<Step>
+
+### Configure DefenseClaw for OpenClaw
+
+```bash
+defenseclaw init
+```
+
+Choose OpenClaw as an active connector. `sandbox init` checks the actual active
+connector roster rather than assuming OpenClaw from an empty configuration.
+
+</Step>
+
+<Step>
+
+### Create and configure the sandbox
+
+```bash
+defenseclaw sandbox init
+```
+
+The command prompts for `sudo` when needed, creates the `sandbox` system user,
+records and transfers the existing OpenClaw home's ownership, links that home
+into `/home/sandbox`, installs the DefenseClaw OpenClaw plugin when guardrail
+inspection is enabled, installs the OpenShell policy files, and invokes the
+sandbox networking setup.
+
+The initialization path uses:
+
+| Setting | Initialization value |
+| --- | --- |
+| Sandbox bridge address | `10.200.0.2` |
+| Host bridge address | `10.200.0.1` |
+| Sandbox home | `/home/sandbox` unless configured otherwise |
+| OpenClaw gateway port | `18789` |
+| DNS | `8.8.8.8,1.1.1.1` |
+| Network policy template | `default` |
+
+</Step>
+
+<Step>
+
+### Start the generated sandbox and sidecar
+
+On a systemd host where setup installed the generated units:
+
+```bash
+sudo systemctl start defenseclaw-sandbox.target
+defenseclaw-gateway start
+```
+
+The target starts `openshell-sandbox.service`; the DefenseClaw gateway is
+started separately.
+
+Without systemd, use the generated launcher:
+
+```bash
+sudo ~/.defenseclaw/scripts/run-sandbox.sh
+```
+
+</Step>
+
+<Step>
+
+### Run the required acceptance gate
+
+```bash
+defenseclaw-gateway status
+defenseclaw status
+defenseclaw doctor
+defenseclaw tui
+```
+
+From inside the sandbox, first prove that the configured sidecar health URL is
+reachable and that an authenticated status request succeeds, then run a
+harmless OpenClaw prompt and require a connector-attributed inspection record
+in the TUI or local audit history.
+Current generated defaults can fail this gate for the endpoint-wiring reasons
+above. A passing host-side `defenseclaw doctor` or model-provider request does
+not substitute for sandbox-originated plugin inspection. If the gate fails,
+stop: the generated sandbox is not an active DefenseClaw enforcement boundary.
+
+</Step>
+
+</Steps>
+
+## What setup changes
+
+`defenseclaw sandbox setup` validates that `sandbox init` created the sandbox
+user and home, then generates the following intended topology:
+
+- sets `openshell.mode: standalone` and records the sandbox home;
+- points the OpenClaw gateway client at the sandbox bridge address and port;
+- points guardrail inspection at the host bridge address when enabled;
+- enables the gateway watcher and skill watcher/action settings;
+- points `claw.home_dir` and `claw.config_file` at the sandbox OpenClaw tree;
+- installs the selected OpenShell Rego/data policy, generates DNS and launcher
+  assets, and patches OpenClaw's port, bind address, and guardrail base URL;
+- pre-pairs a regular, owner-only gateway device key with gateway-minted
+  provenance; otherwise pairing is skipped or refused. The legacy
+  `DEFENSECLAW_PREPAIR_TRUST_DEVICE_KEY=1` override bypasses only the provenance
+  proof, retains the file-type/ownership/mode checks, and is unsafe;
+- stores a detected OpenClaw gateway token by environment reference rather
+  than in YAML;
+- grants the invoking user the group/ACL access needed by the watcher, stops a
+  conflicting host OpenClaw process, and generates systemd plus non-systemd
+  launchers; and
+- skips CodeGuard assets, which always require a separate explicit opt-in.
+
+Setup pins the operator-confirmed OpenClaw home before privileged writes and
+recursive ownership changes. A changed symlink target is refused.
+
+It does **not** currently populate `/home/sandbox/.defenseclaw/config.yaml`,
+provision a corresponding sandbox-user sidecar-token source, set
+`gateway.api_bind`, or create loopback DNAT for extension/interceptor calls.
+Those omissions are why the acceptance gate is mandatory.
+
+## Customize networking and policy
+
+Use the lower-level command after initialization:
+
+```bash
+defenseclaw sandbox setup --policy strict
+```
+
+| Option | Behavior |
+| --- | --- |
+| `--sandbox-ip` | Sandbox bridge address; default `10.200.0.2`. |
+| `--host-ip` | Host bridge address; default `10.200.0.1`. |
+| `--sandbox-home` | Sandbox user home; effective default `/home/sandbox`. |
+| `--openclaw-port` | OpenClaw gateway port; default `18789`. |
+| `--policy default\|strict\|permissive` | OpenShell network policy. Direct `sandbox setup` defaults to `permissive`; `sandbox init` deliberately passes `default`. |
+| `--dns <list>` | Comma-separated name servers; default `8.8.8.8,1.1.1.1`. Use `host` to read the host resolver list. |
+| `--no-auto-pair` | Leave OpenClaw device pairing manual. |
+| `--no-host-networking` | Skip host-side DNS, UI-forwarding, and masquerade rules. |
+| `--no-guardrail` | Disable guardrail configuration and its redirect rules. |
+| `--non-interactive` | Skip confirmation prompts. |
+
+Do not select a policy only by its name. Review the generated
+`~/.defenseclaw/openshell-policy.rego` and
+`~/.defenseclaw/openshell-policy.yaml` against the egress your OpenClaw
+workload actually needs.
+
+## Operate and monitor
+
+On systemd:
+
+```bash
+systemctl status openshell-sandbox.service
+systemctl status defenseclaw-sandbox.target
+sudo journalctl -u openshell-sandbox -f
+sudo systemctl stop openshell-sandbox.service
+```
+
+Without systemd:
+
+```bash
+sudo ~/.defenseclaw/scripts/run-sandbox.sh stop
+```
+
+Run that stop command before disabling sandbox mode on a host without systemd.
+The disable command does not execute the user-writable launcher as root.
+
+The OpenShell service writes to the systemd journal. The separately started
+DefenseClaw gateway writes its detached process output to
+`~/.defenseclaw/gateway.log`; canonical verdict, judge, and lifecycle history
+is in local SQLite and the TUI. Review all three surfaces when diagnosing a
+traffic or policy problem.
+
+## Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| Command says the platform is unsupported | Sandbox lifecycle is Linux-only; use normal host mode elsewhere. |
+| Command says DefenseClaw is not initialized or schema v8 is required | Run `defenseclaw init`, or complete the supported [upgrade](/docs/get-started/upgrade), before sandbox setup. |
+| Active connector is rejected | Configure OpenClaw with `defenseclaw setup guardrail --connector openclaw`; other connectors do not have this sandbox lifecycle. |
+| Sandbox user/home is missing | Run `defenseclaw sandbox init`; direct `sandbox setup` does not create those prerequisites. |
+| `openshell-sandbox` or `iptables` is missing | Follow the exact dependency error. Supply an independent OpenShell binary SHA-256 or install a verified binary through host administration, then rerun initialization. |
+| Device pre-pairing is skipped | Start the gateway so it can create its protected device identity, or use OpenClaw's manual pairing flow. Do not weaken file ownership or provenance checks. |
+| Watcher cannot read sandbox-owned paths | Review setup's group/ACL output. A newly added group membership may require logout/login; rerunning setup can apply supported ACLs immediately when `setfacl` exists. |
+| Model traffic reaches the host but plugin inspection does not | This is the current endpoint-wiring limitation: inspect the sandbox user's missing/default `~/.defenseclaw/config.yaml`, loopback sidecar URL, host `gateway.api_bind`, scoped token, and absence of loopback DNAT. Do not treat model-provider routing alone as enforcement. |
+| Traffic does not reach the guardrail | Check the effective bridge addresses, `openclaw.json`, generated scripts, `iptables`, sidecar status, and OpenShell journal together. |
+
+## Disable sandbox mode
+
+```bash
+defenseclaw sandbox setup --disable
+```
+
+On a non-systemd host, first stop the generated launcher:
+
+```bash
+sudo ~/.defenseclaw/scripts/run-sandbox.sh stop
+defenseclaw sandbox setup --disable
+```
+
+Disable stops and disables generated units when systemd is available, removes
+owned networking rules, removes the sandbox link, switches DefenseClaw back to
+its built-in host defaults, and disables the watcher. It does not snapshot and
+restore custom OpenClaw gateway/provider values: it writes `gateway.mode:
+local`, port `18789`, loopback binding, and a localhost DefenseClaw provider
+host. Record custom values before setup and reapply them afterward.
+
+The ownership record contains one top-level UID/GID and disable applies it
+recursively; it cannot reconstruct mixed ownership. Cleanup is best effort, not
+transactional, so inspect command output and retained files before relying on
+the result. Then rerun `defenseclaw setup guardrail` so the host OpenClaw base
+URL matches the intended topology.
+
+Disabling does not promise to remove the `sandbox` system account or erase
+generated evidence. Review retained files before any manual cleanup.
+
+## Implementation sources
+
+- [`cmd_sandbox.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_sandbox.py) defines the public Linux-only command group.
+- [`cmd_init_sandbox.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_init_sandbox.py) owns initialization, dependency acquisition, OpenClaw transfer, and provenance guards.
+- [`cmd_setup_sandbox.py`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/cli/defenseclaw/commands/cmd_setup_sandbox.py) owns flags, config changes, networking, pairing, launchers, and disable behavior.
+- [`install-openshell-sandbox.sh`](https://github.com/cisco-ai-defense/defenseclaw/blob/main/scripts/install-openshell-sandbox.sh) resolves the OCI image and requires an independent binary integrity anchor unless the operator explicitly opts out.

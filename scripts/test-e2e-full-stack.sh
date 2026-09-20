@@ -42,6 +42,12 @@ OPENCLAW_MODEL_PATCHED="${OPENCLAW_MODEL_PATCHED:-false}"
 OPENCLAW_MODEL_BACKUP_PATH="${OPENCLAW_MODEL_BACKUP_PATH:-/tmp/defenseclaw-openclaw.full-live.backup.json}"
 ANTHROPIC_PASSTHROUGH_RAN="${ANTHROPIC_PASSTHROUGH_RAN:-false}"
 RUNTIME_TOOL_INSPECTION_EXERCISED=false
+DC_HOME="${DEFENSECLAW_HOME:-$HOME/.defenseclaw}"
+case "$DC_HOME" in
+    /*) ;;
+    *) echo "error: DEFENSECLAW_HOME must be absolute (got '$DC_HOME')" >&2; exit 2 ;;
+esac
+export DEFENSECLAW_HOME="$DC_HOME"
 
 sanitize_name() {
     printf '%s' "$1" | tr -cs '[:alnum:]._-' '-'
@@ -142,7 +148,7 @@ derive_proxy_master_key() {
 import hashlib
 import os
 
-key_file = os.path.expanduser("~/.defenseclaw/device.key")
+key_file = os.path.join(os.environ["DEFENSECLAW_HOME"], "device.key")
 try:
     with open(key_file, "rb") as f:
         data = f.read()
@@ -275,7 +281,7 @@ count_nonempty_lines() {
 
 read_dotenv_value() {
     local key="$1"
-    local env_path="$HOME/.defenseclaw/.env"
+    local env_path="$DC_HOME/.env"
     local line
     [ -f "$env_path" ] || return 0
     line=$(grep -E "^${key}=" "$env_path" 2>/dev/null | tail -n 1 || true)
@@ -372,7 +378,7 @@ get_gateway_token() {
 
     # Strategy 1: token persisted by the sidecar/OpenClaw auth repair path.
     # The CI shell can retain stale exported tokens while the daemon has
-    # already refreshed ~/.defenseclaw/.env after an OpenClaw token mismatch.
+    # already refreshed $DEFENSECLAW_HOME/.env after an OpenClaw token mismatch.
     sync_gateway_token_env_from_dotenv
     if [ "$GATEWAY_TOKEN_CACHE" != "__unset__" ]; then
         printf '%s\n' "$GATEWAY_TOKEN_CACHE"
@@ -403,9 +409,9 @@ PY
     fi
 
     # Strategy 5: read token_env name from config, then check that env var.
-    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$HOME/.defenseclaw/config.yaml" ]; then
+    if [ -z "$GATEWAY_TOKEN_CACHE" ] && [ -f "$DC_HOME/config.yaml" ]; then
         local token_env_name
-        token_env_name=$(grep 'token_env:' "$HOME/.defenseclaw/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
+        token_env_name=$(grep 'token_env:' "$DC_HOME/config.yaml" 2>/dev/null | head -1 | awk '{print $2}' | tr -d "'\"" || true)
         if [ -n "$token_env_name" ]; then
             GATEWAY_TOKEN_CACHE="${!token_env_name:-}"
         fi
@@ -487,7 +493,7 @@ sidecar_api_authenticated() {
 }
 
 restart_sidecar_after_openclaw_token_repair() {
-    local log_file="$HOME/.defenseclaw/gateway.log"
+    local log_file="$DC_HOME/gateway.log"
     [ -f "$log_file" ] || return 0
     if ! tail -n 120 "$log_file" 2>/dev/null | grep -q "gateway token refreshed from openclaw.json"; then
         return 0
@@ -516,7 +522,7 @@ alerts_for_run() {
     if [ "${matched_count}" != "?" ] && [ "${matched_count}" -gt 0 ] 2>/dev/null; then
         printf '%s\n' "$raw" | jq --arg id "$DEFENSECLAW_RUN_ID" '[.[] | select(.run_id == $id)]' 2>/dev/null || echo '[]'
     else
-        # The DB is fresh each CI run (rm -rf ~/.defenseclaw in Clean step),
+        # The DB is fresh each CI run (a new isolated home is prepared),
         # so all events belong to the current run. The Go API's pure-Go SQLite
         # may not surface run_id written by the Python CLI (WAL cross-process
         # visibility between modernc.org/sqlite and C sqlite3). Return all
@@ -609,7 +615,7 @@ PY
         return
     fi
 
-    printf '%s\n%s\n' "$HOME/.defenseclaw/plugins" "$HOME/.openclaw/extensions" | awk 'NF && !seen[$0]++'
+    printf '%s\n%s\n' "$DC_HOME/plugins" "$HOME/.openclaw/extensions" | awk 'NF && !seen[$0]++'
 }
 
 get_governance_plugin_dirs() {
@@ -630,7 +636,7 @@ PY
         return
     fi
 
-    printf '%s\n' "$HOME/.defenseclaw/plugins"
+    printf '%s\n' "$DC_HOME/plugins"
 }
 
 get_runtime_plugin_dirs() {
@@ -732,7 +738,7 @@ find_runtime_plugin_path() {
 
 find_quarantined_plugin_path() {
     local name="$1"
-    local root="$HOME/.defenseclaw/quarantine/plugins"
+    local root="$DC_HOME/quarantine/plugins"
     [ -n "$name" ] || return 1
     if [ -d "$root/$name" ]; then
         printf '%s\n' "$root/$name"
@@ -755,8 +761,8 @@ cleanup_skill_name() {
         [ -n "$dir" ] || continue
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_skill_dirs)
-    rm -rf "$HOME/.defenseclaw/quarantine/skills/$name" 2>/dev/null || true
-    rm -rf "$HOME/.defenseclaw/quarantine/skills"/*/"$name" 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/skills/$name" 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/skills"/*/"$name" 2>/dev/null || true
 }
 
 cleanup_plugin_name() {
@@ -765,8 +771,8 @@ cleanup_plugin_name() {
         [ -n "$dir" ] || continue
         rm -rf "$dir/$name" 2>/dev/null || true
     done < <(get_plugin_dirs)
-    rm -rf "$HOME/.defenseclaw/quarantine/plugins/$name" 2>/dev/null || true
-    rm -rf "$HOME/.defenseclaw/quarantine/plugins"/*/"$name" 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/plugins/$name" 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/plugins"/*/"$name" 2>/dev/null || true
 }
 
 skill_list_json() {
@@ -1237,7 +1243,7 @@ import os
 import yaml
 from pathlib import Path
 
-cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+cfg_path = Path(os.environ["DEFENSECLAW_HOME"]) / "config.yaml"
 if not cfg_path.exists():
     print("")
     raise SystemExit(0)
@@ -1256,7 +1262,7 @@ import os
 import yaml
 from pathlib import Path
 
-cfg_path = Path(os.path.expanduser("~/.defenseclaw/config.yaml"))
+cfg_path = Path(os.environ["DEFENSECLAW_HOME"]) / "config.yaml"
 if not cfg_path.exists():
     raise SystemExit("config.yaml not found")
 
@@ -1314,10 +1320,10 @@ cleanup_current_run_artifacts() {
         rm -rf "$dir"/"$E2E_PREFIX"* 2>/dev/null || true
     done < <(get_plugin_dirs)
 
-    rm -rf "$HOME/.defenseclaw/quarantine/skills"/"$E2E_PREFIX"* 2>/dev/null || true
-    rm -rf "$HOME/.defenseclaw/quarantine/plugins"/"$E2E_PREFIX"* 2>/dev/null || true
-    find "$HOME/.defenseclaw/quarantine/skills" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
-    find "$HOME/.defenseclaw/quarantine/plugins" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/skills"/"$E2E_PREFIX"* 2>/dev/null || true
+    rm -rf "$DC_HOME/quarantine/plugins"/"$E2E_PREFIX"* 2>/dev/null || true
+    find "$DC_HOME/quarantine/skills" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
+    find "$DC_HOME/quarantine/plugins" -mindepth 2 -maxdepth 2 -name "$E2E_PREFIX*" -exec rm -rf {} + 2>/dev/null || true
     rm -rf "$HOME/.openclaw/extensions"/"$E2E_PREFIX"* 2>/dev/null || true
     rm -rf /tmp/"$E2E_PREFIX"* 2>/dev/null || true
     prune_openclaw_config_for_prefix
@@ -1333,7 +1339,7 @@ inspect_tool() {
 
 # dump_artifacts is invoked from an EXIT trap when
 # any phase records FAIL>0. The legacy implementation cat'd
-# ~/.defenseclaw/config.yaml and ~/.openclaw/openclaw.json directly
+# $DEFENSECLAW_HOME/config.yaml and ~/.openclaw/openclaw.json directly
 # and tail'd gateway.log / gateway.jsonl without redaction. The
 # DefenseClaw config schema permits inline llm.api_key,
 # splunk.hec_token, gateway.token, and OpenClaw gateway.auth.token
@@ -1368,20 +1374,20 @@ dump_artifacts() {
     echo "profile=$E2E_PROFILE"
     echo "run_id=$DEFENSECLAW_RUN_ID"
     echo "prefix=$E2E_PREFIX"
-    echo "--- ~/.defenseclaw/config.yaml (redacted) ---"
-    cat ~/.defenseclaw/config.yaml 2>/dev/null | _redact_secrets || echo "  (not found)"
+    echo "--- $DEFENSECLAW_HOME/config.yaml (redacted) ---"
+    cat "$DC_HOME/config.yaml" 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- .env key names (values redacted) ---"
-    grep -oP '^\w+(?==)' ~/.defenseclaw/.env 2>/dev/null || echo "  (none)"
+    grep -oP '^\w+(?==)' "$DC_HOME/.env" 2>/dev/null || echo "  (none)"
     echo "--- defenseclaw-gateway status ---"
     defenseclaw-gateway status 2>/dev/null | _redact_secrets || echo "  (not running)"
     echo "--- gateway.log (last 60 lines, redacted) ---"
-    tail -60 ~/.defenseclaw/gateway.log 2>/dev/null | _redact_secrets || echo "  (not found)"
+    tail -60 "$DC_HOME/gateway.log" 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- gateway.jsonl (last 60 lines, redacted) ---"
-    tail -60 ~/.defenseclaw/gateway.jsonl 2>/dev/null | _redact_secrets || echo "  (not found)"
+    tail -60 "$DC_HOME/gateway.jsonl" 2>/dev/null | _redact_secrets || echo "  (not found)"
     echo "--- SQLite direct event count (via Python) ---"
     python3 -c "
 import sqlite3, os
-db = os.path.expanduser('~/.defenseclaw/audit.db')
+db = os.path.join(os.environ['DEFENSECLAW_HOME'], 'audit.db')
 if not os.path.isfile(db):
     print('  audit.db not found')
     raise SystemExit(0)
@@ -1443,7 +1449,7 @@ phase_start() {
     local stale_skills stale_plugins stale_quarantine cfg_state
     stale_skills=$(snapshot_skill_paths | grep "/$E2E_PREFIX" || true)
     stale_plugins=$(snapshot_plugin_paths | grep "/$E2E_PREFIX" || true)
-    stale_quarantine=$(find "$HOME/.defenseclaw/quarantine" -mindepth 1 -maxdepth 3 -name "${E2E_PREFIX}*" 2>/dev/null || true)
+    stale_quarantine=$(find "$DC_HOME/quarantine" -mindepth 1 -maxdepth 3 -name "${E2E_PREFIX}*" 2>/dev/null || true)
     cfg_state=$(openclaw_config_state_json)
 
     if [ -z "$stale_skills" ]; then
@@ -1574,12 +1580,12 @@ phase_start() {
         GATEWAY_TOKEN_CACHE="__unset__"
     else
         fail "sidecar health endpoint reachable" "unhealthy after 3 attempts (60s each)"
-        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
-        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
-        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
-        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
-        echo "  --- last 40 lines of ~/.defenseclaw/watchdog.log ---" >&2
-        tail -n 40 "$HOME/.defenseclaw/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of $DEFENSECLAW_HOME/gateway.log ---" >&2
+        tail -n 100 "$DC_HOME/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of $DEFENSECLAW_HOME/gateway.jsonl ---" >&2
+        tail -n 100 "$DC_HOME/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 40 lines of $DEFENSECLAW_HOME/watchdog.log ---" >&2
+        tail -n 40 "$DC_HOME/watchdog.log" 2>&1 | sed 's/^/    /' >&2 || true
         echo "  --- defenseclaw / openclaw processes ---" >&2
         ps -eo pid,ppid,stat,etime,rss,vsz,cmd 2>&1 | grep -Ei 'defenseclaw|openclaw' | grep -v grep | sed 's/^/    /' >&2 || true
         echo "  --- listeners on 127.0.0.1:18789 and 127.0.0.1:18970 ---" >&2
@@ -1772,7 +1778,7 @@ phase_connector() {
     fi
 
     # ── 2B-2. Active Connector State ──
-    local state_file="$HOME/.defenseclaw/active_connector.json"
+    local state_file="$DC_HOME/active_connector.json"
     if is_full_live; then
         # Full-live should have an active connector configured.
         if [ -n "$active_name" ] && [ "$active_name" != "null" ] && [ "$active_name" != "unknown" ]; then
@@ -1829,8 +1835,8 @@ phase_connector() {
     fi
 
     # ── 2B-4. Hook Scripts & Shims ──
-    local hooks_dir="$HOME/.defenseclaw/hooks"
-    local shims_dir="$HOME/.defenseclaw/shims"
+    local hooks_dir="$DC_HOME/hooks"
+    local shims_dir="$DC_HOME/shims"
 
     if [ -d "$hooks_dir" ]; then
         pass "connector hooks: hooks directory exists"
@@ -1975,7 +1981,7 @@ phase_connector_artifact_matrix() {
 
     connector_names=$(echo "$connectors_resp" | jq -r '[.connectors[].name] | sort | join(" ")' 2>/dev/null || echo "")
 
-    local hook_dir="$HOME/.defenseclaw/hooks"
+    local hook_dir="$DC_HOME/hooks"
     if [ ! -d "$hook_dir" ]; then
         skip "phase 2C: hook dir absent" "no $hook_dir (guardrail not yet set up)"
         phase_timer_end "Phase 2C"
@@ -2477,7 +2483,7 @@ phase_quarantine() {
     fi
 
     local quarantine_root flat_quarantine_path connector_quarantine_path
-    quarantine_root="$HOME/.defenseclaw/quarantine/skills"
+    quarantine_root="$DC_HOME/quarantine/skills"
     flat_quarantine_path="$quarantine_root/$skill_name"
     connector_quarantine_path=$(find "$quarantine_root" -mindepth 2 -maxdepth 2 -type d -name "$skill_name" -print -quit 2>/dev/null || true)
     if [ -d "$flat_quarantine_path" ] || [ -n "$connector_quarantine_path" ]; then
@@ -3009,7 +3015,7 @@ providers_path = os.path.join(repo_root, "internal", "configs", "providers.json"
 if not os.path.exists(providers_path):
     # Fallback: check common paths
     for p in [
-        os.path.expanduser("~/.defenseclaw/providers.json"),
+        os.path.join(os.environ["DEFENSECLAW_HOME"], "providers.json"),
         "internal/configs/providers.json",
     ]:
         if os.path.exists(p):
@@ -3043,7 +3049,7 @@ import os
 repo_root = os.environ.get("REPO_ROOT", ".")
 candidates = [
     os.path.join(repo_root, "internal", "configs", "providers.json"),
-    os.path.expanduser("~/.defenseclaw/providers.json"),
+    os.path.join(os.environ["DEFENSECLAW_HOME"], "providers.json"),
     "internal/configs/providers.json",
 ]
 for p in candidates:
@@ -3845,10 +3851,10 @@ phase_recovery() {
         pass "recovery: sidecar restarted after stop"
     else
         fail "recovery: sidecar restarted after stop" "sidecar health endpoint did not recover"
-        echo "  --- last 100 lines of ~/.defenseclaw/gateway.log ---" >&2
-        tail -n 100 "$HOME/.defenseclaw/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
-        echo "  --- last 100 lines of ~/.defenseclaw/gateway.jsonl ---" >&2
-        tail -n 100 "$HOME/.defenseclaw/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of $DEFENSECLAW_HOME/gateway.log ---" >&2
+        tail -n 100 "$DC_HOME/gateway.log" 2>&1 | sed 's/^/    /' >&2 || true
+        echo "  --- last 100 lines of $DEFENSECLAW_HOME/gateway.jsonl ---" >&2
+        tail -n 100 "$DC_HOME/gateway.jsonl" 2>&1 | sed 's/^/    /' >&2 || true
         phase_timer_end "Phase 7C"
         return
     fi
@@ -4023,7 +4029,7 @@ phase_teardown() {
     defenseclaw-gateway status 2>/dev/null || true
 
     # Verify connector state before stopping.
-    local state_file="$HOME/.defenseclaw/active_connector.json"
+    local state_file="$DC_HOME/active_connector.json"
     if [ -f "$state_file" ]; then
         echo "  Active connector state at teardown: $(cat "$state_file" 2>/dev/null)"
     fi
@@ -4046,8 +4052,8 @@ phase_teardown() {
     fi
 
     # Verify connector teardown cleaned up stale artifacts.
-    local shims_dir="$HOME/.defenseclaw/shims"
-    local hooks_dir="$HOME/.defenseclaw/hooks"
+    local shims_dir="$DC_HOME/shims"
+    local hooks_dir="$DC_HOME/hooks"
     if [ -d "$shims_dir" ] && [ -n "$(ls -A "$shims_dir" 2>/dev/null)" ]; then
         echo "  [warn] shims directory still populated after stop — may need manual cleanup"
     fi

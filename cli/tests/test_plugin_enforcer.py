@@ -57,17 +57,18 @@ class TestPluginEnforcer(unittest.TestCase):
         dest = self.enforcer.quarantine("ghost", "/nonexistent/path")
         self.assertIsNone(dest)
 
-    def test_quarantine_overwrites_existing(self):
+    def test_quarantine_refuses_to_overwrite_existing(self):
         plugin_path = self._create_plugin("dup-plugin")
-        self.enforcer.quarantine("dup-plugin", plugin_path)
+        first_dest = self.enforcer.quarantine("dup-plugin", plugin_path)
 
         plugin_path2 = self._create_plugin("dup-plugin")
         with open(os.path.join(plugin_path2, "extra.txt"), "w") as f:
             f.write("new content")
         dest = self.enforcer.quarantine("dup-plugin", plugin_path2)
 
-        self.assertIsNotNone(dest)
-        self.assertTrue(os.path.isfile(os.path.join(dest, "extra.txt")))
+        self.assertIsNone(dest)
+        self.assertTrue(os.path.isdir(plugin_path2))
+        self.assertFalse(os.path.isfile(os.path.join(first_dest, "extra.txt")))
 
     def test_is_quarantined(self):
         self.assertFalse(self.enforcer.is_quarantined("my-plugin"))

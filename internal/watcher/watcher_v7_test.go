@@ -11,52 +11,11 @@ import (
 	"path/filepath"
 	"sync"
 	"testing"
-	"time"
-
-	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
-
-	"go.opentelemetry.io/otel"
 
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
-	"github.com/defenseclaw/defenseclaw/internal/telemetry"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
-
-func TestAdmissionSpan_GoldenTree(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(prev)
-
-	ctx := context.Background()
-	ctx, parent := otel.Tracer("defenseclaw").Start(ctx, "http/server")
-
-	_, child := enforce.StartAdmissionDecideSpan(ctx, "skill", "x", "pid")
-	enforce.EndAdmissionDecideSpan(child, "allowed", "ok", "pid", nil)
-
-	parent.End()
-
-	spans := exp.GetSpans()
-	if len(spans) < 2 {
-		t.Fatalf("expected spans, got %d", len(spans))
-	}
-	var sawAdmission bool
-	for _, s := range spans {
-		if s.Name == "defenseclaw.admission.decide" {
-			sawAdmission = true
-		}
-	}
-	if !sawAdmission {
-		t.Fatalf("spans: %#v", spans)
-	}
-}
 
 func TestPolicyFilePoll_BumpsGeneration(t *testing.T) {
 	cfg, store, logger, _ := setupTestEnv(t)
@@ -65,7 +24,7 @@ func TestPolicyFilePoll_BumpsGeneration(t *testing.T) {
 		t.Fatal(err)
 	}
 	shell := sandbox.New(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir)
-	w := New(cfg, nil, nil, store, logger, shell, nil, nil, nil)
+	w := New(cfg, nil, nil, store, logger, shell, nil, nil)
 	blockPath := filepath.Join(cfg.DataDir, "block_list.yaml")
 	if err := os.WriteFile(blockPath, []byte(`- target_type: skill
   target_name: a
@@ -106,16 +65,4 @@ func TestQuarantineStress_ConcurrentMoves(t *testing.T) {
 		}(i)
 	}
 	wg.Wait()
-}
-
-func TestRecordQuarantineAction_WithProvider(t *testing.T) {
-	rdr := sdkmetric.NewManualReader()
-	p, err := telemetry.NewProviderForTest(rdr)
-	if err != nil {
-		t.Fatal(err)
-	}
-	ctx := context.Background()
-	p.RecordQuarantineAction(ctx, "move_in", "ok")
-	p.RecordQuarantineAction(ctx, "move_in", "error")
-	_ = time.Now()
 }

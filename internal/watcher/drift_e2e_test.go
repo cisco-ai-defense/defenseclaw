@@ -26,7 +26,7 @@ import (
 )
 
 // TestDriftE2E_SnapshotStoreAndDetect exercises the full drift detection
-// pipeline: snapshot → store → mutate → snapshot → compare → emit.
+// pipeline: snapshot → store → mutate → snapshot → compare → persist.
 func TestDriftE2E_SnapshotStoreAndDetect(t *testing.T) {
 	tmpDir := t.TempDir()
 	dbPath := filepath.Join(tmpDir, "drift-test.db")
@@ -142,7 +142,7 @@ def run():
 		t.Errorf("expected max severity HIGH, got %s", maxSev)
 	}
 
-	// --- Phase 4: Emit alert and verify it's in the audit DB ---
+	// --- Phase 4: Persist the lifecycle event and verify audit history ---
 	event := audit.Event{
 		Action:   "drift",
 		Target:   skillDir,
@@ -155,9 +155,22 @@ def run():
 		t.Fatalf("log drift event: %v", err)
 	}
 
-	events, err := store.ListAlerts(10)
+	// Drift is an asset.lifecycle occurrence in v8, not a security.finding.
+	// ListAlerts is deliberately restricted to findings, so the event must be
+	// durable in history without appearing in that finding-only view.
+	alerts, err := store.ListAlerts(10)
 	if err != nil {
 		t.Fatalf("list alerts: %v", err)
+	}
+	for _, e := range alerts {
+		if e.Action == "drift" {
+			t.Fatal("asset lifecycle drift must not appear in the security-finding alert view")
+		}
+	}
+
+	events, err := store.ListEvents(10)
+	if err != nil {
+		t.Fatalf("list audit history: %v", err)
 	}
 
 	var foundDrift bool
@@ -177,7 +190,7 @@ def run():
 		}
 	}
 	if !foundDrift {
-		t.Error("drift alert not found in audit DB")
+		t.Error("drift lifecycle event not found in audit history")
 	}
 }
 

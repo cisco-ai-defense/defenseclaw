@@ -11,7 +11,7 @@
 """Install / disable / uninstall lifecycle smoke matrix (plan C5 / S7.6).
 
 Pre-existing tests (``test_cmd_uninstall.py``) cover the planning surface;
-this module covers the **round-trip** side of the lifecycle for every
+this module covers the **round-trip** side of the lifecycle for every active
 built-in connector. We exercise the Python CLI plumbing — config write,
 config persistence, uninstall planning — for every built-in
 connector without invoking the destructive
@@ -50,7 +50,6 @@ CONNECTORS = (
     "hermes",
     "cursor",
     "windsurf",
-    "geminicli",
     "copilot",
     "openhands",
     "antigravity",
@@ -148,9 +147,10 @@ class InstallSmokeMatrixTests(unittest.TestCase):
 
             with open(cfg_path) as fh:
                 cfg_doc = yaml.safe_load(fh)
-            guardrail = cfg_doc.get("guardrail", {})
-            for key in ("mode", "scanner_mode", "block_message"):
-                self.assertIn(key, guardrail, f"{connector_name}: guardrail config missing {key}")
+            self.assertEqual(cfg_doc.get("config_version"), 8)
+            self.assertIsInstance(cfg_doc.get("observability"), dict)
+            for removed in ("audit_sinks", "otel", "privacy", "splunk"):
+                self.assertNotIn(removed, cfg_doc)
 
             # 2. Reload config from disk and assert the connector
             #    selection persisted. config.load() reads from

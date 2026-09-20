@@ -1,5 +1,5 @@
 import { source } from '@/lib/source';
-import { siteUrl } from '@/lib/site';
+import { canonicalUrl } from '@/lib/site';
 
 // Single helper used by every LLM-facing surface — `/docs/<slug>.md`,
 // `/llms-full.txt`, and any AI integration we layer on top later.
@@ -16,7 +16,7 @@ export async function getLLMText(
   page: (typeof source)['$inferPage'],
 ): Promise<string> {
   const processed = await page.data.getText('processed');
-  const url = `${siteUrl}${page.url}`;
+  const url = canonicalUrl(page.url);
   const title = page.data.title;
   const description = page.data.description;
   const header = description

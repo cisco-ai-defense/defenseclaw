@@ -14,6 +14,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/testenv"
 )
 
 // TestWriteManagedFileBackup_DirIs0o700 (M-5) verifies the per-connector
@@ -35,13 +37,7 @@ func TestWriteManagedFileBackup_DirIs0o700(t *testing.T) {
 	}
 
 	dir := filepath.Join(tmp, "connector_backups", "claudecode")
-	info, err := os.Stat(dir)
-	if err != nil {
-		t.Fatalf("stat backup dir: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o700 {
-		t.Fatalf("backup dir mode = %v, want 0o700 (operator state must not be world-listable)", mode)
-	}
+	testenv.AssertPrivateDirectory(t, dir)
 }
 
 func TestEnsureManagedBackupDirRestricted_TightensExistingDir(t *testing.T) {
@@ -56,11 +52,5 @@ func TestEnsureManagedBackupDirRestricted_TightensExistingDir(t *testing.T) {
 	if err := ensureManagedBackupDirRestricted(tmp); err != nil {
 		t.Fatalf("ensureManagedBackupDirRestricted: %v", err)
 	}
-	info, err := os.Stat(tmp)
-	if err != nil {
-		t.Fatalf("stat: %v", err)
-	}
-	if mode := info.Mode().Perm(); mode != 0o700 {
-		t.Fatalf("dir mode = %v, want 0o700 (must tighten existing 0o755 dir)", mode)
-	}
+	testenv.AssertPrivateDirectory(t, tmp)
 }

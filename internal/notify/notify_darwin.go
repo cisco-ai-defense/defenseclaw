@@ -26,6 +26,9 @@ import (
 )
 
 var fallbackWriter io.Writer = os.Stderr
+var osascriptRun = func(args ...string) error {
+	return exec.Command("osascript", args...).Run()
+}
 
 // appleScriptQuote produces a quoted AppleScript string literal.
 // AppleScript only recognizes \" and \\ inside double-quoted strings;
@@ -46,5 +49,5 @@ func sendPlatform(n Notification) error {
 	if n.Subtitle != "" {
 		script += " subtitle " + appleScriptQuote(n.Subtitle)
 	}
-	return exec.Command("osascript", "-e", script).Run()
+	return osascriptRun("-e", script)
 }

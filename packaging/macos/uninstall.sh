@@ -24,12 +24,24 @@
 #       ~/.codex/config.toml         (strip [hooks], [otel], notify=)
 #       ~/.claude/settings.json      (strip DC entries from hooks map)
 #       ~/.cursor/hooks.json         (strip DC entries from hooks map)
+#       ~/.config/amp/plugins/defenseclaw.ts
+#                                    (restore/remove only when the structured
+#                                     backup identity + post hash still match)
 #     Non-DefenseClaw user entries in those files are preserved verbatim.
 #     Pass --keep-agent-configs to skip the scrub.
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# Path to the Python scrubber for the `amp` connector. Amp's plugin
+# lives at ~/.config/amp/plugins/defenseclaw.ts and is signed-backup-
+# managed by scrub_agent_configs.py — restoring the pre-install
+# plugin content on uninstall requires SHA-256 verification against a
+# manifest under ~/.defenseclaw/connector_backups/amp/config.json.
+# The codex/claudecode/cursor connectors are scrubbed by the Go
+# `defenseclaw-gateway enterprise hooks scrub` subcommand (no python3
+# runtime dependency). See scrub_agent_config() below for the split.
 SCRUB_PY="${SCRIPT_DIR}/lib/scrub_agent_configs.py"
 
 INSTALL_PREFIX="/opt/cisco/secureclient/defenseclaw"
@@ -37,6 +49,10 @@ SUPPORT_DIR="${INSTALL_PREFIX}"
 LOGS_DIR="/Library/Logs/Cisco/SecureClient/DefenseClaw"
 PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.plist"
 LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw"
+GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+GUARDIAN_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-guardian"
+ENUMERATOR_PLIST_DST="/Library/LaunchDaemons/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+ENUMERATOR_LAUNCHD_LABEL="com.cisco.secureclient.defenseclaw.hook-enumerator"
 
 # Legacy paths + labels from pre-managed-layout DefenseClaw installs.
 # Kept so that running the new uninstall.sh on an old-layout host
@@ -46,6 +62,8 @@ LEGACY_SUPPORT_DIR="/Library/Application Support/DefenseClaw"
 LEGACY_LOGS_DIR="/Library/Logs/DefenseClaw"
 LEGACY_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.gateway.plist"
 LEGACY_LAUNCHD_LABEL="com.defenseclaw.gateway"
+LEGACY_GUARDIAN_PLIST_DST="/Library/LaunchDaemons/com.defenseclaw.hook-guardian.plist"
+LEGACY_GUARDIAN_LAUNCHD_LABEL="com.defenseclaw.hook-guardian"
 
 # Legacy service-user names swept on --purge. Pre-root DefenseClaw
 # installs created these accounts via ensure_service_user in install.sh.
@@ -57,6 +75,25 @@ ASSUME_YES="false"
 TARGET_USER=""
 KEEP_AGENT_CONFIGS="false"
 SCRUB_FAILED="false"
+
+# Source enumerate_local_users + home_perms_ok if the library is present.
+# uninstall.sh runs in three contexts: from a shipped bundle (SCRIPT_DIR
+# has lib/ beside it), from the managed install tree (SUPPORT_DIR/lib/),
+# and from the repo tree during tests. Try each; a missing lib just
+# means multi-user iteration falls back to the single-user SUDO_USER
+# path below.
+_UNINSTALL_LIB=""
+for _c in \
+  "${SCRIPT_DIR}/lib/installer_lib.sh" \
+  "${SUPPORT_DIR}/lib/installer_lib.sh" \
+  "${SCRIPT_DIR}/../lib/installer_lib.sh"; do
+  if [[ -f "${_c}" ]]; then _UNINSTALL_LIB="${_c}"; break; fi
+done
+unset _c
+if [[ -n "${_UNINSTALL_LIB}" ]]; then
+  # shellcheck source=lib/installer_lib.sh
+  . "${_UNINSTALL_LIB}"
+fi
 
 # ---- helpers ------------------------------------------------------------
 
@@ -82,7 +119,11 @@ Options:
                           ~/.codex/config.toml
                           ~/.claude/settings.json
                           ~/.cursor/hooks.json
+                          ~/.config/amp/plugins/defenseclaw.ts
                         Non-DefenseClaw entries in those files are preserved.
+                        Amp cleanup uses:
+                          ~/.defenseclaw/connector_backups/amp/config.json
+                        and refuses to change a drifted or unsafe plugin.
   --keep-agent-configs  With --purge, skip the agent-config scrub. Hook
                         scripts will be deleted, leaving dangling references
                         that fail-close every agent tool call. Use only if
@@ -130,16 +171,39 @@ done
 [[ "$(uname -s)" == "Darwin" ]] || die "macOS only"
 [[ $EUID -eq 0 ]] || die "must run as root (try: sudo $0 $*)"
 
+# Purge targets: newline-separated user:uid:gid:home lines. When --user
+# is passed explicitly, resolve that one user; otherwise iterate every
+# eligible local user via enumerate_local_users (falls back to SUDO_USER
+# if the library isn't sourced in this environment).
+PURGE_TARGETS=""
 if [[ "${PURGE}" == "true" ]]; then
-  if [[ -z "${TARGET_USER}" ]]; then
-    TARGET_USER="${SUDO_USER:-}"
-  fi
   if [[ -n "${TARGET_USER}" ]]; then
     TARGET_HOME="$(dscl . -read "/Users/${TARGET_USER}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
     if [[ -z "${TARGET_HOME}" || ! -d "${TARGET_HOME}" ]]; then
       die "could not resolve home for --user ${TARGET_USER} (dscl returned '${TARGET_HOME}'); refusing to purge without a valid target"
     fi
+    _tuid="$(id -u "${TARGET_USER}" 2>/dev/null || echo "")"
+    _tgid="$(id -g "${TARGET_USER}" 2>/dev/null || echo "")"
+    PURGE_TARGETS="${TARGET_USER}:${_tuid}:${_tgid}:${TARGET_HOME}"
+    unset _tuid _tgid
+  elif command -v enumerate_local_users >/dev/null 2>&1; then
+    PURGE_TARGETS="$(enumerate_local_users || true)"
+  else
+    # Library not sourced — fall back to the legacy SUDO_USER single-user path.
+    _fallback_user="${SUDO_USER:-}"
+    if [[ -n "${_fallback_user}" ]]; then
+      TARGET_USER="${_fallback_user}"
+      TARGET_HOME="$(dscl . -read "/Users/${_fallback_user}" NFSHomeDirectory 2>/dev/null | awk '{print $2}')"
+      if [[ -n "${TARGET_HOME}" && -d "${TARGET_HOME}" ]]; then
+        _tuid="$(id -u "${_fallback_user}" 2>/dev/null || echo "")"
+        _tgid="$(id -g "${_fallback_user}" 2>/dev/null || echo "")"
+        PURGE_TARGETS="${_fallback_user}:${_tuid}:${_tgid}:${TARGET_HOME}"
+        unset _tuid _tgid
+      fi
+    fi
+    unset _fallback_user
   fi
+
   if [[ "${ASSUME_YES}" != "true" ]]; then
     printf '[uninstall] --purge will DELETE:\n'
     printf '  %s\n' "${SUPPORT_DIR}" "${LOGS_DIR}"
@@ -148,15 +212,18 @@ if [[ "${PURGE}" == "true" ]]; then
       [[ -d "${LEGACY_SUPPORT_DIR}" ]] && printf '  %s\n' "${LEGACY_SUPPORT_DIR}"
       [[ -d "${LEGACY_LOGS_DIR}" ]]    && printf '  %s\n' "${LEGACY_LOGS_DIR}"
     fi
-    if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" ]]; then
-      printf '  %s/.defenseclaw/\n' "${TARGET_HOME}"
+    if [[ -n "${PURGE_TARGETS}" ]]; then
+      printf '[uninstall] per-user cleanup targets (%d user(s)):\n' \
+        "$(printf '%s\n' "${PURGE_TARGETS}" | grep -c . || true)"
+      while IFS=: read -r _u _uid _gid _h; do
+        [[ -z "${_u}" ]] && continue
+        printf '  %s/.defenseclaw/\n' "${_h}"
+      done <<< "${PURGE_TARGETS}"
+      unset _u _uid _gid _h
       if [[ "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
-        printf '[uninstall] and will SCRUB DefenseClaw entries from:\n'
-        for f in "${TARGET_HOME}/.codex/config.toml" \
-                 "${TARGET_HOME}/.claude/settings.json" \
-                 "${TARGET_HOME}/.cursor/hooks.json"; do
-          [[ -f "${f}" ]] && printf '  %s\n' "${f}"
-        done
+        printf '[uninstall] and will SCRUB DefenseClaw entries from each user'\''s:\n'
+        printf '  ~/.codex/config.toml\n  ~/.claude/settings.json\n  ~/.cursor/hooks.json\n'
+        printf '  ~/.config/amp/plugins/defenseclaw.ts (exact backup authority required)\n'
         printf '  (non-DefenseClaw entries preserved)\n'
       fi
     fi
@@ -177,6 +244,18 @@ stop_daemon() {
   local plist="$2"
   if launchctl print "system/${label}" >/dev/null 2>&1; then
     log "stopping LaunchDaemon (${label})"
+
+    # Capture the child PID BEFORE bootout so we can wait for the
+    # actual process to exit. bootout returns once launchd has
+    # released the label, but the child may still be alive for a
+    # moment. For hook-guardian this matters: while alive, its
+    # fsnotify handler re-heals the very agent-config files the
+    # subsequent scrub is about to strip, silently undoing the
+    # uninstall.
+    local pid=""
+    pid="$(launchctl print "system/${label}" 2>/dev/null \
+      | awk '/^[[:space:]]*pid = / {print $3; exit}')"
+
     # Try both bootout forms (target vs plist path); either works and
     # both are safe when the target is already gone.
     launchctl bootout "system/${label}" 2>/dev/null || \
@@ -191,11 +270,43 @@ stop_daemon() {
       sleep 1
       settle=$((settle + 1))
     done
+
+    # Now wait for the child process itself to exit. bootout sends
+    # SIGTERM; escalate to SIGKILL after 10s in case the process is
+    # blocked in a syscall or ignoring the signal.
+    if [[ -n "${pid}" && "${pid}" =~ ^[0-9]+$ ]]; then
+      local waited=0
+      while (( waited < 10 )); do
+        kill -0 "${pid}" 2>/dev/null || break
+        sleep 1
+        waited=$((waited + 1))
+      done
+      if kill -0 "${pid}" 2>/dev/null; then
+        warn "PID ${pid} for ${label} did not exit within 10s; sending SIGKILL"
+        kill -9 "${pid}" 2>/dev/null || true
+        waited=0
+        while (( waited < 3 )); do
+          kill -0 "${pid}" 2>/dev/null || break
+          sleep 1
+          waited=$((waited + 1))
+        done
+        if kill -0 "${pid}" 2>/dev/null; then
+          warn "PID ${pid} for ${label} still alive after SIGKILL; hooks scrub may race with the reconciler"
+        fi
+      fi
+    fi
   fi
 }
 
-stop_daemon "${LAUNCHD_LABEL}"        "${PLIST_DST}"
-stop_daemon "${LEGACY_LAUNCHD_LABEL}" "${LEGACY_PLIST_DST}"
+# Stop the hook-guardian FIRST — it's the fsnotify-driven reconciler
+# that re-heals scrubbed agent-config entries. Everything else can
+# race with the scrub without corrupting the result, but the guardian
+# will actively undo it if given even a ~1s window.
+stop_daemon "${GUARDIAN_LAUNCHD_LABEL}"   "${GUARDIAN_PLIST_DST}"
+stop_daemon "${ENUMERATOR_LAUNCHD_LABEL}" "${ENUMERATOR_PLIST_DST}"
+stop_daemon "${LAUNCHD_LABEL}"            "${PLIST_DST}"
+stop_daemon "${LEGACY_GUARDIAN_LAUNCHD_LABEL}" "${LEGACY_GUARDIAN_PLIST_DST}"
+stop_daemon "${LEGACY_LAUNCHD_LABEL}"     "${LEGACY_PLIST_DST}"
 
 # ---- agent-config scrub (BEFORE we delete ~/.defenseclaw) --------------
 #
@@ -203,30 +314,253 @@ stop_daemon "${LEGACY_LAUNCHD_LABEL}" "${LEGACY_PLIST_DST}"
 # start hitting "command not found" + fail-close every tool call the moment
 # we delete ~/.defenseclaw/hooks/*-hook.sh. The scrub runs as the target
 # user (drop privileges via sudo -u) so file ownership is preserved.
+#
+# The scrub logic is baked into the DefenseClaw binary as
+# `defenseclaw enterprise hooks scrub`; the previous Python helper
+# crashed on stock macOS hosts where /usr/bin/python3 is a Xcode CLT
+# stub that fails to launch without developer tools installed. Using
+# our own Go binary sidesteps that dependency entirely.
 
+# Discover the gateway binary. Managed installs land it at a known
+# absolute path; bundle-fixture / dev-tree tests can override via
+# DEFENSECLAW_SCRUB_BIN so they don't need the managed layout present.
+#
+# _scrub_bin_trusted PATH LABEL [--allow-non-root-owner]
+#   Validates a candidate scrub-binary path. Returns 0 on success,
+#   printing the path to stdout; returns 1 on any check failure,
+#   emitting a WARN so the operator sees which check tripped. All
+#   check failures write to stderr and never abort the shell — the
+#   caller decides whether to fall through to the next candidate.
+#
+#   uninstall.sh runs under `sudo`, so the referenced binary is
+#   executed as root; every candidate is treated as untrusted input
+#   and must satisfy the checks below before it takes effect:
+#
+#     1. absolute path (relative could be rerooted by PWD)
+#     2. exists as a regular file (not a directory, not a device,
+#        not a symlink — a symlink swap is the exact race that
+#        motivates this)
+#     3. is executable
+#     4. mode & 0022 == 0 (no group/other write bits — a compromised
+#        umask cannot slip a writable binary through)
+#     5. owned by uid 0 (matches the installer's "root-owned trusted
+#        input" pattern for --plist)
+#
+#   `--allow-non-root-owner` skips check (5). The bundle-fixture /
+#   dev-tree candidates under SCRIPT_DIR inherit the extracting
+#   user's uid — that's expected for a `tar xzf` extraction and
+#   matches the installer's two-tier PLIST_SRC policy where the
+#   bundle default is accepted regardless of owner (its content came
+#   from the trusted tarball). Managed-install candidates under
+#   INSTALL_PREFIX must always be root-owned; the flag isn't used
+#   there.
+#
+#   DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST=1 is a test-side seam that
+#   skips checks 4 & 5 entirely so bundle-fixture tests can drive
+#   uninstall.sh against a non-root-owned binary in a tmpdir
+#   (parallel to DC_INSTALLER_SKIP_ROOT_CHECK on the install side).
+_scrub_bin_trusted() {
+  local path="$1"
+  local label="$2"
+  local allow_non_root_owner="false"
+  case "${3:-}" in
+    --allow-non-root-owner) allow_non_root_owner="true" ;;
+    "") ;;
+    *) warn "${label} internal error: unknown flag ${3}"; return 1 ;;
+  esac
+  case "${path}" in
+    /*) ;;
+    *)
+      warn "${label} must be an absolute path (got: ${path}); ignoring"
+      return 1
+      ;;
+  esac
+  if [[ -L "${path}" ]]; then
+    warn "${label} is a symlink; refusing to follow (${path}); ignoring"
+    return 1
+  fi
+  if [[ ! -f "${path}" ]]; then
+    warn "${label} is not a regular file: ${path}; ignoring"
+    return 1
+  fi
+  if [[ ! -x "${path}" ]]; then
+    warn "${label} is not executable: ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${DC_UNINSTALL_SKIP_SCRUB_BIN_TRUST:-}" == "1" ]]; then
+    printf '%s' "${path}"
+    return 0
+  fi
+  local _own_mode _own _mode
+  _own_mode="$(stat -f '%Su %Lp' "${path}" 2>/dev/null || echo '')"
+  if [[ -z "${_own_mode}" ]]; then
+    warn "${label} cannot be stat'd: ${path}; ignoring"
+    return 1
+  fi
+  _own="${_own_mode%% *}"
+  _mode="${_own_mode##* }"
+  if (( (8#${_mode} & 8#022) != 0 )); then
+    warn "${label} is group/other writable (mode ${_mode}): ${path}; ignoring"
+    return 1
+  fi
+  if [[ "${allow_non_root_owner}" != "true" && "${_own}" != "root" ]]; then
+    warn "${label} must be owned by root (got: ${_own}): ${path}; ignoring"
+    return 1
+  fi
+  # Strict tier: validate the containing directory too. A binary
+  # can be root-owned + 0755 and still be swap-hijackable if the
+  # DIRECTORY it lives in is writable by a non-root user — that
+  # user can `mv the-file another; touch the-file` and replace the
+  # trusted binary at will. The bundle-fixture tier stays exempt
+  # because its extraction directory inherits the operator's uid
+  # (documented in the installer's PLIST_SRC two-tier policy).
+  if [[ "${allow_non_root_owner}" != "true" ]]; then
+    local _dir _dir_own_mode _dir_own _dir_mode
+    _dir="$(dirname -- "${path}")"
+    _dir_own_mode="$(stat -f '%Su %Lp' "${_dir}" 2>/dev/null || echo '')"
+    if [[ -z "${_dir_own_mode}" ]]; then
+      warn "${label} containing dir cannot be stat'd: ${_dir}; ignoring"
+      return 1
+    fi
+    _dir_own="${_dir_own_mode%% *}"
+    _dir_mode="${_dir_own_mode##* }"
+    if [[ "${_dir_own}" != "root" ]]; then
+      warn "${label} containing dir must be owned by root (got: ${_dir_own}): ${_dir}; ignoring"
+      return 1
+    fi
+    if (( (8#${_dir_mode} & 8#022) != 0 )); then
+      warn "${label} containing dir is group/other writable (mode ${_dir_mode}): ${_dir}; ignoring"
+      return 1
+    fi
+  fi
+  printf '%s' "${path}"
+  return 0
+}
+
+# _scrub_bin resolves the scrub-binary path by trying, in order:
+#   1. DEFENSECLAW_SCRUB_BIN (operator override — strict trust)
+#   2. INSTALL_PREFIX/bin/defenseclaw-gateway (managed install — strict trust)
+#   3. SCRIPT_DIR/defenseclaw           (bundle default — relaxed owner tier)
+#   4. SCRIPT_DIR/defenseclaw-gateway   (bundle/dev — relaxed owner tier)
+#
+# Any candidate that fails the trust check prints a WARN and is
+# skipped; discovery falls through to the next candidate.
+_scrub_bin() {
+  local resolved=""
+  if [[ -n "${DEFENSECLAW_SCRUB_BIN:-}" ]]; then
+    resolved="$(_scrub_bin_trusted "${DEFENSECLAW_SCRUB_BIN}" "DEFENSECLAW_SCRUB_BIN" || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
+      return
+    fi
+    # Fall through: warn already printed by helper.
+  fi
+  # Managed-install location: strict trust (root-owned + mode
+  # tightened). If someone dropped an untrusted binary here they've
+  # already compromised the managed tree, but we still don't want
+  # uninstall.sh to launch it as root.
+  resolved="$(_scrub_bin_trusted "${INSTALL_PREFIX}/bin/defenseclaw-gateway" "managed install gateway binary" || true)"
+  if [[ -n "${resolved}" ]]; then
+    printf '%s' "${resolved}"
+    return
+  fi
+  # Bundle-fixture / dev-tree fallbacks: relaxed owner tier because
+  # the bundle unpacks under the caller's uid. Mode + symlink checks
+  # still apply.
+  for cand in \
+    "${SCRIPT_DIR}/defenseclaw" \
+    "${SCRIPT_DIR}/defenseclaw-gateway"; do
+    resolved="$(_scrub_bin_trusted "${cand}" "bundle scrub binary" --allow-non-root-owner || true)"
+    if [[ -n "${resolved}" ]]; then
+      printf '%s' "${resolved}"
+      return
+    fi
+  done
+  printf ''
+}
+
+SCRUB_BIN="$(_scrub_bin)"
+
+# python3 resolver — used only by the `amp` connector's scrub path.
+# The other three connectors (codex / claudecode / cursor) route
+# through the Go binary at ${SCRUB_BIN} and do not need python3.
+# `amp` needs SHA-256 verification against a signed manifest to
+# restore its plugin file safely, which the Go scrubber doesn't
+# implement today; keeping python3 gated to this one connector
+# preserves the QA rip-out for the common case without regressing
+# Amp uninstall.
 PY="$(command -v python3 || printf '/usr/bin/python3')"
 
 scrub_agent_config() {
   local connector="$1"
   local cfg="$2"
-  if [[ ! -f "${cfg}" ]]; then
-    return 0
-  fi
-  if [[ ! -f "${SCRUB_PY}" ]]; then
-    warn "scrub helper missing: ${SCRUB_PY}; skipping ${cfg}"
-    SCRUB_FAILED="true"
-    return 0
+  local run_as_user="$3"   # empty ⇒ run as caller (root)
+  local authority="${4:-}"
+  if [[ "${connector}" == "amp" ]]; then
+    if [[ ! -e "${cfg}" && ! -L "${cfg}" ]]; then
+      return 0
+    fi
+  elif [[ ! -f "${cfg}" ]]; then
+      return 0
   fi
   log "  scrubbing ${connector} entries from ${cfg}"
   local rc=0
-  if [[ -n "${TARGET_USER:-}" && $(id -u "${TARGET_USER}" 2>/dev/null) != "0" ]]; then
-    sudo -u "${TARGET_USER}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+
+  # Split-route: `amp` uses the Python scrubber (signed-backup
+  # restore of ~/.config/amp/plugins/defenseclaw.ts requires SHA-256
+  # verification against the manifest under
+  # ~/.defenseclaw/connector_backups/amp/config.json — logic that
+  # lives in scrub_agent_configs.py). Everything else uses the Go
+  # binary, which is python3-free per the QA rip-out.
+  if [[ "${connector}" == "amp" ]]; then
+    # Threat model parity with the Go binary path below: uninstall.sh
+    # runs under `sudo`, and this branch executes SCRUB_PY as
+    # root-or-target-user. Reuse the bundle tier of _scrub_bin_trusted
+    # so a hostile symlink or a group/other-writable script under
+    # SCRIPT_DIR cannot slip past. `--allow-non-root-owner` mirrors
+    # the bundle-tier relaxation used elsewhere: SCRIPT_DIR extracts
+    # under the operator's uid, which is documented behaviour, but
+    # every OTHER check (absolute path, regular file, executable bit,
+    # non-group-writable mode) must still pass. scrub_agent_configs.py
+    # is shipped 0755, so the -x check is a positive assertion that
+    # the tarball extraction preserved the mode.
+    if ! _scrub_bin_trusted "${SCRUB_PY}" "python scrub helper" --allow-non-root-owner >/dev/null; then
+      SCRUB_FAILED="true"
+      return 0
+    fi
+    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
+      if [[ -n "${authority}" ]]; then
+        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+      else
+        sudo -u "${run_as_user}" "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      fi
+    else
+      if [[ -n "${authority}" ]]; then
+        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" "${authority}" || rc=$?
+      else
+        "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+      fi
+    fi
   else
-    "${PY}" "${SCRUB_PY}" "${connector}" "${cfg}" || rc=$?
+    if [[ -z "${SCRUB_BIN}" ]]; then
+      warn "defenseclaw binary not found; skipping scrub of ${cfg}"
+      SCRUB_FAILED="true"
+      return 0
+    fi
+    # --quiet-missing lets rc=2 (file missing) still count as success:
+    # the outer if-guard already handled the "file doesn't exist" case,
+    # but between that check and the scrub call the file could vanish
+    # (rare, but possible), and treating it as clean is the right move.
+    if [[ -n "${run_as_user}" && $(id -u "${run_as_user}" 2>/dev/null) != "0" ]]; then
+      sudo -u "${run_as_user}" "${SCRUB_BIN}" enterprise hooks scrub \
+        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
+    else
+      "${SCRUB_BIN}" enterprise hooks scrub \
+        --connector "${connector}" --file "${cfg}" --quiet-missing || rc=$?
+    fi
   fi
   case "${rc}" in
     0) ;;
-    2) ;;  # file missing — fine
     *)
       warn "  scrub exited ${rc} for ${cfg} (left unmodified)"
       SCRUB_FAILED="true"
@@ -236,17 +570,30 @@ scrub_agent_config() {
 
 if [[ "${PURGE}" == "true" \
    && "${KEEP_AGENT_CONFIGS}" != "true" \
-   && -n "${TARGET_HOME:-}" ]]; then
-  scrub_agent_config codex      "${TARGET_HOME}/.codex/config.toml"
-  scrub_agent_config claudecode "${TARGET_HOME}/.claude/settings.json"
-  scrub_agent_config cursor     "${TARGET_HOME}/.cursor/hooks.json"
+   && -n "${PURGE_TARGETS}" ]]; then
+  while IFS=: read -r _pu _puid _pgid _phome; do
+    [[ -z "${_pu}" || -z "${_phome}" ]] && continue
+    log "scrubbing per-user hook configs for ${_pu} (${_phome})"
+    scrub_agent_config codex      "${_phome}/.codex/config.toml"    "${_pu}"
+    scrub_agent_config claudecode "${_phome}/.claude/settings.json" "${_pu}"
+    scrub_agent_config cursor     "${_phome}/.cursor/hooks.json"    "${_pu}"
+    scrub_agent_config amp \
+      "${_phome}/.config/amp/plugins/defenseclaw.ts" "${_pu}" \
+      "${_phome}/.defenseclaw/connector_backups/amp/config.json"
+  done <<< "${PURGE_TARGETS}"
+  unset _pu _puid _pgid _phome
 fi
 
 # ---- remove files we own unconditionally --------------------------------
 #
 # Sweep both the current and legacy plist / binary tree.
 
-for plist in "${PLIST_DST}" "${LEGACY_PLIST_DST}"; do
+for plist in \
+  "${PLIST_DST}" \
+  "${GUARDIAN_PLIST_DST}" \
+  "${ENUMERATOR_PLIST_DST}" \
+  "${LEGACY_PLIST_DST}" \
+  "${LEGACY_GUARDIAN_PLIST_DST}"; do
   if [[ -f "${plist}" ]]; then
     log "removing ${plist}"
     rm -f "${plist}"
@@ -326,25 +673,32 @@ if [[ "${PURGE}" == "true" ]]; then
     fi
   done
 
-  if [[ -n "${TARGET_USER:-}" && -n "${TARGET_HOME:-}" && -d "${TARGET_HOME}/.defenseclaw" ]]; then
+  if [[ -n "${PURGE_TARGETS}" ]]; then
     if [[ "${SCRUB_FAILED}" == "true" && "${KEEP_AGENT_CONFIGS}" != "true" ]]; then
       # We're about to delete the hook scripts, but at least one agent
       # config still references them. Deleting now would leave every
       # future agent tool call fail-closed (exit 127 → block). Refuse
       # rather than paint the operator into that corner.
-      die "one or more agent-config scrubs failed; refusing to delete ${TARGET_HOME}/.defenseclaw (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
+      die "one or more agent-config scrubs failed; refusing to delete per-user .defenseclaw dirs (rerun with --keep-agent-configs to force the delete, then repair or reinstall)"
     fi
-    log "purging ${TARGET_HOME}/.defenseclaw"
-    rm -rf "${TARGET_HOME}/.defenseclaw"
-    if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
-      warn "--keep-agent-configs: agent configs still reference deleted hook scripts."
-      warn "  agents will fail-close every tool call until reinstall or manual edit."
-      for cfg in "${TARGET_HOME}/.codex/config.toml" \
-                 "${TARGET_HOME}/.claude/settings.json" \
-                 "${TARGET_HOME}/.cursor/hooks.json"; do
-        [[ -f "${cfg}" ]] && warn "    ${cfg}"
-      done
-    fi
+    while IFS=: read -r _pu _puid _pgid _phome; do
+      [[ -z "${_pu}" || -z "${_phome}" ]] && continue
+      if [[ -d "${_phome}/.defenseclaw" ]]; then
+        log "purging ${_phome}/.defenseclaw"
+        rm -rf "${_phome}/.defenseclaw"
+      fi
+      if [[ "${KEEP_AGENT_CONFIGS}" == "true" ]]; then
+        for cfg in "${_phome}/.codex/config.toml" \
+                   "${_phome}/.claude/settings.json" \
+                   "${_phome}/.cursor/hooks.json" \
+                   "${_phome}/.config/amp/plugins/defenseclaw.ts"; do
+          if [[ -f "${cfg}" ]]; then
+            warn "--keep-agent-configs: ${cfg} remains after DefenseClaw runtime deletion (its managed hook/plugin may fail closed)"
+          fi
+        done
+      fi
+    done <<< "${PURGE_TARGETS}"
+    unset _pu _puid _pgid _phome
   fi
 else
   log "preserving ${SUPPORT_DIR} (config + audit DB)"
@@ -355,15 +709,24 @@ fi
 # ---- sanity check -------------------------------------------------------
 
 REMAINING=()
-[[ -e "${PLIST_DST}" ]]              && REMAINING+=("${PLIST_DST}")
-[[ -e "${LEGACY_PLIST_DST}" ]]       && REMAINING+=("${LEGACY_PLIST_DST}")
-[[ -e "${INSTALL_PREFIX}" ]]         && REMAINING+=("${INSTALL_PREFIX}")
-[[ -e "${LEGACY_INSTALL_PREFIX}" ]]  && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
+[[ -e "${PLIST_DST}" ]]                 && REMAINING+=("${PLIST_DST}")
+[[ -e "${GUARDIAN_PLIST_DST}" ]]        && REMAINING+=("${GUARDIAN_PLIST_DST}")
+[[ -e "${ENUMERATOR_PLIST_DST}" ]]      && REMAINING+=("${ENUMERATOR_PLIST_DST}")
+[[ -e "${LEGACY_PLIST_DST}" ]]          && REMAINING+=("${LEGACY_PLIST_DST}")
+[[ -e "${LEGACY_GUARDIAN_PLIST_DST}" ]] && REMAINING+=("${LEGACY_GUARDIAN_PLIST_DST}")
+[[ -e "${INSTALL_PREFIX}" ]]            && REMAINING+=("${INSTALL_PREFIX}")
+[[ -e "${LEGACY_INSTALL_PREFIX}" ]]     && REMAINING+=("${LEGACY_INSTALL_PREFIX}")
 if [[ "${PURGE}" == "true" ]]; then
   [[ -e "${LOGS_DIR}" ]]         && REMAINING+=("${LOGS_DIR}")
   [[ -e "${LEGACY_SUPPORT_DIR}" ]] && REMAINING+=("${LEGACY_SUPPORT_DIR}")
   [[ -e "${LEGACY_LOGS_DIR}" ]]    && REMAINING+=("${LEGACY_LOGS_DIR}")
-  [[ -n "${TARGET_HOME:-}" && -e "${TARGET_HOME}/.defenseclaw" ]] && REMAINING+=("${TARGET_HOME}/.defenseclaw")
+  if [[ -n "${PURGE_TARGETS}" ]]; then
+    while IFS=: read -r _pu _puid _pgid _phome; do
+      [[ -z "${_phome}" ]] && continue
+      [[ -e "${_phome}/.defenseclaw" ]] && REMAINING+=("${_phome}/.defenseclaw")
+    done <<< "${PURGE_TARGETS}"
+    unset _pu _puid _pgid _phome
+  fi
 fi
 if (( ${#REMAINING[@]} > 0 )); then
   warn "the following paths still exist (manual cleanup needed):"

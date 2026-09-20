@@ -18,6 +18,9 @@
 
 from __future__ import annotations
 
+import os
+import shlex
+
 import click
 
 from defenseclaw.context import AppContext, pass_ctx
@@ -90,8 +93,7 @@ def install_cmd(app: AppContext, connector_flag: str, target: str, replace: bool
             "(see per-connector status above)"
         )
 
-    from defenseclaw.commands import hint
-    hint("Scan code now:  defenseclaw scan code <path>")
+    _emit_code_scan_hint()
 
 
 @codeguard.command("install-skill")
@@ -124,8 +126,78 @@ def install_skill_cmd(app: AppContext, connector_flag: str) -> None:
             "(see per-connector status above)"
         )
 
+    _emit_code_scan_hint()
+
+
+def _emit_code_scan_hint() -> None:
+    """Print a copy-safe command for the real CodeGuard scanner surface."""
     from defenseclaw.commands import hint
-    hint("Scan code now:  defenseclaw scan code <path>")
+
+    executable = _resolved_gateway_executable()
+    if executable is None:
+        hint(
+            "Code scan unavailable: no runnable defenseclaw-gateway executable was resolved. "
+            "Install or repair the gateway, or set DEFENSECLAW_GATEWAY_BIN to its absolute path."
+        )
+        return
+
+    command = _format_code_scan_command(executable)
+    label = "Scan code now (PowerShell)" if os.name == "nt" else "Scan code now"
+    hint(f"{label}:  {command}")
+
+
+def _resolved_gateway_executable() -> str | None:
+    """Resolve a trusted runnable gateway path without consulting PATH."""
+    from defenseclaw import gateway
+
+    try:
+        if gateway.packaged_windows_install_root() is not None:
+            packaged = _runnable_absolute_path(gateway.packaged_windows_gateway_path())
+            if packaged is not None:
+                return packaged
+
+        if "DEFENSECLAW_GATEWAY_BIN" in os.environ:
+            return _runnable_absolute_path(os.environ["DEFENSECLAW_GATEWAY_BIN"])
+
+        canonical = gateway.canonical_install_path()
+        if os.name == "nt" and not canonical.lower().endswith(".exe"):
+            canonical += ".exe"
+        return _runnable_absolute_path(canonical)
+    except (OSError, ValueError):
+        return None
+
+
+def _runnable_absolute_path(candidate: object) -> str | None:
+    """Admit one explicit, control-free, absolute executable path."""
+    if not isinstance(candidate, str) or not candidate:
+        return None
+    if candidate != candidate.strip():
+        return None
+    if any(ord(char) < 32 or ord(char) == 127 for char in candidate):
+        return None
+
+    try:
+        if not os.path.isabs(candidate):
+            return None
+        candidate = os.path.abspath(candidate)
+        if not os.path.isfile(candidate) or not os.access(candidate, os.X_OK):
+            return None
+    except (OSError, ValueError):
+        return None
+    return candidate
+
+
+def _format_code_scan_command(executable: str) -> str:
+    """Render the absolute executable for the operator's current shell."""
+    argv = (executable, "scan", "code", "<path to scan>")
+    if os.name != "nt":
+        return shlex.join(argv)
+    return "& " + " ".join(_powershell_quote(arg) for arg in argv)
+
+
+def _powershell_quote(value: str) -> str:
+    """Single-quote a fixed PowerShell argument without interpolation."""
+    return "'" + value.replace("'", "''") + "'"
 
 
 def _is_codeguard_install_error(status: str) -> bool:

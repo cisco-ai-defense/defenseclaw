@@ -13,12 +13,20 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field, replace
 from datetime import datetime
 from typing import Any, Generic, Literal, TypeVar
 
+from defenseclaw.connector_paths import (
+    cleanup_only_guidance,
+    connector_config_files,
+    connector_home,
+    hermes_config_path,
+    is_cleanup_only,
+)
 from defenseclaw.tui.panels.registries import registry_badge
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 
@@ -226,6 +234,8 @@ class SkillRow:
     # connector installs (the CONNECTOR column stays hidden); set when the
     # app merges ``skill list --json`` across every active connector.
     connector: str = ""
+    # Vendor-managed rows remain visible for discovery, but expose Info only.
+    bundled: bool = False
 
     @property
     def registry_badge(self) -> str:
@@ -571,9 +581,7 @@ class CatalogListModel(Generic[RowT]):
 
     def data_table_rows(self) -> tuple[tuple[str, ...], ...]:
         if self.show_connector_column:
-            return tuple(
-                (self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered
-            )
+            return tuple((self.connector_cell(row), *catalog_row_cells(row)) for row in self.filtered)
         return tuple(catalog_row_cells(row) for row in self.filtered)
 
     def connector_cell(self, row: RowT) -> str:
@@ -592,7 +600,8 @@ class CatalogListModel(Generic[RowT]):
             f"[bold #22D3EE]{title}[/]\n"
             f"{len(self.filtered)} of {len(self.items)} rows{filter_text}{detail}\n"
             "[dim]Navigate:[/] j/k move  ·  Enter detail  ·  / filter  ·  Esc close  ·  r refresh\n"
-            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  R reveal in registry"
+            "[dim]Actions:[/]  o open menu  ·  s scan  ·  b block  ·  a allow  ·  "
+            "u unblock  ·  R reveal in registry"
         )
 
     def _haystack(self, row: RowT) -> str:
@@ -650,10 +659,14 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
+        if is_cleanup_only(self.connector):
+            return ()
         row = self.selected()
-        return skill_actions(row.status if row else "")
+        return skill_actions(row.status if row else "", bundled=bool(row and row.bundled))
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
+        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
+            return None
         row = self.selected()
         if row is None:
             return None
@@ -684,12 +697,12 @@ class SkillsPanelModel(CatalogListModel[SkillRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="skills")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="skills") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
+            if is_cleanup_only(self.connector):
+                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -750,10 +763,14 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
         return sum(1 for row in self.items if row.status == "blocked")
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
+        if is_cleanup_only(self.connector):
+            return ()
         row = self.selected()
         return mcp_actions(row.status if row else "", self.connector)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
+        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
+            return None
         row = self.selected()
         if row is None:
             return None
@@ -784,14 +801,16 @@ class MCPsPanelModel(CatalogListModel[MCPRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"s", "b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="mcps")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="mcps") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key in {"n", "+"}:
+            if is_cleanup_only(self.connector):
+                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, open_mcp_set_form=True)
         if key == "r":
+            if is_cleanup_only(self.connector):
+                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         if key == "R":
             return CatalogPanelAction(True, registry_focus=self.registry_focus())
@@ -849,12 +868,16 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
         )
 
     def menu_actions(self) -> tuple[CatalogMenuAction, ...]:
+        if is_cleanup_only(self.connector):
+            return ()
         row = self.selected()
         if row is None:
             return plugin_actions("", "", False)
         return plugin_actions(row.verdict, row.status, row.enabled)
 
     def action_intent(self, key: str, *, origin: str = "action-menu") -> CatalogCommandIntent | None:
+        if is_cleanup_only(self.action_connector(self.selected()) or self.connector):
+            return None
         row = self.selected()
         if row is None:
             return None
@@ -881,7 +904,7 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             return CatalogPanelAction(True, detail_opened=True)
         if key == "s":
             row = self.selected()
-            if row is None:
+            if row is None or is_cleanup_only(self.action_connector(row) or self.connector):
                 return CatalogPanelAction(True)
             return CatalogPanelAction(True, plugin_direct_scan_intent(row, self.action_connector(row)))
         if key == "o":
@@ -894,6 +917,8 @@ class PluginsPanelModel(CatalogListModel[PluginRow]):
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
+            if is_cleanup_only(self.connector):
+                return CatalogPanelAction(True, hint=cleanup_only_guidance(self.connector))
             return CatalogPanelAction(True, self.load_intent(), reload_requested=True)
         return CatalogPanelAction(False)
 
@@ -923,6 +948,11 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             hint="Loading tools...",
         )
 
+    def set_store(self, store: object | None) -> None:
+        """Rebind the audit store after a configuration reload."""
+
+        self.store = store
+
     def apply_json(self, text: str) -> None:
         self.apply_loaded(parse_tool_list_json(text))
 
@@ -933,15 +963,21 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         if self.store is None:
             self.apply_filter()
             return
-        self.items = ()
-        self.filtered = ()
         try:
             entries = self.store.list_actions_by_type("tool")
         except Exception as exc:  # noqa: BLE001 - panel state renders store errors.
             self.message = f"Error loading tools: {exc}"
             self._clamp_cursor()
             return
-        self.items = tools_from_action_entries(entries)
+        self.apply_action_entries(entries)
+
+    def apply_action_entries(self, entries: Sequence[object]) -> None:
+        """Apply tool actions supplied by the shared TUI read snapshot."""
+
+        next_items = tools_from_action_entries(entries)
+        if self.items == next_items and self.loaded and not self.message:
+            return
+        self.items = next_items
         self.loaded = True
         self.message = ""
         self.apply_filter()
@@ -1002,14 +1038,15 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
             return CatalogPanelAction(True, open_action_menu=self.selected() is not None)
         if key in {"b", "a", "u"}:
             intent = (
-                self.action_intent(key, origin="tools")
-                if self.selected() and self.action_key_available(key)
-                else None
+                self.action_intent(key, origin="tools") if self.selected() and self.action_key_available(key) else None
             )
             return CatalogPanelAction(True, intent)
         if key == "r":
-            self.refresh()
-            return CatalogPanelAction(True, hint="Refreshed.")
+            return CatalogPanelAction(
+                True,
+                hint="Refreshing tools...",
+                reload_requested=True,
+            )
         return CatalogPanelAction(False)
 
     def summary_text(self, title: str) -> str:
@@ -1024,10 +1061,7 @@ class ToolsPanelModel(CatalogListModel[ToolRow]):
         )
 
     def empty_state(self) -> str:
-        return (
-            "No tool policy rows. This table only shows block/allow entries; "
-            "unblocked tools disappear here."
-        )
+        return "No tool policy rows. This table only shows block/allow entries; unblocked tools disappear here."
 
 
 def parse_skill_list_json(text: str) -> tuple[SkillRow, ...]:
@@ -1120,6 +1154,7 @@ def skill_list_to_row(raw: Mapping[str, Any]) -> SkillRow:
         install_action=actions.install,
         runtime_action=actions.runtime,
         connector=str(raw.get("connector") or ""),
+        bundled=bool(raw.get("bundled")),
     )
 
 
@@ -1359,7 +1394,9 @@ def format_tool_time(value: object) -> str:
     return ""
 
 
-def skill_actions(status: str) -> tuple[CatalogMenuAction, ...]:
+def skill_actions(status: str, *, bundled: bool = False) -> tuple[CatalogMenuAction, ...]:
+    if bundled:
+        return (CatalogMenuAction("i", "Info", "Show full details"),)
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -1401,6 +1438,8 @@ def skill_actions(status: str) -> tuple[CatalogMenuAction, ...]:
 
 
 def mcp_actions(status: str, connector: str) -> tuple[CatalogMenuAction, ...]:
+    if is_cleanup_only(connector):
+        return ()
     actions = [
         CatalogMenuAction("s", "Scan", "Run security scan"),
         CatalogMenuAction("i", "Info", "Show full details"),
@@ -1495,16 +1534,14 @@ def tool_actions(status: str) -> tuple[CatalogMenuAction, ...]:
 # Verb keys whose CLI subcommand accepts ``--connector``. In a filtered or
 # merged multi-connector table, row actions should target the selected
 # connector instead of writing an accidental global policy row.
-_SKILL_CONNECTOR_VERBS = frozenset(
-    {"s", "i", "b", "a", "u", "d", "e", "q", "r", "n"}
-)
+_SKILL_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r", "n"})
 _MCP_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "x"})
 _PLUGIN_CONNECTOR_VERBS = frozenset({"s", "i", "b", "a", "u", "d", "e", "q", "r", "x"})
 
 
-def skill_action_intent(
-    key: str, row: SkillRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def skill_action_intent(key: str, row: SkillRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
+    if is_cleanup_only(connector or row.connector):
+        return None
     verbs = {
         "s": ("scan", "scan skill"),
         "i": ("info", "info skill"),
@@ -1519,6 +1556,8 @@ def skill_action_intent(
     }
     if key not in verbs:
         return None
+    if row.bundled and key != "i":
+        return None
     verb, label_prefix = verbs[key]
     args = ["skill", verb, row.name]
     if connector and key in _SKILL_CONNECTOR_VERBS:
@@ -1530,9 +1569,9 @@ def skill_action_intent(
     )
 
 
-def mcp_action_intent(
-    key: str, row: MCPRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def mcp_action_intent(key: str, row: MCPRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
+    if is_cleanup_only(connector or row.connector):
+        return None
     verbs = {
         "s": ("scan", "scan mcp"),
         "i": ("list", "list mcp"),
@@ -1551,7 +1590,9 @@ def mcp_action_intent(
     return CatalogCommandIntent(label=label, args=tuple(args), origin=origin)
 
 
-def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCommandIntent:
+def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCommandIntent | None:
+    if is_cleanup_only(connector or row.connector):
+        return None
     target = row.id
     args = ["plugin", "scan", target]
     if connector:
@@ -1563,9 +1604,9 @@ def plugin_direct_scan_intent(row: PluginRow, connector: str = "") -> CatalogCom
     )
 
 
-def plugin_action_intent(
-    key: str, row: PluginRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def plugin_action_intent(key: str, row: PluginRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
+    if is_cleanup_only(connector or row.connector):
+        return None
     verbs = {
         "s": ("scan", "scan plugin"),
         "i": ("info", "info plugin"),
@@ -1595,9 +1636,7 @@ def plugin_action_intent(
     )
 
 
-def tool_action_intent(
-    key: str, row: ToolRow, *, origin: str, connector: str = ""
-) -> CatalogCommandIntent | None:
+def tool_action_intent(key: str, row: ToolRow, *, origin: str, connector: str = "") -> CatalogCommandIntent | None:
     verbs = {
         "i": ("status", "info tool"),
         "b": ("block", "block tool"),
@@ -1619,29 +1658,34 @@ def tool_action_intent(
 
 
 def mcp_unset_target_for_connector(connector: str) -> str:
+    if is_cleanup_only(connector):
+        return cleanup_only_guidance(connector)
     match normalized_connector(connector):
         case "claudecode":
-            return "~/.claude/settings.json"
+            return connector_config_files("claudecode")[0]
         case "codex":
-            return "./.mcp.json"
+            return connector_config_files("codex")[0]
         case "zeptoclaw":
             return "~/.zeptoclaw/config.json"
         case "hermes":
-            return "~/.hermes/config.yaml"
+            return hermes_config_path()
         case "cursor":
             return "./.cursor/mcp.json"
-        case "windsurf":
-            return "~/.codeium/windsurf/mcp_config.json"
-        case "geminicli":
-            return "~/.gemini/settings.json"
+        case "devin":
+            return os.path.join(connector_home("devin"), "mcp_config.json")
         case "copilot":
             return "./.github/mcp.json"
         case "openhands":
             return "~/.openhands/mcp.json"
         case "antigravity":
             return "~/.gemini/config/mcp_config.json / <workspace>/.agents/mcp_config.json"
+        case "amp":
+            return "read-only; manage with `amp mcp add` or Amp settings"
+        case "opencode":
+            user_target = os.path.join(connector_home("opencode"), "opencode.json")
+            return f"{user_target} / <workspace>/opencode.json"
         case "omnigent":
-            return "unsupported (OmniGent manages MCP configuration)"
+            return "unsupported/unverified by the OmniGent connector"
         case _:
             return "OpenClaw config" if normalized_connector(connector) == "openclaw" else "connector MCP config"
 
@@ -1678,10 +1722,10 @@ def friendly_connector_name(connector: str) -> str:
             return "Hermes"
         case "cursor":
             return "Cursor"
-        case "windsurf":
-            return "Windsurf"
+        case "devin":
+            return "Devin"
         case "geminicli":
-            return "Gemini CLI"
+            return "Gemini CLI (deprecated; use Antigravity)"
         case "copilot":
             return "GitHub Copilot CLI"
         case "openhands":
@@ -1690,6 +1734,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Antigravity"
         case "opencode":
             return "OpenCode"
+        case "amp":
+            return "Amp"
         case "omnigent":
             return "OmniGent"
         case value:
@@ -1698,35 +1744,144 @@ def friendly_connector_name(connector: str) -> str:
 
 def connector_source_label(connector: str, category: str) -> str:
     connector = normalized_connector(connector)
+    if is_cleanup_only(connector):
+        return cleanup_only_guidance(connector)
+    claude_root = connector_home("claudecode")
+    codex_root = connector_home("codex")
+    claude_config = connector_config_files("claudecode")[0]
+    codex_config = connector_config_files("codex")[0]
+    devin_root = connector_home("devin")
+    opencode_plugin = connector_config_files("opencode")[0]
+    opencode_mcp_sources = [
+        "authenticated remote .well-known/opencode (mcp; provenance unverified locally)",
+        "~/.config/opencode/config.json (mcp)",
+        "~/.config/opencode/opencode.json (mcp)",
+        "~/.config/opencode/opencode.jsonc (mcp)",
+        "OPENCODE_CONFIG (mcp; explicit file)",
+        "<workspace>/opencode.json, opencode.jsonc (mcp)",
+        "<workspace>/.opencode/opencode.json, opencode.jsonc (mcp)",
+        "~/.opencode/opencode.json, opencode.jsonc (mcp; user component)",
+    ]
+    if os.environ.get("OPENCODE_CONFIG_DIR", "").strip():
+        opencode_mcp_sources.append(
+            os.path.join(connector_home("opencode"), "opencode.json") + " / opencode.jsonc (mcp; custom override)"
+        )
+    else:
+        opencode_mcp_sources.append("OPENCODE_CONFIG_DIR/opencode.json, opencode.jsonc (mcp; when set)")
+    opencode_mcp_sources.extend(
+        (
+            "OPENCODE_CONFIG_CONTENT (mcp; inline provenance, values never displayed)",
+            "ProgramData managed config (enterprise precedence excluded; unverified)",
+        )
+    )
     sources = {
         ("openclaw", "skills"): ("./skills", "~/.openclaw/skills"),
-        ("claudecode", "skills"): ("~/.claude/skills", "./.claude/skills"),
-        ("codex", "skills"): ("~/.codex/skills", "./.codex/skills"),
+        ("claudecode", "skills"): (os.path.join(claude_root, "skills"), "./.claude/skills"),
+        ("codex", "skills"): (
+            "~/.agents/skills",
+            "./.agents/skills (active directory to repository root)",
+        ),
         ("zeptoclaw", "skills"): ("~/.zeptoclaw/skills", "./.zeptoclaw/skills"),
+        ("devin", "skills"): (
+            os.path.join(devin_root, "skills"),
+            "~/.agents/skills",
+            "./.devin/skills",
+            "./.agents/skills",
+        ),
         ("antigravity", "skills"): (
             "~/.gemini/config/skills/<skill>/SKILL.md",
             "<workspace>/.agents/skills/<skill>/SKILL.md",
             "~/.gemini/antigravity-cli/skills/*.md (discovery-only)",
         ),
+        ("amp", "skills"): (
+            "~/.config/agents/skills",
+            "~/.agents/skills",
+            "~/.config/amp/skills",
+            "<workspace>/.agents/skills",
+            "~/.claude/plugins/cache/.../skills (unless Claude-compatible skills are disabled)",
+        ),
+        ("opencode", "skills"): (
+            "~/.config/opencode/{skill,skills}",
+            "<workspace-through-nearest-git-root>/.opencode/{skill,skills}",
+            "~/.opencode/{skill,skills} and OPENCODE_CONFIG_DIR/{skill,skills}",
+            "<project-or-user>/.claude/skills and .agents/skills",
+        ),
         ("omnigent", "skills"): ("unsupported by the OmniGent connector",),
         ("openclaw", "mcps"): ("openclaw config get mcp.servers", "openclaw.json (mcp.servers)"),
-        ("claudecode", "mcps"): ("~/.claude/settings.json (mcpServers)", "./.mcp.json"),
-        ("codex", "mcps"): ("~/.codex/config.toml ([mcp_servers])", "./.mcp.json"),
+        ("claudecode", "mcps"): (f"{claude_config} (mcpServers)", "./.mcp.json"),
+        ("codex", "mcps"): (
+            f"{codex_config} ([mcp_servers])",
+            "./.codex/config.toml ([mcp_servers]; trusted projects only)",
+        ),
         ("zeptoclaw", "mcps"): ("~/.zeptoclaw/config.json (mcp.servers)", "./.mcp.json"),
+        ("devin", "mcps"): (
+            os.path.join(devin_root, "mcp_config.json"),
+            "./.devin/mcp_config.json",
+            "./.devin/mcp_config.local.json (read-only)",
+            f"{os.path.join(devin_root, 'config.json')} (legacy read-only)",
+            "./.devin/config*.json (legacy read-only)",
+        ),
         ("antigravity", "mcps"): (
             "~/.gemini/config/mcp_config.json",
             "<workspace>/.agents/mcp_config.json",
             "<plugin>/mcp_config.json (discovery-only)",
         ),
-        ("omnigent", "mcps"): ("managed by OmniGent; not modified by DefenseClaw",),
+        ("amp", "mcps"): (
+            "~/.config/amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
+            "<workspace>/.amp/settings.json or settings.jsonc (amp.mcpServers; read-only)",
+            "<skill>/mcp.json",
+        ),
+        ("opencode", "mcps"): tuple(opencode_mcp_sources),
+        ("omnigent", "mcps"): ("unsupported/unverified by the OmniGent connector",),
         ("openclaw", "plugins"): ("~/.openclaw/extensions",),
+        ("devin", "plugins"): ("unsupported; Devin plugins are closed beta",),
+        ("codex", "plugins"): (
+            "./.agents/plugins/marketplace.json",
+            "./.claude-plugin/marketplace.json (legacy-compatible)",
+            "~/.agents/plugins/marketplace.json",
+            os.path.join(codex_root, "plugins", "cache"),
+        ),
         ("antigravity", "plugins"): (
-            "~/.gemini/config/plugins/<plugin>/ (discovery-only)",
+            "~/.gemini/config/plugins/<plugin>/ (read/write)",
             "~/.gemini/antigravity-cli/plugins/<plugin>/ (discovery-only)",
-            "<workspace>/.agents/plugins/<plugin>/ (discovery-only)",
+            "<workspace>/.agents/plugins/<plugin>/ (read/write)",
+        ),
+        ("amp", "plugins"): (
+            "~/.config/amp/plugins/defenseclaw.ts",
+            "<workspace>/.amp/plugins",
+        ),
+        ("amp", "config"): (
+            "~/.config/amp/settings.json or settings.jsonc",
+            "<workspace>/.amp/settings.json or settings.jsonc",
+        ),
+        ("opencode", "plugins"): (
+            "<global/project/custom>/.opencode/{plugin,plugins}/*.{js,ts}",
+            "opencode.json/jsonc plugin package list (discovery-only)",
+            f"{opencode_plugin} (managed bridge; excluded from inventory and scans)",
+        ),
+        ("opencode", "agents"): (
+            "<global/project/custom>/.opencode/{agent,agents}/**/*.md",
+            "opencode.json/jsonc agent map",
+        ),
+        ("opencode", "rules"): (
+            "global/project AGENTS.md with CLAUDE.md fallback",
+            "opencode.json/jsonc instructions (local bounded files only)",
+        ),
+        ("opencode", "tools"): (
+            "<global/project/custom>/.opencode/{tool,tools}/*.{js,ts}",
+            "<global/project/custom>/.opencode/{command,commands}/**/*.md",
+            "opencode.json/jsonc command map (tools permission map is not an asset)",
         ),
         ("omnigent", "plugins"): ("unsupported by the OmniGent connector",),
-        ("omnigent", "config"): ("$OMNIGENT_CONFIG_HOME/config.yaml or ~/.omnigent/config.yaml",),
+        ("devin", "config"): (
+            "./.devin/hooks.v1.json",
+            os.path.join(devin_root, "config.json"),
+        ),
+        ("opencode", "config"): (
+            f"{opencode_plugin} (managed bridge; lifecycle custody only)",
+            "global/project/custom opencode.json and opencode.jsonc",
+        ),
+        ("omnigent", "config"): ("$OMNIGENT_CONFIG, $OMNIGENT_CONFIG_HOME/config.yaml, or ~/.omnigent/config.yaml; CLI server requires --config",),
     }
     return ", ".join(sources.get((connector, category), ()))
 
@@ -1852,11 +2007,7 @@ def _format_decisions(file_action: str, install_action: str, runtime_action: str
     the current status, instead of guessing from the Actions column.
     """
 
-    return (
-        f"install={install_action or '-'}  "
-        f"runtime={runtime_action or '-'}  "
-        f"file={file_action or '-'}"
-    )
+    return f"install={install_action or '-'}  runtime={runtime_action or '-'}  file={file_action or '-'}"
 
 
 _SEVERITY_BUCKET_LABEL: Mapping[str, str] = {

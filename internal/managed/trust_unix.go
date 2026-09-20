@@ -18,6 +18,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"syscall"
 )
 
@@ -76,6 +77,76 @@ func ValidateTrustedRuntimeDir(path, label string) error {
 		if cur == filepath.Dir(cur) {
 			break
 		}
+	}
+	return nil
+}
+
+// ValidateTrustedServiceRuntimeDir is the cross-platform service-runtime
+// entry point. On unix the packaged defenseclaw account is resolved by
+// username (via user.Lookup) inside trustedRuntimeOwner; the
+// Windows-format `NT SERVICE\...` account name in the third argument
+// cannot be reused for a unix user lookup, so it is intentionally
+// dropped here. To point unix trust at a non-default username, set the
+// DEFENSECLAW_UNIX_SERVICE_ACCOUNT env — trustedRuntimeOwner reads it
+// on every check. When neither the env is set nor the "defenseclaw"
+// user exists, the ancestor walk fails with a clear "owner uid N is
+// not trusted" error instead of silently allowing any owner.
+func ValidateTrustedServiceRuntimeDir(path, label, _ string) error {
+	return ValidateTrustedRuntimeDir(path, label)
+}
+
+// ValidateTrustedServiceRuntimeFilePath validates a service-owned runtime
+// file. The file itself may be owned by the packaged defenseclaw service
+// account (WriteServiceRuntimeFile stages and renames as that user), so
+// require ownership by root OR that trusted service uid — same rule as
+// ValidateTrustedRuntimeDir applies to its ancestors. Config, manifests,
+// and the authorization ledger keep the stricter root-only contract via
+// ValidateTrustedFilePath.
+func ValidateTrustedServiceRuntimeFilePath(path, label, _ string) error {
+	if label == "" {
+		label = "managed runtime file"
+	}
+	if path == "" {
+		return fmt.Errorf("%s path is empty", label)
+	}
+	clean, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve %s path: %w", label, err)
+	}
+	if err := validateTrustedRuntimeFileElement(clean, label); err != nil {
+		return err
+	}
+	for dir := filepath.Dir(clean); dir != filepath.Dir(dir); dir = filepath.Dir(dir) {
+		if err := validateTrustedRuntimeDirElement(dir, label); err != nil {
+			return err
+		}
+	}
+	return validateTrustedRuntimeDirElement(filepath.VolumeName(clean)+string(filepath.Separator), label)
+}
+
+func validateTrustedRuntimeFileElement(path, label string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("%s: %w", path, err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("%s: symlinks are not allowed in %s path", path, label)
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s: expected regular %s file", path, label)
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("%s: group/other writable permissions %04o are not trusted", path, info.Mode().Perm())
+	}
+	if err := validateTrustedPathACL(path); err != nil {
+		return err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fmt.Errorf("%s: cannot inspect file owner", path)
+	}
+	if !trustedRuntimeOwner(st.Uid) {
+		return fmt.Errorf("%s: owner uid %d is not trusted for %s; expected root/admin uid 0 or defenseclaw service uid", path, st.Uid, label)
 	}
 	return nil
 }
@@ -141,7 +212,19 @@ func trustedRuntimeOwner(uid uint32) bool {
 	if uid == 0 {
 		return true
 	}
-	serviceUser, err := user.Lookup("defenseclaw")
+	// The unix trust model accepts root (uid 0) or the packaged
+	// defenseclaw service account. The service account username is
+	// "defenseclaw" by convention (installer contract). Setting
+	// DEFENSECLAW_UNIX_SERVICE_ACCOUNT lets custom packaging point trust
+	// at a different username without patching the source — the finder
+	// audit flagged this as previously silently unavailable because the
+	// serviceAccount parameter on ValidateTrustedServiceRuntimeDir is a
+	// Windows-format `NT SERVICE\...` value and cannot be reused here.
+	username := "defenseclaw"
+	if custom := strings.TrimSpace(os.Getenv(UnixServiceAccountEnv)); custom != "" {
+		username = custom
+	}
+	serviceUser, err := user.Lookup(username)
 	if err != nil {
 		return false
 	}

@@ -1,0 +1,29 @@
+{
+  "schema_version": "defenseclaw.contextual-judge-datasets.v1",
+  "frozen_at": "2026-09-09",
+  "excluded_datasets": [
+    "tool-risk training corpora",
+    "protected tool-risk evaluation corpora"
+  ],
+  "datasets": [
+    {
+      "id": "yoonholee/terminalbench-trajectories",
+      "source_url": "https://huggingface.co/datasets/yoonholee/terminalbench-trajectories",
+      "revision": "04e8940f5b6736a7ce8d22224fe2f2af74163ed2",
+      "use": "successful benign coding trajectories and production-format tool calls"
+    },
+    {
+      "id": "harbor-framework/terminal-bench-2",
+      "source_url": "https://huggingface.co/datasets/harbor-framework/terminal-bench-2",
+      "revision": "2fd12b88aafdd04a52c298e3940bcb189f9766d6",
+      "use": "public task instructions replayed as authenticated user intent"
+    },
+    {
+      "id": "neur26anonsub/ctrldataset2026",
+      "source_url": "https://huggingface.co/datasets/neur26anonsub/ctrldataset2026",
+      "revision": "6c72cf19883376b921a94a0dd17dc8ab6b25e52f",
+      "use": "environment-successful contextual attack trajectories"
+    }
+  ],
+  "private_inputs": "Operator-supplied private corpora and generated predictions are intentionally not described in this public lock."
+}

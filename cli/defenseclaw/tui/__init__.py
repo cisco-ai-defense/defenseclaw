@@ -77,11 +77,24 @@ def run_textual_tui() -> None:
     _harden_textual_stdin_decoder()
 
     try:
-        cfg = config.load()
-        first_run = False
-    except Exception:
+        config.require_v8_config(allow_missing=True)
+    except config.ConfigVersionError as exc:
+        print(str(exc), file=sys.stderr)
+        raise SystemExit(1) from exc
+
+    if config.source_config_version() is None:
         cfg, first_run = _load_after_optional_first_run_prompt(config)
-    DefenseClawTUI(config=cfg, first_run=first_run).run()
+    else:
+        try:
+            cfg = config.load()
+            first_run = False
+        except Exception:
+            cfg, first_run = _load_after_optional_first_run_prompt(config)
+    DefenseClawTUI(
+        config=cfg,
+        first_run=first_run,
+        config_path=config.config_path(),
+    ).run()
 
 
 def _load_after_optional_first_run_prompt(config_module: object) -> tuple[object | None, bool]:

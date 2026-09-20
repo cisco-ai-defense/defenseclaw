@@ -1,3 +1,10 @@
+# DefenseClaw 0.3.0 release notes
+
+> **Historical release record.** These notes describe the 0.3.0 release and do
+> not define current installation, configuration, connector support, or
+> observability behavior. Use the
+> [current documentation](https://cisco-ai-defense.github.io/defenseclaw/docs/).
+
 ## Highlights
 
 - **Externalized rule packs, detection strategies, and full policy TUI** — RFC #111 lands the new pluggable policy surface.

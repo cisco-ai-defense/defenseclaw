@@ -5,7 +5,7 @@
   "connectors": {
     "codex": {
       "version_probe": "codex --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -14,16 +14,7 @@
     },
     "claudecode": {
       "version_probe": "claude --version",
-      "live": true,
-      "os": {
-        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
-        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
-        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
-    },
-    "geminicli": {
-      "version_probe": "gemini --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -31,8 +22,8 @@
       }
     },
     "cursor": {
-      "version_probe": "cursor-agent --version",
-      "live": "pending-validation",
+      "version_probe": "agent --version",
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
         "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
@@ -41,11 +32,13 @@
     },
     "copilot": {
       "version_probe": "copilot --version",
-      "live": true,
+      "live": false,
       "os": {
         "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
-        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
-      }
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Native Windows setup is supported. Authentication, HITL, and official-client live evidence remain unverified and unclaimed; Windows validation version/date/run fields remain empty and live=false."
     },
     "openhands": {
       "version_probe": "openhands --version",
@@ -57,22 +50,54 @@
     "hermes": {
       "version_probe": "hermes --version",
       "live": false,
-      "notes": "contract-only (Layer A); only pre_tool_call is mapped"
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "contract-only (Layer A); hermes-hooks-v1 covers official Hermes tags v2026.7.20 (0.19.0), v2026.7.30 (0.19.1), and v2026.8.3 (0.20.0). hermes-hooks-v2 rechecked the same 23 claimed events at v0.21.3 (v2026.9.14), bounded to <0.22.0. Packaged and real-client Windows validation remains pending."
     },
-    "windsurf": {
-      "version_probe": "",
+    "devin": {
+      "version_probe": "devin --version",
       "live": false,
-      "notes": "contract-only (Layer A); no headless CLI/SDK"
+      "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Source-reviewed native Devin CLI hook contract pinned to 3000.4.25. Windows Setup additionally requires the exact current-user CLI path and trusted Exafunction, Inc. Authenticode signer. Authentic client live evidence remains pending and live=false; Restricted Mode, cloud, ACP, proxy, plugins, and native OTLP are unclaimed."
+    },
+    "opencode": {
+      "version_probe": "opencode --version",
+      "live": false,
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "Source-reviewed contract is pinned to OpenCode 1.18.31 (reviewed range >=1.18.10,<1.19.0); the v1.18.31 Hooks entries used by this contract match the v1.18.19 signatures and a thrown Error from tool.execute.before remains the block surface. Native Windows setup is supported; authentic official-client validation metadata remains empty until the manual run is recorded, and live=false."
     },
     "antigravity": {
       "version_probe": "agy --version",
       "live": false,
-      "notes": "contract-only (Layer A); headless auth is Google Sign-In/keyring OAuth, no API key"
+      "notes": "Native Windows x64 setup is supported. The accepted protected harness pins official CLI 1.1.10 as availability metadata only, not as a validation record. No protected-client, authentication, HITL, client-provenance, or official-client live evidence is claimed; validation version/date/run fields remain empty and live=false. Enterprise/managed, Team, ProgramData, cloud-dashboard, MDM, and organization-policy surfaces remain out of scope and unverified. Real official-client E2E requires a dedicated pre-authenticated Windows runner because Google documents Windows Credential Manager/browser auth, not API-key bootstrap.",
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      }
+    },
+    "amp": {
+      "version_probe": "amp --version",
+      "live": false,
+      "os": {
+        "linux": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "macos": { "last_validated_version": "", "last_validated_at": "", "run_url": "" },
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "plugin contract validated against Amp 0.0.1785334225; authentic live policy-cell certification remains pending and live=false"
     },
     "omnigent": {
       "version_probe": "omnigent --version",
       "live": false,
-      "notes": "contract-only (Layer A); custom Python policy bridge"
+      "os": {
+        "windows": { "last_validated_version": "", "last_validated_at": "", "run_url": "" }
+      },
+      "notes": "contract-only; the supported native Windows server/SDK policy bridge and required CI remain native-degraded; live=false, authentic live and authentication/HITL evidence remain pending and unclaimed, and the CI gate does not add a public Setup availability gate"
     }
   }
 }

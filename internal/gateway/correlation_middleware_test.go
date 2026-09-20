@@ -367,7 +367,7 @@ func TestCorrelationMiddleware_DropsInboundTraceparentOnNonLoopback(t *testing.T
 //
 // The path set below is intentionally broader than the hook/notify
 // allow-list enforced by shouldExtractHookTrace (which gates the
-// OTel server span's parent extraction). The audit envelope mirror
+// generated span parent extraction). The audit envelope mirror
 // is per-row data with no propagation, so loopback alone is the
 // appropriate trust boundary — see the long comment in
 // correlation_middleware.go for the rationale.

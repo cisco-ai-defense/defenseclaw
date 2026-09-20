@@ -1,0 +1,103 @@
+[
+  {
+    "id": "complete-protected-proof",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "protected_policy": true,
+    "want_detected": true,
+    "want_enforcement_safe": true
+  },
+  {
+    "id": "complete-balanced-proof",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "protected_policy": false,
+    "want_detected": true,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "scoped-delete",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials WHERE id = 7",
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "database-mismatch",
+    "source_database": "mcp://sqlite/fixture-source",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-other",
+    "sink_query": "DELETE FROM credentials",
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "table-mismatch",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM employees",
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "failed-source",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "failed",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "unknown-source",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "unknown",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  },
+  {
+    "id": "distance-eight",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "intervening_successes": 7,
+    "protected_policy": true,
+    "want_detected": true,
+    "want_enforcement_safe": true
+  },
+  {
+    "id": "distance-nine",
+    "source_database": "mcp://sqlite/fixture-protected",
+    "source_query": "SELECT password FROM credentials",
+    "source_outcome": "succeeded",
+    "sink_database": "mcp://sqlite/fixture-protected",
+    "sink_query": "DELETE FROM credentials",
+    "intervening_successes": 8,
+    "protected_policy": true,
+    "want_detected": false,
+    "want_enforcement_safe": false
+  }
+]

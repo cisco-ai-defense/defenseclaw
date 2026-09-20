@@ -1,0 +1,8 @@
+{
+  "hook_event_name": "sessionStart",
+  "session_id": "dc-e2e-cursor",
+  "turn_id": "dc-e2e-turn",
+  "agent_id": "cursor-e2e",
+  "agent_name": "cursor e2e agent",
+  "agent_type": "cursor-cli"
+}

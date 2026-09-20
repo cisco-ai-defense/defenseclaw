@@ -41,18 +41,15 @@ import (
 //  3. Any other header value (including "true", "yes", empty) keeps
 //     the default redacted response.
 
-// piiPayload is a message body that reliably produces
-// DetailedFindings with raw Evidence containing PII. We target the
-// Anthropic API key pattern because ScanAllRules ships with a
-// high-confidence regex for it and the literal is unique enough
-// that substring assertions are not ambiguous.
-const piiPayload = `{"tool":"message","args":{},` +
-	`"content":"leaked secret sk-ant-api03-abcdefghij1234567890abcdefghij",` +
-	`"direction":"outbound"}`
-
 // piiLiteral is the substring we assert is or is not present in
-// response bodies and audit rows. Must match piiPayload exactly.
-const piiLiteral = "sk-ant-api03-abcdefghij1234567890abcdefghij"
+// response bodies and audit rows.
+const piiLiteral = "sk-ant-api03-" + "A7b9C2d4E6f8G1h3J5k7L9m2"
+
+// piiPayload is a message body that reliably produces DetailedFindings with
+// raw Evidence containing the exact piiLiteral value.
+const piiPayload = `{"tool":"message","args":{},` +
+	`"content":"leaked secret ` + piiLiteral + `",` +
+	`"direction":"outbound"}`
 
 func TestInspectHandler_RedactsEvidenceByDefault(t *testing.T) {
 	api := testAPIServerWithConfig(t, "action")

@@ -20,12 +20,17 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
+	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hermespath"
 	toml "github.com/pelletier/go-toml/v2"
 	yaml "gopkg.in/yaml.v3"
 )
@@ -64,6 +69,15 @@ type MCPServerEntry struct {
 	OAuth            map[string]any    `json:"oauth,omitempty"`
 	Disabled         bool              `json:"disabled,omitempty"`
 	DisabledTools    []string          `json:"disabledTools,omitempty"`
+	Source           string            `json:"source,omitempty"`
+	SourceScope      string            `json:"source_scope,omitempty"`
+	TrustRequired    bool              `json:"trust_required,omitempty"`
+	Bundled          bool              `json:"bundled,omitempty"`
+
+	// codexBuiltinShape records an exact parser-level match before the caller
+	// proves that the table came from a user-scope Codex config. It is never
+	// serialized and must not be treated as provenance on its own.
+	codexBuiltinShape bool
 }
 
 // expandPath expands ~ to home directory.
@@ -103,10 +117,10 @@ func (c *Config) activeConnector() string {
 		return "openclaw"
 	}
 	if name := strings.TrimSpace(c.Guardrail.Connector); name != "" {
-		return name
+		return normalizeConnectorKey(name)
 	}
 	if mode := strings.TrimSpace(string(c.Claw.Mode)); mode != "" {
-		return mode
+		return normalizeConnectorKey(mode)
 	}
 	return "openclaw"
 }
@@ -199,7 +213,7 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 	if c != nil {
 		workspaceDir = c.ConnectorWorkspaceDir()
 	}
-	switch strings.ToLower(strings.TrimSpace(connector)) {
+	switch normalizeConnectorKey(connector) {
 	case "claudecode":
 		return readMCPServersClaudeCode(workspaceDir)
 	case "codex":
@@ -210,16 +224,20 @@ func (c *Config) ReadMCPServersForConnector(connector string) ([]MCPServerEntry,
 		return readMCPServersHermes()
 	case "cursor":
 		return readMCPServersCursor(workspaceDir)
+	case "devin":
+		return readMCPServersDevin(workspaceDir)
 	case "windsurf":
 		return readMCPServersWindsurf()
 	case "geminicli":
-		return readMCPServersGeminiCLI()
+		return readMCPServersGeminiCLI(workspaceDir)
 	case "copilot":
 		return readMCPServersCopilot(workspaceDir)
 	case "openhands":
 		return readMCPServersOpenHands()
 	case "opencode":
 		return readMCPServersOpenCode(workspaceDir)
+	case "amp":
+		return readMCPServersAMP(workspaceDir)
 	case "antigravity":
 		return readMCPServersAntigravity(workspaceDir)
 	case "omnigent":
@@ -378,6 +396,63 @@ func parseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
 	return entries, nil
 }
 
+// ParseMCPServersJSON is the exported wrapper around parseMCPServersJSON
+// so packages outside `config` (e.g. inventory's AI-discovery scanner)
+// can enumerate the servers declared inside a matched `mcp.json` /
+// `.cursor/mcp.json` / claude-desktop config file without duplicating the
+// parser. The input is the raw file bytes; the output is one
+// MCPServerEntry per top-level key in the JSON object form
+// (`{"mcpServers": {...}}` callers must pass the inner `mcpServers`
+// object; plain-object callers pass their whole file). Callers that need
+// the array shape should use ParseMCPServersJSONArray.
+func ParseMCPServersJSON(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSON(data)
+}
+
+// ParseMCPServersJSONArray is the exported wrapper around
+// parseMCPServersJSONArray for callers that need the alternate top-level
+// array form (`[{"name": "...", ...}, ...]`).
+func ParseMCPServersJSONArray(data []byte) ([]MCPServerEntry, error) {
+	return parseMCPServersJSONArray(data)
+}
+
+// ReadMCPFromDotMCPJSON is the exported wrapper around the internal
+// `.mcp.json` reader so AI-discovery / signature-catalog callers can
+// enumerate the servers declared inside a matched file without
+// re-implementing the "wrapped in mcpServers vs bare map" fallback.
+func ReadMCPFromDotMCPJSON(path string) ([]MCPServerEntry, error) {
+	return readMCPFromDotMCPJSON(path)
+}
+
+// ReadMCPFromClaudeSettings is the exported wrapper around the
+// Claude Code settings.json / .claude.json reader; input is a path to
+// a JSON file with a top-level `mcpServers` map.
+func ReadMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeSettings(path)
+}
+
+// ReadMCPFromClaudeJSONProjects is the exported wrapper around the
+// per-project local-scope Claude Code MCP reader; input is a path to
+// ~/.claude.json, and the returned entries flatten every
+// projects.<path>.mcpServers subtree.
+func ReadMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	return readMCPFromClaudeJSONProjects(path)
+}
+
+// ReadMCPFromCodexConfigTOML is the exported wrapper around the
+// Codex `~/.codex/config.toml` reader for callers that need to
+// enumerate mcp_servers entries out of a TOML file.
+func ReadMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
+	return readMCPFromCodexConfigTOML(path)
+}
+
+// ReadMCPFromYAMLPath is the exported wrapper around readMCPFromYAMLPath;
+// each `paths` argument is a JSON-pointer-style chain of keys to walk
+// (e.g. `[]string{"mcp", "servers"}`).
+func ReadMCPFromYAMLPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
+	return readMCPFromYAMLPath(path, paths...)
+}
+
 func workspaceSkillsDir(homeDir string, oc *openclawConfig) string {
 	workspace := filepath.Join(homeDir, "workspace")
 	if oc != nil && oc.Agents.Defaults.Workspace != "" {
@@ -429,8 +504,8 @@ func (c *Config) SkillDirs() []string {
 // PluginDirs returns the plugin directories for the active connector.
 //
 // Dispatches via activeConnector() — when guardrail.connector is set,
-// the connector-specific layout is returned (e.g. ~/.codex/plugins
-// for Codex). With no connector configured, falls back to the OpenClaw
+// the connector-specific layout is returned. With no connector configured,
+// falls back to the OpenClaw
 // extensions directory (claw_home/extensions).
 func (c *Config) PluginDirs() []string {
 	return c.PluginDirsForConnector(c.activeConnector())
@@ -457,6 +532,20 @@ func (c *Config) InstalledSkillCandidates(skillName string) []string {
 // ClawHomeDir returns the resolved home directory for the active claw framework.
 func (c *Config) ClawHomeDir() string {
 	return c.ConnectorHomeDir(c.activeConnector())
+}
+
+func connectorEnvHome(variable, defaultDir string) string {
+	if configured := strings.TrimSpace(os.Getenv(variable)); configured != "" {
+		configured = expandPath(configured)
+		if !filepath.IsAbs(configured) {
+			if absolute, err := filepath.Abs(configured); err == nil {
+				configured = absolute
+			}
+		}
+		return filepath.Clean(configured)
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, defaultDir)
 }
 
 // ConnectorWorkspaceDir returns the explicitly pinned project/workspace root
@@ -486,21 +575,35 @@ func (c *Config) ConnectorWorkspaceDir() string {
 func (c *Config) ConnectorHomeDir(connector string) string {
 	home, _ := os.UserHomeDir()
 
-	switch strings.ToLower(strings.TrimSpace(connector)) {
+	switch normalizeConnectorKey(connector) {
 	case "claudecode":
-		return filepath.Join(home, ".claude")
+		return connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude")
 	case "codex":
-		return filepath.Join(home, ".codex")
+		return connectorEnvHome("CODEX_HOME", ".codex")
 	case "zeptoclaw":
 		return filepath.Join(home, ".zeptoclaw")
 	case "hermes":
-		return filepath.Join(home, ".hermes")
+		return hermespath.HomeDir()
 	case "cursor":
 		return filepath.Join(home, ".cursor")
+	case "devin":
+		configHome, err := devinConfigHome()
+		if err != nil {
+			return ""
+		}
+		return configHome
 	case "windsurf":
-		return filepath.Join(home, ".codeium", "windsurf")
+		boundHome, err := windsurfUserHome()
+		if err != nil {
+			return ""
+		}
+		return filepath.Join(boundHome, ".codeium", "windsurf")
 	case "geminicli":
-		return filepath.Join(home, ".gemini")
+		configHome, err := geminiCLIConfigHome()
+		if err != nil {
+			return ""
+		}
+		return configHome
 	case "copilot":
 		return filepath.Join(home, ".copilot")
 	case "openhands":
@@ -514,9 +617,16 @@ func (c *Config) ConnectorHomeDir(connector string) string {
 		// side. Never fall through to OpenClaw's home_dir.
 		return filepath.Join(home, ".gemini", "antigravity-cli")
 	case "opencode":
-		// opencode keeps its config under ~/.config/opencode/ (XDG-style);
-		// matches connector_paths.connector_home("opencode").
+		if configured := openCodeEnvPath(os.Getenv("OPENCODE_CONFIG_DIR"), c.ConnectorWorkspaceDir()); configured != "" {
+			return configured
+		}
+		// OpenCode keeps its default config under ~/.config/opencode/
+		// (XDG-style); matches connector_paths.connector_home("opencode").
 		return filepath.Join(home, ".config", "opencode")
+	case "amp":
+		// Amp uses this same config home on macOS, Linux, and native
+		// Windows (%USERPROFILE%\.config\amp).
+		return filepath.Join(home, ".config", "amp")
 	case "omnigent":
 		if configHome := strings.TrimSpace(os.Getenv("OMNIGENT_CONFIG_HOME")); configHome != "" {
 			return expandPath(configHome)
@@ -609,24 +719,34 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
 
-	switch strings.ToLower(strings.TrimSpace(connector)) {
+	switch normalizeConnectorKey(connector) {
 	case "claudecode":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".claude", "skills"),
-			workspaceJoin(cwd, ".claude", "skills"),
-		})
+		configDir := c.ConnectorHomeDir("claudecode")
+		dirs := []string{
+			filepath.Join(configDir, "skills"),
+			filepath.Join(configDir, "commands"),
+			workspaceJoin(cwd, ".claude", "commands"),
+		}
+		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
+		return dedupNonEmpty(dirs)
 	case "codex":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".codex", "skills"),
-			workspaceJoin(cwd, ".codex", "skills"),
-		})
+		dirs := make([]string, 0, 5)
+		for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+			dirs = append(dirs, filepath.Join(layer, ".agents", "skills"))
+		}
+		dirs = append(dirs, gatewayconnector.CodexPersonalSkillsPath())
+		dirs = append(dirs, filepath.Join(c.ConnectorHomeDir("codex"), "skills"))
+		if runtime.GOOS != "windows" {
+			dirs = append(dirs, filepath.FromSlash("/etc/codex/skills"))
+		}
+		return dedupNonEmpty(dirs)
 	case "zeptoclaw":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".zeptoclaw", "skills"),
 			workspaceJoin(cwd, ".zeptoclaw", "skills"),
 		})
 	case "hermes":
-		return []string{filepath.Join(home, ".hermes", "skills")}
+		return []string{filepath.Join(hermespath.HomeDir(), "skills")}
 	case "cursor":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".cursor", "skills"),
@@ -634,11 +754,23 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".cursor", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
-	case "windsurf", "opencode", "omnigent":
-		// No documented skills install/discovery surface. Return nil so
-		// these never fall through to OpenClaw's skill dirs — parity with
-		// connector_paths.skill_dirs() == [] on the Python side.
+	case "windsurf":
+		boundHome, err := windsurfUserHome()
+		if err != nil {
+			return nil
+		}
+		return dedupNonEmpty([]string{
+			filepath.Join(boundHome, ".codeium", "windsurf", "skills"),
+			filepath.Join(boundHome, ".agents", "skills"),
+			workspaceJoin(cwd, ".windsurf", "skills"),
+			workspaceJoin(cwd, ".agents", "skills"),
+		})
+	case "opencode", "omnigent":
+		// These connectors have no documented local skills surface. Keep
+		// them isolated from OpenClaw's skill directories.
 		return nil
+	case "amp":
+		return ampSkillDirs(home, cwd)
 	case "antigravity":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".gemini", "config", "skills"),
@@ -646,8 +778,12 @@ func (c *Config) SkillDirsForConnector(connector string) []string {
 			workspaceJoin(cwd, ".agent", "skills"),
 		})
 	case "geminicli":
+		configHome, err := geminiCLIConfigHome()
+		if err != nil {
+			return nil
+		}
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "skills"),
+			filepath.Join(configHome, "skills"),
 			workspaceJoin(cwd, ".gemini", "skills"),
 			workspaceJoin(cwd, ".agents", "skills"),
 		})
@@ -680,35 +816,53 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 	home, _ := os.UserHomeDir()
 	cwd := c.ConnectorWorkspaceDir()
 
-	switch strings.ToLower(strings.TrimSpace(connector)) {
+	switch normalizeConnectorKey(connector) {
 	case "claudecode":
-		return []string{
-			filepath.Join(home, ".claude", "plugins"),
+		configDir := c.ConnectorHomeDir("claudecode")
+		pluginParent := strings.TrimSpace(os.Getenv("CLAUDE_CODE_PLUGIN_CACHE_DIR"))
+		if pluginParent == "" {
+			pluginParent = filepath.Join(configDir, "plugins")
+		} else {
+			pluginParent = expandPath(pluginParent)
 		}
+		dirs := []string{
+			filepath.Join(pluginParent, "cache"),
+			filepath.Join(configDir, "skills"),
+		}
+		dirs = append(dirs, claudecodepath.ProjectSkillDirs(cwd)...)
+		return dedupNonEmpty(dirs)
 	case "codex":
-		return []string{
-			filepath.Join(home, ".codex", "plugins"),
-		}
+		base := filepath.Join(c.ConnectorHomeDir("codex"), "plugins")
+		return dedupNonEmpty(append(
+			gatewayconnector.CodexPluginSourceDirs(cwd),
+			filepath.Join(base, "cache"),
+		))
 	case "zeptoclaw":
 		return []string{
 			filepath.Join(home, ".zeptoclaw", "plugins"),
 		}
 	case "hermes":
 		return dedupNonEmpty([]string{
-			filepath.Join(home, ".hermes", "plugins"),
+			filepath.Join(hermespath.HomeDir(), "plugins"),
 			workspaceJoin(cwd, ".hermes", "plugins"),
 		})
 	case "geminicli":
-		return dedupNonEmpty([]string{
-			filepath.Join(home, ".gemini", "extensions"),
-			workspaceJoin(cwd, ".gemini", "extensions"),
-		})
+		configHome, err := geminiCLIConfigHome()
+		if err != nil {
+			return nil
+		}
+		return []string{filepath.Join(configHome, "extensions")}
 	case "antigravity":
 		return dedupNonEmpty([]string{
 			filepath.Join(home, ".gemini", "config", "plugins"),
 			filepath.Join(home, ".gemini", "antigravity-cli", "plugins"),
 			workspaceJoin(cwd, ".agents", "plugins"),
 			workspaceJoin(cwd, "_agents", "plugins"),
+		})
+	case "amp":
+		return dedupNonEmpty([]string{
+			filepath.Join(home, ".config", "amp", "plugins"),
+			workspaceJoin(cwd, ".amp", "plugins"),
 		})
 	case "cursor", "windsurf", "copilot", "openhands", "opencode", "omnigent":
 		return nil
@@ -720,56 +874,229 @@ func (c *Config) PluginDirsForConnector(connector string) []string {
 // --- Connector-specific MCP readers ---
 
 func readMCPServersClaudeCode(workspaceDir string) ([]MCPServerEntry, error) {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
-	}
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
+	statePath := claudeCodeMCPStatePath()
+	local, user, stateErr := readMCPFromClaudeState(statePath, cwd)
+	if stateErr == nil {
+		// Claude's documented precedence is local, project, then user.
+		// dedupMCPEntries is first-wins, so append the workspace-matched local
+		// scope before either user registry.
+		entries = append(entries, local...)
+	}
 
-	settingsPath := filepath.Join(home, ".claude", "settings.json")
+	// A missing or malformed state file must not suppress a valid project
+	// registry. Project discovery is explicit-workspace-only.
+	if cwd != "" {
+		mcpJSONPath := filepath.Join(cwd, ".mcp.json")
+		if e, err := readMCPFromDotMCPJSON(mcpJSONPath); err == nil {
+			entries = append(entries, e...)
+		}
+	}
+	if stateErr == nil {
+		entries = append(entries, user...)
+	}
+
+	// Some Claude installations also carry a top-level user registry in
+	// settings.json. Keep it as the final user layer so the CLI state registry
+	// retains precedence while this additional source still fills missing names.
+	settingsPath := filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), "settings.json")
 	if e, err := readMCPFromClaudeSettings(settingsPath); err == nil {
 		entries = append(entries, e...)
 	}
 
-	if cwd != "" {
-		mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-		if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-			entries = append(entries, e...)
-		}
+	return dedupMCPEntries(entries), nil
+}
+
+func claudeCodeMCPStatePath() string {
+	if strings.TrimSpace(os.Getenv("CLAUDE_CONFIG_DIR")) != "" {
+		return filepath.Join(connectorEnvHome("CLAUDE_CONFIG_DIR", ".claude"), ".claude.json")
+	}
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".claude.json")
+}
+
+func readMCPFromClaudeState(path, workspaceDir string) (local, user []MCPServerEntry, err error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, nil, err
+	}
+	var state map[string]any
+	if err := json.Unmarshal(data, &state); err != nil {
+		return nil, nil, err
 	}
 
-	return dedupMCPEntries(entries), nil
+	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
+		if projects, ok := state["projects"].(map[string]any); ok {
+			for projectKey, projectValue := range projects {
+				if !sameClaudeWorkspace(projectKey, workspace) {
+					continue
+				}
+				if projectState, ok := projectValue.(map[string]any); ok {
+					local, _ = readMCPFromAnyPaths(projectState, []string{"mcpServers"})
+				}
+				break
+			}
+		}
+	}
+	user, _ = readMCPFromAnyPaths(state, []string{"mcpServers"})
+	return local, user, nil
+}
+
+func sameClaudeWorkspace(left, right string) bool {
+	normalize := func(value string) string {
+		value = expandPath(strings.TrimSpace(value))
+		if absolute, err := filepath.Abs(value); err == nil {
+			value = absolute
+		}
+		return filepath.Clean(value)
+	}
+	left = normalize(left)
+	right = normalize(right)
+	if runtime.GOOS == "windows" {
+		return strings.EqualFold(left, right)
+	}
+	return left == right
+}
+
+// readMCPFromClaudeJSONProjects extracts per-project local-scope MCP servers
+// from the projects.<path>.mcpServers subtrees of ~/.claude.json. Each
+// project's servers ship as a single flat list — the parent-path prefix is
+// intentionally not appended so downstream de-dup by name works across scopes.
+func readMCPFromClaudeJSONProjects(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	_, projectEntries, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return projectEntries, nil
+}
+
+// claudeJSONScopes is the union shape of ~/.claude.json we care about: the
+// user-scope `mcpServers` block and the per-project local-scope
+// `projects.<path>.mcpServers` blocks. Split out so one read+unmarshal of the
+// (often multi-megabyte) file is enough to cover both scopes.
+type claudeJSONMCPServer struct {
+	Command string            `json:"command"`
+	Args    []string          `json:"args"`
+	Env     map[string]string `json:"env"`
+	URL     string            `json:"url"`
+	Type    string            `json:"type"`
+}
+
+type claudeJSONScopes struct {
+	MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	Projects   map[string]struct {
+		MCPServers map[string]claudeJSONMCPServer `json:"mcpServers"`
+	} `json:"projects"`
+}
+
+// parseClaudeJSONScopes unmarshals ~/.claude.json once and splits the two
+// MCP-server scopes out. `user` is the top-level mcpServers map (user scope);
+// `projects` is the flattened union of every projects.<path>.mcpServers block
+// (local scope). Callers that already have the raw bytes should prefer this
+// helper to the pair of ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects
+// wrappers, which each open and decode the file independently.
+func parseClaudeJSONScopes(data []byte) (user, projects []MCPServerEntry, err error) {
+	var doc claudeJSONScopes
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, nil, err
+	}
+	for name, s := range doc.MCPServers {
+		user = append(user, MCPServerEntry{
+			Name:      name,
+			Command:   s.Command,
+			Args:      s.Args,
+			Env:       s.Env,
+			URL:       s.URL,
+			Transport: s.Type,
+		})
+	}
+	for _, project := range doc.Projects {
+		for name, s := range project.MCPServers {
+			projects = append(projects, MCPServerEntry{
+				Name:      name,
+				Command:   s.Command,
+				Args:      s.Args,
+				Env:       s.Env,
+				URL:       s.URL,
+				Transport: s.Type,
+			})
+		}
+	}
+	return user, projects, nil
+}
+
+// ReadMCPFromClaudeJSONBothScopes is the exported single-read helper: it
+// opens ~/.claude.json once and returns the union of user-scope
+// (top-level mcpServers) and local-scope (projects.<path>.mcpServers)
+// entries. Callers that need both scopes should prefer this over pairing
+// ReadMCPFromClaudeSettings + ReadMCPFromClaudeJSONProjects, which would
+// each read and decode the (often multi-megabyte) conversation-state file.
+func ReadMCPFromClaudeJSONBothScopes(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	user, projects, err := parseClaudeJSONScopes(data)
+	if err != nil {
+		return nil, err
+	}
+	return append(user, projects...), nil
 }
 
 func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
-	// Codex registers MCP servers in two places — the global
-	// `~/.codex/config.toml` `[mcp_servers]` table and the
-	// project-local `./.mcp.json` (a Codex SDK / Claude Code
-	// convention). Pre-S5.x we only read `./.mcp.json`, which
-	// silently dropped every globally-registered server. We now
-	// read both, with the project-local file taking precedence so
-	// per-project overrides win — matching how Codex itself layers
-	// them at runtime.
-	home, _ := os.UserHomeDir()
+	// Codex stores user and project MCP registries in config.toml
+	// [mcp_servers] tables. Candidate project layers are read closest-first so
+	// their entries take precedence, then the user layer fills remaining names.
+	// Filesystem presence is discovery only: project entries carry
+	// TrustRequired because Codex activates them only for trusted projects.
 	cwd := strings.TrimSpace(workspaceDir)
 
 	var entries []MCPServerEntry
-	if home != "" {
-		tomlPath := filepath.Join(home, ".codex", "config.toml")
-		if e, err := readMCPFromCodexConfigTOML(tomlPath); err == nil {
-			entries = append(entries, e...)
+	for _, layer := range gatewayconnector.CodexProjectLayerDirs(cwd) {
+		projectPath := filepath.Join(layer, ".codex", "config.toml")
+		if e, err := readMCPFromCodexConfigTOML(projectPath); err == nil {
+			entries = append(entries, annotateCodexMCPEntries(e, projectPath, "project", true)...)
 		}
 	}
-	if cwd != "" {
-		mcpJsonPath := filepath.Join(cwd, ".mcp.json")
-		if e, err := readMCPFromDotMCPJSON(mcpJsonPath); err == nil {
-			entries = append(entries, e...)
-		}
+	userPath := filepath.Join(connectorEnvHome("CODEX_HOME", ".codex"), "config.toml")
+	if e, err := ReadMCPFromCodexUserConfigTOML(userPath); err == nil {
+		entries = append(entries, e...)
 	}
 	return dedupMCPEntries(entries), nil
 }
+
+func annotateCodexMCPEntries(entries []MCPServerEntry, source, scope string, trustRequired bool) []MCPServerEntry {
+	for index := range entries {
+		entries[index].Source = source
+		entries[index].SourceScope = scope
+		entries[index].TrustRequired = trustRequired
+	}
+	return entries
+}
+
+// ReadMCPFromCodexUserConfigTOML reads a path that the caller has already
+// resolved as a Codex user-scope config. Only this provenance-aware entry point
+// can promote an exact built-in table shape to Bundled; project and generic
+// TOML readers intentionally leave the same name/URL scan-eligible.
+func ReadMCPFromCodexUserConfigTOML(path string) ([]MCPServerEntry, error) {
+	entries, err := readMCPFromCodexConfigTOML(path)
+	if err != nil {
+		return nil, err
+	}
+	entries = annotateCodexMCPEntries(entries, path, "user", false)
+	for index := range entries {
+		entries[index].Bundled = entries[index].codexBuiltinShape
+	}
+	return entries, nil
+}
+
+const maxCodexInventoryConfigBytes = 1 << 20
 
 // readMCPFromCodexConfigTOML parses the [mcp_servers] table out of
 // ~/.codex/config.toml. Codex's documented schema is:
@@ -779,14 +1106,13 @@ func readMCPServersCodex(workspaceDir string) ([]MCPServerEntry, error) {
 //	args = ["..."]
 //	env = { KEY = "value" }
 //
-// Returns an empty slice (not an error) for missing files / malformed
-// TOML / missing block so callers can soft-fall back to the
-// project-local .mcp.json. Uses pelletier/go-toml/v2 which is already
-// a project dependency — no new module is added.
+// The read is bounded and rejects reparse/symlink or changing inputs. Callers
+// treat errors as an unsafe/unavailable layer and continue to lower-precedence
+// project or user config.
 func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
+	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxCodexInventoryConfigBytes)
+	if !ok {
+		return nil, fmt.Errorf("Codex MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxCodexInventoryConfigBytes, path)
 	}
 	var doc struct {
 		MCPServers map[string]struct {
@@ -800,18 +1126,33 @@ func readMCPFromCodexConfigTOML(path string) ([]MCPServerEntry, error) {
 	if err := tomlUnmarshal(data, &doc); err != nil {
 		return nil, err
 	}
+	var rawDoc struct {
+		MCPServers map[string]map[string]any `toml:"mcp_servers"`
+	}
+	if err := tomlUnmarshal(data, &rawDoc); err != nil {
+		return nil, err
+	}
 	out := make([]MCPServerEntry, 0, len(doc.MCPServers))
 	for name, cfg := range doc.MCPServers {
 		out = append(out, MCPServerEntry{
-			Name:      name,
-			Command:   cfg.Command,
-			Args:      cfg.Args,
-			Env:       cfg.Env,
-			URL:       cfg.URL,
-			Transport: cfg.Transport,
+			Name:              name,
+			Command:           cfg.Command,
+			Args:              cfg.Args,
+			Env:               cfg.Env,
+			URL:               cfg.URL,
+			Transport:         cfg.Transport,
+			codexBuiltinShape: isCodexBuiltinMCPShape(name, rawDoc.MCPServers[name]),
 		})
 	}
 	return out, nil
+}
+
+func isCodexBuiltinMCPShape(name string, raw map[string]any) bool {
+	if name != "openaiDeveloperDocs" || len(raw) != 1 {
+		return false
+	}
+	url, ok := raw["url"].(string)
+	return ok && url == "https://developers.openai.com/mcp"
 }
 
 func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
@@ -839,8 +1180,7 @@ func readMCPServersZeptoClaw(workspaceDir string) ([]MCPServerEntry, error) {
 }
 
 func readMCPServersHermes() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromYAMLPath(filepath.Join(home, ".hermes", "config.yaml"), []string{"mcp", "servers"}, []string{"mcpServers"})
+	return readMCPFromYAMLPath(hermespath.ConfigPath(), []string{"mcp", "servers"}, []string{"mcpServers"})
 }
 
 func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
@@ -858,23 +1198,160 @@ func readMCPServersCursor(workspaceDir string) ([]MCPServerEntry, error) {
 	return dedupMCPEntries(entries), nil
 }
 
-func readMCPServersWindsurf() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
+const maxDevinInventoryConfigBytes int64 = 4 << 20
+
+// readMCPServersDevin reads Devin's canonical MCP registries in effective
+// precedence order. Project-local settings win over project settings, and both
+// win over the lifecycle-bound user registry. A workspace is consulted only
+// when the operator pinned one in DefenseClaw configuration; the gateway's own
+// working directory is never inferred.
+func readMCPServersDevin(workspaceDir string) ([]MCPServerEntry, error) {
+	configHome, err := devinConfigHome()
+	if err != nil {
+		return nil, err
+	}
+
 	var entries []MCPServerEntry
-	for _, path := range []string{
-		filepath.Join(home, ".codeium", "windsurf", "mcp_config.json"),
-		filepath.Join(home, ".codeium", "windsurf", "mcp.json"),
-	} {
-		if e, err := readMCPFromDotMCPJSON(path); err == nil {
-			entries = append(entries, e...)
+	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
+		for _, name := range []string{"mcp_config.local.json", "mcp_config.json"} {
+			if found, readErr := ReadMCPFromDevinConfig(filepath.Join(workspace, ".devin", name)); readErr == nil {
+				entries = append(entries, found...)
+			}
 		}
+	}
+	if found, readErr := ReadMCPFromDevinConfig(filepath.Join(configHome, "mcp_config.json")); readErr == nil {
+		entries = append(entries, found...)
 	}
 	return dedupMCPEntries(entries), nil
 }
 
-func readMCPServersGeminiCLI() ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	return readMCPFromJSONPath(filepath.Join(home, ".gemini", "settings.json"), []string{"mcpServers"})
+// devinConfigHome resolves the exact user configuration root used by the
+// current lifecycle. Native Setup supplies its Known-Folder result through the
+// DefenseClaw-only binding; source installs use Devin's documented platform
+// defaults.
+func devinConfigHome() (string, error) {
+	if configured, exists := os.LookupEnv("DEFENSECLAW_DEVIN_CONFIG_HOME"); exists {
+		if configured == "" || strings.TrimSpace(configured) != configured ||
+			strings.ContainsAny(configured, "\x00\r\n") ||
+			!filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
+			return "", fmt.Errorf("DEFENSECLAW_DEVIN_CONFIG_HOME is not an absolute normalized path")
+		}
+		return configured, nil
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("Devin user home is unavailable")
+	}
+	if runtime.GOOS == "windows" {
+		if appData := strings.TrimSpace(os.Getenv("APPDATA")); appData != "" {
+			return filepath.Join(filepath.Clean(appData), "devin"), nil
+		}
+		return filepath.Join(home, "AppData", "Roaming", "devin"), nil
+	}
+	return filepath.Join(home, ".config", "devin"), nil
+}
+
+// ReadMCPFromDevinConfig reads one canonical Devin mcp_config.json file using
+// the same bounded, stable-file boundary as other native inventory readers.
+// Both Devin's wrapped mcpServers shape and its compatible top-level map are
+// accepted.
+func ReadMCPFromDevinConfig(path string) ([]MCPServerEntry, error) {
+	data, ok := gatewayconnector.ReadStableInventoryFile(path, maxDevinInventoryConfigBytes)
+	if !ok {
+		return nil, fmt.Errorf("Devin MCP config is unavailable, unstable, unsafe, or exceeds %d bytes: %s", maxDevinInventoryConfigBytes, path)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(data, &raw); err != nil {
+		return nil, err
+	}
+	if _, wrapped := raw["mcpServers"]; wrapped {
+		return readMCPFromAnyPaths(raw, []string{"mcpServers"})
+	}
+	return readMCPFromAnyPaths(map[string]any{"mcpServers": raw}, []string{"mcpServers"})
+}
+
+func readMCPServersWindsurf() ([]MCPServerEntry, error) {
+	home, err := windsurfUserHome()
+	if err != nil {
+		return nil, err
+	}
+	path := filepath.Join(home, ".codeium", "windsurf", "mcp_config.json")
+	entries, err := readMCPFromDotMCPJSON(path)
+	if err != nil {
+		return nil, nil
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+func windsurfUserHome() (string, error) {
+	configured := os.Getenv("WINDSURF_USER_HOME")
+	if configured == "" {
+		return os.UserHomeDir()
+	}
+	if strings.TrimSpace(configured) != configured ||
+		strings.ContainsAny(configured, "\x00\r\n") ||
+		!filepath.IsAbs(configured) ||
+		filepath.Clean(configured) != configured {
+		return "", fmt.Errorf("WINDSURF_USER_HOME is not an absolute normalized path")
+	}
+	return configured, nil
+}
+
+func readMCPServersGeminiCLI(workspaceDir string) ([]MCPServerEntry, error) {
+	configHome, err := geminiCLIConfigHome()
+	if err != nil {
+		return nil, err
+	}
+	var entries []MCPServerEntry
+	if workspace := strings.TrimSpace(workspaceDir); workspace != "" {
+		if project, projectErr := readMCPFromGeminiSettings(filepath.Join(workspace, ".gemini", "settings.json")); projectErr == nil {
+			entries = append(entries, project...)
+		}
+	}
+	if user, userErr := readMCPFromGeminiSettings(filepath.Join(configHome, "settings.json")); userErr == nil {
+		entries = append(entries, user...)
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+func readMCPFromGeminiSettings(path string) ([]MCPServerEntry, error) {
+	data, err := readStableAMPSettingsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	// Gemini CLI runs strip-json-comments and then JSON.parse. Keep trailing
+	// commas invalid instead of applying the more permissive Amp/OpenCode
+	// JSONC normalization.
+	data = stripJSONCComments(data)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return readMCPFromAnyPaths(doc, []string{"mcpServers"})
+}
+
+func geminiCLIConfigHome() (string, error) {
+	if configured, exists := os.LookupEnv("DEFENSECLAW_GEMINI_CONFIG_HOME"); exists {
+		if configured == "" || strings.TrimSpace(configured) != configured ||
+			strings.ContainsAny(configured, "\x00\r\n") ||
+			!filepath.IsAbs(configured) || filepath.Clean(configured) != configured {
+			return "", fmt.Errorf("DEFENSECLAW_GEMINI_CONFIG_HOME is not an absolute normalized path")
+		}
+		return configured, nil
+	}
+	if root, exists := os.LookupEnv("GEMINI_CLI_HOME"); exists && root != "" {
+		if strings.TrimSpace(root) != root || strings.ContainsAny(root, "\x00\r\n") ||
+			!filepath.IsAbs(root) || filepath.Clean(root) != root {
+			return "", fmt.Errorf("GEMINI_CLI_HOME is not an absolute normalized path")
+		}
+		return filepath.Join(root, ".gemini"), nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "", fmt.Errorf("Gemini CLI user home is unavailable")
+	}
+	return filepath.Join(home, ".gemini"), nil
 }
 
 func readMCPServersCopilot(workspaceDir string) ([]MCPServerEntry, error) {
@@ -921,119 +1398,6 @@ func readMCPServersAntigravity(workspaceDir string) ([]MCPServerEntry, error) {
 		}
 	}
 	return dedupMCPEntries(entries), nil
-}
-
-// readMCPServersOpenCode reads opencode's MCP registrations. opencode
-// stores servers under a top-level `mcp` map — a different schema from
-// the `mcpServers` shape the other connectors use: each entry is
-// {type:"local", command:[...], environment:{...}} or {type:"remote",
-// url:...}. The global ~/.config/opencode/opencode.json is read first,
-// then the pinned project opencode.json when a workspace is set, so
-// per-project servers layer on top the way opencode loads them. Parity
-// with connector_paths._opencode_mcp_servers on the Python side.
-func readMCPServersOpenCode(workspaceDir string) ([]MCPServerEntry, error) {
-	home, _ := os.UserHomeDir()
-	cwd := strings.TrimSpace(workspaceDir)
-	var paths []string
-	if home != "" {
-		paths = append(paths,
-			filepath.Join(home, ".config", "opencode", "opencode.json"),
-			filepath.Join(home, ".config", "opencode", "opencode.jsonc"),
-		)
-	}
-	if cwd != "" {
-		paths = append(paths,
-			filepath.Join(cwd, "opencode.json"),
-			filepath.Join(cwd, "opencode.jsonc"),
-		)
-	}
-	var entries []MCPServerEntry
-	for _, path := range paths {
-		if e, err := readMCPFromOpenCodeConfig(path); err == nil {
-			entries = append(entries, e...)
-		}
-	}
-	return dedupMCPEntries(entries), nil
-}
-
-// readMCPFromOpenCodeConfig parses the top-level `mcp` map out of an
-// opencode config file. Go's encoding/json does not accept JSONC
-// comments, so a hand-authored opencode.jsonc with comments yields an
-// error here and is skipped by the caller (best-effort); the canonical
-// global opencode.json is plain JSON.
-func readMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-	var doc struct {
-		MCP map[string]struct {
-			Type        string            `json:"type"`
-			Command     []string          `json:"command"`
-			Environment map[string]string `json:"environment"`
-			URL         string            `json:"url"`
-		} `json:"mcp"`
-	}
-	if err := json.Unmarshal(data, &doc); err != nil {
-		return nil, err
-	}
-	entries := make([]MCPServerEntry, 0, len(doc.MCP))
-	for name, cfg := range doc.MCP {
-		kind := strings.ToLower(strings.TrimSpace(cfg.Type))
-		if kind == "remote" || (kind == "" && cfg.URL != "" && len(cfg.Command) == 0) {
-			entries = append(entries, MCPServerEntry{
-				Name:      name,
-				URL:       cfg.URL,
-				Transport: "remote",
-			})
-			continue
-		}
-		command := ""
-		var args []string
-		if len(cfg.Command) > 0 {
-			command = cfg.Command[0]
-			if len(cfg.Command) > 1 {
-				args = cfg.Command[1:]
-			}
-		}
-		entries = append(entries, MCPServerEntry{
-			Name:      name,
-			Command:   command,
-			Args:      args,
-			Env:       cfg.Environment,
-			Transport: "local",
-		})
-	}
-	return entries, nil
-}
-
-func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, err
-	}
-
-	var settings struct {
-		MCPServers map[string]struct {
-			Command string            `json:"command"`
-			Args    []string          `json:"args"`
-			Env     map[string]string `json:"env"`
-		} `json:"mcpServers"`
-	}
-	if err := json.Unmarshal(data, &settings); err != nil {
-		return nil, err
-	}
-
-	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
-	for name, s := range settings.MCPServers {
-		entries = append(entries, MCPServerEntry{
-			Name:    name,
-			Command: s.Command,
-			Args:    s.Args,
-			Env:     s.Env,
-		})
-	}
-	return entries, nil
 }
 
 func readMCPFromJSONPath(path string, paths ...[]string) ([]MCPServerEntry, error) {
@@ -1148,6 +1512,468 @@ func readMCPFromZeptoConfig(path string) ([]MCPServerEntry, error) {
 	default:
 		return nil, nil
 	}
+}
+
+const ampSettingsReadLimit int64 = 2 << 20
+
+func ampClaudePluginCacheSkillDirs(home string) []string {
+	const (
+		maxDepth   = 4
+		maxEntries = 4096
+	)
+	root := filepath.Join(home, ".claude", "plugins", "cache")
+	info, err := os.Lstat(root)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
+		return nil
+	}
+	type pendingDir struct {
+		path  string
+		depth int
+	}
+	pending := []pendingDir{{path: root}}
+	inspected := 0
+	var skillDirs []string
+	for len(pending) > 0 && inspected < maxEntries {
+		current := pending[0]
+		pending = pending[1:]
+		entries, err := readBoundedAMPDirectory(current.path, maxEntries-inspected)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			inspected++
+			if entry.Type()&os.ModeSymlink != 0 || !entry.IsDir() {
+				continue
+			}
+			childDepth := current.depth + 1
+			child := filepath.Join(current.path, entry.Name())
+			if strings.EqualFold(entry.Name(), "skills") {
+				skillDirs = append(skillDirs, child)
+				continue
+			}
+			if childDepth < maxDepth {
+				pending = append(pending, pendingDir{path: child, depth: childDepth})
+			}
+		}
+	}
+	return dedupNonEmpty(skillDirs)
+}
+
+func ampManagedSettingsPath() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return filepath.Join(string(filepath.Separator), "Library", "Application Support", "ampcode", "managed-settings.json")
+	case "linux":
+		return filepath.Join(string(filepath.Separator), "etc", "ampcode", "managed-settings.json")
+	case "windows":
+		if programData := strings.TrimSpace(os.Getenv("ProgramData")); programData != "" {
+			return filepath.Join(programData, "ampcode", "managed-settings.json")
+		}
+	}
+	return ""
+}
+
+func ampSettingsPaths(home, workspace string, workspaceFirst bool) []string {
+	paths := ampUserSettingsPaths(home, workspace, workspaceFirst)
+	managed := ampManagedSettingsPath()
+	if workspaceFirst {
+		return dedupNonEmpty(append([]string{managed}, paths...))
+	}
+	return dedupNonEmpty(append(paths, managed))
+}
+
+func ampUserSettingsPaths(home, workspace string, workspaceFirst bool) []string {
+	user := []string{preferredAMPSettingsPath(
+		filepath.Join(home, ".config", "amp", "settings.json"),
+		filepath.Join(home, ".config", "amp", "settings.jsonc"),
+	)}
+	project := []string{preferredAMPSettingsPath(
+		workspaceJoin(workspace, ".amp", "settings.json"),
+		workspaceJoin(workspace, ".amp", "settings.jsonc"),
+	)}
+	if workspaceFirst {
+		return dedupNonEmpty(append(project, user...))
+	}
+	return dedupNonEmpty(append(user, project...))
+}
+
+func ampSkillDirs(home, workspace string) []string {
+	return ampSkillDirsFromSettings(
+		home,
+		workspace,
+		ampSettingsPaths(home, workspace, false),
+	)
+}
+
+func ampSkillDirsFromSettings(home, workspace string, settingsPaths []string) []string {
+	disableClaude := false
+	var extraPath string
+	// Read user then workspace so the documented workspace override wins.
+	for _, path := range settingsPaths {
+		doc, err := readJSONObjectJSONC(path)
+		if err != nil {
+			continue
+		}
+		if value, ok := doc["amp.skills.disableClaudeCodeSkills"].(bool); ok {
+			disableClaude = value
+		}
+		if value, ok := doc["amp.skills.path"].(string); ok {
+			extraPath = value
+		}
+	}
+
+	dirs := []string{
+		filepath.Join(home, ".config", "agents", "skills"),
+		filepath.Join(home, ".agents", "skills"),
+		filepath.Join(home, ".config", "amp", "skills"),
+		workspaceJoin(workspace, ".agents", "skills"),
+	}
+	if !disableClaude {
+		dirs = append(dirs,
+			workspaceJoin(workspace, ".claude", "skills"),
+			filepath.Join(home, ".claude", "skills"),
+		)
+		dirs = append(dirs, ampClaudePluginCacheSkillDirs(home)...)
+	}
+	for _, configured := range filepath.SplitList(extraPath) {
+		configured = expandPath(strings.TrimSpace(configured))
+		if configured == "" {
+			continue
+		}
+		// Never resolve a relative path against the DefenseClaw daemon's cwd.
+		// With a pinned workspace, relative additions are workspace-relative;
+		// otherwise only the documented absolute/~ forms are actionable.
+		if !filepath.IsAbs(configured) {
+			if workspace == "" {
+				continue
+			}
+			configured = filepath.Join(workspace, configured)
+		}
+		dirs = append(dirs, filepath.Clean(configured))
+	}
+	// Plugin-bundled skills are the lowest local precedence documented by
+	// Amp. Only directory plugins can bundle a skills/ component; standalone
+	// .ts plugins remain visible through plugin inventory, not this list.
+	for _, pluginRoot := range dedupNonEmpty([]string{
+		filepath.Join(home, ".config", "amp", "plugins"),
+		workspaceJoin(workspace, ".amp", "plugins"),
+	}) {
+		entries, err := readBoundedAMPDirectory(pluginRoot, 4096)
+		if err != nil {
+			continue
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				dirs = append(dirs, filepath.Join(pluginRoot, entry.Name(), "skills"))
+			}
+		}
+	}
+	return dedupNonEmpty(dirs)
+}
+
+func preferredAMPSettingsPath(primary, fallback string) string {
+	for _, candidate := range []string{primary, fallback} {
+		if candidate == "" {
+			continue
+		}
+		if info, err := os.Stat(candidate); err == nil && !info.IsDir() {
+			return candidate
+		}
+	}
+	return primary
+}
+
+func readBoundedAMPDirectory(path string, remaining int) ([]os.DirEntry, error) {
+	if remaining <= 0 {
+		return nil, nil
+	}
+	directory, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	entries, readErr := directory.ReadDir(remaining)
+	closeErr := directory.Close()
+	if readErr != nil && readErr != io.EOF {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	sort.Slice(entries, func(left, right int) bool {
+		return strings.ToLower(entries[left].Name()) < strings.ToLower(entries[right].Name())
+	})
+	return entries, nil
+}
+
+func readJSONObjectJSONC(path string) (map[string]any, error) {
+	data, err := readStableAMPSettingsFile(path)
+	if err != nil {
+		return nil, err
+	}
+	data = stripJSONCComments(data)
+	data = stripJSONCTrailingCommas(data)
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	return doc, nil
+}
+
+func readMCPFromClaudeSettings(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+
+	var settings struct {
+		MCPServers map[string]struct {
+			Command string            `json:"command"`
+			Args    []string          `json:"args"`
+			Env     map[string]string `json:"env"`
+		} `json:"mcpServers"`
+	}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		return nil, err
+	}
+
+	entries := make([]MCPServerEntry, 0, len(settings.MCPServers))
+	for name, s := range settings.MCPServers {
+		entries = append(entries, MCPServerEntry{
+			Name:    name,
+			Command: s.Command,
+			Args:    s.Args,
+			Env:     s.Env,
+		})
+	}
+	return entries, nil
+}
+
+func readMCPFromOpenCodeConfig(path string) ([]MCPServerEntry, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var doc struct {
+		MCP map[string]struct {
+			Type        string            `json:"type"`
+			Command     []string          `json:"command"`
+			Environment map[string]string `json:"environment"`
+			URL         string            `json:"url"`
+		} `json:"mcp"`
+	}
+	if err := json.Unmarshal(data, &doc); err != nil {
+		return nil, err
+	}
+	entries := make([]MCPServerEntry, 0, len(doc.MCP))
+	for name, cfg := range doc.MCP {
+		kind := strings.ToLower(strings.TrimSpace(cfg.Type))
+		if kind == "remote" || (kind == "" && cfg.URL != "" && len(cfg.Command) == 0) {
+			entries = append(entries, MCPServerEntry{
+				Name:      name,
+				URL:       cfg.URL,
+				Transport: "remote",
+			})
+			continue
+		}
+		command := ""
+		var args []string
+		if len(cfg.Command) > 0 {
+			command = cfg.Command[0]
+			if len(cfg.Command) > 1 {
+				args = cfg.Command[1:]
+			}
+		}
+		entries = append(entries, MCPServerEntry{
+			Name:      name,
+			Command:   command,
+			Args:      args,
+			Env:       cfg.Environment,
+			Transport: "local",
+		})
+	}
+	return entries, nil
+}
+
+func readMCPServersAMP(workspaceDir string) ([]MCPServerEntry, error) {
+	home, _ := os.UserHomeDir()
+	cwd := strings.TrimSpace(workspaceDir)
+	return readMCPServersAMPFromHome(
+		home,
+		cwd,
+		ampSettingsPaths(home, cwd, true),
+		ampSettingsPaths(home, cwd, false),
+	)
+}
+
+// ReadMCPServersAMPUnderHome reads Amp's standard user settings and
+// skill-bundled MCP files below an explicitly selected home. Shared managed
+// settings and project layers are intentionally outside this per-user view.
+func ReadMCPServersAMPUnderHome(home string) ([]MCPServerEntry, error) {
+	home = strings.TrimSpace(home)
+	if home == "" {
+		return nil, nil
+	}
+	return readMCPServersAMPFromHome(
+		home,
+		"",
+		ampUserSettingsPaths(home, "", true),
+		ampUserSettingsPaths(home, "", false),
+	)
+}
+
+func readMCPServersAMPFromHome(home, workspace string, settingsPaths, skillSettingsPaths []string) ([]MCPServerEntry, error) {
+	var entries []MCPServerEntry
+
+	for _, path := range settingsPaths {
+		doc, err := readJSONObjectJSONC(path)
+		if err != nil {
+			continue
+		}
+		if found, err := readMCPFromAnyPaths(doc, []string{"amp.mcpServers"}); err == nil {
+			entries = append(entries, found...)
+		}
+	}
+
+	for _, skillRoot := range ampSkillDirsFromSettings(home, workspace, skillSettingsPaths) {
+		children, err := os.ReadDir(skillRoot)
+		if err != nil {
+			continue
+		}
+		for _, child := range children {
+			if !child.IsDir() {
+				continue
+			}
+			if found, err := readMCPFromDotMCPJSON(filepath.Join(skillRoot, child.Name(), "mcp.json")); err == nil {
+				entries = append(entries, found...)
+			}
+		}
+	}
+	return dedupMCPEntries(entries), nil
+}
+
+func readStableAMPSettingsFile(path string) ([]byte, error) {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if before.Mode()&os.ModeSymlink != 0 || !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("Amp settings source is not a regular file")
+	}
+	if before.Size() > ampSettingsReadLimit {
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	opened, statErr := file.Stat()
+	data, readErr := io.ReadAll(io.LimitReader(file, ampSettingsReadLimit+1))
+	closeErr := file.Close()
+	if statErr != nil {
+		return nil, statErr
+	}
+	if readErr != nil {
+		return nil, readErr
+	}
+	if closeErr != nil {
+		return nil, closeErr
+	}
+	if !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("Amp settings source changed during inspection")
+	}
+	if int64(len(data)) > ampSettingsReadLimit {
+		return nil, fmt.Errorf("Amp settings source exceeds %d bytes", ampSettingsReadLimit)
+	}
+	after, err := os.Lstat(path)
+	if err != nil || after.Mode()&os.ModeSymlink != 0 || !after.Mode().IsRegular() ||
+		!os.SameFile(opened, after) || before.Size() != after.Size() ||
+		!before.ModTime().Equal(after.ModTime()) {
+		return nil, fmt.Errorf("Amp settings source changed during inspection")
+	}
+	return data, nil
+}
+
+func stripJSONCComments(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); {
+		b := data[i]
+		if inString {
+			out = append(out, b)
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			i++
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			i++
+			continue
+		}
+		if b == '/' && i+1 < len(data) && data[i+1] == '/' {
+			i += 2
+			for i < len(data) && data[i] != '\n' && data[i] != '\r' {
+				i++
+			}
+			continue
+		}
+		if b == '/' && i+1 < len(data) && data[i+1] == '*' {
+			i += 2
+			for i+1 < len(data) && !(data[i] == '*' && data[i+1] == '/') {
+				i++
+			}
+			if i+1 < len(data) {
+				i += 2
+			}
+			continue
+		}
+		out = append(out, b)
+		i++
+	}
+	return out
+}
+
+func stripJSONCTrailingCommas(data []byte) []byte {
+	out := make([]byte, 0, len(data))
+	inString := false
+	escaped := false
+	for i := 0; i < len(data); i++ {
+		b := data[i]
+		if inString {
+			out = append(out, b)
+			if escaped {
+				escaped = false
+			} else if b == '\\' {
+				escaped = true
+			} else if b == '"' {
+				inString = false
+			}
+			continue
+		}
+		if b == '"' {
+			inString = true
+			out = append(out, b)
+			continue
+		}
+		if b == ',' {
+			j := i + 1
+			for j < len(data) && (data[j] == ' ' || data[j] == '\t' || data[j] == '\n' || data[j] == '\r') {
+				j++
+			}
+			if j < len(data) && (data[j] == '}' || data[j] == ']') {
+				continue
+			}
+		}
+		out = append(out, b)
+	}
+	return out
 }
 
 func dedupMCPEntries(entries []MCPServerEntry) []MCPServerEntry {

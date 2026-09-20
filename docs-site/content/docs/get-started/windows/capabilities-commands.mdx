@@ -1,0 +1,19 @@
+---
+title: Windows capabilities and commands moved
+description: Connector capabilities and CLI commands now live in their cross-platform canonical references.
+---
+
+The duplicated native Windows capability and command matrices have moved to
+their cross-platform canonical references. This route remains as a
+compatibility pointer for existing bookmarks.
+
+<Cards>
+  <Card title="Platform support" href="/docs/connectors#platform-support" description="Compare macOS/Linux and native Windows connector availability and quirks." />
+  <Card title="Capability matrix" href="/docs/capability-matrix" description="Compare connector enforcement, native ask, fail-closed, and subprocess behavior." />
+  <Card title="CLI commands" href="/docs/reference/cli" description="Browse the public defenseclaw and defenseclaw-gateway command families and platform notes." />
+  <Card title="Windows install lifecycle" href="/docs/get-started/windows/install-lifecycle" description="Use the native package, quiet install, repair, upgrade, recovery, and uninstall workflows." />
+</Cards>
+
+The command's own `--help` output remains authoritative for registered flags.
+A command being present does not override the connector or feature's stated
+native Windows support boundary.

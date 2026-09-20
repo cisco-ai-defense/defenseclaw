@@ -28,6 +28,8 @@ import { SeverityMatrixSection } from './sections/severity-matrix';
 import { AdmissionSection } from './sections/admission';
 import { GuardrailSection } from './sections/guardrail';
 import { RulesSection } from './sections/rules';
+import { DeterministicCoverageSection } from './sections/deterministic-coverage';
+import { DETERMINISTIC_COVERAGE_TOTALS } from './deterministic-coverage-catalog';
 import { SuppressionsSection } from './sections/suppressions';
 import { SensitiveToolsSection } from './sections/sensitive-tools';
 import { JudgesSection } from './sections/judges';
@@ -122,6 +124,16 @@ const SECTION_DEFS: SectionDef[] = [
     status: (p) =>
       p.rule_pack.files.some((f) => f.rules.length > 0) ? 'customized' : 'untouched',
     render: (p, set) => <RulesSection policy={p} onPolicyChange={set} />,
+  },
+  {
+    id: 'deterministic-coverage',
+    title: 'Deterministic coverage',
+    subtitle: () =>
+      `${DETERMINISTIC_COVERAGE_TOTALS.chains} chains · ${DETERMINISTIC_COVERAGE_TOTALS.yaraRules} YARA · ${DETERMINISTIC_COVERAGE_TOTALS.selectablePacks} selectable + ${DETERMINISTIC_COVERAGE_TOTALS.stagedPacks} staged packs`,
+    // Runtime-owned capabilities are informational and do not change the
+    // custom policy emitted by this creator.
+    status: () => 'untouched',
+    render: (p, set) => <DeterministicCoverageSection policy={p} onPolicyChange={set} />,
   },
   {
     id: 'suppressions',
@@ -327,8 +339,8 @@ export function Playground({
           <div>
             <h2 className="text-base font-semibold text-fd-foreground">Playground</h2>
             <p className="mt-0.5 text-[11px] text-fd-muted-foreground">
-              Every knob the engine reads, surfaced section-by-section. Edits run through the
-              live OPA-WASM engine on the right.
+              Configurable policy knobs plus the fixed deterministic detector inventory.
+              The browser preview on the right evaluates OPA/Rego domains only.
             </p>
           </div>
           <CommandPaletteHint />

@@ -16,14 +16,14 @@
 
 """Config writer for ``webhooks[]`` notifier entries.
 
-Sister module to ``defenseclaw.observability.writer`` — the ``webhooks:``
+The ``webhooks:``
 top-level list in ``config.yaml`` is consumed at runtime by
 ``internal/gateway/webhook.go`` for chat/incident notifiers
 (Slack, PagerDuty, Webex, generic HMAC). This is a *different* surface
-from ``audit_sinks[].http_jsonl`` (which forwards every audit event as
-JSONL to a log collector); both write to the same YAML file but to
-separate keys, so we use the same atomic tmp+rename pattern to keep the
-Go gateway safe on reload.
+from canonical v8 ``observability.destinations`` entries such as
+``kind: http_jsonl``; both write to the same YAML file but to separate keys,
+so we use the same atomic tmp+rename pattern to keep the gateway safe on
+reload.
 
 All callers (CLI commands, TUI shell-outs, doctor probes) go through
 ``apply_webhook``, ``set_webhook_enabled``, ``remove_webhook`` rather

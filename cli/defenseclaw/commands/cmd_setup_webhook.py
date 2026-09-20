@@ -19,8 +19,9 @@
 This group is the *disambiguated* webhook surface: it manages the
 top-level ``webhooks:`` list in ``config.yaml`` (chat/incident notifiers
 consumed by ``internal/gateway/webhook.go``). The preset
-``setup observability add webhook`` writes a separate audit-sink and is
-now labeled "Generic HTTP JSONL" to avoid the collision.
+``setup observability add webhook`` writes a separate canonical HTTP JSONL
+telemetry destination and is labeled "Generic HTTP JSONL" to avoid the
+collision.
 
 Subcommands
 -----------
@@ -79,7 +80,7 @@ def webhook() -> None:
     """Configure Slack/PagerDuty/Webex/generic chat + incident webhooks.
 
     Separate from ``setup observability add webhook`` (which configures
-    a generic HTTP JSONL audit-log forwarder). This group edits the
+    a generic HTTP JSONL telemetry destination). This group edits the
     top-level ``webhooks:`` list consumed by the runtime dispatcher.
     """
 
@@ -498,6 +499,13 @@ def test_cmd(app: AppContext, name: str, dry_run: bool, timeout: float) -> None:
     # Log the outcome *before* possibly exiting non-zero so failed
     # dispatches still leave an audit trail.
     if app.logger and not dry_run:
+        app.logger.log_webhook_delivery(
+            webhook_kind=v.type,
+            target_url=v.url,
+            status_code=result.status_code or 0,
+            duration_ms=result.duration_ms,
+            succeeded=result.ok,
+        )
         app.logger.log_action(
             ACTION_SETUP_WEBHOOK,
             "test",
@@ -596,7 +604,7 @@ def _print_write_result(result: WebhookWriteResult, *, connector: str = "") -> N
 # dataclass and could clobber a concurrently-written global ``webhooks:``
 # block. The ``observability.connectors`` schema is round-tripped by
 # ``config.ObservabilityConfig`` so any *fully-loaded* ``cfg.save()`` (a
-# setup wizard, the TUI) preserves these entries.
+# setup wizard, the TUI) preserves these notification entries.
 #
 # Validation (SSRF guard, type/severity/env-name checks, name derivation) is
 # reused from the writer's public ``apply_webhook`` via a ``dry_run`` probe,
@@ -670,8 +678,6 @@ def _prune_observability(raw: dict[str, Any], connector: str) -> None:
     if isinstance(entry, dict):
         if entry.get("webhooks") == []:
             entry.pop("webhooks", None)
-        if entry.get("audit_sinks") == []:
-            entry.pop("audit_sinks", None)
         if not entry:
             conns.pop(connector, None)
     if not conns:

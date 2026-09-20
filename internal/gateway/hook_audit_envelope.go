@@ -24,7 +24,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/defenseclaw/defenseclaw/internal/redaction"
+	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
 )
 
 // HookAuditEnvelopeSchema identifies the audit-envelope shape. Bumped
@@ -106,6 +106,16 @@ type HookAuditEnvelope struct {
 	Enforced    bool   `json:"enforced,omitempty"`
 	RulePackDir string `json:"rule_pack_dir,omitempty"`
 
+	// Agent lifecycle correlation is copied from the same phase snapshot used
+	// by native lifecycle/tool/hook-decision events. These additive fields let
+	// the durable audit row identify the transition that produced the decision.
+	AgentPhase         string `json:"agent_phase,omitempty"`
+	AgentPreviousPhase string `json:"agent_previous_phase,omitempty"`
+	AgentSequence      int64  `json:"agent_sequence,omitempty"`
+	AgentLifecycleID   string `json:"agent_lifecycle_id,omitempty"`
+	AgentExecutionID   string `json:"agent_execution_id,omitempty"`
+	AgentOperationID   string `json:"agent_operation_id,omitempty"`
+
 	// AuditActionOverride steers the audit ROW action (not the
 	// envelope JSON). When non-empty, the audit.Logger writes the
 	// row under this action constant instead of
@@ -142,26 +152,29 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 	env.RawAction = stripLogInjectionRunes(env.RawAction)
 	env.Severity = stripLogInjectionRunes(env.Severity)
 	env.Mode = stripLogInjectionRunes(env.Mode)
-	// M2 fix: Reason is the only envelope field that routinely
-	// carries user-influenced free-form text (policy reasons, AID
-	// findings, scanner messages). The downstream audit choke point
-	// runs the assembled `details` string through
-	// redaction.ForSinkReason, which splits on raw ", " / "; "
-	// byte sequences and per-chunk redacts. Without pre-redaction
-	// here, a Reason like "X, Y" would split details_json across
-	// that boundary and each half would be independently redacted,
-	// corrupting the JSON value. By redacting Reason FIRST and
-	// marking the envelope as already-redacted-equivalent (the
-	// resulting JSON contains no further "free-form" surfaces),
-	// the downstream pass becomes a no-op via isAlreadyRedacted
-	// for any envelope whose Reason actually contained PII.
-	env.Reason = preRedactEnvelopeFreeForm(env.Reason)
+	// Preserve source content for the immutable v8 runtime. Only structural
+	// log-injection controls are removed here; each destination applies its own
+	// configured redaction profile after routing.
+	env.Reason = sanitizeEnvelopeFreeForm(env.Reason)
 	env.RulePackDir = stripLogInjectionRunes(env.RulePackDir)
+	if phase, ok := gatewaylog.NormalizeAgentPhase(env.AgentPhase); ok {
+		env.AgentPhase = phase
+	} else {
+		env.AgentPhase = stripLogInjectionRunes(env.AgentPhase)
+	}
+	if previous, ok := gatewaylog.NormalizeAgentPhase(env.AgentPreviousPhase); ok {
+		env.AgentPreviousPhase = previous
+	} else {
+		env.AgentPreviousPhase = ""
+	}
+	env.AgentLifecycleID = stripLogInjectionRunes(env.AgentLifecycleID)
+	env.AgentExecutionID = stripLogInjectionRunes(env.AgentExecutionID)
+	env.AgentOperationID = stripLogInjectionRunes(env.AgentOperationID)
 	env.RawOrigin = stripLogInjectionRunes(env.RawOrigin)
 	for i, id := range env.RawEventIDs {
 		env.RawEventIDs[i] = stripLogInjectionRunes(id)
 	}
-	env.RawPayload = preRedactEnvelopeFreeForm(env.RawPayload)
+	env.RawPayload = sanitizeEnvelopeFreeForm(env.RawPayload)
 	if env.Extra != nil {
 		clean := make(map[string]string, len(env.Extra))
 		for k, v := range env.Extra {
@@ -169,7 +182,7 @@ func renderHookAuditEnvelope(env HookAuditEnvelope) string {
 			if cleanKey == "" {
 				continue
 			}
-			clean[cleanKey] = preRedactEnvelopeFreeForm(v)
+			clean[cleanKey] = sanitizeEnvelopeFreeForm(v)
 		}
 		env.Extra = clean
 	}
@@ -196,36 +209,13 @@ func renderHookAuditEnvelopePayload(env HookAuditEnvelope) (string, map[string]a
 	return rendered, structured
 }
 
-// preRedactEnvelopeFreeForm runs free-form, user-influenced fields
-// through the same redaction pipeline the downstream audit sink would
-// apply, BEFORE the field is folded into the envelope JSON. This is
-// the M2 fix.
-//
-// Background: internal/audit/logger.go's sanitizeEvent runs the
-// assembled audit details string through redaction.ForSinkReason,
-// which tokenises on raw ", " / "; " byte sequences and per-chunk
-// redacts. The hook envelope places JSON next to free-form text in a
-// single `details` blob; without pre-redaction, a Reason carrying
-// "blocked, see logs" creates a split point INSIDE the strconv.Quote'd
-// JSON value, and PII patterns elsewhere in the JSON are then
-// inline-redacted, breaking jq / SIEM parsers that expect well-formed
-// details_json.
-//
-// The fix is to pre-redact the free-form fields. ForSinkReason is
-// idempotent (its isAlreadyRedacted fast-path skips strings whose
-// chunks are already `<redacted...>` placeholders or safe glue
-// tokens), so the downstream pass is a no-op for already-redacted
-// material — meaning the envelope JSON we emit here is identical to
-// what the audit row contains, regardless of what
-// redaction.ForSinkReason does later.
-//
-// stripLogInjectionRunes still runs on top so CR/LF/ANSI cannot
-// survive even within already-redacted markers.
-func preRedactEnvelopeFreeForm(s string) string {
+// sanitizeEnvelopeFreeForm removes terminal/log injection controls without
+// applying content redaction ahead of v8 routing.
+func sanitizeEnvelopeFreeForm(s string) string {
 	if s == "" {
 		return s
 	}
-	return stripLogInjectionRunes(string(redaction.ForSinkReason(s)))
+	return stripLogInjectionRunes(s)
 }
 
 // stripLogInjectionRunes removes characters an attacker could use to

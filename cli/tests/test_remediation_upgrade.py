@@ -427,7 +427,10 @@ class TestHealthProbeTokenScoping(unittest.TestCase):
             type(self).captured = {"host": host, "port": port, "token": token}
 
         def health(self):
-            return {"gateway": {"state": "running"}}
+            return {
+                "api": {"state": "running"},
+                "gateway": {"state": "running"},
+            }
 
     def test_is_loopback_host_classification(self):
         for host in ("", "localhost", "127.0.0.1", "127.0.0.5", "::1", "[::1]"):

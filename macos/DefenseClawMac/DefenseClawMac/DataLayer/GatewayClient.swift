@@ -19,29 +19,52 @@
 
 import Foundation
 
+private struct GatewayMutationDenied: LocalizedError {
+    let reason: String
+    var errorDescription: String? { "Operation refused by the Mac app: \(reason)" }
+}
+
 actor GatewayClient {
     private var baseURL: URL?
     private var token: String?
+    private var mutationsAllowed: Bool
+    private var mutationDenialReason: String
     private let session: URLSession
+    private let responseByteLimit: Int
 
     static let defaultTimeout: TimeInterval = 5
     static let pluginTimeout: TimeInterval = 90
     static let scanTimeout: TimeInterval = 120
+    static let maximumResponseBytes = 4 * 1024 * 1024
     private static let pathSegmentCharacters = CharacterSet.alphanumerics
         .union(CharacterSet(charactersIn: "-._~"))
 
-    init(config: DefenseClawConfig = DefenseClawConfig()) {
+    init(
+        config: DefenseClawConfig = DefenseClawConfig(),
+        mutationsAllowed: Bool = false,
+        mutationDenialReason: String = "This installation is read only.",
+        maximumResponseBytes: Int = GatewayClient.maximumResponseBytes,
+        session: URLSession? = nil
+    ) {
         self.baseURL = config.baseURL
         self.token = config.gatewayToken
+        self.mutationsAllowed = mutationsAllowed
+        self.mutationDenialReason = mutationDenialReason
+        self.responseByteLimit = max(1, maximumResponseBytes)
         let conf = URLSessionConfiguration.ephemeral
         conf.timeoutIntervalForRequest = Self.defaultTimeout
         conf.waitsForConnectivity = false
-        self.session = URLSession(configuration: conf)
+        self.session = session ?? URLSession(configuration: conf)
     }
 
     func update(config: DefenseClawConfig) {
         baseURL = config.baseURL
         token = config.gatewayToken
+    }
+
+    func update(installationContext: InstallationContext) {
+        mutationsAllowed = installationContext.permitsMutation
+        mutationDenialReason = installationContext.accessMode.reason ?? "This installation is read only."
     }
 
     // MARK: - Request plumbing
@@ -52,6 +75,9 @@ actor GatewayClient {
         queryItems: [URLQueryItem] = [],
         timeout: TimeInterval = GatewayClient.defaultTimeout
     ) async throws -> Data {
+        if method != "GET", !mutationsAllowed {
+            throw GatewayMutationDenied(reason: mutationDenialReason)
+        }
         guard let baseURL, Self.isLoopback(baseURL) else {
             throw GatewayError.badResponse("refusing non-loopback gateway URL")
         }
@@ -76,10 +102,45 @@ actor GatewayClient {
             req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
         }
 
-        let data: Data
-        let response: URLResponse
         do {
-            (data, response) = try await session.data(for: req)
+            let (bytes, response) = try await session.bytes(for: req)
+            guard let http = response as? HTTPURLResponse else {
+                throw GatewayError.badResponse("non-HTTP response")
+            }
+            if http.statusCode == 401 || http.statusCode == 403 {
+                throw GatewayError.unauthorized
+            }
+            let expectedLength = http.expectedContentLength
+            guard expectedLength < 0 || expectedLength <= Int64(responseByteLimit) else {
+                throw GatewayError.badResponse(
+                    "response exceeds the \(responseByteLimit)-byte limit"
+                )
+            }
+
+            var data = Data()
+            if expectedLength > 0 {
+                data.reserveCapacity(Int(expectedLength))
+            }
+            for try await byte in bytes {
+                guard data.count < responseByteLimit else {
+                    throw GatewayError.badResponse(
+                        "response exceeds the \(responseByteLimit)-byte limit"
+                    )
+                }
+                data.append(byte)
+            }
+
+            switch http.statusCode {
+            case 200..<300:
+                return data
+            default:
+                throw GatewayError.degraded(
+                    status: http.statusCode,
+                    body: String(data: data, encoding: .utf8) ?? ""
+                )
+            }
+        } catch let error as GatewayError {
+            throw error
         } catch let err as URLError {
             switch err.code {
             case .cannotConnectToHost, .networkConnectionLost, .cannotFindHost:
@@ -89,17 +150,6 @@ actor GatewayClient {
             default:
                 throw GatewayError.offline
             }
-        }
-        guard let http = response as? HTTPURLResponse else {
-            throw GatewayError.badResponse("non-HTTP response")
-        }
-        switch http.statusCode {
-        case 200..<300:
-            return data
-        case 401, 403:
-            throw GatewayError.unauthorized
-        default:
-            throw GatewayError.degraded(status: http.statusCode, body: String(data: data, encoding: .utf8) ?? "")
         }
     }
 
@@ -148,7 +198,10 @@ actor GatewayClient {
         snap.version = dict["version"] as? String
 
         // Subsystems: any nested object with a state/status field becomes a row.
-        let known = ["watcher", "api", "guardrail", "telemetry", "ai_discovery", "sinks", "sandbox", "gateway", "watchdog"]
+        let known = [
+            "watcher", "api", "guardrail", "telemetry", "ai_discovery",
+            "sinks", "sandbox", "gateway", "watchdog", "managed",
+        ]
         for key in known {
             if let sub = dict[key] as? [String: Any],
                let state = (sub["state"] as? String) ?? (sub["status"] as? String) {
@@ -402,7 +455,8 @@ actor GatewayClient {
                 name: (r["name"] as? String) ?? (r["key"] as? String) ?? "?",
                 version: (r["version"] as? String) ?? "—",
                 source: (r["source"] as? String) ?? ((r["bundled"] as? Bool) == true ? "bundled" : "custom"),
-                enabled: (r["enabled"] as? Bool) ?? true
+                enabled: (r["enabled"] as? Bool) ?? true,
+                bundled: (r["bundled"] as? Bool) ?? false
             )
         }
     }
@@ -416,7 +470,8 @@ actor GatewayClient {
                 transport: (r["transport"] as? String) ?? (r["type"] as? String) ?? "stdio",
                 endpoint: (r["endpoint"] as? String) ?? (r["url"] as? String) ?? (r["command"] as? String) ?? "—",
                 version: (r["version"] as? String) ?? "—",
-                enabled: (r["enabled"] as? Bool) ?? true
+                enabled: (r["enabled"] as? Bool) ?? true,
+                bundled: (r["bundled"] as? Bool) ?? false
             )
         }
     }
@@ -502,13 +557,20 @@ actor GatewayClient {
         snap.filesScanned = (summary["files_scanned"] as? Int) ?? 0
         // TUI: bool(raw.get("enabled")) — a missing key means disabled.
         snap.enabled = (dict["enabled"] as? Bool) ?? (summary["enabled"] as? Bool) ?? false
+        snap.lookupModelProvenanceOnline =
+            (dict["lookup_model_provenance_online"] as? Bool) ?? false
         snap.newSignals = (summary["new_signals"] as? Int) ?? 0
         snap.changedSignals = (summary["changed_signals"] as? Int) ?? 0
         snap.goneSignals = (summary["gone_signals"] as? Int) ?? 0
         snap.privacyMode = (summary["privacy_mode"] as? String) ?? (summary["mode"] as? String) ?? ""
+        let diagnostics = AIDiscoveryDiagnostics.fromMapping(summary)
+        snap.result = diagnostics.result
+        snap.errors = diagnostics.errors
+        snap.detectorErrors = diagnostics.detectorErrors
         snap.lastScan = DCDates.parse(summary["scanned_at"] ?? summary["last_scan"] ?? summary["lastScan"])
-        let signals = (dict["signals"] as? [[String: Any]]) ?? (dict["components"] as? [[String: Any]]) ?? []
-        snap.signals = signals.map(decodeSignal)
+        let signalPayload = dict["signals"] ?? dict["components"]
+        let signals = AISignalDecoding.signalMappings(from: signalPayload)
+        snap.signals = signals.map(AISignalDecoding.decode)
         snap.components = signals.map(decodeComponent)
         if snap.totalDetected == 0 { snap.totalDetected = snap.signals.count }
         snap.averageConfidence = normalizeConfidence(summary["avg_confidence"] ?? summary["average_confidence"])
@@ -518,40 +580,22 @@ actor GatewayClient {
         return snap
     }
 
-    private func decodeSignal(_ r: [String: Any]) -> AISignal {
-        let component = r["component"] as? [String: Any]
-        let presenceBand = (r["presence_band"] as? String) ?? ""
-        // Scores are `omitempty` in the current gateway, so an exact zero can
-        // arrive as a band without a numeric field. Also remember an explicit
-        // zero from other compatible gateways; both mean the axis was reported.
-        let presenceAxisReported = AIPresenceAxis.wasReported(
-            rawScore: r["presence_score"],
-            band: presenceBand
-        )
-        return AISignal(
-            state: (r["state"] as? String) ?? "",
-            product: (r["product"] as? String) ?? (r["name"] as? String) ?? "?",
-            vendor: (r["vendor"] as? String) ?? "",
-            category: (r["category"] as? String) ?? "",
-            detector: (r["detector"] as? String) ?? "",
-            version: (component?["version"] as? String) ?? (r["version"] as? String) ?? "",
-            ecosystem: (component?["ecosystem"] as? String) ?? "",
-            componentName: (component?["name"] as? String) ?? "",
-            source: (r["source"] as? String) ?? "",
-            confidence: normalizeConfidence(r["confidence"]),
-            identityScore: normalizeConfidence(r["identity_score"]),
-            identityBand: (r["identity_band"] as? String) ?? "",
-            presenceScore: normalizeConfidence(r["presence_score"]),
-            presenceBand: presenceBand,
-            presenceAxisReported: presenceAxisReported,
-            firstSeen: DCDates.parse(r["first_seen"]),
-            lastSeen: DCDates.parse(r["last_seen"]),
-            lastActive: DCDates.parse(r["last_active_at"]),
-            name: (r["name"] as? String) ?? "",
-            supportedConnector: (r["supported_connector"] as? String) ?? "",
-            signalID: (r["signal_id"] as? String) ?? (r["id"] as? String) ?? "",
-            signatureID: (r["signature_id"] as? String) ?? ""
-        )
+    /// Fetch the runtime-plane snapshot.
+    ///
+    /// Throws on a malformed payload so the caller keeps the last good
+    /// snapshot: replacing a stale-but-true coverage report with an empty one
+    /// would read as a clean host rather than as a lost connection.
+    func aiRuntime() async throws -> AIRuntimeSnapshot {
+        let json = try await getJSON("/api/v1/ai-usage/runtime")
+        guard json is [String: Any] else {
+            throw GatewayError.badResponse("/api/v1/ai-usage/runtime not an object")
+        }
+        return AIRuntimeDecoding.snapshot(from: json)
+    }
+
+    /// Trigger one immediate runtime-plane poll.
+    func scanAIRuntime() async throws {
+        try await post("/api/v1/ai-usage/runtime/scan", timeout: Self.scanTimeout)
     }
 
     func aiComponents() async throws -> [AIComponent] {

@@ -53,10 +53,61 @@ func claudeCodeProfileDecode(payload map[string]interface{}) HookProfileRequest 
 		req.Direction = "prompt"
 	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
 		req.Direction = "tool_result"
+	case "MessageDisplay":
+		req.Content = hookFirstString(payload, "delta")
+		req.Direction = "response"
+	case "StopFailure":
+		req.Content = strings.Join(hookNonEmptyStrings(
+			hookFirstString(payload, "error"),
+			hookFirstString(payload, "error_details", "errorDetails"),
+		), "\n")
+		req.Direction = "tool_result"
+	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove", "TaskCreated",
+		"TaskCompleted", "TeammateIdle", "PreCompact", "PostCompact",
+		"Elicitation", "ElicitationResult", "Notification":
+		req.Content = claudeCodeProfileEventContent(payload)
+		req.Direction = "event_content"
 	default:
 		req.Direction = "tool_call"
 	}
 	return req
+}
+
+func hookNonEmptyStrings(values ...string) []string {
+	out := make([]string, 0, len(values))
+	for _, value := range values {
+		if strings.TrimSpace(value) != "" {
+			out = append(out, value)
+		}
+	}
+	return out
+}
+
+func claudeCodeProfileEventContent(payload map[string]interface{}) string {
+	return strings.Join(hookNonEmptyStrings(
+		hookFirstString(payload, "message"),
+		hookFirstString(payload, "title"),
+		hookFirstString(payload, "file_path", "filePath"),
+		hookFirstString(payload, "source"),
+		hookFirstString(payload, "load_reason", "loadReason"),
+		hookFirstString(payload, "memory_type", "memoryType"),
+		hookFirstString(payload, "mcp_server_name", "mcpServerName"),
+		hookFirstString(payload, "action"),
+		hookFirstString(payload, "url"),
+		hookFirstString(payload, "agent_id", "agentId"),
+		hookFirstString(payload, "agent_type", "agentType"),
+		hookFirstString(payload, "old_cwd", "oldCwd"),
+		hookFirstString(payload, "new_cwd", "newCwd"),
+		hookFirstString(payload, "directory"),
+		hookFirstString(payload, "worktree_path", "worktreePath"),
+		hookFirstString(payload, "last_assistant_message", "lastAssistantMessage"),
+		hookFirstString(payload, "content"),
+		hookFirstString(payload, "compact_summary", "compactSummary"),
+		hookFirstString(payload, "custom_instructions", "customInstructions"),
+		hookFirstString(payload, "task_subject", "taskSubject"),
+		hookFirstString(payload, "task_description", "taskDescription"),
+		hookFirstString(payload, "reason"),
+	), "\n")
 }
 
 // claudeCodeProfileMapVerdict implements HookProfile.MapVerdict for
@@ -64,8 +115,8 @@ func claudeCodeProfileDecode(payload map[string]interface{}) HookProfileRequest 
 // evaluateClaudeCodeHook:
 //
 //   - rawAction=="block" + event-is-not-claude-enforceable →
-//     allow + wouldBlock=true (Claude Code's PostToolUseFailure,
-//     SessionStart, etc. are observe-only by contract).
+//     allow + wouldBlock=true (Claude Code's PostToolUse,
+//     PostToolBatch, SessionStart, etc. are observe-only by contract).
 //   - observe mode: any block/alert/confirm verdict demotes to
 //     allow; wouldBlock=true for the block case.
 //   - action mode + rawAction=="confirm": stays confirm only on
@@ -77,7 +128,7 @@ func claudeCodeProfileMapVerdict(in HookVerdictInput) HookVerdictOutput {
 		raw = "allow"
 	}
 
-	if raw == "block" && !claudeCodeCanEnforceProfile(in.Event) {
+	if raw == "block" && !claudeCodeCanEnforceProfile(in) {
 		return HookVerdictOutput{Action: "allow", WouldBlock: true}
 	}
 
@@ -138,7 +189,9 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 				},
 			}}
 		case "TaskCreated", "TaskCompleted", "TeammateIdle":
-			return map[string]interface{}{"continue": false, "stopReason": claudeCodeReasonOrDefault(reason)}
+			// No structured output: hookexec must render the policy reason on
+			// stderr and exit 2 so Claude applies the event-specific feedback.
+			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "Elicitation",
@@ -155,17 +208,33 @@ func claudeCodeOutputForProfile(req HookProfileRequest, action, rawAction, reaso
 			return map[string]interface{}{"decision": "block", "reason": claudeCodeReasonOrDefault(reason)}
 		}
 	}
-	// CwdChanged / FileChanged: PR 5 keeps watchPaths derivation in
-	// the gateway (it consults req.NewCWD which is connector-specific
-	// and not in HookProfileRequest yet). Until PR 6 widens
-	// HookProfileRequest, the unified path falls back to nil here and
-	// the legacy handler keeps producing watchPaths.
+	watchRoot := strings.TrimSpace(hookFirstString(req.Payload, "new_cwd", "newCwd"))
+	if watchRoot == "" {
+		watchRoot = req.CWD
+	}
+	if event == "SessionStart" {
+		output := map[string]interface{}{
+			"hookEventName": "SessionStart",
+			"watchPaths":    ClaudeCodeWatchPaths(watchRoot),
+		}
+		if additional != "" {
+			output["additionalContext"] = additional
+		}
+		return map[string]interface{}{"hookSpecificOutput": output}
+	}
+	if event == "CwdChanged" || event == "FileChanged" {
+		output := map[string]interface{}{"watchPaths": ClaudeCodeWatchPaths(watchRoot)}
+		if additional != "" {
+			output["systemMessage"] = additional
+		}
+		return output
+	}
 	if additional == "" {
 		return nil
 	}
 	switch event {
-	case "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
-		"PostToolBatch", "Notification", "SubagentStart", "SubagentStop":
+	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
+		"PostToolBatch", "SubagentStart", "SubagentStop":
 		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,
@@ -191,27 +260,26 @@ func claudeCodeAdditionalContextForProfile(rawAction, severity, reason string, w
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Claude Code hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Claude Code hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Claude Code hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 // claudeCodeCanEnforceProfile mirrors claudeCodeCanEnforce() in
 // gateway/claude_code_hook.go — the set of events for which a
 // "block" verdict actually reaches an enforceable surface. Events
 // outside this set produce wouldBlock=true / allow.
-func claudeCodeCanEnforceProfile(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
-		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
-		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
-		return true
-	default:
+func claudeCodeCanEnforceProfile(in HookVerdictInput) bool {
+	if in.Event == "ConfigChange" && strings.EqualFold(strings.TrimSpace(hookFirstString(in.Payload, "source")), "policy_settings") {
 		return false
 	}
+	return in.Caps.CanBlock && eventInProfile(in.Event, in.Caps.BlockEvents)
 }

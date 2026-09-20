@@ -1,12 +1,14 @@
 {
-  "hook_event_name": "PreToolUse",
-  "session_id": "dc-e2e-antigravity",
-  "turn_id": "dc-e2e-turn",
-  "agent_id": "antigravity-e2e",
-  "agent_name": "antigravity e2e agent",
-  "agent_type": "antigravity-cli",
-  "tool_name": "run_command",
-  "tool_input": {
-    "command": "echo dc-contract-allow"
+  "conversationId": "dc-e2e-antigravity",
+  "workspacePaths": ["C:\\dc-e2e-workspace"],
+  "transcriptPath": "C:\\dc-e2e-workspace\\transcript.jsonl",
+  "artifactDirectoryPath": "C:\\dc-e2e-workspace\\artifacts",
+  "stepIdx": 1,
+  "toolCall": {
+    "name": "run_command",
+    "args": {
+      "Cwd": "C:\\dc-e2e-workspace",
+      "CommandLine": "Write-Output dc-contract-allow"
+    }
   }
 }

@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/enforce"
 )
@@ -48,7 +49,7 @@ func TestInspectTool_GlobalMCPBlock_RejectsToolsEverywhere(t *testing.T) {
 	// connector and globally — not just at the Python CLI.
 	for _, conn := range []string{"codex", "claudecode", ""} {
 		body := `{"tool":"mcp__jira__createIssue","connector":"` + conn + `","args":{}}`
-		_, v := postInspect(t, api, body)
+		_, v := postInspectForConnector(t, api, conn, body)
 		if v.Action != "block" {
 			t.Errorf("connector %q: action = %q, want block (global mcp block must hit all)", conn, v.Action)
 		}
@@ -58,7 +59,7 @@ func TestInspectTool_GlobalMCPBlock_RejectsToolsEverywhere(t *testing.T) {
 	}
 
 	// A tool belonging to a different (unblocked) MCP server is untouched.
-	_, v := postInspect(t, api, `{"tool":"mcp__github__listRepos","connector":"codex","args":{}}`)
+	_, v := postInspectForConnector(t, api, "codex", `{"tool":"mcp__github__listRepos","connector":"codex","args":{}}`)
 	if v.Action == "block" {
 		t.Errorf("unblocked server: action = block, want non-block (block leaked across servers)")
 	}
@@ -73,12 +74,12 @@ func TestInspectTool_ConnectorScopedMCPBlock_Isolated(t *testing.T) {
 	}
 
 	// Rejected for codex…
-	_, v := postInspect(t, api, `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
+	_, v := postInspectForConnector(t, api, "codex", `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
 	if v.Action != "block" {
 		t.Errorf("codex: action = %q, want block", v.Action)
 	}
 	// …but allowed for a different connector…
-	_, v = postInspect(t, api, `{"tool":"mcp__jira__createIssue","connector":"claudecode","args":{}}`)
+	_, v = postInspectForConnector(t, api, "claudecode", `{"tool":"mcp__jira__createIssue","connector":"claudecode","args":{}}`)
 	if v.Action == "block" {
 		t.Errorf("claudecode: action = block, want non-block (connector-scoped mcp block leaked)")
 	}
@@ -101,7 +102,7 @@ func TestInspectTool_MCPServerBlock_WinsOverToolAllow(t *testing.T) {
 	}
 
 	// The server-level block must win over the tool-level allow.
-	_, v := postInspect(t, api, `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
+	_, v := postInspectForConnector(t, api, "codex", `{"tool":"mcp__jira__createIssue","connector":"codex","args":{}}`)
 	if v.Action != "block" {
 		t.Errorf("action = %q, want block (mcp-server block must override a tool-level allow)", v.Action)
 	}
@@ -117,7 +118,7 @@ func TestHandleToolCall_GlobalMCPBlock(t *testing.T) {
 		t.Fatalf("Block mcp: %v", err)
 	}
 
-	r := NewEventRouter(nil, store, logger, false, nil)
+	r := NewEventRouter(nil, store, logger, false)
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	r.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if !hasAction(t, store, "gateway-tool-call-blocked") {
@@ -131,7 +132,7 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 	if err := enforce.NewPolicyEngine(storeA).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
 		t.Fatalf("BlockForConnector mcp: %v", err)
 	}
-	rCodex := NewEventRouter(nil, storeA, loggerA, false, nil)
+	rCodex := NewEventRouter(nil, storeA, loggerA, false)
 	rCodex.SetGuardrailConfig(&config.GuardrailConfig{Connector: "codex"})
 	payload, _ := json.Marshal(ToolCallPayload{Tool: "mcp__jira__createIssue", Args: json.RawMessage(`{}`), Status: "running"})
 	rCodex.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
@@ -144,7 +145,7 @@ func TestHandleToolCall_ConnectorScopedMCPBlock(t *testing.T) {
 	if err := enforce.NewPolicyEngine(storeB).BlockForConnector("mcp", "jira", "codex", "scoped"); err != nil {
 		t.Fatalf("BlockForConnector mcp: %v", err)
 	}
-	rOther := NewEventRouter(nil, storeB, loggerB, false, nil)
+	rOther := NewEventRouter(nil, storeB, loggerB, false)
 	rOther.SetGuardrailConfig(&config.GuardrailConfig{Connector: "claudecode"})
 	rOther.Route(EventFrame{Type: "event", Event: "tool_call", Payload: payload})
 	if hasAction(t, storeB, "gateway-tool-call-blocked") {
@@ -184,12 +185,34 @@ func TestInspectTool_MCPServerBlock_UsesExplicitServerName(t *testing.T) {
 		t.Fatalf("BlockForConnector mcp: %v", err)
 	}
 
-	_, v := postInspect(t, api, `{"tool":"createIssue","mcp_server_name":"jira","connector":"codex","args":{}}`)
+	_, v := postInspectForConnector(t, api, "codex", `{"tool":"createIssue","mcp_server_name":"jira","connector":"codex","args":{}}`)
 	if v.Action != "block" {
 		t.Errorf("explicit mcp_server_name: action = %q, want block", v.Action)
 	}
 	if !hasFinding(v.Findings, "MCP-BLOCK") {
 		t.Errorf("findings = %v, want MCP-BLOCK", v.Findings)
+	}
+}
+
+func TestOpenCodeHook_ConnectorScopedMCPBlockUsesMappedServerIdentity(t *testing.T) {
+	store, err := audit.NewStore(":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	if err := store.Init(); err != nil {
+		t.Fatal(err)
+	}
+	policy := enforce.NewPolicyEngine(store)
+	if err := policy.BlockForConnector("mcp", "jira.prod", "opencode", "scoped"); err != nil {
+		t.Fatal(err)
+	}
+	deny, server, _ := mcpServerRuntimeBlock(policy, "jira_prod_createIssue", "opencode", "jira.prod")
+	if !deny || server != "jira.prod" {
+		t.Fatalf("opencode mapped identity: deny=%v server=%q, want scoped deny for jira.prod", deny, server)
+	}
+	if deny, _, _ := mcpServerRuntimeBlock(policy, "jira_prod_createIssue", "codex", "jira.prod"); deny {
+		t.Fatal("OpenCode-scoped mapped identity leaked to another connector")
 	}
 }
 

@@ -22,6 +22,21 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import { execFileSync } from 'node:child_process';
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import yaml from 'js-yaml';
 
 import {
   decodePolicyFromHash,
@@ -36,8 +51,14 @@ import { highlightRegoToHtml, tokenizeRego } from '../components/policy-creator/
 import { highlightJsonToHtml, tokenizeJson } from '../components/policy-creator/lib/json-highlight.js';
 import { filterIndex } from '../components/policy-creator/playground/cmdk-filter.js';
 import { policyFromPreset } from '../components/policy-creator/lib/presets.js';
-import { validatePolicy } from '../components/policy-creator/lib/validators.js';
-import type { CorrelationPattern, Policy } from '../components/policy-creator/types.js';
+import { lintRegex, testRegex, validatePolicy } from '../components/policy-creator/lib/validators.js';
+import { BLOCK_CARDS } from '../components/policy-creator/quick-start/questions.js';
+import {
+  BOUNDED_CHAINS,
+  HIGH_ASSURANCE_PACKS,
+  YARA_RULES,
+} from '../components/policy-creator/deterministic-coverage-catalog.js';
+import type { CorrelationPattern, Policy, UseCasePacksFile } from '../components/policy-creator/types.js';
 
 // ── fixtures ────────────────────────────────────────────────────────
 
@@ -98,11 +119,362 @@ function makePolicy(overrides: Partial<Policy> = {}): Policy {
   return base;
 }
 
+// Keep this test-side reader intentionally narrow. RULE_RECIPE_KINDS is a
+// component-local constant (and importing rules.tsx would pull React into this
+// pure Node suite), so the audit reads only that array declaration. If the UI
+// later exports the constant from a non-React module, prefer importing it.
+function visibleRuleRecipeKinds(): Set<string> {
+  const source = readFileSync(
+    new URL('../components/policy-creator/sections/rules.tsx', import.meta.url),
+    'utf8',
+  );
+  const declaration = source.match(
+    /const\s+RULE_RECIPE_KINDS[^=]*=\s*\[([\s\S]*?)\];/,
+  );
+  assert.ok(
+    declaration,
+    'could not find RULE_RECIPE_KINDS in sections/rules.tsx; export it from a non-React module and update this test',
+  );
+  return new Set(
+    Array.from(declaration[1].matchAll(/['"](rule:[^'"]+)['"]/g), (match) => match[1]),
+  );
+}
+
+function generatedRuleRecipeKinds(): Set<string> {
+  const raw = readFileSync(
+    new URL('../data/policy-recipes.json', import.meta.url),
+    'utf8',
+  );
+  const decoded = JSON.parse(raw) as {
+    recipes?: Array<{ kind?: unknown }>;
+  };
+  assert.ok(Array.isArray(decoded.recipes), 'policy-recipes.json must contain a recipes array');
+  return new Set(
+    decoded.recipes
+      .map((recipe) => recipe.kind)
+      .filter((kind): kind is string => typeof kind === 'string' && kind.startsWith('rule:')),
+  );
+}
+
+// ── generated catalog / Quick Start integrity ─────────────────────
+
+test('quick start: every rule ID resolves in every selectable base preset', () => {
+  const references = BLOCK_CARDS.flatMap((card) =>
+    card.ruleIds.map((ruleId) => ({ cardId: card.id, ruleId })),
+  );
+  assert.ok(references.length > 0, 'Quick Start must exercise at least one bundled rule');
+
+  for (const presetName of ['default', 'permissive', 'strict'] as const) {
+    const preset = policyFromPreset(presetName);
+    const available = new Set(
+      preset.rule_pack.files.flatMap((file) => file.rules.map((rule) => rule.id)),
+    );
+    const missing = references
+      .filter(({ ruleId }) => !available.has(ruleId))
+      .map(({ cardId, ruleId }) => `${cardId}:${ruleId}`)
+      .sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `Quick Start references rules absent from the ${presetName} preset: ${missing.join(', ')}`,
+    );
+  }
+});
+
+test('quick start: every correlator ID resolves in every selectable base preset', () => {
+  const references = BLOCK_CARDS.flatMap((card) =>
+    (card.correlatorPatternIds ?? []).map((patternId) => ({ cardId: card.id, patternId })),
+  );
+  assert.ok(references.length > 0, 'Quick Start must exercise at least one correlator pattern');
+
+  for (const presetName of ['default', 'permissive', 'strict'] as const) {
+    const preset = policyFromPreset(presetName);
+    const available = new Set(preset.correlator.map((pattern) => pattern.id));
+    const missing = references
+      .filter(({ patternId }) => !available.has(patternId))
+      .map(({ cardId, patternId }) => `${cardId}:${patternId}`)
+      .sort();
+    assert.deepEqual(
+      missing,
+      [],
+      `Quick Start references correlators absent from the ${presetName} preset: ${missing.join(', ')}`,
+    );
+  }
+});
+
+test('recipe picker: every generated rule recipe kind is visible', () => {
+  const generated = generatedRuleRecipeKinds();
+  const visible = visibleRuleRecipeKinds();
+  assert.ok(generated.size > 0, 'generated recipe catalog must contain rule recipes');
+  assert.ok(visible.size > 0, 'recipe picker must expose at least one rule recipe kind');
+
+  const hidden = [...generated].filter((kind) => !visible.has(kind)).sort();
+  assert.deepEqual(
+    hidden,
+    [],
+    `generated rule recipe kinds hidden by RULE_RECIPE_KINDS: ${hidden.join(', ')}`,
+  );
+});
+
+test('deterministic inventory: fixed chain and YARA IDs match runtime sources', () => {
+  const chainSource = readFileSync(
+    new URL('../../internal/guardrail/tool_chain.go', import.meta.url),
+    'utf8',
+  );
+  const sourceChainIds = Array.from(
+    chainSource.matchAll(/ToolChain\w+\s+=\s+"(chain\.[^"]+)"/g),
+    (match) => match[1],
+  ).sort();
+  assert.deepEqual(
+    BOUNDED_CHAINS.map((chain) => chain.id).sort(),
+    sourceChainIds,
+  );
+  assert.equal(sourceChainIds.length, 26);
+
+  const yaraSource = readFileSync(
+    new URL('../../policies/yara/mcp-tools/description_injection.yara', import.meta.url),
+    'utf8',
+  );
+  const sourceYaraIds = Array.from(
+    yaraSource.matchAll(/^rule\s+([A-Za-z0-9_]+)\b/gm),
+    (match) => match[1],
+  ).sort();
+  assert.deepEqual(
+    YARA_RULES.map((rule) => rule.id).sort(),
+    sourceYaraIds,
+  );
+  assert.equal(sourceYaraIds.length, 10);
+});
+
+test('deterministic docs: profile totals and chain posture match canonical sources', () => {
+  const totals = new Map<string, {
+    declared: number;
+    enabled: number;
+    semantic: number;
+    toolCallOnly: number;
+    neverMatch: number;
+  }>();
+
+  for (const profile of ['default', 'permissive', 'strict']) {
+    const rulesDir = new URL(`../../policies/guardrail/${profile}/rules/`, import.meta.url);
+    const rules = readdirSync(rulesDir)
+      .filter((name) => name.endsWith('.yaml'))
+      .flatMap((name) => {
+        const source = yaml.load(readFileSync(new URL(name, rulesDir), 'utf8')) as {
+          rules?: Array<{
+            enabled?: boolean;
+            expression?: string;
+            tool_call_only?: boolean;
+            pattern?: string;
+          }>;
+        };
+        return source.rules ?? [];
+      });
+    const enabled = rules.filter((rule) => rule.enabled !== false);
+    totals.set(profile, {
+      declared: rules.length,
+      enabled: enabled.length,
+      semantic: enabled.filter((rule) => typeof rule.expression === 'string').length,
+      toolCallOnly: enabled.filter((rule) => rule.tool_call_only === true).length,
+      neverMatch: enabled.filter((rule) => rule.pattern === 'a^').length,
+    });
+  }
+
+  const reference = readFileSync(
+    new URL('../content/docs/policies/deterministic-detection.mdx', import.meta.url),
+    'utf8',
+  );
+  const creator = readFileSync(
+    new URL('../content/docs/policies/creator.mdx', import.meta.url),
+    'utf8',
+  );
+  const index = readFileSync(
+    new URL('../content/docs/policies/index.mdx', import.meta.url),
+    'utf8',
+  );
+
+  const balanced = totals.get('default')!;
+  const permissive = totals.get('permissive')!;
+  const strict = totals.get('strict')!;
+  assert.ok(reference.includes(
+    `| Balanced/default | ${balanced.declared} | ${balanced.enabled} | ${balanced.semantic} | ${balanced.toolCallOnly} | ${balanced.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `| Permissive | ${permissive.declared} | ${permissive.enabled} | ${permissive.semantic} | ${permissive.toolCallOnly} | ${permissive.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `| Strict | ${strict.declared} | ${strict.enabled} | ${strict.semantic} | ${strict.toolCallOnly} | ${strict.neverMatch} |`,
+  ));
+  assert.ok(reference.includes(
+    `The balanced/default enabled rule catalog contains ${balanced.enabled} local rules`,
+  ));
+  assert.ok(index.includes(
+    `The balanced/default enabled catalog currently contains ${balanced.enabled} local rules`,
+  ));
+  assert.ok(creator.includes(
+    `Balanced/default exposes ${balanced.declared} declared rules (${balanced.enabled} enabled)`,
+  ));
+
+  const enforcementCapable = BOUNDED_CHAINS.filter(
+    (chain) => chain.mode === 'enforcement-capable',
+  ).length;
+  assert.ok(reference.includes(`The fixed chain catalog contains ${BOUNDED_CHAINS.length} ordered behaviors.`));
+  assert.equal(enforcementCapable, 4);
+  for (const page of [
+    reference,
+    readFileSync(new URL('../content/docs/policies/cel/engine.mdx', import.meta.url), 'utf8'),
+    readFileSync(new URL('../content/docs/policies/cel/tool-call-state.mdx', import.meta.url), 'utf8'),
+  ]) {
+    assert.ok(page.includes(`${BOUNDED_CHAINS.length} ordered chains`) ||
+      page.includes(`${BOUNDED_CHAINS.length} ordered behaviors`));
+    assert.ok(!page.includes('The six ordered chains'));
+    assert.ok(!page.includes('contains 18 ordered'));
+  }
+});
+
+test('use-case packs: generated selectable rules match canonical YAML', () => {
+  const generated = JSON.parse(
+    readFileSync(new URL('../data/policy-use-case-packs.json', import.meta.url), 'utf8'),
+  ) as UseCasePacksFile;
+  const sourceRoot = new URL('../../policies/guardrail-use-cases/', import.meta.url);
+  const sourceIds = readdirSync(sourceRoot).filter((entry) =>
+    statSync(new URL(entry, sourceRoot)).isDirectory(),
+  );
+  assert.deepEqual(
+    generated.packs.map((pack) => pack.id).sort(),
+    sourceIds.sort(),
+  );
+
+  for (const pack of generated.packs) {
+    const expected = HIGH_ASSURANCE_PACKS.find((item) => item.id === pack.id);
+    assert.ok(expected, `missing inventory metadata for ${pack.id}`);
+    assert.equal(pack.status, expected.status);
+    const generatedRuleCount = pack.files.reduce((count, file) => count + file.rules.length, 0);
+    assert.equal(generatedRuleCount, expected.ruleCount);
+
+    for (const file of pack.files) {
+      const sourcePath = new URL(
+        `${pack.id}/rules/${file.filename}.yaml`,
+        sourceRoot,
+      );
+      const source = yaml.load(readFileSync(sourcePath, 'utf8')) as {
+        category: string;
+        rules: unknown[];
+      };
+      assert.deepEqual(file.category, source.category);
+      assert.deepEqual(file.rules, source.rules);
+    }
+  }
+});
+
+test('validators accept code-owned dotted semantic rule IDs', () => {
+  const policy = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{
+        filename: 'commands',
+        category: 'commands',
+        rules: [{
+          id: 'impact.fork_bomb',
+          enabled: true,
+          pattern: 'a^',
+          title: 'Fork bomb',
+          severity: 'CRITICAL',
+          confidence: 0.99,
+          tags: ['impact'],
+        }],
+      }],
+    },
+  });
+  assert.equal(validatePolicy(policy).some((finding) => finding.code === 'ID_FORMAT'), false);
+});
+
 test('install script honors DEFENSECLAW_HOME with the standard home fallback', () => {
   const script = emitInstallScript(makePolicy());
   assert.match(script, /DC_ROOT="\$\{DEFENSECLAW_HOME:-\$\{HOME\}\/\.defenseclaw\}"/);
   assert.match(script, /POLICIES_ROOT="\$\{DC_ROOT\}\/policies"/);
   assert.doesNotMatch(script, /POLICIES_ROOT="\$\{HOME\}\/\.defenseclaw\/policies"/);
+});
+
+test('install script executes idempotently and activates the emitted policy', () => {
+  const root = mkdtempSync(join(tmpdir(), 'defenseclaw-policy-studio-'));
+  try {
+    const policyHome = join(root, 'policy-home');
+    const binDir = join(root, 'bin');
+    const scriptPath = join(root, 'install-studio-e2e.sh');
+    const shimPath = join(binDir, 'defenseclaw');
+    const policy = policyFromPreset('default');
+    policy.name = 'studio-e2e';
+    policy.rule_pack.name = policy.name;
+
+    mkdirSync(binDir, { recursive: true, mode: 0o700 });
+    writeFileSync(scriptPath, emitInstallScript(policy), { mode: 0o700 });
+    writeFileSync(
+      shimPath,
+      `#!/usr/bin/env bash\nset -euo pipefail\ntest "$1" = policy\ntest "$2" = activate\ntest "$3" = studio-e2e\nprintf '%s\\n' "$*" > "\${DEFENSECLAW_HOME}/activation-call"\n`,
+      { mode: 0o700 },
+    );
+    chmodSync(shimPath, 0o700);
+
+    const env = {
+      ...process.env,
+      DEFENSECLAW_HOME: policyHome,
+      PATH: `${binDir}:${process.env.PATH ?? ''}`,
+    };
+    execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
+    execFileSync('bash', [scriptPath], { env, stdio: 'pipe' });
+
+    assert.ok(existsSync(join(policyHome, 'policies', 'studio-e2e.yaml')));
+    assert.ok(existsSync(join(policyHome, 'policies', 'rego', 'data.json')));
+    assert.equal(
+      readFileSync(join(policyHome, 'activation-call'), 'utf8').trim(),
+      'policy activate studio-e2e',
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('regex tester supports the shipped Go Unicode scalar syntax', () => {
+  const pattern = String.raw`(?:[A-Za-z0-9][\x{200B}\x{200C}\x{200D}\x{FEFF}][\s\S]*?){10,}`;
+  assert.equal(lintRegex(pattern).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{FDD0}`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{0000200B}`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{200B}\_`).compiled, true);
+  assert.equal(lintRegex(String.raw`\x{110000}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{D800}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{not-hex}`).compiled, false);
+  assert.equal(lintRegex(String.raw`\x{200B`).compiled, false);
+
+  const positive =
+    'a' +
+    '\u200B' +
+    'b' +
+    '\u200C' +
+    'c' +
+    '\u200D' +
+    'd' +
+    '\uFEFF' +
+    'e' +
+    '\u200B' +
+    'f' +
+    '\u200C' +
+    'g' +
+    '\u200D' +
+    'h' +
+    '\uFEFF' +
+    'i' +
+    '\u200B' +
+    'j' +
+    '\u200C';
+  const results = testRegex(pattern, '', [positive], [
+    'copy' + '\u200B' + 'paste',
+    '👩' + '\u200D' + '💻',
+  ]);
+  assert.deepEqual(
+    results.map((result) => result.actual),
+    ['match', 'no-match', 'no-match'],
+  );
 });
 
 // ── share: round trip ───────────────────────────────────────────────
@@ -929,6 +1301,89 @@ test('validators: properly-shaped CISCO env var passes', () => {
     f.code === 'CISCO_AID_KEY_ENV_MISSING',
   );
   assert.equal(findings.length, 0, 'valid env var name must not trip the secret-paste lint');
+});
+
+test('semantic rule fields validate and survive YAML emit', async () => {
+  const rule = {
+    id: 'TOOL-CALL-RULE',
+    enabled: true,
+    pattern: 'dangerous-tool-call',
+    expression: "f.tool == 'shell'",
+    tool_call_only: true,
+    title: 'Semantic tool-call rule',
+    severity: 'HIGH' as const,
+    confidence: 0.9,
+    tags: ['tool-call'],
+  };
+  const policy = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{ filename: 'commands', category: 'command', rules: [rule] }],
+    },
+  });
+  assert.equal(
+    validatePolicy(policy).filter((f) => f.code.startsWith('CEL_')).length,
+    0,
+  );
+
+  const file = emit(policy).find((f) => f.path.endsWith('rules/commands.yaml'));
+  assert.ok(file, 'commands rule file must be emitted');
+  const yaml = await import('js-yaml');
+  const decoded = yaml.load(file!.contents) as {
+    rules: Array<Record<string, unknown>>;
+  };
+  assert.equal(decoded.rules[0].expression, rule.expression);
+  assert.equal(decoded.rules[0].tool_call_only, true);
+
+  const messageLaneRegex = makePolicy({
+    rule_pack: {
+      name: 'test-policy',
+      files: [{
+        filename: 'commands',
+        category: 'command',
+        rules: [{ ...rule, tool_call_only: false }],
+      }],
+    },
+  });
+  assert.equal(
+    validatePolicy(messageLaneRegex).filter((f) => f.code.startsWith('CEL_')).length,
+    0,
+    'regex exposure must not change the trusted boundary for CEL evaluation',
+  );
+  const compound = structuredClone(messageLaneRegex);
+  compound.rule_pack.files[0].rules[0].expression = ' true';
+  const compoundCodes = validatePolicy(compound).map((f) => f.code);
+  assert.ok(
+    compoundCodes.includes('CEL_EXPRESSION_BLANK'),
+    'expression formatting errors must still be reported',
+  );
+
+  for (const expression of ['', '   ', ' true', 'true ']) {
+    const malformed = makePolicy({
+      rule_pack: {
+        name: 'test-policy',
+        files: [{
+          filename: 'commands',
+          category: 'command',
+          rules: [{ ...rule, expression }],
+        }],
+      },
+    });
+    assert.ok(
+      validatePolicy(malformed).some((f) => f.code === 'CEL_EXPRESSION_BLANK'),
+      `expression ${JSON.stringify(expression)} must fail`,
+    );
+  }
+
+  const nonString = structuredClone(policy);
+  (nonString.rule_pack.files[0].rules[0] as unknown as { expression: unknown }).expression =
+    true;
+  nonString.rule_pack.files[0].rules[0].tool_call_only = false;
+  const nonStringCodes = validatePolicy(nonString).map((f) => f.code);
+  assert.ok(
+    nonStringCodes.includes('CEL_EXPRESSION_TYPE'),
+    'a non-string expression must report its type error without crashing',
+  );
 });
 
 // ── rego-highlight ──────────────────────────────────────────────────

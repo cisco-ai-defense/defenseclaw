@@ -19,7 +19,7 @@
 #               codex --restart`, so OTLP is asserted.
 #   - trust:    Codex hashes the hook command and refuses to run an
 #               unrecognized one. `defenseclaw setup codex` pre-seeds trust;
-#               on Windows the native `defenseclaw-gateway hook` command +
+#               on Windows the native no-console `defenseclaw-hook hook` command +
 #               .hookcfg keep the hash stable. CODEX_BYPASS_HOOK_TRUST=1 adds
 #               the documented escape hatch if a runner starts cold.
 #

@@ -1,0 +1,15 @@
+{
+  "hook_event_name": "agent.end",
+  "session_id": "dc-e2e-amp",
+  "thread_id": "dc-e2e-amp",
+  "turn_id": "dc-e2e-turn",
+  "message_id": "dc-e2e-turn",
+  "source_event_id": "agent.end:dc-e2e-amp:dc-e2e-turn:windows-contract:6",
+  "source_sequence": "6",
+  "agent_name": "amp",
+  "agent_type": "amp",
+  "tool_name": "message",
+  "tool_response": "ready",
+  "response": "ready",
+  "status": "completed"
+}

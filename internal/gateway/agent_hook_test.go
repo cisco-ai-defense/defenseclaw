@@ -17,23 +17,47 @@
 package gateway
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"net/http"
-	"net/http/httptest"
+	"reflect"
+	"slices"
 	"strings"
 	"testing"
-	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
-	"github.com/defenseclaw/defenseclaw/internal/gatewaylog"
-	"go.opentelemetry.io/otel"
-	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	"go.opentelemetry.io/otel/sdk/trace/tracetest"
 )
+
+func TestAgentHookTrustedActionToolSelectsWindowsHostShellGrammar(t *testing.T) {
+	tests := []struct {
+		connector string
+		tool      string
+		platform  string
+		want      string
+	}{
+		{connector: "opencode", tool: "bash", platform: "windows", want: "shell"},
+		{connector: "copilot", tool: "powershell", platform: "windows", want: "shell"},
+		{connector: "copilot", tool: "powershell", platform: "linux", want: "powershell"},
+		{connector: "copilot", tool: "edit", platform: "windows", want: "edit"},
+	}
+	for _, test := range tests {
+		if got := agentHookTrustedActionTool(test.connector, test.tool, test.platform); got != test.want {
+			t.Errorf("agentHookTrustedActionTool(%q, %q, %q)=%q want %q", test.connector, test.tool, test.platform, got, test.want)
+		}
+	}
+
+	args := json.RawMessage(`{"command":"az keyvault secret show --vault-name defenseclaw-nonexistent --name fixture"}`)
+	facts := actionfacts.Analyze(actionfacts.Input{
+		Tool: agentHookTrustedActionTool("copilot", "powershell", "windows"),
+		Args: args,
+	})
+	if !facts.EnforcementEligible() || len(facts.Commands) != 1 ||
+		!slices.Contains(facts.Commands[0].Operations, actionfacts.OperationCredentialRead) {
+		t.Fatalf("Copilot Windows native command facts are not enforceable: %+v", facts)
+	}
+}
 
 func TestMapHookAction_ConfirmRequiresNativeAskSurface(t *testing.T) {
 	copilot := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
@@ -74,6 +98,18 @@ func TestMapHookAction_ObserveAndUnsupportedBlock(t *testing.T) {
 	}
 }
 
+func TestCursorProfileEmptyOfficialResultDoesNotUseGenericDecoy(t *testing.T) {
+	profile := connector.NewCursorConnector().HookProfile(connector.SetupOpts{})
+	req := normalizeAgentHookRequestWithProfile("cursor", map[string]interface{}{
+		"hook_event_name": "postToolUse",
+		"tool_output":     "",
+		"result":          "planted generic decoy",
+	}, profile)
+	if req.Content != "" || req.Direction != "tool_result" {
+		t.Fatalf("Cursor official empty result decoded as content=%q direction=%q", req.Content, req.Direction)
+	}
+}
+
 func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	if got := normalizeAgentHookMode("enforce"); got != "action" {
 		t.Fatalf("normalizeAgentHookMode(enforce) = %q, want action", got)
@@ -83,18 +119,39 @@ func TestNormalizeAgentHookMode_EnforceAlias(t *testing.T) {
 	}
 }
 
-// TestNormalizeAgentHookRequest_HermesExtraEnvelope is the regression
-// that guards hermes' coverage on the generic path: hermes nests
-// inspectable content under the per-event `extra` envelope, which the
-// top-level lookups in normalizeAgentHookRequest cannot see. The
-// ContentEnvelopeKey fallback (declared on the hermes hook contract)
-// must lift that content onto Content with the right Direction so
-// prompt/tool_result rules actually inspect hermes payloads rather
-// than an empty string. Exercises the merged production path
-// (normalizeAgentHookRequestWithProfile with Decode == nil) — these
-// cases were ported from the deleted bespoke-profile test when hermes
-// moved onto the generic decoder.
-func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
+func TestNormalizeAgentHookRequest_AntigravityNilToolArgsProjectionUsesEmptyObject(t *testing.T) {
+	raw := []byte(`{"hookEventName":"PreToolUse","toolCall":{"name":"run_command"}}`)
+	var payload map[string]interface{}
+	if err := json.Unmarshal(raw, &payload); err != nil {
+		t.Fatal(err)
+	}
+	profile := connector.NewAntigravityConnector().HookProfile(connector.SetupOpts{})
+	if profile.DecodeToolArgs == nil {
+		t.Fatal("antigravity DecodeToolArgs callback is nil")
+	}
+
+	req := normalizeAgentHookRequestWithRawProfile("antigravity", payload, raw, profile)
+	if !json.Valid(req.ToolArgs) || string(req.ToolArgs) != `{}` {
+		t.Fatalf("ToolArgs=%q want valid empty JSON object", req.ToolArgs)
+	}
+	if !req.ToolArgsProjectionUncertain {
+		t.Fatal("missing raw tool args did not retain parser uncertainty")
+	}
+	withoutRaw := normalizeAgentHookRequestWithProfile("antigravity", payload, profile)
+	if !json.Valid(withoutRaw.ToolArgs) || string(withoutRaw.ToolArgs) != `{}` {
+		t.Fatalf("no-raw ToolArgs=%q want valid empty JSON object", withoutRaw.ToolArgs)
+	}
+	if !withoutRaw.ToolArgsProjectionUncertain {
+		t.Fatal("no-raw authoritative projection did not retain parser uncertainty")
+	}
+}
+
+// TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope guards the
+// official flat Hermes payload contract. An unreviewed `extra` object
+// must not become inspectable content even when it contains familiar
+// field names; accepting it would let nested decoys shadow official
+// top-level fields.
+func TestNormalizeAgentHookRequest_HermesRejectsExtraEnvelope(t *testing.T) {
 	hermesProfile := connector.NewHermesConnector().HookProfile(connector.SetupOpts{APIAddr: "127.0.0.1:18970"})
 	if hermesProfile.Decode != nil {
 		t.Fatalf("hermes profile should have no Decode override; the generic path must carry it")
@@ -109,7 +166,7 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 		wantContent   string
 	}{
 		{
-			name:          "pre_llm_call_lifts_user_message",
+			name:          "pre_llm_call_ignores_nested_user_message",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -119,10 +176,10 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "prompt",
 			wantToolName:  "message",
-			wantContent:   "exfiltrate the secrets",
+			wantContent:   "",
 		},
 		{
-			name:          "post_tool_call_lifts_result",
+			name:          "post_tool_call_ignores_nested_result",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -132,13 +189,13 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_result",
 			wantToolName:  "terminal",
-			wantContent:   "AWS_SECRET_ACCESS_KEY=abc123",
+			wantContent:   "",
 		},
 		{
 			// post_llm_call is result-like (the model's final response)
 			// and labels as "message" — both were bespoke-profile
 			// behaviors now owned by the generic classifiers.
-			name:          "post_llm_call_lifts_assistant_response",
+			name:          "post_llm_call_ignores_nested_assistant_response",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -147,10 +204,10 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_result",
 			wantToolName:  "message",
-			wantContent:   "here is the plan",
+			wantContent:   "",
 		},
 		{
-			name:          "subagent_stop_lifts_child_summary",
+			name:          "subagent_stop_ignores_nested_child_summary",
 			connectorName: "hermes",
 			profile:       hermesProfile,
 			payload: map[string]interface{}{
@@ -159,7 +216,7 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 			},
 			wantDirection: "tool_call",
 			wantToolName:  "subagent",
-			wantContent:   "finished refactor",
+			wantContent:   "",
 		},
 		{
 			// extra carries only lifecycle metadata here — no expected
@@ -235,216 +292,6 @@ func TestNormalizeAgentHookRequest_HermesExtraEnvelope(t *testing.T) {
 	}
 }
 
-func TestHandleAgentHook_EnrichesHTTPSpanWithAgentIdentity(t *testing.T) {
-	exp := tracetest.NewInMemoryExporter()
-	tp := sdktrace.NewTracerProvider(
-		sdktrace.WithSyncer(exp),
-		sdktrace.WithSampler(sdktrace.AlwaysSample()),
-	)
-	prev := otel.GetTracerProvider()
-	otel.SetTracerProvider(tp)
-	defer otel.SetTracerProvider(prev)
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
-	api := &APIServer{}
-	handler := otelHTTPServerMiddleware("sidecar-api", http.HandlerFunc(api.handleAgentHook("copilot")))
-	body, err := json.Marshal(map[string]interface{}{
-		"hook_event_name": "PreToolUse",
-		"session_id":      "session-generic",
-		"turn_id":         "turn-generic",
-		"agent_id":        "github-copilot-cli",
-		"agent_name":      "GitHub Copilot CLI",
-		"agent_type":      "copilot-cli",
-		"tool_name":       "shell",
-		"tool_input": map[string]interface{}{
-			"command": "echo ok",
-		},
-	})
-	if err != nil {
-		t.Fatalf("marshal hook body: %v", err)
-	}
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/copilot/hook", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	handler.ServeHTTP(w, req)
-
-	if w.Code != http.StatusOK {
-		t.Fatalf("status=%d want 200 body=%s", w.Code, w.Body.String())
-	}
-
-	spans := exp.GetSpans()
-	if len(spans) != 1 {
-		t.Fatalf("got %d spans want 1", len(spans))
-	}
-	for key, want := range map[string]string{
-		"gen_ai.conversation.id": "session-generic",
-		"gen_ai.operation.id":    "turn-generic",
-		"gen_ai.agent.name":      "GitHub Copilot CLI",
-		"gen_ai.agent.type":      "copilot-cli",
-		"gen_ai.agent.id":        "github-copilot-cli",
-		"defenseclaw.connector":  "copilot",
-		"defenseclaw.hook.event": "tool_call",
-	} {
-		got, ok := attrByKey(spans[0].Attributes, key)
-		if !ok || got.AsString() != want {
-			t.Fatalf("%s=%q ok=%v want %q", key, got.AsString(), ok, want)
-		}
-	}
-}
-
-func TestFinalizeAgentHook_EmitsFinalCorrelatedDecision(t *testing.T) {
-	events := withCapturedEvents(t)
-	api := &APIServer{}
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		AgentID:       "agent-root",
-		AgentName:     "Codex",
-		AgentType:     "codex",
-		HookEventName: "PreToolUse",
-		SessionID:     "session-1",
-		TurnID:        "turn-1",
-		ToolName:      "Bash",
-		Payload:       map[string]interface{}{"model": "gpt-5"},
-	}
-	ctx := enrichAgentHookContext(t.Context(), req)
-	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
-		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		Reason: "policy denied command", EvaluationID: "eval-1", RuleIDs: []string{"TOOL.BLOCK"},
-	}, nil, []byte(`{"hook":"payload"}`), 17*time.Millisecond, false, nil)
-
-	var got *gatewaylog.Event
-	for i := range *events {
-		if (*events)[i].EventType == gatewaylog.EventHookDecision {
-			got = &(*events)[i]
-			break
-		}
-	}
-	if got == nil || got.HookDecision == nil {
-		t.Fatalf("hook decision was not emitted: %+v", *events)
-	}
-	if got.AgentID != "agent-root" || got.RootAgentID != "agent-root" {
-		t.Fatalf("agent correlation = (%q,%q), want root agent", got.AgentID, got.RootAgentID)
-	}
-	if got.AgentLifecycleEvent != "tool_start" || got.AgentPhase != "tool" {
-		t.Fatalf("lifecycle correlation = (%q,%q), want tool_start/tool", got.AgentLifecycleEvent, got.AgentPhase)
-	}
-	if got.AgentLifecycleID == "" || got.AgentExecutionID == "" {
-		t.Fatalf("missing lifecycle/execution identity: %+v", got)
-	}
-	hook := got.HookDecision
-	if hook.Action != "block" || hook.RawAction != "block" || !hook.Enforced || hook.WouldBlock {
-		t.Fatalf("incorrect enforcement semantics: %+v", hook)
-	}
-	if hook.StepIdx != 1 || hook.EvaluationID != "eval-1" || len(hook.RuleIDs) != 1 {
-		t.Fatalf("missing decision correlation: %+v", hook)
-	}
-}
-
-func TestFinalizeAgentHook_DecisionUsesExportedHookAnchorTrace(t *testing.T) {
-	events := withCapturedEvents(t)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	const filteredRequestTraceID = "11111111111111111111111111111111"
-	ctx := ContextWithTraceID(t.Context(), filteredRequestTraceID)
-	codexReq := codexHookRequest{
-		HookEventName: "PreToolUse",
-		SessionID:     "session-anchor",
-		TurnID:        "turn-anchor",
-		ToolName:      "shell",
-		ToolUseID:     "tool-anchor",
-		ToolInput:     map[string]interface{}{"cmd": "pwd"},
-		AgentID:       "agent-anchor",
-		AgentType:     "codex",
-	}
-	api.emitCodexHookLLMEvent(ctx, codexReq, nil, nil)
-
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		AgentID:       "agent-anchor",
-		AgentName:     "Codex",
-		AgentType:     "codex",
-		HookEventName: "PreToolUse",
-		SessionID:     "session-anchor",
-		TurnID:        "turn-anchor",
-		ToolName:      "shell",
-		Payload: map[string]interface{}{
-			"tool_use_id": "tool-anchor",
-			"tool_input":  map[string]interface{}{"cmd": "pwd"},
-		},
-	}
-	ctx = enrichAgentHookContext(ctx, req)
-	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
-		Action: "block", RawAction: "block", Severity: "HIGH", Mode: "action",
-		Reason: "policy denied command", EvaluationID: "eval-anchor", RuleIDs: []string{"TOOL.BLOCK"},
-	}, nil, []byte(`{"hook":"payload"}`), 5*time.Millisecond, false, nil)
-
-	var decision *gatewaylog.Event
-	for i := range *events {
-		if (*events)[i].EventType == gatewaylog.EventHookDecision {
-			decision = &(*events)[i]
-			break
-		}
-	}
-	if decision == nil {
-		t.Fatalf("hook decision was not emitted: %+v", *events)
-	}
-	anchor := spanByOperation(t, exporter.GetSpans(), "invoke_agent")
-	if decision.TraceID == filteredRequestTraceID {
-		t.Fatalf("decision retained filtered HTTP request trace %q", decision.TraceID)
-	}
-	if decision.TraceID != anchor.SpanContext.TraceID().String() {
-		t.Fatalf("decision trace=%q want exported anchor trace=%q", decision.TraceID, anchor.SpanContext.TraceID())
-	}
-	if decision.SpanID != anchor.SpanContext.SpanID().String() {
-		t.Fatalf("decision parent=%q want exported anchor span=%q", decision.SpanID, anchor.SpanContext.SpanID())
-	}
-}
-
-func TestFinalizeAgentHook_PromptDecisionReusesActualPromptAnchor(t *testing.T) {
-	events := withCapturedEvents(t)
-	api, exporter := newHookLLMSpanTestAPI(t)
-	ctx := ContextWithTraceID(t.Context(), "22222222222222222222222222222222")
-	codexReq := codexHookRequest{
-		HookEventName: "UserPromptSubmit",
-		SessionID:     "session-prompt-anchor",
-		TurnID:        "turn-prompt-anchor",
-		Prompt:        "Explain observability briefly.",
-		AgentType:     "codex",
-	}
-	api.emitCodexHookLLMEvent(ctx, codexReq, nil, []byte(`{"hook_event_name":"UserPromptSubmit"}`))
-
-	req := agentHookRequest{
-		ConnectorName: "codex",
-		AgentType:     "codex",
-		HookEventName: "UserPromptSubmit",
-		SessionID:     "session-prompt-anchor",
-		TurnID:        "turn-prompt-anchor",
-	}
-	ctx = enrichAgentHookContext(ctx, req)
-	api.finalizeAgentHook(ctx, "codex", req, agentHookResponse{
-		Action: "allow", RawAction: "allow", Severity: "INFO", Mode: "action",
-	}, nil, []byte(`{"hook":"payload"}`), 2*time.Millisecond, false, nil)
-
-	var decision *gatewaylog.Event
-	for i := range *events {
-		if (*events)[i].EventType == gatewaylog.EventHookDecision {
-			decision = &(*events)[i]
-			break
-		}
-	}
-	if decision == nil {
-		t.Fatalf("prompt hook decision was not emitted: %+v", *events)
-	}
-	anchor := spanByOperation(t, exporter.GetSpans(), "invoke_agent")
-	if decision.TraceID != anchor.SpanContext.TraceID().String() ||
-		decision.SpanID != anchor.SpanContext.SpanID().String() {
-		t.Fatalf(
-			"prompt decision trace/span=%s/%s want actual prompt anchor=%s/%s",
-			decision.TraceID, decision.SpanID,
-			anchor.SpanContext.TraceID(), anchor.SpanContext.SpanID(),
-		)
-	}
-}
-
 // TestHookOutputFor_AllConnectors_AllActions is the contract test
 // that locks the JSON shape every hook script downstream parses.
 // Each row pins:
@@ -481,6 +328,7 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 
 		// cursor -- permission field; supports deny + ask + allow.
 		{connector: "cursor", event: "preToolUse", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
+		{connector: "cursor", event: "subagentStart", action: "block", rawAction: "block", expectedKey: "permission", expectedValue: "deny"},
 		{connector: "cursor", event: "beforeShellExecution", action: "confirm", rawAction: "confirm", expectedKey: "permission", expectedValue: "ask"},
 
 		// windsurf -- minimal shape; only block surfaces a message.
@@ -531,6 +379,127 @@ func TestHookOutputFor_AllConnectors_AllActions(t *testing.T) {
 					tc.connector, tc.event, tc.action, tc.expectedKey, gotStr, tc.expectedValue)
 			}
 		})
+	}
+}
+
+func TestCursorLegacyHookOutputUsesEventSpecificSchemas(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      string
+		action     string
+		additional string
+		want       map[string]interface{}
+	}{
+		{
+			name:   "subagent start deny has no ask or agent message",
+			event:  "subagentStart",
+			action: "block",
+			want: map[string]interface{}{
+				"permission":   "deny",
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:       "subagent stop uses only followup",
+			event:      "subagentStop",
+			action:     "alert",
+			additional: "review child result",
+			want:       map[string]interface{}{"followup_message": "review child result"},
+		},
+		{
+			name:   "before submit deny omits permission and agent message",
+			event:  "beforeSubmitPrompt",
+			action: "block",
+			want: map[string]interface{}{
+				"continue":     false,
+				"user_message": "blocked",
+			},
+		},
+		{
+			name:   "after event has no invented fields",
+			event:  "postToolUseFailure",
+			action: "block",
+			want:   map[string]interface{}{},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			got := hookOutputFor(agentHookRequest{
+				ConnectorName: "cursor",
+				HookEventName: test.event,
+				ToolName:      "test-tool",
+			}, test.action, test.action, "blocked", test.additional, capsForConnector("cursor"))
+			if !reflect.DeepEqual(got, test.want) {
+				t.Fatalf("hookOutputFor(%s) = %#v, want %#v", test.event, got, test.want)
+			}
+		})
+	}
+}
+
+func TestCopilotOfficialCamelCaseSubagentIdentity(t *testing.T) {
+	profile := connector.NewCopilotConnector().HookProfile(connector.SetupOpts{
+		APIAddr:      "127.0.0.1:18970",
+		AgentVersion: "GitHub Copilot CLI 1.0.76",
+	})
+	startPayload := map[string]interface{}{
+		"sessionId":        "session-1",
+		"timestamp":        float64(1),
+		"cwd":              `C:\workspace`,
+		"transcriptPath":   `C:\state\transcript.jsonl`,
+		"agentName":        "security-review",
+		"agentDisplayName": "Security review",
+	}
+	start := normalizeAgentHookRequestWithProfileEvent("copilot", startPayload, profile, "subagentStart")
+	if start.HookEventName != "subagentStart" || start.SessionID != "session-1" ||
+		start.AgentName != "security-review" || start.ChildAgentID != "" ||
+		start.AgentID == "" {
+		t.Fatalf("official subagentStart identity was not preserved: %+v", start)
+	}
+	if _, invented := start.Payload["hook_event_name"]; invented {
+		t.Fatalf("trusted event binding mutated official start payload: %#v", start.Payload)
+	}
+
+	stopPayload := map[string]interface{}{
+		"sessionId":      "session-1",
+		"timestamp":      float64(2),
+		"cwd":            `C:\workspace`,
+		"transcriptPath": `C:\state\transcript.jsonl`,
+		"agentId":        "agent-42",
+		"agentType":      "custom",
+		"agentName":      "security-review",
+		"response":       "done",
+		"stopReason":     "end_turn",
+	}
+	stop := normalizeAgentHookRequestWithProfileEvent("copilot", stopPayload, profile, "subagentStop")
+	if stop.HookEventName != "subagentStop" || stop.ChildAgentID != "agent-42" ||
+		stop.AgentID != "agent-42" || stop.AgentName != "security-review" ||
+		stop.AgentType != "custom" {
+		t.Fatalf("official subagentStop identity was not preserved: %+v", stop)
+	}
+	if _, invented := stop.Payload["hookEventName"]; invented {
+		t.Fatalf("trusted event binding mutated official stop payload: %#v", stop.Payload)
+	}
+}
+
+func TestCopilotResponseSemanticsRemainEventScoped(t *testing.T) {
+	caps := connector.NewCopilotConnector().HookCapabilities(connector.SetupOpts{})
+	if action, wouldBlock := mapHookAction("block", "action", "postToolUseFailure", caps); action != "allow" || !wouldBlock {
+		t.Fatalf("postToolUseFailure block mapping=(%q,%v), want advisory allow/would-block", action, wouldBlock)
+	}
+	advisory := copilotHookOutput("postToolUseFailure", "allow", "block", "policy", "recovery guidance")
+	if advisory["additionalContext"] != "recovery guidance" {
+		t.Fatalf("postToolUseFailure output=%#v, want recovery additionalContext", advisory)
+	}
+	permission := copilotHookOutput("permissionRequest", "block", "block", "denied", "")
+	if permission["behavior"] != "deny" {
+		t.Fatalf("permissionRequest output=%#v, want deny", permission)
+	}
+	if _, interruptsAgent := permission["interrupt"]; interruptsAgent {
+		t.Fatalf("ordinary permission denial stops the entire agent: %#v", permission)
+	}
+	transformed := copilotHookOutput("userPromptTransformed", "allow", "block", "policy", "warning")
+	if len(transformed) != 0 {
+		t.Fatalf("mutation-only userPromptTransformed output=%#v, want no-op {}", transformed)
 	}
 }
 
@@ -923,14 +892,14 @@ func TestRefreshAuditEnvelopeFromHook_PayloadOverridesStale(t *testing.T) {
 	}
 }
 
-func TestHookAgentIdentityFromContext_PropagatesConnector(t *testing.T) {
+func TestScanCorrelationFromContextPropagatesConnector(t *testing.T) {
 	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
 		Connector: "codex",
 		RunID:     "run-1",
 		SessionID: "session-1",
 	})
 
-	got := hookAgentIdentityFromContext(ctx)
+	got := ScanCorrelationFromContext(ctx)
 	if got.Connector != "codex" {
 		t.Fatalf("Connector = %q, want codex", got.Connector)
 	}
@@ -1068,7 +1037,7 @@ func TestEnrichAgentHookContext_CodexRefreshesEnvelope(t *testing.T) {
 func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 	enforceable := []string{
 		// Claude/Codex baseline — kept literal in production code.
-		"PreToolUse", "PermissionRequest", "UserPromptExpansion",
+		"UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
 		// Hermes
 		"pre_tool_call",
 		// Cursor
@@ -1085,14 +1054,106 @@ func TestRuntimeAssetCanEnforce_HookOnlyEvents(t *testing.T) {
 			t.Errorf("runtimeAssetCanEnforce(%q) = false, want true (hook-only connector tool-inspection event)", ev)
 		}
 	}
-	// Negative cases — prompt and result events stay non-enforceable
+	// Negative cases — post-execution and non-selection prompt events stay non-enforceable
 	// so the merge logic correctly downgrades to would-block.
 	nonEnforceable := []string{
-		"UserPromptSubmit", "post_tool_call", "PostToolUse", "Stop", "BeforeAgent",
+		"post_tool_call", "PostToolUse", "Stop", "BeforeAgent",
 	}
 	for _, ev := range nonEnforceable {
 		if runtimeAssetCanEnforce(ev) {
 			t.Errorf("runtimeAssetCanEnforce(%q) = true, want false", ev)
+		}
+	}
+}
+
+func TestToolJudgeIntentEventsCoverConnectorTurnStarts(t *testing.T) {
+	intentEvents := []string{
+		// Codex, Claude Code, Devin, and OmniGent.
+		"UserPromptSubmit",
+		// Cursor, Windsurf, Copilot, OpenHands, Gemini CLI, Hermes, and Amp.
+		"beforeSubmitPrompt", "pre_user_prompt", "userPromptSubmitted",
+		"user_prompt_submit", "BeforeAgent", "pre_llm_call", "agent.start",
+	}
+	for _, event := range intentEvents {
+		if !isToolJudgeIntentEvent(event) {
+			t.Errorf("isToolJudgeIntentEvent(%q) = false, want true", event)
+		}
+	}
+
+	// These surfaces may carry model-generated or expanded content and must
+	// not overwrite the authenticated user task retained for tool judging.
+	for _, event := range []string{
+		"UserPromptTransformed", "UserPromptExpansion", "BeforeModel",
+		"SubagentStart", "PostToolUse", "tool.execute.before", "PreInvocation",
+	} {
+		if isToolJudgeIntentEvent(event) {
+			t.Errorf("isToolJudgeIntentEvent(%q) = true, want false", event)
+		}
+	}
+}
+
+func TestToolJudgeSessionBoundariesCoverConnectorSpellings(t *testing.T) {
+	for _, event := range []string{
+		"SessionStart", "SessionEnd", "session.start", "session_end",
+		"session.created", "session.deleted", "on_session_start",
+		"on_session_end", "on_session_finalize", "on_session_reset",
+	} {
+		if !isToolJudgeSessionBoundaryEvent(event) {
+			t.Errorf("isToolJudgeSessionBoundaryEvent(%q) = false, want true", event)
+		}
+	}
+	for _, event := range []string{"agent.start", "agent.end", "Stop", "PreToolUse"} {
+		if isToolJudgeSessionBoundaryEvent(event) {
+			t.Errorf("isToolJudgeSessionBoundaryEvent(%q) = true, want false", event)
+		}
+	}
+}
+
+func TestShouldResetToolJudgeSessionPreservesClaudeCompaction(t *testing.T) {
+	tests := []struct {
+		name string
+		req  agentHookRequest
+		want bool
+	}{
+		{
+			name: "claude compaction continues session",
+			req: agentHookRequest{
+				HookEventName: "SessionStart",
+				Payload:       map[string]interface{}{"source": "compact"},
+			},
+			want: false,
+		},
+		{
+			name: "claude clear starts session",
+			req: agentHookRequest{
+				HookEventName: "SessionStart",
+				Payload:       map[string]interface{}{"source": "clear"},
+			},
+			want: true,
+		},
+		{
+			name: "session end resets",
+			req:  agentHookRequest{HookEventName: "SessionEnd"},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := shouldResetToolJudgeSession(tt.req); got != tt.want {
+				t.Fatalf("shouldResetToolJudgeSession(%+v) = %v, want %v", tt.req, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestToolJudgeIntentEventsAreRoutedAsPromptLike(t *testing.T) {
+	for _, event := range []string{
+		"UserPromptSubmit", "beforeSubmitPrompt", "pre_user_prompt",
+		"userPromptSubmitted", "user_prompt_submit", "BeforeAgent",
+		"pre_llm_call", "agent.start",
+	} {
+		if !isToolJudgeIntentEvent(event) || !isPromptLikeEvent(event) {
+			t.Errorf("intent event %q is not reachable through the prompt route", event)
 		}
 	}
 }

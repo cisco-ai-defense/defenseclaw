@@ -1,4 +1,4 @@
-import { site, siteUrl } from '@/lib/site';
+import { canonicalUrl, site, siteUrl } from '@/lib/site';
 
 // Centralised JSON-LD emitter. Each helper returns a `<script>` tag
 // with `application/ld+json`, so they can be composed at any layer
@@ -45,18 +45,7 @@ export function WebSiteSchema() {
         '@context': 'https://schema.org',
         '@type': 'WebSite',
         name: `Cisco · ${site.name}`,
-        url: siteUrl,
-        // Wire the on-site search into Google's Sitelinks searchbox
-        // so a search-engine results page can deep-link directly into
-        // a Fumadocs Cmd-K query.
-        potentialAction: {
-          '@type': 'SearchAction',
-          target: {
-            '@type': 'EntryPoint',
-            urlTemplate: `${siteUrl}/docs?query={search_term_string}`,
-          },
-          'query-input': 'required name=search_term_string',
-        },
+        url: canonicalUrl(),
       }}
     />
   );
@@ -93,7 +82,7 @@ export function BreadcrumbSchema({ crumbs }: { crumbs: { name: string; url: stri
           '@type': 'ListItem',
           position: i + 1,
           name: c.name,
-          item: `${siteUrl}${c.url}`,
+          item: canonicalUrl(c.url),
         })),
       }}
     />
@@ -104,12 +93,12 @@ export function TechArticleSchema({
   title,
   description,
   url,
-  datePublished,
+  dateModified,
 }: {
   title: string;
   description: string;
   url: string;
-  datePublished?: string;
+  dateModified?: string;
 }) {
   return (
     <JsonLd
@@ -125,8 +114,10 @@ export function TechArticleSchema({
           name: site.organization.name,
           logo: { '@type': 'ImageObject', url: `${siteUrl}${site.organization.logo}` },
         },
-        datePublished: datePublished ?? '2026-05-01',
-        dateModified: datePublished ?? '2026-05-08',
+        // Article dates are optional. A shared placeholder date is less useful
+        // than omitting the property; publish a modified date only when the
+        // page has explicit provenance in frontmatter.
+        ...(dateModified ? { dateModified } : {}),
       }}
     />
   );
@@ -162,7 +153,7 @@ export function SoftwareApplicationSchema() {
         applicationCategory: site.product.applicationCategory,
         operatingSystem: site.product.operatingSystem,
         offers: { '@type': 'Offer', price: '0', priceCurrency: 'USD' },
-        url: siteUrl,
+        url: canonicalUrl(),
         publisher: { '@type': 'Organization', name: site.organization.name },
         license: site.product.licenseUrl,
       }}

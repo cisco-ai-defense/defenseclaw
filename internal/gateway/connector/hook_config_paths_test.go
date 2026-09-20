@@ -5,12 +5,15 @@
 package connector
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strings"
 	"testing"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // cursorTestSetup wires the cursor connector to a temp config path and returns
@@ -58,6 +61,61 @@ func TestHookConfigPathsForConnector_NilConnector(t *testing.T) {
 	}
 }
 
+func TestHookPolicyWatchPathsForConnector_ClaudeCoversEffectiveSources(t *testing.T) {
+	root := t.TempDir()
+	settingsPath := filepath.Join(root, "profile", "settings.json")
+	managedRoot := filepath.Join(root, "managed")
+	workspace := filepath.Join(root, "workspace")
+	cliPath := filepath.Join(workspace, "cli-settings.json")
+	dropinPath := filepath.Join(managedRoot, "managed-settings.d", "20-defenseclaw.json")
+	if err := os.MkdirAll(filepath.Dir(dropinPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{cliPath, dropinPath} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	previousSettings := ClaudeCodeSettingsPathOverride
+	previousManaged := ClaudeCodeManagedSettingsRootOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	ClaudeCodeManagedSettingsRootOverride = managedRoot
+	t.Cleanup(func() {
+		ClaudeCodeSettingsPathOverride = previousSettings
+		ClaudeCodeManagedSettingsRootOverride = previousManaged
+	})
+
+	opts := SetupOpts{
+		WorkspaceDir:           workspace,
+		ClaudeSettingsOverride: "cli-settings.json",
+	}
+	got := HookPolicyWatchPathsForConnector(NewClaudeCodeConnector(), opts)
+	want := []string{
+		settingsPath,
+		filepath.Join(managedRoot, ".remote-settings.json"),
+		filepath.Join(workspace, ".claude"),
+		filepath.Join(workspace, ".claude", "settings.json"),
+		filepath.Join(workspace, ".claude", "settings.local.json"),
+		filepath.Join(managedRoot, "managed-settings.json"),
+		filepath.Join(managedRoot, "managed-settings.d"),
+		dropinPath,
+		cliPath,
+	}
+	gotSet := make(map[string]struct{}, len(got))
+	for _, path := range got {
+		gotSet[filepath.Clean(path)] = struct{}{}
+	}
+	for _, path := range want {
+		if _, ok := gotSet[filepath.Clean(path)]; !ok {
+			t.Errorf("HookPolicyWatchPathsForConnector missing %q; got %v", path, got)
+		}
+	}
+}
+
 func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 	conn, opts, cfgPath := cursorTestSetup(t)
 
@@ -88,6 +146,85 @@ func TestOwnedHooksPresent_TrueAfterSetup_FalseAfterRemoval(t *testing.T) {
 	}
 }
 
+func TestOwnedHooksPresent_CursorRequiresExactObserveContract(t *testing.T) {
+	mutations := map[string]func(map[string]interface{}){
+		"missing event": func(hooks map[string]interface{}) { delete(hooks, "subagentStart") },
+		"wrong type": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["type"] = "prompt"
+		},
+		"millisecond timeout": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["timeout"] = json.Number("30000")
+		},
+		"fail closed": func(hooks map[string]interface{}) {
+			hooks["preToolUse"].([]interface{})[0].(map[string]interface{})["failClosed"] = true
+		},
+		"duplicate": func(hooks map[string]interface{}) {
+			entry := hooks["preToolUse"].([]interface{})[0]
+			hooks["preToolUse"] = append(hooks["preToolUse"].([]interface{}), entry)
+		},
+		"unexpected event": func(hooks map[string]interface{}) {
+			hooks["beforeVendorExtension"] = []interface{}{hooks["preToolUse"].([]interface{})[0]}
+		},
+	}
+	for name, mutate := range mutations {
+		t.Run(name, func(t *testing.T) {
+			conn, opts, cfgPath := cursorTestSetup(t)
+			if err := conn.Setup(context.Background(), opts); err != nil {
+				t.Fatalf("Setup: %v", err)
+			}
+			cfg, err := readJSONObject(cfgPath)
+			if err != nil {
+				t.Fatalf("read hooks: %v", err)
+			}
+			hooks := cfg["hooks"].(map[string]interface{})
+			mutate(hooks)
+			if err := writeJSONObject(cfgPath, cfg); err != nil {
+				t.Fatalf("write mutated hooks: %v", err)
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if present {
+				t.Fatal("OwnedHooksPresent=true for malformed Cursor registration")
+			}
+		})
+	}
+}
+
+func TestOwnedHooksPresent_CursorAcceptsExactActionContract(t *testing.T) {
+	conn, opts, cfgPath := cursorTestSetup(t)
+	opts.GuardrailMode = "action"
+	// The connector derives Cursor failure behavior from the selected mode;
+	// an inherited fail-open value must not weaken action registration.
+	opts.HookFailMode = "open"
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+
+	cfg, err := readJSONObject(cfgPath)
+	if err != nil {
+		t.Fatalf("read hooks: %v", err)
+	}
+	hooks := cfg["hooks"].(map[string]interface{})
+	for event, rawEntries := range hooks {
+		entries := rawEntries.([]interface{})
+		if len(entries) != 1 {
+			t.Fatalf("event %s entries=%d, want exactly one", event, len(entries))
+		}
+		if failClosed, ok := entries[0].(map[string]interface{})["failClosed"].(bool); !ok || !failClosed {
+			t.Fatalf("event %s failClosed=%v, want true", event, entries[0].(map[string]interface{})["failClosed"])
+		}
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent=false for exact Cursor action registration")
+	}
+}
+
 func TestOwnedHooksPresent_FalseWhenFileMissing(t *testing.T) {
 	conn, opts, cfgPath := cursorTestSetup(t)
 
@@ -107,6 +244,24 @@ func TestOwnedHooksPresent_FalseWhenFileMissing(t *testing.T) {
 	}
 }
 
+func TestOwnedHooksPresent_CursorRejectsMissingManagedRuntime(t *testing.T) {
+	conn, opts, _ := cursorTestSetup(t)
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Setup: %v", err)
+	}
+	runtimePath := conn.(*hookOnlyConnector).cursorRuntimePath(opts)
+	if err := os.Remove(runtimePath); err != nil {
+		t.Fatalf("remove Cursor runtime: %v", err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent: %v", err)
+	}
+	if present {
+		t.Fatal("OwnedHooksPresent=true after removing Cursor's managed runtime")
+	}
+}
+
 func TestOwnedHooksPresent_ProxyConnectorReportsPresent(t *testing.T) {
 	// Proxy/plugin connectors have no guarded hook config paths, so they
 	// are reported present (never heal-eligible).
@@ -117,6 +272,344 @@ func TestOwnedHooksPresent_ProxyConnectorReportsPresent(t *testing.T) {
 	}
 	if !present {
 		t.Fatal("OwnedHooksPresent=false for proxy connector; want true (inert)")
+	}
+}
+
+func installedClaudeCodeConnectorForPresence(t *testing.T) (Connector, SetupOpts, string) {
+	t.Helper()
+	settingsPath := filepath.Join(t.TempDir(), "settings.json")
+	previous := ClaudeCodeSettingsPathOverride
+	ClaudeCodeSettingsPathOverride = settingsPath
+	t.Cleanup(func() { ClaudeCodeSettingsPathOverride = previous })
+
+	opts := SetupOpts{
+		DataDir:  t.TempDir(),
+		APIAddr:  "127.0.0.1:18970",
+		APIToken: "tok-test",
+	}
+	conn := NewClaudeCodeConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Claude Code Setup: %v", err)
+	}
+	return conn, opts, settingsPath
+}
+
+func mutateClaudeSettings(t *testing.T, path string, mutate func(map[string]interface{})) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var settings map[string]interface{}
+	if err := json.Unmarshal(data, &settings); err != nil {
+		t.Fatal(err)
+	}
+	mutate(settings)
+	out, err := json.MarshalIndent(settings, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestOwnedHooksPresent_ClaudeRequiresEffectiveContract(t *testing.T) {
+	conn, opts, settingsPath := installedClaudeCodeConnectorForPresence(t)
+	baseline, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent baseline: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent=false for the connector's own baseline Claude Code contract")
+	}
+
+	tests := map[string]func(map[string]interface{}){
+		"irrelevant-event-only": func(settings map[string]interface{}) {
+			hooks := settings["hooks"].(map[string]interface{})
+			settings["hooks"] = map[string]interface{}{"Notification": hooks["Notification"]}
+		},
+		"missing-block-event": func(settings map[string]interface{}) {
+			delete(settings["hooks"].(map[string]interface{}), "PreToolUse")
+		},
+		"narrow-block-matcher": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = "Bash"
+		},
+		"whitespace-padded-wildcard": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = " * "
+		},
+		"asynchronous-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["async"] = true
+		},
+		"async-rewake-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["asyncRewake"] = true
+		},
+		"non-command-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["type"] = "http"
+		},
+		"conditional-block-handler": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["PreToolUse"].([]interface{})
+			handler := entries[0].(map[string]interface{})["hooks"].([]interface{})[0].(map[string]interface{})
+			handler["if"] = "Bash(git *)"
+		},
+		"hooks-disabled": func(settings map[string]interface{}) {
+			settings["disableAllHooks"] = true
+		},
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(settingsPath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutateClaudeSettings(t, settingsPath, mutate)
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil && name != "hooks-disabled" {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if name == "hooks-disabled" && (err == nil || !strings.Contains(err.Error(), "user settings") || !strings.Contains(err.Error(), "disableAllHooks=true")) {
+				t.Fatalf("OwnedHooksPresent hooks-disabled error = %v, want source-specific disableAllHooks diagnostic", err)
+			}
+			if present {
+				t.Fatal("OwnedHooksPresent=true for a non-enforcing Claude Code hook contract")
+			}
+		})
+	}
+}
+
+func TestOwnedHooksPresent_ClaudeAcceptsEffectiveMatcherSupersets(t *testing.T) {
+	conn, opts, settingsPath := installedClaudeCodeConnectorForPresence(t)
+	baseline, err := os.ReadFile(settingsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	tests := map[string]func(map[string]interface{}){
+		"file-changed-superset": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["FileChanged"].([]interface{})
+			entry := entries[0].(map[string]interface{})
+			entry["matcher"] = entry["matcher"].(string) + "|README.md"
+		},
+		"stop-matcher-is-ignored": func(settings map[string]interface{}) {
+			entries := settings["hooks"].(map[string]interface{})["Stop"].([]interface{})
+			entries[0].(map[string]interface{})["matcher"] = "ignored-by-claude"
+		},
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(settingsPath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutateClaudeSettings(t, settingsPath, mutate)
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if !present {
+				t.Fatal("OwnedHooksPresent=false for an effective Claude Code matcher superset")
+			}
+		})
+	}
+}
+
+func installedCodexConnectorForPresence(t *testing.T) (Connector, SetupOpts, string) {
+	return installedCodexConnectorForPresenceWithContract(t, "", "")
+}
+
+func installedCodexConnectorForPresenceWithContract(
+	t *testing.T,
+	agentVersion string,
+	contractID string,
+) (Connector, SetupOpts, string) {
+	t.Helper()
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	previousPath := CodexConfigPathOverride
+	CodexConfigPathOverride = configPath
+	t.Cleanup(func() { CodexConfigPathOverride = previousPath })
+
+	previousInspector := codexPolicyInspector
+	codexPolicyInspector = func(context.Context, SetupOpts) (codexEffectivePolicy, error) {
+		return codexEffectivePolicy{Source: "test"}, nil
+	}
+	t.Cleanup(func() { codexPolicyInspector = previousInspector })
+
+	opts := SetupOpts{
+		DataDir:        t.TempDir(),
+		APIAddr:        "127.0.0.1:18970",
+		APIToken:       "tok-test",
+		AgentVersion:   agentVersion,
+		HookContractID: contractID,
+	}
+	conn := NewCodexConnector()
+	if err := conn.Setup(context.Background(), opts); err != nil {
+		t.Fatalf("Codex Setup: %v", err)
+	}
+	return conn, opts, codexHookConfigPathForTest(configPath)
+}
+
+func TestOwnedHooksPresent_CodexPinnedContractDrivesInstalledMatrix(t *testing.T) {
+	tests := []struct {
+		name, version, contract string
+		wantSessionEnd          bool
+	}{
+		{name: "unknown-pinned-v4", version: "codex nightly", contract: "codex-hooks-v4", wantSessionEnd: true},
+		{name: "current-pinned-v1", version: "codex 0.146.0", contract: "codex-hooks-v1"},
+		{name: "current-pinned-v3-generic", version: "codex 0.146.0", contract: "codex-hooks-v3-generic"},
+		{name: "legacy-pinned-v4", version: "codex 0.124.0", contract: "codex-hooks-v4", wantSessionEnd: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			conn, opts, configPath := installedCodexConnectorForPresenceWithContract(
+				t, test.version, test.contract,
+			)
+			data, err := os.ReadFile(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			config := map[string]interface{}{}
+			if err := toml.Unmarshal(data, &config); err != nil {
+				t.Fatal(err)
+			}
+			hooks, ok := config["hooks"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("hooks has type %T", config["hooks"])
+			}
+			_, hasSessionEnd := hooks["SessionEnd"]
+			if hasSessionEnd != test.wantSessionEnd {
+				t.Fatalf("SessionEnd present=%t want=%t", hasSessionEnd, test.wantSessionEnd)
+			}
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil || !present {
+				t.Fatalf("OwnedHooksPresent=%t err=%v", present, err)
+			}
+			profile := conn.(HookProfileProvider).HookProfile(opts)
+			lock := NewHookContractLockEntry(opts, conn, "test")
+			if profile.ContractID != test.contract || lock.ContractID != test.contract ||
+				profile.CompatibilityStatus != lock.CompatibilityStatus {
+				t.Fatalf("profile/lock contract drift: profile=%s/%s lock=%s/%s",
+					profile.ContractID, profile.CompatibilityStatus,
+					lock.ContractID, lock.CompatibilityStatus)
+			}
+		})
+	}
+}
+
+func mutateCodexConfig(t *testing.T, path string, mutate func(map[string]interface{})) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config := map[string]interface{}{}
+	if err := toml.Unmarshal(data, &config); err != nil {
+		t.Fatal(err)
+	}
+	mutate(config)
+	out, err := toml.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func firstCodexTrustEntry(t *testing.T, config map[string]interface{}) map[string]interface{} {
+	t.Helper()
+	hooks := config["hooks"].(map[string]interface{})
+	state := hooks["state"].(map[string]interface{})
+	for _, rawEntry := range state {
+		entry, ok := rawEntry.(map[string]interface{})
+		if ok {
+			return entry
+		}
+	}
+	t.Fatal("Codex hook trust state is empty")
+	return nil
+}
+
+func firstCodexHandler(t *testing.T, config map[string]interface{}, eventType string) map[string]interface{} {
+	t.Helper()
+	hooks := config["hooks"].(map[string]interface{})
+	groups := hooks[eventType].([]interface{})
+	group := groups[0].(map[string]interface{})
+	handlers := group["hooks"].([]interface{})
+	return handlers[0].(map[string]interface{})
+}
+
+func TestOwnedHooksPresent_CodexRequiresTrustedCompleteContract(t *testing.T) {
+	conn, opts, configPath := installedCodexConnectorForPresence(t)
+	baseline, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	present, err := OwnedHooksPresent(conn, opts)
+	if err != nil {
+		t.Fatalf("OwnedHooksPresent baseline: %v", err)
+	}
+	if !present {
+		t.Fatal("OwnedHooksPresent=false for the connector's own trusted Codex contract")
+	}
+
+	tests := map[string]func(map[string]interface{}){
+		"missing-event": func(config map[string]interface{}) {
+			delete(config["hooks"].(map[string]interface{}), "PreToolUse")
+		},
+		"missing-session-end": func(config map[string]interface{}) {
+			delete(config["hooks"].(map[string]interface{}), "SessionEnd")
+		},
+		"asynchronous-handler": func(config map[string]interface{}) {
+			firstCodexHandler(t, config, "PreToolUse")["async"] = true
+		},
+		"wrong-timeout": func(config map[string]interface{}) {
+			firstCodexHandler(t, config, "PreToolUse")["timeout"] = int64(1)
+		},
+		"wrong-command": func(config map[string]interface{}) {
+			firstCodexHandler(t, config, "PreToolUse")["command"] = "echo bypass"
+		},
+		"hooks-feature-disabled": func(config map[string]interface{}) {
+			config["features"] = map[string]interface{}{"hooks": false}
+		},
+		"legacy-hooks-feature-disabled": func(config map[string]interface{}) {
+			config["features"] = map[string]interface{}{"codex_hooks": false}
+		},
+	}
+	if runtime.GOOS != "windows" {
+		tests["altered-trusted-hash"] = func(config map[string]interface{}) {
+			firstCodexTrustEntry(t, config)["trusted_hash"] = "sha256:tampered"
+		}
+		tests["disabled-trust-entry"] = func(config map[string]interface{}) {
+			firstCodexTrustEntry(t, config)["enabled"] = false
+		}
+	}
+
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			if err := os.WriteFile(configPath, baseline, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			mutateCodexConfig(t, configPath, mutate)
+			present, err := OwnedHooksPresent(conn, opts)
+			if err != nil {
+				t.Fatalf("OwnedHooksPresent: %v", err)
+			}
+			if present {
+				t.Fatal("OwnedHooksPresent=true for a non-enforcing Codex hook contract")
+			}
+		})
 	}
 }
 
@@ -133,27 +626,90 @@ func TestOwnedHookNeedles_WindowsSurvivesConfigEscaping(t *testing.T) {
 	conn := NewCursorConnector()
 
 	needles := ownedHookCommandNeedlesFor("windows", opts, conn)
-	if len(needles) != 1 || needles[0] != nativeHookFlag+conn.Name() {
-		t.Fatalf("windows needles = %v, want [%q]", needles, nativeHookFlag+conn.Name())
+	wantCommand := hookInvocationCommandFor(
+		"windows",
+		conn.Name(),
+		filepath.Join(opts.DataDir, "hooks", "cursor-hook.sh"),
+	)
+	if len(needles) != 1 || needles[0] != wantCommand {
+		t.Fatalf("windows needles = %v, want [%q]", needles, wantCommand)
 	}
 
 	// What Setup actually writes on Windows: the native command embedded in a
 	// JSON config, where the exe path's backslashes/quotes get escaped.
-	winCmd := `"C:\Users\me\AppData\Local\defenseclaw\defenseclaw-gateway.exe" ` + nativeHookFlag + conn.Name()
+	winCmd := wantCommand
 	encoded, err := json.Marshal(map[string]string{"command": winCmd})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 
-	// The full raw command must NOT appear in the escaped bytes (this is the
-	// failure mode the marker avoids) ...
-	if bytes.Contains(encoded, []byte(winCmd)) {
-		t.Fatalf("precondition: expected JSON to escape the windows command, but it appeared verbatim:\n%s", encoded)
+	path := filepath.Join(t.TempDir(), "hooks.json")
+	if err := os.WriteFile(path, encoded, 0o600); err != nil {
+		t.Fatal(err)
 	}
-	// ... while the escaping-invariant marker IS present.
-	for _, n := range needles {
-		if !bytes.Contains(encoded, []byte(n)) {
-			t.Fatalf("windows needle %q not found in escaped config:\n%s", n, encoded)
+	present, err := configFileReferencesHook(path, needles)
+	if err != nil {
+		t.Fatalf("configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatalf("decoded matcher did not recognize Cursor adapter command %q", winCmd)
+	}
+}
+
+func TestEventBoundOwnedHookNeedlesMatchRegisteredCommands(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		connector *hookOnlyConnector
+	}{
+		{
+			name:      "copilot",
+			connector: NewCopilotConnector(),
+		},
+		{
+			name:      "antigravity",
+			connector: NewAntigravityConnector(),
+		},
+	} {
+		for _, goos := range []string{"linux", "windows"} {
+			t.Run(tc.name+"/"+goos, func(t *testing.T) {
+				root := t.TempDir()
+				opts := SetupOpts{DataDir: filepath.Join(root, "defenseclaw")}
+				hookScript := filepath.Join(opts.DataDir, "hooks", tc.connector.scriptName)
+				path := filepath.Join(root, "hooks.json")
+				hooks := make(map[string]interface{})
+				if tc.name == "copilot" {
+					for _, event := range copilotCurrentHookEvents {
+						key := "bash"
+						if goos == "windows" {
+							key = "powershell"
+						}
+						hooks[event] = []interface{}{map[string]interface{}{
+							key: copilotHookInvocationCommandForEvent(goos, event, hookScript),
+						}}
+					}
+				} else {
+					for _, event := range antigravityLifecycleEvents {
+						hooks[event] = map[string]interface{}{
+							"command": antigravityHookInvocationCommandForEvent(goos, event, hookScript),
+						}
+					}
+				}
+				data, err := json.Marshal(map[string]interface{}{"hooks": hooks})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(path, data, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				needles := ownedHookCommandNeedlesFor(goos, opts, tc.connector)
+				present, err := configFileReferencesHook(path, needles)
+				if err != nil {
+					t.Fatalf("configFileReferencesHook: %v", err)
+				}
+				if !present {
+					t.Fatalf("event-bound %s config did not match owned needles: %v", tc.name, needles)
+				}
+			})
 		}
 	}
 }
@@ -203,6 +759,50 @@ func TestConfigFileReferencesHookAcceptsManagedCommandField(t *testing.T) {
 	}
 	if !present {
 		t.Fatal("managed command field was not detected")
+	}
+}
+
+func TestConfigFileReferencesCopilotPowerShellRequiresCanonicalCommand(t *testing.T) {
+	const hookBinary = `C:\Program Files\DefenseClaw\defenseclaw-hook.exe`
+	setHookBinaryOverride(t, hookBinary)
+	hookScript := filepath.Join(t.TempDir(), "hooks", "copilot-hook.sh")
+	canonical := copilotHookInvocationCommandForEvent("windows", "preToolUse", hookScript)
+	needle := canonical
+	path := filepath.Join(t.TempDir(), "defenseclaw.json")
+	write := func(command string) {
+		t.Helper()
+		data, err := json.Marshal(map[string]interface{}{
+			"version": 1,
+			"hooks": map[string]interface{}{
+				"preToolUse": []interface{}{
+					map[string]interface{}{"type": "command", "powershell": command, "timeoutSec": 30},
+				},
+			},
+		})
+		if err != nil {
+			t.Fatalf("marshal config: %v", err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatalf("write config: %v", err)
+		}
+	}
+
+	write(canonical)
+	present, err := configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("canonical configFileReferencesHook: %v", err)
+	}
+	if !present {
+		t.Fatal("canonical Copilot powershell hook was not detected")
+	}
+
+	write(windowsCopilotPowerShellHookCommandForEvent("preToolUse", hookBinary))
+	present, err = configFileReferencesHook(path, []string{needle})
+	if err != nil {
+		t.Fatalf("legacy configFileReferencesHook: %v", err)
+	}
+	if present {
+		t.Fatal("legacy Start-Process Copilot hook was considered healthy instead of requiring repair")
 	}
 }
 

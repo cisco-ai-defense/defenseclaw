@@ -22,17 +22,46 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"runtime"
 )
 
-// atomicWriteFile writes data to path atomically by writing to a temp file in
-// the same directory and renaming. This prevents partial writes from corrupting
-// the target file if the process crashes mid-write.
+// atomicWriteFile writes data to a temp file in the same directory and then
+// performs a replacement-style rename. This prevents partial writes from
+// corrupting the target file if the process crashes mid-write.
 //
 // If path is a symlink, write through to the linked target instead of renaming
 // over the symlink itself. Many operators keep agent dotfiles in a managed
 // repo and symlink ~/.codex/config.toml or ~/.claude/settings.json; preserving
 // that filesystem shape is part of the teardown contract.
 func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
+	return atomicWriteFileWithPublisher(path, data, perm, atomicFilePublish)
+}
+
+// atomicWriteFileWithReplace preserves the injectable replacement seam used by
+// durability-failure tests. Production writes use atomicFilePublish so Windows
+// can bind private-file validation and publication to the staged file handle.
+func atomicWriteFileWithReplace(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	replace func(string, string) error,
+) error {
+	return atomicWriteFileWithPublisher(
+		path, data, perm,
+		func(source, destination string, _ os.FileInfo, _ os.FileMode) error {
+			return replace(source, destination)
+		},
+	)
+}
+
+type atomicFilePublisher func(string, string, os.FileInfo, os.FileMode) error
+
+func atomicWriteFileWithPublisher(
+	path string,
+	data []byte,
+	perm os.FileMode,
+	publish atomicFilePublisher,
+) error {
 	writePath, err := resolveAtomicWritePath(path)
 	if err != nil {
 		return err
@@ -42,15 +71,30 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("create dir for %s: %w", writePath, err)
 	}
+	// Avoid replacing an already-correct config. This is especially important
+	// on Windows, where a replacement is a file-identity transition and must not
+	// churn NTFS metadata. The platform helper validates the effective owner-only
+	// DACL instead of comparing Go's synthetic 0666 FileMode to 0600.
 	if atomicFileAlreadyMatches(writePath, data, perm) {
 		return nil
 	}
 
-	tmp, err := os.CreateTemp(dir, ".tmp-*")
+	tmp, tmpPath, err := atomicFileCreateTemp(dir, perm)
 	if err != nil {
 		return fmt.Errorf("create temp file: %w", err)
 	}
-	tmpPath := tmp.Name()
+	if runtime.GOOS == "windows" && perm.Perm()&0o077 == 0 {
+		// atomicFileCreateTemp creates private Windows files with their final
+		// owner and protected DACL in the handle-bound NtCreateFile operation.
+		// Validate that same handle before writing sensitive bytes. Do not reopen
+		// the pathname here: the staging handle deliberately denies write sharing,
+		// so a path-based protection pass would conflict with our own handle.
+		if err := atomicFileValidateStagedProtection(tmp, perm); err != nil {
+			tmp.Close()
+			os.Remove(tmpPath)
+			return fmt.Errorf("validate private temp file: %w", err)
+		}
+	}
 
 	if _, err := tmp.Write(data); err != nil {
 		tmp.Close()
@@ -62,14 +106,40 @@ func atomicWriteFile(path string, data []byte, perm os.FileMode) error {
 		os.Remove(tmpPath)
 		return fmt.Errorf("chmod temp file: %w", err)
 	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("sync temp file: %w", err)
+	}
+	stagedInfo, err := tmp.Stat()
+	if err != nil {
+		tmp.Close()
+		os.Remove(tmpPath)
+		return fmt.Errorf("stat temp file: %w", err)
+	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("close temp file: %w", err)
 	}
-
-	if err := os.Rename(tmpPath, writePath); err != nil {
+	if err := publish(tmpPath, writePath, stagedInfo, perm); err != nil {
 		os.Remove(tmpPath)
 		return fmt.Errorf("rename %s → %s: %w", tmpPath, writePath, err)
+	}
+	// The staged file was synced before publication. POSIX rename additionally
+	// needs an explicit parent-directory fsync.
+	if runtime.GOOS != "windows" {
+		directory, err := os.Open(dir)
+		if err != nil {
+			return fmt.Errorf("open parent directory for sync: %w", err)
+		}
+		syncErr := directory.Sync()
+		closeErr := directory.Close()
+		if syncErr != nil {
+			return fmt.Errorf("sync parent directory: %w", syncErr)
+		}
+		if closeErr != nil {
+			return fmt.Errorf("close parent directory after sync: %w", closeErr)
+		}
 	}
 	return nil
 }
@@ -82,14 +152,22 @@ func atomicFileAlreadyMatches(path string, data []byte, perm os.FileMode) bool {
 	defer file.Close()
 
 	openedInfo, err := file.Stat()
-	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Mode().Perm() != perm.Perm() {
+	if err != nil || !openedInfo.Mode().IsRegular() || !atomicFileProtectionMatches(file, openedInfo, perm) {
+		return false
+	}
+	// The destination is commonly user-owned runtime state. Never size an
+	// allocation from attacker-controlled metadata: a sparse file can advertise
+	// terabytes while consuming almost no disk. A byte-for-byte match must have
+	// the exact expected length, and the bounded read below closes a grow-after-
+	// stat race without changing the comparison result.
+	if openedInfo.Size() != int64(len(data)) {
 		return false
 	}
 	pathInfo, err := os.Lstat(path)
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
 		return false
 	}
-	current, err := io.ReadAll(file)
+	current, err := io.ReadAll(io.LimitReader(file, int64(len(data))+1))
 	if err != nil || !bytes.Equal(current, data) {
 		return false
 	}

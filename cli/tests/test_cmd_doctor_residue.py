@@ -190,6 +190,32 @@ class FixConnectorResidueTests(unittest.TestCase):
         connectors = [args[args.index("--connector") + 1] for args in called_args]
         self.assertEqual(set(connectors), {"codex", "claudecode"})
 
+    def test_calls_gateway_teardown_for_every_native_connector_receipt(self):
+        native_connectors = {
+            "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
+            "geminicli", "hermes", "omnigent", "opencode", "windsurf",
+        }
+        with tempfile.TemporaryDirectory() as data_dir:
+            for name in native_connectors:
+                marker = os.path.join(data_dir, _CONNECTOR_RESIDUE_ARTIFACTS[name][0])
+                os.makedirs(os.path.dirname(marker), exist_ok=True)
+                with open(marker, "w", encoding="utf-8") as fh:
+                    fh.write("{}")
+            cfg = self._cfg_with_residue(data_dir)
+            with patch("shutil.which", return_value="defenseclaw-gateway.exe"), \
+                 patch("subprocess.run") as run_mock:
+                run_mock.return_value.returncode = 0
+                run_mock.return_value.stdout = ""
+                run_mock.return_value.stderr = ""
+                tag, detail = _fix_connector_residue(cfg, assume_yes=True)
+
+        self.assertEqual(tag, "pass", msg=detail)
+        called = {
+            call.args[0][call.args[0].index("--connector") + 1]
+            for call in run_mock.call_args_list
+        }
+        self.assertEqual(called, native_connectors)
+
     def test_calls_gateway_teardown_for_managed_residual(self):
         with tempfile.TemporaryDirectory() as data_dir:
             managed = os.path.join(
@@ -316,8 +342,12 @@ class ResidueArtifactsContractTests(unittest.TestCase):
     new connector adapter can't silently disable residue detection."""
 
     def test_built_in_connectors_present(self):
-        for name in ("claudecode", "codex", "zeptoclaw"):
-            self.assertIn(name, _CONNECTOR_RESIDUE_ARTIFACTS)
+        expected = {
+            "amp", "antigravity", "claudecode", "codex", "copilot", "cursor",
+            "devin", "geminicli", "hermes", "omnigent", "opencode", "openhands",
+            "windsurf", "zeptoclaw",
+        }
+        self.assertEqual(set(_CONNECTOR_RESIDUE_ARTIFACTS), expected)
 
     def test_artifact_filenames_match_connector_state(self):
         """Filenames must cover both legacy and managed backup names that
@@ -333,6 +363,34 @@ class ResidueArtifactsContractTests(unittest.TestCase):
         self.assertIn(
             os.path.join("connector_backups", "codex", "config.toml.json"),
             _CONNECTOR_RESIDUE_ARTIFACTS["codex"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "codex", "managed_config.toml.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["codex"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "cursor", "config.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["cursor"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "cursor", "hooks.json.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["cursor"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "antigravity", "hooks.json.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["antigravity"],
+        )
+        self.assertIn(
+            os.path.join("connector_backups", "hermes", "shell-hooks-allowlist.json.json"),
+            _CONNECTOR_RESIDUE_ARTIFACTS["hermes"],
+        )
+        self.assertEqual(
+            set(_CONNECTOR_RESIDUE_ARTIFACTS["omnigent"]),
+            {
+                os.path.join("connector_backups", "omnigent", "config.json"),
+                os.path.join("connector_backups", "omnigent", "module.json"),
+                os.path.join("connector_backups", "omnigent", "pth.json"),
+            },
         )
         self.assertIn("zeptoclaw_backup.json", _CONNECTOR_RESIDUE_ARTIFACTS["zeptoclaw"])
         self.assertIn(

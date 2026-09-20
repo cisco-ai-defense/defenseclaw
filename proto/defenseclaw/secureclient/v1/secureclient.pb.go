@@ -92,6 +92,70 @@ func (ServiceAvailability) EnumDescriptor() ([]byte, []int) {
 	return file_secureclient_proto_rawDescGZIP(), []int{0}
 }
 
+// ConfigurationState mirrors internal/gateway/health.go's
+// ConfigurationState (spec 003) on the wire. The values track the
+// managed-enterprise UCB drop lifecycle:
+//   - UNSPECIFIED: non-managed-enterprise or unknown (proto3 default).
+//   - WAITING_FOR_CONFIG: gateway daemon has not yet loaded config.yaml.
+//   - WAITING_FOR_TARGETS: config.yaml loaded, hook-guardian has not
+//     yet loaded targets.yaml.
+//   - READY: both files loaded, hook enforcement engaged.
+//
+// Downstream Secure Client UIs treat UNSPECIFIED as "no configuration
+// tracking here" — the field is absent from every non-managed
+// deployment's HealthSnapshot and MUST NOT be rendered as an error.
+type ConfigurationState int32
+
+const (
+	ConfigurationState_CONFIGURATION_STATE_UNSPECIFIED         ConfigurationState = 0
+	ConfigurationState_CONFIGURATION_STATE_WAITING_FOR_CONFIG  ConfigurationState = 1
+	ConfigurationState_CONFIGURATION_STATE_WAITING_FOR_TARGETS ConfigurationState = 2
+	ConfigurationState_CONFIGURATION_STATE_READY               ConfigurationState = 3
+)
+
+// Enum value maps for ConfigurationState.
+var (
+	ConfigurationState_name = map[int32]string{
+		0: "CONFIGURATION_STATE_UNSPECIFIED",
+		1: "CONFIGURATION_STATE_WAITING_FOR_CONFIG",
+		2: "CONFIGURATION_STATE_WAITING_FOR_TARGETS",
+		3: "CONFIGURATION_STATE_READY",
+	}
+	ConfigurationState_value = map[string]int32{
+		"CONFIGURATION_STATE_UNSPECIFIED":         0,
+		"CONFIGURATION_STATE_WAITING_FOR_CONFIG":  1,
+		"CONFIGURATION_STATE_WAITING_FOR_TARGETS": 2,
+		"CONFIGURATION_STATE_READY":               3,
+	}
+)
+
+func (x ConfigurationState) Enum() *ConfigurationState {
+	p := new(ConfigurationState)
+	*p = x
+	return p
+}
+
+func (x ConfigurationState) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (ConfigurationState) Descriptor() protoreflect.EnumDescriptor {
+	return file_secureclient_proto_enumTypes[1].Descriptor()
+}
+
+func (ConfigurationState) Type() protoreflect.EnumType {
+	return &file_secureclient_proto_enumTypes[1]
+}
+
+func (x ConfigurationState) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use ConfigurationState.Descriptor instead.
+func (ConfigurationState) EnumDescriptor() ([]byte, []int) {
+	return file_secureclient_proto_rawDescGZIP(), []int{1}
+}
+
 type StatsAvailability int32
 
 const (
@@ -131,11 +195,11 @@ func (x StatsAvailability) String() string {
 }
 
 func (StatsAvailability) Descriptor() protoreflect.EnumDescriptor {
-	return file_secureclient_proto_enumTypes[1].Descriptor()
+	return file_secureclient_proto_enumTypes[2].Descriptor()
 }
 
 func (StatsAvailability) Type() protoreflect.EnumType {
-	return &file_secureclient_proto_enumTypes[1]
+	return &file_secureclient_proto_enumTypes[2]
 }
 
 func (x StatsAvailability) Number() protoreflect.EnumNumber {
@@ -144,7 +208,7 @@ func (x StatsAvailability) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use StatsAvailability.Descriptor instead.
 func (StatsAvailability) EnumDescriptor() ([]byte, []int) {
-	return file_secureclient_proto_rawDescGZIP(), []int{1}
+	return file_secureclient_proto_rawDescGZIP(), []int{2}
 }
 
 type NotificationSeverity int32
@@ -183,11 +247,11 @@ func (x NotificationSeverity) String() string {
 }
 
 func (NotificationSeverity) Descriptor() protoreflect.EnumDescriptor {
-	return file_secureclient_proto_enumTypes[2].Descriptor()
+	return file_secureclient_proto_enumTypes[3].Descriptor()
 }
 
 func (NotificationSeverity) Type() protoreflect.EnumType {
-	return &file_secureclient_proto_enumTypes[2]
+	return &file_secureclient_proto_enumTypes[3]
 }
 
 func (x NotificationSeverity) Number() protoreflect.EnumNumber {
@@ -196,7 +260,7 @@ func (x NotificationSeverity) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use NotificationSeverity.Descriptor instead.
 func (NotificationSeverity) EnumDescriptor() ([]byte, []int) {
-	return file_secureclient_proto_rawDescGZIP(), []int{2}
+	return file_secureclient_proto_rawDescGZIP(), []int{3}
 }
 
 type NotificationPresentation int32
@@ -235,11 +299,11 @@ func (x NotificationPresentation) String() string {
 }
 
 func (NotificationPresentation) Descriptor() protoreflect.EnumDescriptor {
-	return file_secureclient_proto_enumTypes[3].Descriptor()
+	return file_secureclient_proto_enumTypes[4].Descriptor()
 }
 
 func (NotificationPresentation) Type() protoreflect.EnumType {
-	return &file_secureclient_proto_enumTypes[3]
+	return &file_secureclient_proto_enumTypes[4]
 }
 
 func (x NotificationPresentation) Number() protoreflect.EnumNumber {
@@ -248,7 +312,7 @@ func (x NotificationPresentation) Number() protoreflect.EnumNumber {
 
 // Deprecated: Use NotificationPresentation.Descriptor instead.
 func (NotificationPresentation) EnumDescriptor() ([]byte, []int) {
-	return file_secureclient_proto_rawDescGZIP(), []int{3}
+	return file_secureclient_proto_rawDescGZIP(), []int{4}
 }
 
 type GetHealthRequest struct {
@@ -304,6 +368,22 @@ type HealthSnapshot struct {
 	Availability ServiceAvailability `protobuf:"varint,2,opt,name=availability,proto3,enum=defenseclaw.secureclient.v1.ServiceAvailability" json:"availability,omitempty"`
 	// DefenseClaw product/runtime version, if available.
 	DefenseClawVersion string `protobuf:"bytes,3,opt,name=defense_claw_version,json=defenseClawVersion,proto3" json:"defense_claw_version,omitempty"`
+	// Managed-enterprise deferred-config state, plumbed through from
+	// internal/gateway/health.go's HealthSnapshot.Configuration.State
+	// (spec 003 REQ-19 / REQ-20). Present on Windows and macOS managed-
+	// enterprise deployments; UNSPECIFIED on every other build (OSS,
+	// SaaS, DP, CP) so a Secure Client UI can key on the value without
+	// additional deployment-mode probing. See
+	// docs/specs/004-windows-ui-ipc/design.md § Interfaces.
+	//
+	// Semantic layering with `availability` above: `availability` reports
+	// overall reachability of the DefenseClaw runtime; `configuration_state`
+	// reports whether the managed-enterprise UCB drop has completed. A
+	// "starting" availability + "waiting_for_config" configuration_state
+	// means "gateway process is up but config.yaml has not arrived yet",
+	// which lets Secure Client render a first-class "waiting for
+	// configuration" UI state distinct from a generic "starting" spinner.
+	ConfigurationState ConfigurationState `protobuf:"varint,4,opt,name=configuration_state,json=configurationState,proto3,enum=defenseclaw.secureclient.v1.ConfigurationState" json:"configuration_state,omitempty"`
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }
@@ -359,6 +439,13 @@ func (x *HealthSnapshot) GetDefenseClawVersion() string {
 	return ""
 }
 
+func (x *HealthSnapshot) GetConfigurationState() ConfigurationState {
+	if x != nil {
+		return x.ConfigurationState
+	}
+	return ConfigurationState_CONFIGURATION_STATE_UNSPECIFIED
+}
+
 type GetStatsSnapshotRequest struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Highest response schema version the AVC caller understands.
@@ -410,18 +497,20 @@ type StatsSnapshot struct {
 	SchemaVersion uint32 `protobuf:"varint,1,opt,name=schema_version,json=schemaVersion,proto3" json:"schema_version,omitempty"`
 	// Indicates whether the statistics are current, stale, or unavailable.
 	Availability StatsAvailability `protobuf:"varint,2,opt,name=availability,proto3,enum=defenseclaw.secureclient.v1.StatsAvailability" json:"availability,omitempty"`
-	// Total scan count for the agreed statistics scope.
-	TotalScans uint64 `protobuf:"varint,3,opt,name=total_scans,json=totalScans,proto3" json:"total_scans,omitempty"`
+	// Total scan count for the agreed statistics scope. Always present
+	// on an AVAILABLE snapshot (even at zero).
+	TotalScans *uint64 `protobuf:"varint,3,opt,name=total_scans,json=totalScans,proto3,oneof" json:"total_scans,omitempty"`
 	// Current active alert count for the agreed statistics scope.
-	ActiveAlerts uint64 `protobuf:"varint,4,opt,name=active_alerts,json=activeAlerts,proto3" json:"active_alerts,omitempty"`
+	// Always present on an AVAILABLE snapshot (even at zero).
+	ActiveAlerts *uint64 `protobuf:"varint,4,opt,name=active_alerts,json=activeAlerts,proto3,oneof" json:"active_alerts,omitempty"`
 	// Count of blocked skills for the agreed statistics scope.
-	BlockedSkills uint64 `protobuf:"varint,5,opt,name=blocked_skills,json=blockedSkills,proto3" json:"blocked_skills,omitempty"`
+	BlockedSkills *uint64 `protobuf:"varint,5,opt,name=blocked_skills,json=blockedSkills,proto3,oneof" json:"blocked_skills,omitempty"`
 	// Count of allowed skills for the agreed statistics scope.
-	AllowedSkills uint64 `protobuf:"varint,6,opt,name=allowed_skills,json=allowedSkills,proto3" json:"allowed_skills,omitempty"`
+	AllowedSkills *uint64 `protobuf:"varint,6,opt,name=allowed_skills,json=allowedSkills,proto3,oneof" json:"allowed_skills,omitempty"`
 	// Count of blocked MCP servers for the agreed statistics scope.
-	BlockedMcpServers uint64 `protobuf:"varint,7,opt,name=blocked_mcp_servers,json=blockedMcpServers,proto3" json:"blocked_mcp_servers,omitempty"`
+	BlockedMcpServers *uint64 `protobuf:"varint,7,opt,name=blocked_mcp_servers,json=blockedMcpServers,proto3,oneof" json:"blocked_mcp_servers,omitempty"`
 	// Count of allowed MCP servers for the agreed statistics scope.
-	AllowedMcpServers uint64 `protobuf:"varint,8,opt,name=allowed_mcp_servers,json=allowedMcpServers,proto3" json:"allowed_mcp_servers,omitempty"`
+	AllowedMcpServers *uint64 `protobuf:"varint,8,opt,name=allowed_mcp_servers,json=allowedMcpServers,proto3,oneof" json:"allowed_mcp_servers,omitempty"`
 	unknownFields     protoimpl.UnknownFields
 	sizeCache         protoimpl.SizeCache
 }
@@ -471,43 +560,43 @@ func (x *StatsSnapshot) GetAvailability() StatsAvailability {
 }
 
 func (x *StatsSnapshot) GetTotalScans() uint64 {
-	if x != nil {
-		return x.TotalScans
+	if x != nil && x.TotalScans != nil {
+		return *x.TotalScans
 	}
 	return 0
 }
 
 func (x *StatsSnapshot) GetActiveAlerts() uint64 {
-	if x != nil {
-		return x.ActiveAlerts
+	if x != nil && x.ActiveAlerts != nil {
+		return *x.ActiveAlerts
 	}
 	return 0
 }
 
 func (x *StatsSnapshot) GetBlockedSkills() uint64 {
-	if x != nil {
-		return x.BlockedSkills
+	if x != nil && x.BlockedSkills != nil {
+		return *x.BlockedSkills
 	}
 	return 0
 }
 
 func (x *StatsSnapshot) GetAllowedSkills() uint64 {
-	if x != nil {
-		return x.AllowedSkills
+	if x != nil && x.AllowedSkills != nil {
+		return *x.AllowedSkills
 	}
 	return 0
 }
 
 func (x *StatsSnapshot) GetBlockedMcpServers() uint64 {
-	if x != nil {
-		return x.BlockedMcpServers
+	if x != nil && x.BlockedMcpServers != nil {
+		return *x.BlockedMcpServers
 	}
 	return 0
 }
 
 func (x *StatsSnapshot) GetAllowedMcpServers() uint64 {
-	if x != nil {
-		return x.AllowedMcpServers
+	if x != nil && x.AllowedMcpServers != nil {
+		return *x.AllowedMcpServers
 	}
 	return 0
 }
@@ -675,23 +764,30 @@ const file_secureclient_proto_rawDesc = "" +
 	"\n" +
 	"\x12secureclient.proto\x12\x1bdefenseclaw.secureclient.v1\"F\n" +
 	"\x10GetHealthRequest\x122\n" +
-	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\xbf\x01\n" +
+	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\xa1\x02\n" +
 	"\x0eHealthSnapshot\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12T\n" +
 	"\favailability\x18\x02 \x01(\x0e20.defenseclaw.secureclient.v1.ServiceAvailabilityR\favailability\x120\n" +
-	"\x14defense_claw_version\x18\x03 \x01(\tR\x12defenseClawVersion\"M\n" +
+	"\x14defense_claw_version\x18\x03 \x01(\tR\x12defenseClawVersion\x12`\n" +
+	"\x13configuration_state\x18\x04 \x01(\x0e2/.defenseclaw.secureclient.v1.ConfigurationStateR\x12configurationState\"M\n" +
 	"\x17GetStatsSnapshotRequest\x122\n" +
-	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\xfe\x02\n" +
+	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\x94\x04\n" +
 	"\rStatsSnapshot\x12%\n" +
 	"\x0eschema_version\x18\x01 \x01(\rR\rschemaVersion\x12R\n" +
-	"\favailability\x18\x02 \x01(\x0e2..defenseclaw.secureclient.v1.StatsAvailabilityR\favailability\x12\x1f\n" +
-	"\vtotal_scans\x18\x03 \x01(\x04R\n" +
-	"totalScans\x12#\n" +
-	"\ractive_alerts\x18\x04 \x01(\x04R\factiveAlerts\x12%\n" +
-	"\x0eblocked_skills\x18\x05 \x01(\x04R\rblockedSkills\x12%\n" +
-	"\x0eallowed_skills\x18\x06 \x01(\x04R\rallowedSkills\x12.\n" +
-	"\x13blocked_mcp_servers\x18\a \x01(\x04R\x11blockedMcpServers\x12.\n" +
-	"\x13allowed_mcp_servers\x18\b \x01(\x04R\x11allowedMcpServers\"O\n" +
+	"\favailability\x18\x02 \x01(\x0e2..defenseclaw.secureclient.v1.StatsAvailabilityR\favailability\x12$\n" +
+	"\vtotal_scans\x18\x03 \x01(\x04H\x00R\n" +
+	"totalScans\x88\x01\x01\x12(\n" +
+	"\ractive_alerts\x18\x04 \x01(\x04H\x01R\factiveAlerts\x88\x01\x01\x12*\n" +
+	"\x0eblocked_skills\x18\x05 \x01(\x04H\x02R\rblockedSkills\x88\x01\x01\x12*\n" +
+	"\x0eallowed_skills\x18\x06 \x01(\x04H\x03R\rallowedSkills\x88\x01\x01\x123\n" +
+	"\x13blocked_mcp_servers\x18\a \x01(\x04H\x04R\x11blockedMcpServers\x88\x01\x01\x123\n" +
+	"\x13allowed_mcp_servers\x18\b \x01(\x04H\x05R\x11allowedMcpServers\x88\x01\x01B\x0e\n" +
+	"\f_total_scansB\x10\n" +
+	"\x0e_active_alertsB\x11\n" +
+	"\x0f_blocked_skillsB\x11\n" +
+	"\x0f_allowed_skillsB\x16\n" +
+	"\x14_blocked_mcp_serversB\x16\n" +
+	"\x14_allowed_mcp_servers\"O\n" +
 	"\x19WatchNotificationsRequest\x122\n" +
 	"\x15client_schema_version\x18\x01 \x01(\rR\x13clientSchemaVersion\"\xd4\x02\n" +
 	"\x12NotificationRecord\x12%\n" +
@@ -709,7 +805,12 @@ const file_secureclient_proto_rawDesc = "" +
 	"\x1dSERVICE_AVAILABILITY_DEGRADED\x10\x03\x12$\n" +
 	" SERVICE_AVAILABILITY_UNAVAILABLE\x10\x04\x12+\n" +
 	"'SERVICE_AVAILABILITY_DISABLED_BY_POLICY\x10\x05\x12\x1e\n" +
-	"\x1aSERVICE_AVAILABILITY_ERROR\x10\x06*\xb9\x01\n" +
+	"\x1aSERVICE_AVAILABILITY_ERROR\x10\x06*\xb1\x01\n" +
+	"\x12ConfigurationState\x12#\n" +
+	"\x1fCONFIGURATION_STATE_UNSPECIFIED\x10\x00\x12*\n" +
+	"&CONFIGURATION_STATE_WAITING_FOR_CONFIG\x10\x01\x12+\n" +
+	"'CONFIGURATION_STATE_WAITING_FOR_TARGETS\x10\x02\x12\x1d\n" +
+	"\x19CONFIGURATION_STATE_READY\x10\x03*\xb9\x01\n" +
 	"\x11StatsAvailability\x12\"\n" +
 	"\x1eSTATS_AVAILABILITY_UNSPECIFIED\x10\x00\x12 \n" +
 	"\x1cSTATS_AVAILABILITY_AVAILABLE\x10\x01\x12\x1c\n" +
@@ -743,36 +844,38 @@ func file_secureclient_proto_rawDescGZIP() []byte {
 	return file_secureclient_proto_rawDescData
 }
 
-var file_secureclient_proto_enumTypes = make([]protoimpl.EnumInfo, 4)
+var file_secureclient_proto_enumTypes = make([]protoimpl.EnumInfo, 5)
 var file_secureclient_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_secureclient_proto_goTypes = []any{
 	(ServiceAvailability)(0),          // 0: defenseclaw.secureclient.v1.ServiceAvailability
-	(StatsAvailability)(0),            // 1: defenseclaw.secureclient.v1.StatsAvailability
-	(NotificationSeverity)(0),         // 2: defenseclaw.secureclient.v1.NotificationSeverity
-	(NotificationPresentation)(0),     // 3: defenseclaw.secureclient.v1.NotificationPresentation
-	(*GetHealthRequest)(nil),          // 4: defenseclaw.secureclient.v1.GetHealthRequest
-	(*HealthSnapshot)(nil),            // 5: defenseclaw.secureclient.v1.HealthSnapshot
-	(*GetStatsSnapshotRequest)(nil),   // 6: defenseclaw.secureclient.v1.GetStatsSnapshotRequest
-	(*StatsSnapshot)(nil),             // 7: defenseclaw.secureclient.v1.StatsSnapshot
-	(*WatchNotificationsRequest)(nil), // 8: defenseclaw.secureclient.v1.WatchNotificationsRequest
-	(*NotificationRecord)(nil),        // 9: defenseclaw.secureclient.v1.NotificationRecord
+	(ConfigurationState)(0),           // 1: defenseclaw.secureclient.v1.ConfigurationState
+	(StatsAvailability)(0),            // 2: defenseclaw.secureclient.v1.StatsAvailability
+	(NotificationSeverity)(0),         // 3: defenseclaw.secureclient.v1.NotificationSeverity
+	(NotificationPresentation)(0),     // 4: defenseclaw.secureclient.v1.NotificationPresentation
+	(*GetHealthRequest)(nil),          // 5: defenseclaw.secureclient.v1.GetHealthRequest
+	(*HealthSnapshot)(nil),            // 6: defenseclaw.secureclient.v1.HealthSnapshot
+	(*GetStatsSnapshotRequest)(nil),   // 7: defenseclaw.secureclient.v1.GetStatsSnapshotRequest
+	(*StatsSnapshot)(nil),             // 8: defenseclaw.secureclient.v1.StatsSnapshot
+	(*WatchNotificationsRequest)(nil), // 9: defenseclaw.secureclient.v1.WatchNotificationsRequest
+	(*NotificationRecord)(nil),        // 10: defenseclaw.secureclient.v1.NotificationRecord
 }
 var file_secureclient_proto_depIdxs = []int32{
-	0, // 0: defenseclaw.secureclient.v1.HealthSnapshot.availability:type_name -> defenseclaw.secureclient.v1.ServiceAvailability
-	1, // 1: defenseclaw.secureclient.v1.StatsSnapshot.availability:type_name -> defenseclaw.secureclient.v1.StatsAvailability
-	2, // 2: defenseclaw.secureclient.v1.NotificationRecord.severity:type_name -> defenseclaw.secureclient.v1.NotificationSeverity
-	3, // 3: defenseclaw.secureclient.v1.NotificationRecord.presentation:type_name -> defenseclaw.secureclient.v1.NotificationPresentation
-	4, // 4: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetHealth:input_type -> defenseclaw.secureclient.v1.GetHealthRequest
-	6, // 5: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetStatsSnapshot:input_type -> defenseclaw.secureclient.v1.GetStatsSnapshotRequest
-	8, // 6: defenseclaw.secureclient.v1.DefenseClawSecureClientService.WatchNotifications:input_type -> defenseclaw.secureclient.v1.WatchNotificationsRequest
-	5, // 7: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetHealth:output_type -> defenseclaw.secureclient.v1.HealthSnapshot
-	7, // 8: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetStatsSnapshot:output_type -> defenseclaw.secureclient.v1.StatsSnapshot
-	9, // 9: defenseclaw.secureclient.v1.DefenseClawSecureClientService.WatchNotifications:output_type -> defenseclaw.secureclient.v1.NotificationRecord
-	7, // [7:10] is the sub-list for method output_type
-	4, // [4:7] is the sub-list for method input_type
-	4, // [4:4] is the sub-list for extension type_name
-	4, // [4:4] is the sub-list for extension extendee
-	0, // [0:4] is the sub-list for field type_name
+	0,  // 0: defenseclaw.secureclient.v1.HealthSnapshot.availability:type_name -> defenseclaw.secureclient.v1.ServiceAvailability
+	1,  // 1: defenseclaw.secureclient.v1.HealthSnapshot.configuration_state:type_name -> defenseclaw.secureclient.v1.ConfigurationState
+	2,  // 2: defenseclaw.secureclient.v1.StatsSnapshot.availability:type_name -> defenseclaw.secureclient.v1.StatsAvailability
+	3,  // 3: defenseclaw.secureclient.v1.NotificationRecord.severity:type_name -> defenseclaw.secureclient.v1.NotificationSeverity
+	4,  // 4: defenseclaw.secureclient.v1.NotificationRecord.presentation:type_name -> defenseclaw.secureclient.v1.NotificationPresentation
+	5,  // 5: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetHealth:input_type -> defenseclaw.secureclient.v1.GetHealthRequest
+	7,  // 6: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetStatsSnapshot:input_type -> defenseclaw.secureclient.v1.GetStatsSnapshotRequest
+	9,  // 7: defenseclaw.secureclient.v1.DefenseClawSecureClientService.WatchNotifications:input_type -> defenseclaw.secureclient.v1.WatchNotificationsRequest
+	6,  // 8: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetHealth:output_type -> defenseclaw.secureclient.v1.HealthSnapshot
+	8,  // 9: defenseclaw.secureclient.v1.DefenseClawSecureClientService.GetStatsSnapshot:output_type -> defenseclaw.secureclient.v1.StatsSnapshot
+	10, // 10: defenseclaw.secureclient.v1.DefenseClawSecureClientService.WatchNotifications:output_type -> defenseclaw.secureclient.v1.NotificationRecord
+	8,  // [8:11] is the sub-list for method output_type
+	5,  // [5:8] is the sub-list for method input_type
+	5,  // [5:5] is the sub-list for extension type_name
+	5,  // [5:5] is the sub-list for extension extendee
+	0,  // [0:5] is the sub-list for field type_name
 }
 
 func init() { file_secureclient_proto_init() }
@@ -780,12 +883,13 @@ func file_secureclient_proto_init() {
 	if File_secureclient_proto != nil {
 		return
 	}
+	file_secureclient_proto_msgTypes[3].OneofWrappers = []any{}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_secureclient_proto_rawDesc), len(file_secureclient_proto_rawDesc)),
-			NumEnums:      4,
+			NumEnums:      5,
 			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   1,

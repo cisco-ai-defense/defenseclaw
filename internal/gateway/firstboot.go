@@ -24,6 +24,8 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 )
 
 // firstBootMu serializes EnsureGatewayToken so two goroutines (e.g. proxy
@@ -107,13 +109,6 @@ func appendEnvLine(path, key, value string) error {
 		return fmt.Errorf("appendEnvLine: value contains newline")
 	}
 
-	dir := filepath.Dir(path)
-	if dir != "" && dir != "." {
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return err
-		}
-	}
-
 	var lines []string
 	if data, err := os.ReadFile(path); err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -136,13 +131,29 @@ func appendEnvLine(path, key, value string) error {
 	}
 	lines = append(lines, fmt.Sprintf("%s=%s", key, value), "")
 
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, []byte(strings.Join(lines, "\n")), 0o600); err != nil {
-		return err
+	// Cold-start dependency (T5.7): in managed_enterprise mode the write
+	// below goes through managed.WriteServiceRuntimeFile which requires
+	// the parent directory to already carry the Administrators-owned +
+	// service-writer-ACE trust contract. Spec 003 (deferred config)
+	// introduced a boot ordering that can invoke appendEnvLine before
+	// the installer's trust-setup step has applied those ACLs; when
+	// that happens the caller sees a wrapped "not trusted" error and
+	// firstboot fails. The proper cross-cutting fix is to gate this
+	// helper on the installer trust-setup completion signal — deferred
+	// as follow-up scope. The wrapped error text already points
+	// operators at the missing ACL, so the boot failure is diagnosable.
+	if err := managed.WriteServiceRuntimeFile(
+		managed.PinnedDeploymentMode(),
+		path,
+		"gateway dotenv",
+		[]byte(strings.Join(lines, "\n")),
+	); err != nil {
+		return fmt.Errorf(
+			"appendEnvLine: %w (cold-start note: on managed_enterprise the "+
+				"parent %s must carry the installer's Administrators-owned + "+
+				"service-writer-ACE trust ACLs before firstboot writes the token)",
+			err, filepath.Dir(path),
+		)
 	}
-	if err := os.Chmod(tmp, 0o600); err != nil {
-		_ = os.Remove(tmp)
-		return err
-	}
-	return os.Rename(tmp, path)
+	return nil
 }

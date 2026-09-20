@@ -18,6 +18,9 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/defenseclaw/defenseclaw/internal/audit"
+	"go.opentelemetry.io/otel/trace"
 )
 
 // uuidV4Pattern loosely matches a v4 UUID so we can assert the
@@ -30,6 +33,46 @@ func TestContextWithRequestID_EmptyIsNoOp(t *testing.T) {
 	got := ContextWithRequestID(ctx, "")
 	if got != ctx {
 		t.Fatalf("empty id should return the same ctx; got %v want %v", got, ctx)
+	}
+}
+
+func TestScanCorrelationFromContextPreservesEnvelopeAndW3CSpan(t *testing.T) {
+	traceID, err := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	spanID, err := trace.SpanIDFromHex("0123456789abcdef")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx := audit.ContextWithEnvelope(context.Background(), audit.CorrelationEnvelope{
+		RunID: "run-scan", RequestID: "request-scan", SessionID: "session-scan",
+		TraceID: traceID.String(), AgentID: "agent-scan", AgentName: "scanner-agent",
+		AgentInstanceID: "instance-scan", Connector: "codex",
+	})
+	ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: traceID, SpanID: spanID, TraceFlags: trace.FlagsSampled,
+	}))
+
+	got := ScanCorrelationFromContext(ctx)
+	if got.RunID != "run-scan" || got.RequestID != "request-scan" || got.SessionID != "session-scan" ||
+		got.TraceID != traceID.String() || got.SpanID != spanID.String() || got.AgentID != "agent-scan" ||
+		got.AgentName != "scanner-agent" || got.AgentInstanceID != "instance-scan" || got.Connector != "codex" {
+		t.Fatalf("scan correlation=%+v", got)
+	}
+}
+
+func TestScanCorrelationFromContextDoesNotPairMismatchedTraceAndSpan(t *testing.T) {
+	activeTraceID, _ := trace.TraceIDFromHex("0123456789abcdef0123456789abcdef")
+	activeSpanID, _ := trace.SpanIDFromHex("0123456789abcdef")
+	ctx := ContextWithTraceID(context.Background(), "abcdefabcdefabcdefabcdefabcdefab")
+	ctx = trace.ContextWithSpanContext(ctx, trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID: activeTraceID, SpanID: activeSpanID, TraceFlags: trace.FlagsSampled,
+	}))
+
+	got := ScanCorrelationFromContext(ctx)
+	if got.TraceID != "abcdefabcdefabcdefabcdefabcdefab" || got.SpanID != "" {
+		t.Fatalf("mismatched W3C correlation=%+v", got)
 	}
 }
 
@@ -142,8 +185,8 @@ func TestRequestIDMiddleware_HonoursClientSupplied(t *testing.T) {
 // TestSanitizeClientRequestID_BoundsLength verifies the hard cap on
 // client-supplied correlation IDs. Without this guard, a misbehaving
 // client could ship multi-kilobyte request IDs that would be
-// replicated to every observability sink (SQLite, gateway.jsonl,
-// Splunk HEC, OTel), amplifying a single bad request into a
+// replicated to local SQLite and every configured export destination,
+// amplifying a single bad request into a
 // denial-of-service vector on storage and indexing cost.
 func TestSanitizeClientRequestID_BoundsLength(t *testing.T) {
 	oversized := strings.Repeat("a", maxRequestIDLength+1024)

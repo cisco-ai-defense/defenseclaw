@@ -12,6 +12,225 @@ t_plist_exists_and_parses() {
   fi
 }
 
+t_guardian_and_enumerator_plists_exist_and_parse() {
+  # The hook-guardian + hook-enumerator LaunchDaemons together deliver
+  # per-user hook wiring for every eligible local user on the box.
+  # install.sh installs and bootstraps both; the shipped bundle must
+  # therefore include both plist templates.
+  local g="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+  local e="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+  assert_file_exists "${g}"
+  assert_file_exists "${e}"
+  if command -v plutil >/dev/null 2>&1; then
+    local out rc=0
+    out="$(plutil -lint "${g}" 2>&1)" || rc=$?
+    assert_status "${rc}" 0 "guardian plutil -lint should succeed"
+    out="$(plutil -lint "${e}" 2>&1)" || rc=$?
+    assert_status "${rc}" 0 "enumerator plutil -lint should succeed"
+  fi
+  # The enumerator invokes the render-targets.sh helper we ship under
+  # /opt/cisco/secureclient/defenseclaw/lib/render-targets.sh. If a
+  # future edit accidentally points at a stale bin/ path, catch it here.
+  local body
+  body="$(cat "${e}")"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/lib/render-targets.sh" \
+    "enumerator plist points at lib/render-targets.sh"
+  assert_contains "${body}" "<key>StartInterval</key>" "enumerator has StartInterval"
+  assert_contains "${body}" "com.cisco.secureclient.defenseclaw.hook-enumerator" \
+    "enumerator label is namespaced under com.cisco.secureclient.defenseclaw"
+
+  body="$(cat "${g}")"
+  assert_contains "${body}" "enterprise" "guardian invokes enterprise subcommand"
+  assert_contains "${body}" "hooks"      "guardian invokes hooks subcommand"
+  # The guardian runs the long-running `watch` mode so tampering with a
+  # per-user hook config or hook script is fsnotify-detected and healed
+  # within ~1 s. If this ever regresses back to `reconcile`, heal
+  # latency silently blows out to ~5 min.
+  assert_contains "${body}" "<string>watch</string>" "guardian runs long-running watch mode"
+  assert_not_contains "${body}" "<string>reconcile</string>" \
+    "guardian must not use one-shot reconcile (regresses fsnotify auto-heal)"
+  # --interval 60s is the periodic backstop *inside* watch; it is NOT a
+  # substitute for real fsnotify reactivity. Both must be present.
+  # 60s (was 5m) tightens worst-case tamper-detection for SharedWriter
+  # Write tampers (native agent configs) and generic-script Writes to
+  # ~1 min. No additional resource cost — same long-running process.
+  assert_contains "${body}" "<string>--interval</string>" "guardian passes --interval flag"
+  assert_contains "${body}" "<string>60s</string>"        "guardian backstop interval is 60s"
+  assert_contains "${body}" "/opt/cisco/secureclient/defenseclaw/hook-guardian/targets.yaml" \
+    "guardian points at the installer-rendered manifest path"
+  # Restart policy: KeepAlive (right for long-running watch) NOT
+  # StartInterval (would relaunch every N seconds — pointless with a
+  # long-running process and would spawn duplicates).
+  assert_contains "${body}" "<key>KeepAlive</key>" "guardian uses KeepAlive"
+  assert_not_contains "${body}" "<key>StartInterval</key>" \
+    "guardian must not use StartInterval in watch mode (would relaunch long-running process)"
+}
+
+t_render_targets_sh_exists_and_is_executable() {
+  # render-targets.sh is invoked by the hook-enumerator LaunchDaemon.
+  # It must be shipped in the bundle and be +x so /bin/bash doesn't
+  # need to be edited to allow execution.
+  local rt="${PKG_DIR}/lib/render-targets.sh"
+  assert_file_exists "${rt}"
+  if [[ ! -x "${rt}" ]]; then
+    _fail "render-targets.sh missing +x"
+    return 1
+  fi
+  local rc=0
+  bash -n "${rt}" 2>&1 || rc=$?
+  assert_status "${rc}" 0 "render-targets.sh parses cleanly"
+}
+
+t_install_bootstraps_guardian_and_enumerator() {
+  # Regression guard: install.sh MUST install and bootstrap both the
+  # hook-guardian and hook-enumerator LaunchDaemons — otherwise no
+  # user's hooks ever get wired on a fresh customer install.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  assert_contains "${body}" 'install_file_no_replace "${GUARDIAN_PLIST_SRC}" "${GUARDIAN_PLIST_DST}"' \
+    "install.sh copies the guardian plist"
+  assert_contains "${body}" 'install_file_no_replace "${ENUMERATOR_PLIST_SRC}" "${ENUMERATOR_PLIST_DST}"' \
+    "install.sh copies the enumerator plist"
+  assert_contains "${body}" 'launchctl bootstrap system "${GUARDIAN_PLIST_DST}"' \
+    "install.sh bootstraps the guardian daemon"
+  assert_contains "${body}" 'launchctl bootstrap system "${ENUMERATOR_PLIST_DST}"' \
+    "install.sh bootstraps the enumerator daemon"
+  assert_contains "${body}" 'render_targets_manifest' \
+    "install.sh renders the initial targets.yaml manifest"
+  assert_contains "${body}" 'enumerate_local_users' \
+    "install.sh enumerates local users via the shared helper"
+}
+
+t_install_survives_zero_target_manifest() {
+  # AIFW-31486 regression guard: on a fresh customer box the AVC-shipped
+  # .pkg lands before the user has installed any supported connector CLI
+  # (Amp / Codex / ClaudeCode / Cursor / OpenCode). The zero-target render used to `die`
+  # here, which surfaced as the AVC postinstall logging
+  # "DefenseClaw install failed with exit code 1; continuing AVC install"
+  # and left the box with no hook-guardian daemon running at all.
+  #
+  # The new contract: warn and proceed. The hook-enumerator LaunchDaemon
+  # re-renders targets.yaml every 5 min, so the guardian picks up hooks
+  # the moment a connector CLI appears — no operator action required.
+  local body
+  body="$(cat "${PKG_DIR}/install.sh")"
+  # No `die` referencing the zero-target manifest condition may remain.
+  if grep -nE 'die[[:space:]].*hook-guardian manifest has zero targets' "${PKG_DIR}/install.sh" >/dev/null; then
+    _fail "install.sh still die()s on a zero-target manifest — regresses AIFW-31486; must warn+proceed so the enumerator can pick up connectors later"
+    return 1
+  fi
+  # And there must be an explicit warn on both branches of the classify
+  # helper so an operator scanning /var/log/install.log can tell why
+  # hooks aren't wired yet AND which corrective action (if any) matters.
+  assert_contains "${body}" 'warn "hook-guardian manifest has zero targets:' \
+    "install.sh warns loudly on the all-unsupported branch (AIFW-31486)"
+  assert_contains "${body}" 'warn "hook-guardian manifest has zero targets (users=' \
+    "install.sh warns loudly on the none-installed branch (AIFW-31486)"
+  # The classification helper MUST be invoked so the two branches get
+  # different guidance. Without this the warn is a single generic line.
+  assert_contains "${body}" 'classify_zero_target_reason "${CONNECTOR}"' \
+    "install.sh consults classify_zero_target_reason to distinguish all-unsupported vs none-installed"
+  assert_contains "${body}" 'supported today: amp|codex|claudecode|cursor|opencode' \
+    "zero-target operator report lists every auto-wireable connector"
+
+  # Branch-to-bootstrap control-flow guard (CodeRabbit finding 2):
+  # a source scan alone can't prove the zero-target branch actually
+  # falls through to the launchctl bootstrap. Assert that the
+  # `if [[ ${MANIFEST_TARGETS} == "0" ]]` block itself contains NO
+  # `die` — if a future edit re-adds one there, a fresh customer
+  # install would still fail to start any daemon even though a warn
+  # text is present. Legitimate `die`s guarding unrelated file-integrity
+  # (symlink refusal, atomic-move failure) live OUTSIDE this block and
+  # must stay untouched.
+  local py_rc=0
+  /usr/bin/python3 - "${PKG_DIR}/install.sh" >/dev/null 2>&1 <<'PY' || py_rc=$?
+import re, sys
+src = open(sys.argv[1]).read()
+# Find the zero-target if-block header.
+header = re.search(
+    r'if\s+\[\[\s+"\$\{MANIFEST_TARGETS\}"\s*==\s*"0"\s*\]\]\s+&&\s+\[\[\s+-n\s+"\$\{USER_LINES\}"\s*\]\]\s*;\s*then',
+    src,
+)
+if not header:
+    print("zero-target if header not found — install.sh contract changed", file=sys.stderr)
+    sys.exit(2)
+# Walk forward from the header to find the matching `fi`, tracking nesting.
+body_start = header.end()
+i = body_start
+depth = 1
+while i < len(src) and depth > 0:
+    m_if = re.match(r'\s*if\s', src[i:])
+    m_fi = re.match(r'\s*fi(\s|$)', src[i:])
+    # Move line-by-line to keep the walk simple; scan the current line's
+    # first token for if/fi.
+    nl = src.find('\n', i)
+    if nl == -1:
+        nl = len(src)
+    line = src[i:nl]
+    stripped_line = re.sub(r'^\s*', '', line)
+    stripped_line = re.sub(r'(?<!\\)#.*$', '', stripped_line).rstrip()
+    if re.match(r'if\b', stripped_line) or re.match(r'case\b', stripped_line):
+        depth += 1
+    elif re.match(r'fi\b', stripped_line) or re.match(r'esac\b', stripped_line):
+        depth -= 1
+        if depth == 0:
+            block_end = i + len(line)  # up to and including the `fi` line
+            break
+    i = nl + 1
+else:
+    print("could not find closing fi for zero-target block", file=sys.stderr)
+    sys.exit(3)
+body = src[body_start:block_end]
+# Strip line comments so a `# die ...` in prose doesn't false-positive.
+stripped = re.sub(r'(?m)^\s*#.*$', '', body)
+hit = re.search(r'(^|[^_a-zA-Z0-9])die\s', stripped)
+if hit:
+    ctx = stripped[max(0, hit.start()-40):hit.end()+80]
+    print(f"die() found INSIDE the zero-target block near: {ctx!r}", file=sys.stderr)
+    sys.exit(1)
+PY
+  if [[ "${py_rc}" -ne 0 ]]; then
+    _fail "install.sh has a die() inside the MANIFEST_TARGETS==0 block — regresses AIFW-31486 (daemons never start on a zero-target box); python check exited with ${py_rc}"
+    return 1
+  fi
+}
+
+t_install_no_longer_hardcodes_single_target_user() {
+  # Regression guard: the pre-2026.7.3 flow called
+  #   "${GATEWAY_BIN}" enterprise hooks install --connector ... --user "${TARGET_USER}"
+  # inline, which silently no-op'd whenever TARGET_USER was empty. The
+  # multi-user rewrite REPLACES those inline calls with a manifest-based
+  # reconcile owned by the hook-guardian LaunchDaemon. Grepping for a
+  # bare `enterprise hooks install` invocation must return zero code
+  # matches (comments are fine — they're filtered by the same grep the
+  # guardian-auth-dir regression test uses).
+  local bad
+  bad="$(/usr/bin/python3 - "${PKG_DIR}/install.sh" <<'PY'
+import re, sys
+src = open(sys.argv[1]).read()
+joined = re.sub(r"\\\n\s*", " ", src)
+bad = []
+for i, line in enumerate(joined.splitlines(), start=1):
+    if "enterprise hooks install" not in line:
+        continue
+    # Skip pure prints / logs / comments.
+    stripped = line.lstrip()
+    if stripped.startswith("#"):
+        continue
+    if re.search(r"\blog\b|\bwarn\b|\bprintf\b", line):
+        continue
+    bad.append((i, line.strip()[:200]))
+for i, l in bad:
+    print(f"{i}: {l}")
+PY
+)"
+  if [[ -n "${bad}" ]]; then
+    _fail "found live 'enterprise hooks install' invocation(s) in install.sh — the multi-user rewrite should route wiring through the hook-guardian reconcile only:
+${bad}"
+    return 1
+  fi
+}
+
 t_plist_contains_managed_paths() {
   local plist="${REPO_ROOT}/packaging/launchd/com.cisco.secureclient.defenseclaw.plist"
   local body; body="$(cat "${plist}")"
@@ -343,6 +562,34 @@ t_plist_validator_fails_closed_when_stat_output_empty() {
   assert_contains "${out}" "cannot stat plist source" "explains why"
 }
 
+t_install_log_sink_is_after_preflight() {
+  # Regression guard: install.sh's persistent log-sink tee must NOT
+  # fire before the fresh-host preflight. Setting it up earlier
+  # implicitly creates ${LOGS_DIR}/install.log which then trips both:
+  #   1. The fresh-host marker loop (LOGS_DIR appears "existing")
+  #   2. The `create_install_directory_no_replace ${LOGS_DIR}` at
+  #      line ~678 (the dir was already created by mkdir -p)
+  # Either failure locks the operator out of reinstall after
+  # uninstall --purge. Uninstall wipes LOGS_DIR wholesale so no
+  # persistence across install/uninstall cycles is desired anyway.
+  #
+  # This test enforces the ordering by grepping for both landmarks
+  # (the tee call + the LOGS_DIR creation) and asserting the tee
+  # appears AFTER the create_install_directory_no_replace line.
+  local install="${REPO_ROOT}/packaging/macos/install.sh"
+  local tee_line create_line
+  tee_line="$(grep -n 'tee -a "\${_install_log_path}"' "${install}" | head -1 | cut -d: -f1)"
+  create_line="$(grep -n 'create_install_directory_no_replace "\${LOGS_DIR}"' "${install}" | head -1 | cut -d: -f1)"
+  if [[ -z "${tee_line}" || -z "${create_line}" ]]; then
+    _fail "could not locate install.log tee (line=${tee_line:-?}) or LOGS_DIR creation (line=${create_line:-?}) in install.sh"
+    return 1
+  fi
+  if (( tee_line < create_line )); then
+    _fail "install.log tee at line ${tee_line} precedes LOGS_DIR creation at line ${create_line} — self-lockout on reinstall"
+    return 1
+  fi
+}
+
 t_install_does_not_precreate_cmid_log_file() {
   # Running the daemon as root means the managed cloud auth provider
   # can create its own log file without any installer help. The earlier
@@ -445,7 +692,13 @@ t_install_refuses_existing_state_before_build_or_launchd_mutation() {
 }
 
 run_case "plist exists and lints"     t_plist_exists_and_parses
+run_case "guardian + enumerator plists exist and lint" t_guardian_and_enumerator_plists_exist_and_parse
+run_case "render-targets.sh present + executable + parses" t_render_targets_sh_exists_and_is_executable
+run_case "install.sh bootstraps guardian + enumerator daemons" t_install_bootstraps_guardian_and_enumerator
+run_case "install.sh survives zero-target manifest (AIFW-31486)" t_install_survives_zero_target_manifest
+run_case "install.sh no longer inline-calls 'enterprise hooks install'" t_install_no_longer_hardcodes_single_target_user
 run_case "plist references managed paths" t_plist_contains_managed_paths
+run_case "install.log sink is set up AFTER fresh-host preflight + LOGS_DIR create" t_install_log_sink_is_after_preflight
 run_case "install does not pre-create CMID log file (root daemon owns lifecycle)"    t_install_does_not_precreate_cmid_log_file
 run_case "install does not relax CMID store perms (root daemon owns lifecycle)"      t_install_does_not_relax_cmid_store_perms
 run_case "uninstall still sweeps legacy CMID log file from pre-root installs"        t_uninstall_still_sweeps_legacy_cmid_log_file

@@ -39,12 +39,12 @@ CONNECTORS: tuple[str, ...] = (
     "claudecode",
     "hermes",
     "cursor",
-    "windsurf",
-    "geminicli",
+    "devin",
     "copilot",
     "openhands",
     "antigravity",
     "opencode",
+    "amp",
     "omnigent",
 )
 
@@ -58,8 +58,7 @@ GUARDRAIL_CONNECTORS: frozenset[str] = frozenset({"openclaw", "zeptoclaw"})
 def supported_connector_choices(os_name: str | None = None) -> tuple[str, ...]:
     """``CONNECTORS`` filtered to those supported on *os_name*.
 
-    DefenseClaw is hook-only on Windows, so the proxy connectors
-    (openclaw/zeptoclaw) are dropped there; a no-op on macOS/Linux. Use this
+    Unsupported or retired connectors are dropped on every platform. Use this
     wherever the connector list is presented to or chosen by the operator.
     """
     return tuple(supported_connectors(CONNECTORS, os_name))

@@ -24,7 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 from defenseclaw.config import LLMConfig
 from defenseclaw.models import Finding, ScanResult
-from defenseclaw.scanner._llm_env import litellm_model
+from defenseclaw.scanner._llm_env import litellm_model, llm_analyzer_ready
 from defenseclaw.scanner.plugin_scanner import scan_plugin
 from defenseclaw.scanner.plugin_scanner.types import (
     PluginScanOptions,
@@ -97,6 +97,8 @@ class PluginScannerWrapper:
         llm_provider: str = "",
         llm_consensus_runs: int = 0,
         disable_meta: bool = False,
+        include_self: bool = False,
+        trusted_self_paths: tuple[str, ...] = (),
         lenient: bool = False,
     ) -> ScanResult:
         start = time.monotonic()
@@ -112,6 +114,8 @@ class PluginScannerWrapper:
         # Thread the --no-meta request through so the MetaAnalyzer is
         # actually skipped by the scanner pipeline (F-0302).
         options.disable_meta = disable_meta
+        options.include_self = include_self
+        options.trusted_self_paths = trusted_self_paths
 
         # Build the LLM override:
         #   1. Start from the resolved unified LLM config (top-level
@@ -129,12 +133,11 @@ class PluginScannerWrapper:
         if llm_consensus_runs > 0:
             override["consensus_runs"] = llm_consensus_runs
 
-        # P-F: the LLM lane is default-ON whenever a model is configured.
-        #   use_llm is None  → auto: enable iff a model resolves.
-        #   use_llm is True  → force on; loud-degrade to static (YARA/heuristic)
-        #                      with a stderr warning if no model resolves, so a
-        #                      requested-but-unavailable LLM is never a silent
-        #                      clean pass.
+        # P-F: the LLM lane is default-ON whenever a usable model is configured.
+        #   use_llm is None  → auto: enable iff a model resolves and can auth.
+        #   use_llm is True  → force-request it; loud-degrade to static
+        #                      (YARA/heuristic) when the model or required
+        #                      credential is unavailable.
         #   use_llm is False → force off (local analyzers only; --no-llm).
         # The plugin_scanner orchestrator additionally surfaces a runtime LLM
         # failure (backend unreachable) as an LLM-SCAN-ERROR finding rather than
@@ -142,18 +145,48 @@ class PluginScannerWrapper:
         model_configured = bool(override.get("model")) or bool(
             self._llm and litellm_model(self._llm)
         )
+        readiness_llm = LLMConfig(
+            model=str(override.get("model") or ""),
+            provider=str(override.get("provider") or ""),
+            api_key=str(override.get("api_key") or ""),
+            base_url=str(override.get("api_base") or ""),
+        )
+        llm_ready = model_configured and llm_analyzer_ready(readiness_llm)
         if use_llm is None:
-            if model_configured:
+            if llm_ready:
                 override["enabled"] = True
+            elif model_configured:
+                key_name = (
+                    self._llm.api_key_env
+                    if self._llm and self._llm.api_key_env
+                    else "DEFENSECLAW_LLM_KEY"
+                )
+                print(
+                    "warning: LLM analyzer skipped: "
+                    f"{key_name} is not configured; continuing with local analyzers",
+                    file=sys.stderr,
+                )
         elif use_llm:
-            if model_configured:
+            if llm_ready:
                 override["enabled"] = True
-            else:
+            elif not model_configured:
                 print(
                     "warning: --use-llm requested but no model is configured for "
                     "scanners.plugin — running static (YARA/heuristic) analysis "
                     "only. Set llm.model or scanners.plugin.llm to enable the "
                     "semantic LLM lane.",
+                    file=sys.stderr,
+                )
+            else:
+                key_name = (
+                    self._llm.api_key_env
+                    if self._llm and self._llm.api_key_env
+                    else "DEFENSECLAW_LLM_KEY"
+                )
+                print(
+                    "warning: --use-llm requested but "
+                    f"{key_name} is not configured — running static "
+                    "(YARA/heuristic) analysis only.",
                     file=sys.stderr,
                 )
         if override:
@@ -170,6 +203,12 @@ class PluginScannerWrapper:
             if getattr(f, "suppressed", False):
                 continue
             rid = getattr(f, "rule_id", None) or ""
+            tags = list(f.tags) if f.tags else []
+            correlation_evidence = (
+                (getattr(f, "evidence", None) or "")
+                if rid.startswith("META-") and "correlation" in tags
+                else ""
+            )
             line = getattr(f, "line", None) or getattr(f, "line_number", None)
             ln: int | None = int(line) if line is not None else None
             findings.append(Finding(
@@ -180,9 +219,11 @@ class PluginScannerWrapper:
                 location=f.location or "",
                 remediation=f.remediation or "",
                 scanner="plugin-scanner",
-                tags=list(f.tags) if f.tags else [],
+                tags=tags,
                 rule_id=rid,
                 line_number=ln,
+                confidence=getattr(f, "confidence", None),
+                evidence=correlation_evidence,
             ))
 
         return ScanResult(

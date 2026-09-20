@@ -4,12 +4,12 @@
     "index",
     "command-generator",
     "tui",
-    "---Get Started---",
     "get-started",
-    "---Setup---",
     "setup",
     "connectors",
     "capability-matrix",
+    "benchmarks",
+    "llm-judge-benchmark",
     "ai-discovery",
     "hitl",
     "---Policies & Defaults---",
@@ -17,11 +17,8 @@
     "defaults",
     "---Integrations---",
     "openclaw",
-    "---Observability---",
     "observability",
-    "---Stories---",
     "stories",
-    "---Reference---",
     "reference"
   ]
 }

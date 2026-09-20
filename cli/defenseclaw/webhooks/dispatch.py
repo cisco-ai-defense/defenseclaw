@@ -37,6 +37,7 @@ import hashlib
 import hmac
 import json
 import re
+import time
 import urllib.error
 import urllib.request
 import uuid
@@ -44,7 +45,6 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from defenseclaw.webhooks.otel_metrics import WebhookDeliveryTimer
 from defenseclaw.webhooks.writer import validate_webhook_url
 
 # ---------------------------------------------------------------------------
@@ -287,6 +287,7 @@ class DispatchResult:
     request_body_preview: str = ""
     request_headers: dict[str, str] = field(default_factory=dict)
     payload_bytes: int = 0
+    duration_ms: float = 0.0
 
 
 def send_synthetic(
@@ -375,18 +376,16 @@ def send_synthetic(
     # ``validate_webhook_url`` never inspected. Disable redirects so
     # the connection terminates at the validated host or fails loudly.
     opener = urllib.request.build_opener(_NoRedirectHandler())
-    with WebhookDeliveryTimer(webhook_type, url) as wt:
-        try:
-            with opener.open(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
-                status = int(resp.getcode())
-                wt.status_code = status
-        except urllib.error.HTTPError as exc:
-            status = int(exc.code)
-            wt.status_code = status
-            err = f"HTTP {exc.code}: {exc.reason}"
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
-            wt.status_code = 0
-            err = str(exc)
+    started_at = time.perf_counter()
+    try:
+        with opener.open(req, timeout=max(1, int(timeout_seconds))) as resp:  # noqa: S310
+            status = int(resp.getcode())
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        err = f"HTTP {exc.code}: {exc.reason}"
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        err = str(exc)
+    duration_ms = (time.perf_counter() - started_at) * 1000.0
 
     ok = status is not None and 200 <= status < 300
     return DispatchResult(
@@ -399,6 +398,7 @@ def send_synthetic(
         request_body_preview=preview,
         request_headers=_redact_headers(headers),
         payload_bytes=len(payload),
+        duration_ms=duration_ms,
     )
 
 
@@ -466,5 +466,4 @@ def _redact_payload_preview(payload: bytes, webhook_type: str, secret: str) -> s
         scrubbed = scrubbed.replace(secret, "<redacted>")
     # Truncate only after redaction so the preview stays short.
     return scrubbed[:200]
-
 

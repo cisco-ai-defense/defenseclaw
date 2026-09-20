@@ -57,8 +57,8 @@ import (
 //
 // Do NOT add a "patch before_tool to point at our script" branch in Setup —
 // it will silently no-op or, worse, write a malformed HookRule and break
-// the user's config. See plan C3 + docs/CONNECTOR-MATRIX.md "By-design
-// connector limitations" for the canonical statement.
+// the user's config. See plan C3 plus the published ZeptoClaw capability
+// reference: https://cisco-ai-defense.github.io/defenseclaw/docs/connectors/zeptoclaw/
 type ZeptoClawConnector struct {
 	gatewayToken string
 	masterKey    string

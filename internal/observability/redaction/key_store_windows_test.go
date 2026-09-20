@@ -1,0 +1,1308 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+//go:build windows
+
+package redaction
+
+import (
+	"bytes"
+	"errors"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"runtime"
+	"sync"
+	"testing"
+	"time"
+	"unsafe"
+
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"golang.org/x/sys/windows"
+)
+
+func TestWindowsCorrelationKeyAccessSeparatesReadFromHardening(t *testing.T) {
+	ordinary := windowsCorrelationExistingKeyAccess(false)
+	if ordinary&(windows.WRITE_DAC|windows.WRITE_OWNER) != 0 {
+		t.Fatalf("ordinary key open access 0x%x includes ACL-changing rights", ordinary)
+	}
+	if ordinary&windows.GENERIC_READ == 0 {
+		t.Fatalf("ordinary key open access 0x%x omits GENERIC_READ", ordinary)
+	}
+	hardening := windowsCorrelationExistingKeyAccess(true)
+	if hardening&windows.WRITE_DAC == 0 || hardening&windows.WRITE_OWNER == 0 {
+		t.Fatalf("migration key open access 0x%x omits ACL-changing rights", hardening)
+	}
+	if hardening&(windows.GENERIC_READ|windows.GENERIC_WRITE|windows.FILE_READ_DATA|windows.FILE_WRITE_DATA) != 0 {
+		t.Fatalf("migration key open access 0x%x includes key-data access", hardening)
+	}
+}
+
+func TestWindowsCorrelationKeyCreateLoadAndProtectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	createdInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("load key: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("created and loaded keys differ")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(createdInfo, info) {
+		t.Fatal("loading an existing key replaced the published inode")
+	}
+	if info.Size() != hashV1KeySize {
+		t.Fatalf("key size = %d", info.Size())
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+	assertWindowsCorrelationReadOpen(t, path)
+	assertNoWindowsCorrelationTemps(t, dir)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 1 || entries[0].Name() != correlationKeyFilename {
+		t.Fatalf("key directory entries = %v, want only %s", entries, correlationKeyFilename)
+	}
+}
+
+func TestWindowsCorrelationKeyIsHardenedAndUnopenableBeforePublication(t *testing.T) {
+	dir := t.TempDir()
+	entropy := bytes.NewReader(bytes.Repeat([]byte{0x6a}, hashV1KeySize+keyTempRandomBytes))
+	stagingCanonical := false
+	stagingBlocked := false
+	publishedBlocked := false
+	assertReadOpenBlocked := func(path string) error {
+		name, err := windows.UTF16PtrFromString(path)
+		if err != nil {
+			return err
+		}
+		handle, err := windows.CreateFile(
+			name,
+			windows.GENERIC_READ,
+			windows.FILE_SHARE_READ|windows.FILE_SHARE_WRITE|windows.FILE_SHARE_DELETE,
+			nil,
+			windows.OPEN_EXISTING,
+			windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+			0,
+		)
+		if err == nil {
+			_ = windows.CloseHandle(handle)
+			return errors.New("key became readable before final publication completed")
+		}
+		if !errors.Is(err, windows.ERROR_SHARING_VIOLATION) {
+			return err
+		}
+		return nil
+	}
+	hooks := keyStoreHooks{afterTempSync: func() error {
+		matches, err := filepath.Glob(filepath.Join(dir, correlationKeyTempPrefix+"*"))
+		if err != nil {
+			return err
+		}
+		if len(matches) != 1 {
+			return errors.New("expected one private staging key")
+		}
+		assertWindowsCorrelationCanonicalSecurity(t, matches[0])
+		stagingCanonical = true
+		if err := assertReadOpenBlocked(matches[0]); err != nil {
+			return err
+		}
+		stagingBlocked = true
+		return nil
+	}, afterLink: func() error {
+		if err := assertReadOpenBlocked(filepath.Join(dir, correlationKeyFilename)); err != nil {
+			return err
+		}
+		publishedBlocked = true
+		return nil
+	}}
+	if _, err := loadOrCreateCorrelationKeyPlatform(dir, entropy, hooks); err != nil {
+		t.Fatalf("install key through private publication window: %v", err)
+	}
+	if !stagingCanonical || !stagingBlocked || !publishedBlocked {
+		t.Fatalf(
+			"publication checks: canonical=%t staging_blocked=%t published_blocked=%t",
+			stagingCanonical,
+			stagingBlocked,
+			publishedBlocked,
+		)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+	assertWindowsCorrelationReadOpen(t, path)
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyInterruptedBeforePublicationCleansTemp(t *testing.T) {
+	dir := t.TempDir()
+	entropy := bytes.NewReader(bytes.Repeat([]byte{0x71}, hashV1KeySize+keyTempRandomBytes))
+	hooks := keyStoreHooks{afterTempSync: func() error {
+		return errors.New("injected pre-publication failure")
+	}}
+
+	if _, err := loadOrCreateCorrelationKeyPlatform(dir, entropy, hooks); !IsKeyStoreError(err, KeyStoreErrorInstall) {
+		t.Fatalf("error = %v, want install failure", err)
+	}
+	if _, err := os.Lstat(filepath.Join(dir, correlationKeyFilename)); !os.IsNotExist(err) {
+		t.Fatalf("final key exists after pre-publication failure: %v", err)
+	}
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyCrashAfterPublicationLeavesCanonicalInode(t *testing.T) {
+	dir := t.TempDir()
+	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWindowsCorrelationKeyDirectories(directories)
+
+	tempPath := filepath.Join(dir, correlationKeyTempPrefix+"crash-window")
+	file, err := createWindowsCorrelationTemp(tempPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	material := bytes.Repeat([]byte{0x39}, hashV1KeySize)
+	if err := writeAll(file, material); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Sync(); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := validateWindowsCorrelationStagingSecurity(windows.Handle(file.Fd())); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := validateWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := renameWindowsCorrelationKeyHandle(windows.Handle(file.Fd()), directories[len(directories)-1]); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	path := filepath.Join(dir, correlationKeyFilename)
+	before, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("load key left by crash after publication: %v", err)
+	}
+	var expectedMaterial [hashV1KeySize]byte
+	copy(expectedMaterial[:], material)
+	want := newCorrelationKey(expectedMaterial)
+	loadedMaterial, loadedOK := loaded.Material()
+	wantMaterial, wantOK := want.Material()
+	if !loadedOK || !wantOK || loaded.ID() != want.ID() || loadedMaterial != wantMaterial {
+		t.Fatal("post-publication crash recovery changed key material")
+	}
+	after, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(before, after) {
+		t.Fatal("post-publication crash recovery replaced the published inode")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+	assertWindowsCorrelationReadOpen(t, path)
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyHandleRenamePublishesNoReplace(t *testing.T) {
+	dir := t.TempDir()
+	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWindowsCorrelationKeyDirectories(directories)
+	directory := directories[len(directories)-1]
+
+	createHardenedTemp := func(name string, fill byte) *os.File {
+		t.Helper()
+		path := filepath.Join(dir, correlationKeyTempPrefix+name)
+		file, err := createWindowsCorrelationTemp(path)
+		if err != nil {
+			t.Fatalf("create %s: %v", name, err)
+		}
+		t.Cleanup(func() {
+			handle := windows.Handle(file.Fd())
+			if handle != windows.InvalidHandle {
+				_ = markWindowsCorrelationKeyForDeletion(handle)
+				_ = file.Close()
+			}
+		})
+		if err := writeAll(file, bytes.Repeat([]byte{fill}, hashV1KeySize)); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+		if err := file.Sync(); err != nil {
+			t.Fatalf("sync %s: %v", name, err)
+		}
+		if err := protectWindowsCorrelationSecurity(windows.Handle(file.Fd())); err != nil {
+			t.Fatalf("harden %s: %v", name, err)
+		}
+		if err := validateWindowsCorrelationKeyHandle(windows.Handle(file.Fd())); err != nil {
+			t.Fatalf("validate %s: %v", name, err)
+		}
+		return file
+	}
+
+	winner := createHardenedTemp("native-winner", 0x31)
+	winnerBefore, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := renameWindowsCorrelationKeyHandle(windows.Handle(winner.Fd()), directory); err != nil {
+		t.Fatalf("handle-bound NtSetInformationFile publish error (%T): %v", err, err)
+	}
+	winnerAfter, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windowsCorrelationSameFile(winnerBefore, winnerAfter) {
+		t.Fatal("handle-bound publication changed the winning inode")
+	}
+
+	loser := createHardenedTemp("native-loser", 0x32)
+	if err := renameWindowsCorrelationKeyHandle(windows.Handle(loser.Fd()), directory); !errors.Is(err, windows.ERROR_ALREADY_EXISTS) {
+		t.Fatalf("handle-bound no-replace collision error (%T) = %v, want ERROR_ALREADY_EXISTS", err, err)
+	}
+	winnerFinal, err := windowsCorrelationHandleInformation(windows.Handle(winner.Fd()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !windowsCorrelationSameFile(winnerBefore, winnerFinal) {
+		t.Fatal("no-replace collision replaced the winning inode")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, filepath.Join(dir, correlationKeyFilename))
+}
+
+func TestWindowsCorrelationKeyConcurrentCreatorsConverge(t *testing.T) {
+	dir := t.TempDir()
+	const creators = 24
+	start := make(chan struct{})
+	results := make(chan CorrelationKey, creators)
+	errorsCh := make(chan error, creators)
+	var group sync.WaitGroup
+	group.Add(creators)
+	for range creators {
+		go func() {
+			defer group.Done()
+			<-start
+			key, err := LoadOrCreateCorrelationKey(dir)
+			if err != nil {
+				errorsCh <- err
+				return
+			}
+			results <- key
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(results)
+	close(errorsCh)
+	for err := range errorsCh {
+		t.Errorf("creator: %v", err)
+	}
+	var winner CorrelationKey
+	first := true
+	for key := range results {
+		if first {
+			winner, first = key, false
+			continue
+		}
+		winnerMaterial, winnerOK := winner.Material()
+		material, ok := key.Material()
+		if !winnerOK || !ok || winner.ID() != key.ID() || winnerMaterial != material {
+			t.Fatal("concurrent creators did not converge")
+		}
+	}
+	if first {
+		t.Fatal("no creator returned a key")
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	beforeReload, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatalf("reload concurrent winner: %v", err)
+	}
+	afterReload, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeReload, afterReload) {
+		t.Fatal("concurrent winner was replaced during reload")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+	assertWindowsCorrelationReadOpen(t, path)
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyNoReplaceCollisionPreservesWinnerAndCleansLoser(t *testing.T) {
+	dir := t.TempDir()
+	winner, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	winnerInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var losingMaterial [hashV1KeySize]byte
+	for index := range losingMaterial {
+		losingMaterial[index] = 0x5d
+	}
+	directories, err := openWindowsCorrelationKeyDirectoryChain(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer closeWindowsCorrelationKeyDirectories(directories)
+	installed, err := installWindowsCorrelationKey(
+		dir,
+		directories[len(directories)-1],
+		newCorrelationKey(losingMaterial),
+		bytes.NewReader(bytes.Repeat([]byte{0x2b}, keyTempRandomBytes)),
+		keyStoreHooks{},
+	)
+	if err != nil {
+		t.Fatalf("no-replace collision: %v", err)
+	}
+	if installed {
+		t.Fatal("losing candidate replaced the existing key")
+	}
+
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	winnerMaterial, winnerOK := winner.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !winnerOK || !loadedOK || winner.ID() != loaded.ID() || winnerMaterial != loadedMaterial {
+		t.Fatal("no-replace collision changed the winning key")
+	}
+	loadedInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(winnerInfo, loadedInfo) {
+		t.Fatal("no-replace collision changed the winning inode")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+	assertWindowsCorrelationReadOpen(t, path)
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyPublishesWithAdministratorsDisabled(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, "")
+	t.Setenv(managed.WindowsServiceAccountEnv, "")
+
+	processUser, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || processUser == nil || processUser.User.Sid == nil {
+		t.Fatalf("resolve process user: %v", err)
+	}
+	if processUser.User.Sid.IsWellKnown(windows.WinLocalSystemSid) {
+		t.Skip("restricted-token fixture cannot isolate the Administrators ACE from the LocalSystem ACE")
+	}
+	dir := t.TempDir()
+	restoreDirectory := setWindowsCorrelationRestrictedPublicationDirectory(
+		t,
+		dir,
+		processUser.User.Sid,
+	)
+	defer restoreDirectory()
+
+	restricted, err := createWindowsCorrelationRestrictedImpersonationToken()
+	if err != nil {
+		if errors.Is(err, windows.ERROR_PROC_NOT_FOUND) ||
+			errors.Is(err, windows.ERROR_CALL_NOT_IMPLEMENTED) ||
+			errors.Is(err, windows.ERROR_NOT_SUPPORTED) {
+			t.Skipf("CreateRestrictedToken unavailable: %v", err)
+		}
+		t.Fatalf("create restricted impersonation token: %v", err)
+	}
+	defer func() {
+		if err := restricted.Close(); err != nil {
+			t.Errorf("close restricted token: %v", err)
+		}
+	}()
+
+	runtime.LockOSThread()
+	safeToUnlock := true
+	defer func() {
+		if safeToUnlock {
+			runtime.UnlockOSThread()
+		}
+		// If reverting ever fails, intentionally leave the goroutine locked.
+		// The Go runtime then retires this OS thread instead of returning a
+		// restricted impersonation token to the thread pool.
+	}()
+	if err := windows.SetThreadToken(nil, restricted); err != nil {
+		t.Fatalf("impersonate restricted token: %v", err)
+	}
+	safeToUnlock = false
+	reverted := false
+	defer func() {
+		if !reverted {
+			if err := windows.RevertToSelf(); err != nil {
+				t.Errorf("revert restricted token: %v", err)
+				return
+			}
+			reverted = true
+		}
+		safeToUnlock = true
+	}()
+	assertWindowsCorrelationAdministratorsDisabled(t)
+
+	// Prove this fixture catches the old sequence: after the final key DACL is
+	// installed and the creating handle is closed, a fresh path-based rename
+	// has neither DELETE on the leaf nor FILE_DELETE_CHILD on the parent.
+	probeFrom := filepath.Join(dir, ".redaction-key-path-rename-probe")
+	probeTo := filepath.Join(dir, ".redaction-key-path-rename-target")
+	probe, err := createWindowsCorrelationTemp(probeFrom)
+	if err != nil {
+		t.Fatalf("create path-rename probe: %v", err)
+	}
+	probeMaterial := bytes.Repeat([]byte{0x46}, hashV1KeySize)
+	if err := writeAll(probe, probeMaterial); err != nil {
+		_ = probe.Close()
+		t.Fatalf("write path-rename probe: %v", err)
+	}
+	if err := probe.Sync(); err != nil {
+		_ = probe.Close()
+		t.Fatalf("sync path-rename probe: %v", err)
+	}
+	if err := protectWindowsCorrelationSecurity(windows.Handle(probe.Fd())); err != nil {
+		_ = probe.Close()
+		t.Fatalf("harden path-rename probe: %v", err)
+	}
+	if err := validateWindowsCorrelationKeyHandle(windows.Handle(probe.Fd())); err != nil {
+		_ = probe.Close()
+		t.Fatalf("validate path-rename probe: %v", err)
+	}
+	if err := probe.Close(); err != nil {
+		t.Fatalf("close path-rename probe: %v", err)
+	}
+	probeFromUTF16, err := windows.UTF16PtrFromString(probeFrom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	probeToUTF16, err := windows.UTF16PtrFromString(probeTo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.MoveFileEx(probeFromUTF16, probeToUTF16, windows.MOVEFILE_WRITE_THROUGH); !errors.Is(err, windows.ERROR_ACCESS_DENIED) {
+		t.Fatalf("path-based rename error = %v, want access denied", err)
+	}
+
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("create key with Administrators disabled: %v", err)
+	}
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("reload key with Administrators disabled: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("restricted-token create and reload returned different keys")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, filepath.Join(dir, correlationKeyFilename))
+	assertWindowsCorrelationReadOpen(t, filepath.Join(dir, correlationKeyFilename))
+	assertNoWindowsCorrelationTemps(t, dir)
+
+	if err := windows.RevertToSelf(); err != nil {
+		t.Fatalf("revert restricted token: %v", err)
+	}
+	reverted = true
+	safeToUnlock = true
+}
+
+func createWindowsCorrelationRestrictedImpersonationToken() (windows.Token, error) {
+	var process windows.Token
+	if err := windows.OpenProcessToken(
+		windows.CurrentProcess(),
+		windows.TOKEN_QUERY|windows.TOKEN_DUPLICATE,
+		&process,
+	); err != nil {
+		return 0, err
+	}
+	defer process.Close() //nolint:errcheck
+
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		return 0, err
+	}
+	disabled := windows.SIDAndAttributes{Sid: administrators}
+	createRestrictedToken := windows.NewLazySystemDLL("advapi32.dll").NewProc("CreateRestrictedToken")
+	if err := createRestrictedToken.Find(); err != nil {
+		return 0, err
+	}
+	const disableMaxPrivilege = 0x1
+	var restrictedPrimary windows.Token
+	result, _, callErr := createRestrictedToken.Call(
+		uintptr(process),
+		disableMaxPrivilege,
+		1,
+		uintptr(unsafe.Pointer(&disabled)),
+		0,
+		0,
+		0,
+		0,
+		uintptr(unsafe.Pointer(&restrictedPrimary)),
+	)
+	runtime.KeepAlive(disabled)
+	if result == 0 {
+		if callErr != windows.ERROR_SUCCESS {
+			return 0, callErr
+		}
+		return 0, windows.ERROR_GEN_FAILURE
+	}
+	defer restrictedPrimary.Close() //nolint:errcheck
+
+	var impersonation windows.Token
+	if err := windows.DuplicateTokenEx(
+		restrictedPrimary,
+		windows.TOKEN_QUERY|windows.TOKEN_IMPERSONATE,
+		nil,
+		windows.SecurityImpersonation,
+		windows.TokenImpersonation,
+		&impersonation,
+	); err != nil {
+		return 0, err
+	}
+	return impersonation, nil
+}
+
+func setWindowsCorrelationRestrictedPublicationDirectory(
+	t *testing.T,
+	path string,
+	user *windows.SID,
+) func() {
+	t.Helper()
+	localSystem, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const restrictedDirectoryAccess windows.ACCESS_MASK = windows.FILE_LIST_DIRECTORY |
+		windows.FILE_WRITE_DATA |
+		windows.FILE_READ_EA |
+		windows.FILE_TRAVERSE |
+		windows.FILE_READ_ATTRIBUTES |
+		windows.FILE_WRITE_ATTRIBUTES |
+		windows.READ_CONTROL |
+		windows.SYNCHRONIZE
+	apply := func(userAccess windows.ACCESS_MASK) error {
+		dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+			windowsCorrelationAccess(user, userAccess),
+			windowsCorrelationAccess(localSystem, windowsCorrelationFileAllAccess),
+			windowsCorrelationAccess(administrators, windowsCorrelationFileAllAccess),
+		}, nil)
+		if err != nil {
+			return err
+		}
+		return windows.SetNamedSecurityInfo(
+			path,
+			windows.SE_FILE_OBJECT,
+			windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+			nil,
+			nil,
+			dacl,
+			nil,
+		)
+	}
+	if err := apply(restrictedDirectoryAccess); err != nil {
+		t.Fatalf("install restricted publication-directory DACL: %v", err)
+	}
+	return func() {
+		if err := apply(windowsCorrelationFileAllAccess); err != nil {
+			t.Errorf("restore publication-directory DACL: %v", err)
+		}
+	}
+}
+
+func assertWindowsCorrelationAdministratorsDisabled(t *testing.T) {
+	t.Helper()
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groups, err := windows.GetCurrentThreadEffectiveToken().GetTokenGroups()
+	if err != nil {
+		t.Fatalf("read restricted token groups: %v", err)
+	}
+	for _, group := range groups.AllGroups() {
+		if group.Sid == nil || !group.Sid.Equals(administrators) {
+			continue
+		}
+		if group.Attributes&windows.SE_GROUP_ENABLED != 0 ||
+			group.Attributes&windows.SE_GROUP_USE_FOR_DENY_ONLY == 0 {
+			t.Fatalf("Administrators group attributes = 0x%x, want disabled/deny-only", group.Attributes)
+		}
+		return
+	}
+	// A source token that did not contain BUILTIN\Administrators already has
+	// no Administrators allow capability; the restricted token preserves that.
+}
+
+func TestWindowsCorrelationKeyRetriesTransientBusyHandle(t *testing.T) {
+	// Repeat the timing-sensitive first reopen so a future removal of the
+	// trusted-inheritance repair cannot disappear as a low-frequency flake.
+	for attempt := 0; attempt < 8; attempt++ {
+		dir := t.TempDir()
+		created, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("attempt %d create key: %v", attempt, err)
+		}
+		path, err := windows.UTF16PtrFromString(filepath.Join(dir, correlationKeyFilename))
+		if err != nil {
+			t.Fatal(err)
+		}
+		handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+			return windows.CreateFile(
+				path,
+				windows.GENERIC_READ,
+				0,
+				nil,
+				windows.OPEN_EXISTING,
+				windows.FILE_ATTRIBUTE_NORMAL,
+				0,
+			)
+		}, false)
+		if err != nil {
+			t.Fatalf("attempt %d open incompatible handle: %v", attempt, err)
+		}
+		released := make(chan error, 1)
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			released <- windows.CloseHandle(handle)
+		}()
+
+		loaded, loadErr := LoadOrCreateCorrelationKey(dir)
+		closeErr := <-released
+		if closeErr != nil {
+			t.Fatalf("attempt %d close incompatible handle: %v", attempt, closeErr)
+		}
+		if loadErr != nil {
+			t.Fatalf("attempt %d load after transient sharing violation: %v", attempt, loadErr)
+		}
+		createdMaterial, createdOK := created.Material()
+		loadedMaterial, loadedOK := loaded.Material()
+		if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+			t.Fatalf("attempt %d key changed while retrying the transient sharing violation", attempt)
+		}
+		assertNoWindowsCorrelationTemps(t, dir)
+	}
+}
+
+func TestWindowsCorrelationHandleRetryLoopIsExercised(t *testing.T) {
+	const want = windows.Handle(0x1234)
+	attempts := 0
+	handle, err := openWindowsCorrelationHandle(func() (windows.Handle, error) {
+		attempts++
+		if attempts < 3 {
+			return 0, windows.ERROR_SHARING_VIOLATION
+		}
+		return want, nil
+	}, false)
+	if err != nil {
+		t.Fatalf("retry transient sharing violation: %v", err)
+	}
+	if handle != want || attempts != 3 {
+		t.Fatalf("handle=%v attempts=%d, want handle=%v attempts=3", handle, attempts, want)
+	}
+}
+
+func TestWindowsCorrelationKeyRetryableErrorClassification(t *testing.T) {
+	tests := []struct {
+		name              string
+		err               error
+		retryAccessDenied bool
+		want              bool
+	}{
+		{name: "sharing violation", err: windows.ERROR_SHARING_VIOLATION, want: true},
+		{name: "lock violation", err: windows.ERROR_LOCK_VIOLATION, want: true},
+		{name: "delete pending", err: windows.ERROR_DELETE_PENDING, want: true},
+		{name: "leaf access denied", err: windows.ERROR_ACCESS_DENIED, retryAccessDenied: true, want: true},
+		{name: "directory access denied", err: windows.ERROR_ACCESS_DENIED, want: false},
+		{name: "missing", err: windows.ERROR_FILE_NOT_FOUND, retryAccessDenied: true, want: false},
+		{name: "other", err: errors.New("other"), retryAccessDenied: true, want: false},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if got := windowsCorrelationOpenRetryable(test.err, test.retryAccessDenied); got != test.want {
+				t.Fatalf("retryable = %t, want %t", got, test.want)
+			}
+		})
+	}
+}
+
+func TestWindowsCorrelationKeyPinsConfiguredServiceOwner(t *testing.T) {
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil || current == nil || current.User.Sid == nil {
+		t.Fatalf("resolve current Windows user: %v", err)
+	}
+	t.Setenv(managed.WindowsServiceAccountEnv, `NT SERVICE\DefenseClawCorrelationFixture`)
+	previous := windowsCorrelationServiceAccountSID
+	windowsCorrelationServiceAccountSID = func(account string) (*windows.SID, error) {
+		if account != `NT SERVICE\DefenseClawCorrelationFixture` {
+			t.Fatalf("service account = %q", account)
+		}
+		return current.User.Sid, nil
+	}
+	t.Cleanup(func() { windowsCorrelationServiceAccountSID = previous })
+
+	owner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil || owner == nil || !owner.Equals(current.User.Sid) {
+		t.Fatalf("pinned owner = %v, %v", owner, err)
+	}
+	foreign, err := windows.StringToSid("S-1-5-80-1-2-3-4-5")
+	if err != nil {
+		t.Fatal(err)
+	}
+	windowsCorrelationServiceAccountSID = func(string) (*windows.SID, error) {
+		return foreign, nil
+	}
+	if _, err := windowsCorrelationExpectedOwnerSID(); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("mismatched service token error = %v, want unavailable", err)
+	}
+}
+
+func TestWindowsCorrelationKeyRequiresServicePinInManagedMode(t *testing.T) {
+	t.Setenv(managed.DeploymentModeEnv, managed.DeploymentModeManagedEnterprise)
+	t.Setenv(managed.WindowsServiceAccountEnv, "")
+	if _, err := windowsCorrelationExpectedOwnerSID(); !IsKeyStoreError(err, KeyStoreErrorUnavailable) {
+		t.Fatalf("missing managed service pin error = %v, want unavailable", err)
+	}
+}
+
+func TestWindowsCorrelationKeyMigratesLegacyServiceFullACLWithoutChangingMaterial(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	setWindowsCorrelationLegacySecurity(t, path)
+	beforeInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("migrate legacy key ACL: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("legacy ACL migration changed correlation key material")
+	}
+	afterInfo, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterBytes, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !os.SameFile(beforeInfo, afterInfo) {
+		t.Fatal("legacy ACL migration replaced the pinned key inode")
+	}
+	if !bytes.Equal(beforeBytes, afterBytes) {
+		t.Fatal("legacy ACL migration changed key bytes")
+	}
+	assertWindowsCorrelationCanonicalSecurity(t, path)
+}
+
+func TestWindowsCorrelationKeyRepairsTrustedUnprotectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	initial, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || initial == nil {
+		t.Fatalf("read initial descriptor: %v", err)
+	}
+	initialControl, _, err := initial.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if initialControl&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("freshly installed key DACL is not protected")
+	}
+	setWindowsCorrelationTrustedUnprotectedDACL(t, path)
+
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("repair trusted inherited DACL: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("repair changed correlation key material")
+	}
+	repaired, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || repaired == nil {
+		t.Fatalf("read repaired descriptor: %v", err)
+	}
+	control, _, err := repaired.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("trusted inherited DACL was not re-protected")
+	}
+}
+
+func TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL(t *testing.T) {
+	const (
+		dirEnv = "DEFENSECLAW_TEST_CORRELATION_RESTART_DIR"
+		idEnv  = "DEFENSECLAW_TEST_CORRELATION_RESTART_ID"
+	)
+	if dir := os.Getenv(dirEnv); dir != "" {
+		loaded, err := LoadOrCreateCorrelationKey(dir)
+		if err != nil {
+			t.Fatalf("fresh-process load: %v", err)
+		}
+		if loaded.ID() != os.Getenv(idEnv) {
+			t.Fatalf("fresh-process key ID = %q, want %q", loaded.ID(), os.Getenv(idEnv))
+		}
+		return
+	}
+
+	dir := t.TempDir()
+	created, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("create key: %v", err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	setWindowsCorrelationTrustedUnprotectedDACL(t, path)
+
+	command := exec.Command(
+		os.Args[0],
+		"-test.run=^TestWindowsCorrelationKeyFreshProcessRestartRepairsTrustedDACL$",
+		"-test.v",
+	)
+	command.Env = append(os.Environ(), dirEnv+"="+dir, idEnv+"="+created.ID())
+	if output, err := command.CombinedOutput(); err != nil {
+		t.Fatalf("fresh-process restart failed: %v\n%s", err, output)
+	}
+
+	repaired, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || repaired == nil {
+		t.Fatalf("read repaired descriptor: %v", err)
+	}
+	control, _, err := repaired.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("fresh-process restart did not protect the trusted DACL")
+	}
+	loaded, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("load after fresh-process repair: %v", err)
+	}
+	createdMaterial, createdOK := created.Material()
+	loadedMaterial, loadedOK := loaded.Material()
+	if !createdOK || !loadedOK || created.ID() != loaded.ID() || createdMaterial != loadedMaterial {
+		t.Fatal("fresh-process restart changed correlation key material")
+	}
+}
+
+func setWindowsCorrelationTrustedUnprotectedDACL(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windowsCorrelationProtectedSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve canonical DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWindowsCorrelationKeyDoesNotRepairUntrustedUnprotectedDACL(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	system, err := windows.CreateWellKnownSid(windows.WinLocalSystemSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	administrators, err := windows.CreateWellKnownSid(windows.WinBuiltinAdministratorsSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsCorrelationAccess(current.User.Sid, windows.GENERIC_ALL),
+		windowsCorrelationAccess(system, windows.GENERIC_ALL),
+		windowsCorrelationAccess(administrators, windows.GENERIC_ALL),
+		windowsCorrelationAccess(everyone, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.UNPROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		nil,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+	before, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || before == nil {
+		t.Fatalf("read untrusted descriptor: %v", err)
+	}
+	beforeSDDL := before.String()
+
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+		t.Fatalf("error = %v, want unsafe permissions", err)
+	}
+	after, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || after == nil {
+		t.Fatalf("read rejected descriptor: %v", err)
+	}
+	if after.String() != beforeSDDL {
+		t.Fatalf("untrusted descriptor was mutated\nbefore: %s\nafter:  %s", beforeSDDL, after.String())
+	}
+	control, _, err := after.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED != 0 {
+		t.Fatal("untrusted inherited DACL was unexpectedly protected")
+	}
+}
+
+func TestWindowsCorrelationKeyRejectsUntrustedReadACL(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	current, err := windows.GetCurrentProcessToken().GetTokenUser()
+	if err != nil {
+		t.Fatal(err)
+	}
+	everyone, err := windows.CreateWellKnownSid(windows.WinWorldSid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dacl, err := windows.ACLFromEntries([]windows.EXPLICIT_ACCESS{
+		windowsCorrelationAccess(current.User.Sid, windows.GENERIC_ALL),
+		windowsCorrelationAccess(everyone, windows.GENERIC_READ),
+	}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := windows.SetNamedSecurityInfo(path, windows.SE_FILE_OBJECT,
+		windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil, nil, dacl, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafePermissions) {
+		t.Fatalf("error = %v, want unsafe permissions", err)
+	}
+}
+
+func TestWindowsCorrelationKeyRejectsInvalidLength(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	if err := os.WriteFile(path, bytes.Repeat([]byte{0x44}, hashV1KeySize-1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorInvalidLength) {
+		t.Fatalf("error = %v, want invalid length", err)
+	}
+}
+
+func TestWindowsCorrelationKeyPostMoveFailureLeavesLoadableKey(t *testing.T) {
+	dir := t.TempDir()
+	entropy := bytes.NewReader(bytes.Repeat([]byte{0x4a}, hashV1KeySize+keyTempRandomBytes))
+	hooks := keyStoreHooks{afterLink: func() error { return errors.New("injected post-move failure") }}
+	if _, err := loadOrCreateCorrelationKeyPlatform(dir, entropy, hooks); !IsKeyStoreError(err, KeyStoreErrorSync) {
+		t.Fatalf("error = %v, want sync failure", err)
+	}
+	key, err := LoadOrCreateCorrelationKey(dir)
+	if err != nil {
+		t.Fatalf("load installed key: %v", err)
+	}
+	material, ok := key.Material()
+	var want [hashV1KeySize]byte
+	for index := range want {
+		want[index] = 0x4a
+	}
+	if !ok || material != want {
+		t.Fatal("installed key changed after post-move failure")
+	}
+	assertNoWindowsCorrelationTemps(t, dir)
+}
+
+func TestWindowsCorrelationKeyRejectsReparsePoint(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target")
+	if err := os.WriteFile(target, bytes.Repeat([]byte{0x33}, hashV1KeySize), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, filepath.Join(dir, correlationKeyFilename)); err != nil {
+		t.Skipf("Windows symlink privilege unavailable: %v", err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeType) {
+		t.Fatalf("error = %v, want unsafe type", err)
+	}
+}
+
+func TestWindowsCorrelationKeyRejectsHardLinkedLeaf(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := LoadOrCreateCorrelationKey(dir); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, correlationKeyFilename)
+	alias := filepath.Join(dir, "correlation-key-alias")
+	if err := os.Link(path, alias); err != nil {
+		t.Fatalf("create hard-link fixture: %v", err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(dir); !IsKeyStoreError(err, KeyStoreErrorUnsafeType) {
+		t.Fatalf("hard-linked key error = %v, want unsafe type", err)
+	}
+}
+
+func TestWindowsCorrelationKeyRejectsReparseDirectory(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "target")
+	if err := os.Mkdir(target, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(root, "alias")
+	if err := os.Symlink(target, alias); err != nil {
+		t.Skipf("Windows symlink privilege unavailable: %v", err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(alias); !IsKeyStoreError(err, KeyStoreErrorInvalidDataDir) {
+		t.Fatalf("error = %v, want invalid data directory", err)
+	}
+}
+
+func TestWindowsCorrelationKeyInvalidDataDirectory(t *testing.T) {
+	if _, err := LoadOrCreateCorrelationKey(""); !IsKeyStoreError(err, KeyStoreErrorInvalidDataDir) {
+		t.Fatalf("empty directory error = %v", err)
+	}
+	file := filepath.Join(t.TempDir(), "not-a-directory")
+	if err := os.WriteFile(file, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadOrCreateCorrelationKey(file); !IsKeyStoreError(err, KeyStoreErrorInvalidDataDir) {
+		t.Fatalf("file directory error = %v", err)
+	}
+}
+
+func windowsCorrelationAccess(sid *windows.SID, access windows.ACCESS_MASK) windows.EXPLICIT_ACCESS {
+	return windows.EXPLICIT_ACCESS{
+		AccessPermissions: access,
+		AccessMode:        windows.GRANT_ACCESS,
+		Trustee: windows.TRUSTEE{
+			TrusteeForm:  windows.TRUSTEE_IS_SID,
+			TrusteeType:  windows.TRUSTEE_IS_USER,
+			TrusteeValue: windows.TrusteeValueFromSID(sid),
+		},
+	}
+}
+
+func setWindowsCorrelationLegacySecurity(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windowsCorrelationStagingSecurityDescriptor()
+	if err != nil {
+		t.Fatal(err)
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil {
+		t.Fatalf("resolve legacy key group: %v", err)
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("resolve legacy key DACL: %v", err)
+	}
+	if err := windows.SetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION|windows.PROTECTED_DACL_SECURITY_INFORMATION,
+		nil,
+		group,
+		dacl,
+		nil,
+	); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertWindowsCorrelationCanonicalSecurity(t *testing.T, path string) {
+	t.Helper()
+	descriptor, err := windows.GetNamedSecurityInfo(
+		path,
+		windows.SE_FILE_OBJECT,
+		windows.OWNER_SECURITY_INFORMATION|windows.GROUP_SECURITY_INFORMATION|windows.DACL_SECURITY_INFORMATION,
+	)
+	if err != nil || descriptor == nil {
+		t.Fatalf("read key security descriptor: %v", err)
+	}
+	owner, _, err := descriptor.Owner()
+	if err != nil || owner == nil {
+		t.Fatalf("read key owner: %v", err)
+	}
+	expectedOwner, err := windowsCorrelationExpectedOwnerSID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !owner.Equals(expectedOwner) {
+		t.Fatalf("key owner = %s, want %s", owner.String(), expectedOwner.String())
+	}
+	group, _, err := descriptor.Group()
+	if err != nil || group == nil || !group.IsWellKnown(windows.WinBuiltinAdministratorsSid) {
+		t.Fatalf("key group is not BUILTIN\\Administrators: %v", err)
+	}
+	control, _, err := descriptor.Control()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if control&windows.SE_DACL_PROTECTED == 0 {
+		t.Fatal("key DACL is not protected")
+	}
+	dacl, _, err := descriptor.DACL()
+	if err != nil || dacl == nil {
+		t.Fatalf("read key DACL: %v", err)
+	}
+	matches, err := windowsCorrelationACLMatches(dacl, windowsCorrelationCanonicalACL(expectedOwner))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !matches {
+		t.Fatal("key DACL does not match OW:RC,SY:FA,BA:FA,service:FR")
+	}
+}
+
+func assertWindowsCorrelationReadOpen(t *testing.T, path string) {
+	t.Helper()
+	name, err := windows.UTF16PtrFromString(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := windows.CreateFile(
+		name,
+		windowsCorrelationExistingKeyAccess(false),
+		windows.FILE_SHARE_READ,
+		nil,
+		windows.OPEN_EXISTING,
+		windows.FILE_ATTRIBUTE_NORMAL|windows.FILE_FLAG_OPEN_REPARSE_POINT,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("open canonical key read-only: %v", err)
+	}
+	if err := validateWindowsCorrelationKeyHandle(handle); err != nil {
+		_ = windows.CloseHandle(handle)
+		t.Fatalf("validate read-only key handle: %v", err)
+	}
+	if err := windows.CloseHandle(handle); err != nil {
+		t.Fatalf("close read-only key handle: %v", err)
+	}
+}
+
+func assertNoWindowsCorrelationTemps(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, correlationKeyTempPrefix+"*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary key files remain: %v", matches)
+	}
+}

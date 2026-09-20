@@ -19,15 +19,20 @@ package cli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strings"
 
 	"github.com/spf13/cobra"
 
 	"github.com/defenseclaw/defenseclaw/internal/gateway/connector"
+	"github.com/defenseclaw/defenseclaw/internal/hookruntime"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
+	"github.com/defenseclaw/defenseclaw/internal/version"
 )
 
 // connectorCmd is the parent for low-level connector lifecycle subcommands
@@ -48,7 +53,7 @@ var connectorCmd = &cobra.Command{
 	Long: `Low-level connector lifecycle commands.
 
 These subcommands operate on a single connector adapter (openclaw, codex,
-claudecode, zeptoclaw, or any plugin connector) and intentionally bypass
+claudecode, amp, zeptoclaw, or any plugin connector) and intentionally bypass
 the interactive 'defenseclaw setup' flow. They are primarily intended for
 the 'defenseclaw uninstall' flow and for operator debugging when a
 connector handoff (S7) leaves residual state behind.
@@ -64,15 +69,29 @@ active connector is resolved in this order:
 }
 
 var (
-	connectorFlagName    string
-	connectorFlagJSON    bool
-	connectorFlagDataDir string
+	connectorFlagName                 string
+	connectorFlagJSON                 bool
+	connectorFlagDataDir              string
+	connectorFlagConfigHome           string
+	connectorFlagHookExe              string
+	connectorVerifySetupParent        string
+	connectorVerifySetupStartIdentity string
+	connectorVerifyCleanupRecord      string
+	connectorVerifyCleanupTransaction string
 )
 
 // connectorExit is the indirection used in place of os.Exit so tests can
 // observe the exit code without terminating the test binary. Production
 // code paths leave this at the default (real os.Exit).
 var connectorExit = os.Exit
+var connectorHookRuntimePaths = hookruntime.CurrentUserPaths
+var connectorSaveOpenCodeActive = connector.SaveActiveConnectors
+var connectorSaveOpenCodeLock = connector.SaveFreshHookContractLockEntry
+var connectorSaveAmpLock = connector.SaveFreshHookContractLockEntry
+var connectorEnsureHookAPIToken = connector.EnsureHookAPIToken
+var connectorVerifyRootPersistentPreRun = rootPersistentPreRunE
+var connectorLaunchOpenHands = connector.LaunchOpenHandsWithNativeOTLP
+var connectorCheckPlatformSupportOnHost = connector.CheckPlatformSupportOnHost
 
 var connectorTeardownCmd = &cobra.Command{
 	Use:   "teardown",
@@ -86,7 +105,9 @@ Calls Connector.Teardown(opts) which is responsible for:
 
 This subcommand does NOT touch the sidecar's own systemd unit, the
 gateway token, or the audit DB. It is the idempotent inverse of
-Connector.Setup() for a single connector.`,
+Connector.Setup() for a single connector. It marks that connector inactive in
+the runtime state before removing files so a still-running hook guard cannot
+immediately reinstall the configuration being deliberately torn down.`,
 	RunE: runConnectorTeardown,
 }
 
@@ -105,7 +126,36 @@ Exit codes:
   0   connector is clean
   1   connector has residual state (details printed to stderr)
   2   connector unknown / config error`,
-	RunE: runConnectorVerify,
+	PersistentPreRunE: runConnectorVerifyPersistentPreRunE,
+	RunE:              runConnectorVerify,
+}
+
+var connectorReconcileCmd = &cobra.Command{
+	Use:   "reconcile",
+	Short: "Refresh one connector's installed runtime registration",
+	Long: `Reconcile the named connector from the current DefenseClaw config.
+
+This is the selected-connector setup primitive used by transactional policy
+mutations. It does not restart the gateway and does not setup peer connectors.`,
+	RunE: runConnectorReconcile,
+}
+
+var connectorLaunchCmd = &cobra.Command{
+	Use:   "launch -- [openhands arguments...]",
+	Short: "Launch the protected OpenHands executable with scoped native telemetry",
+	Long: `Launch the exact OpenHands executable selected and sealed by setup.
+
+This Darwin-only boundary revalidates the protected executable and hook
+registration, loads the owner-only OpenHands OTLP credential, and supplies it
+only in the child process environment. The credential is never printed or
+placed in the command arguments. Put -- before OpenHands flags.`,
+	// A launch client can coexist with the running gateway. Loading a second
+	// audit store would create the same WAL/SHM ownership hazard as status.
+	PersistentPreRunE: func(_ *cobra.Command, _ []string) error {
+		return loadGatewayCommandConfigOnly()
+	},
+	PersistentPostRun: func(_ *cobra.Command, _ []string) {},
+	RunE:              runConnectorLaunch,
 }
 
 var connectorListBackupsCmd = &cobra.Command{
@@ -137,12 +187,67 @@ func init() {
 		"Emit machine-readable JSON instead of the human-readable view")
 	connectorCmd.PersistentFlags().StringVar(&connectorFlagDataDir, "data-dir", "",
 		"Override the data directory (defaults to cfg.DataDir)")
+	connectorCmd.PersistentFlags().StringVar(&connectorFlagConfigHome, "config-home", "",
+		"Bind native connector maintenance to an installer-validated configuration home")
+	_ = connectorCmd.PersistentFlags().MarkHidden("config-home")
+	connectorCmd.PersistentFlags().StringVar(&connectorFlagHookExe, "hook-executable", "",
+		"Bind native connector maintenance to an installer-validated hook launcher")
+	_ = connectorCmd.PersistentFlags().MarkHidden("hook-executable")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifySetupParent,
+		"internal-setup-parent",
+		"",
+		"internal authenticated Setup parent binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-parent")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifySetupStartIdentity,
+		"internal-setup-start-identity",
+		"",
+		"internal authenticated Setup process-instance binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-setup-start-identity")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifyCleanupRecord,
+		"internal-deferred-cleanup-record",
+		"",
+		"internal authenticated deferred-cleanup record binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-record")
+	connectorVerifyCmd.Flags().StringVar(
+		&connectorVerifyCleanupTransaction,
+		"internal-deferred-cleanup-transaction",
+		"",
+		"internal authenticated deferred-cleanup transaction binding",
+	)
+	_ = connectorVerifyCmd.Flags().MarkHidden("internal-deferred-cleanup-transaction")
 
 	connectorCmd.AddCommand(connectorTeardownCmd)
 	connectorCmd.AddCommand(connectorVerifyCmd)
+	connectorCmd.AddCommand(connectorReconcileCmd)
+	connectorCmd.AddCommand(connectorLaunchCmd)
 	connectorCmd.AddCommand(connectorListBackupsCmd)
 
 	rootCmd.AddCommand(connectorCmd)
+}
+
+func runConnectorVerifyPersistentPreRunE(cmd *cobra.Command, args []string) error {
+	if connectorVerifySetupParent == "" &&
+		connectorVerifySetupStartIdentity == "" &&
+		connectorVerifyCleanupRecord == "" &&
+		connectorVerifyCleanupTransaction == "" {
+		return connectorVerifyRootPersistentPreRun(cmd, args)
+	}
+	if err := validateDeferredUninstallConnectorVerify(cmd); err != nil {
+		return fmt.Errorf("connector verify deferred-uninstall authorization: %w", err)
+	}
+	// The authenticated deferred-uninstall child is deliberately configless:
+	// DELETEUSERDATA has already removed the runtime v8 source. VerifyClean uses
+	// only the transaction-bound data/config homes validated above.
+	cfg = nil
+	activeObservabilityV8Startup = nil
+	version.SetBinaryVersion(appVersion)
+	return nil
 }
 
 // resolveActiveConnectorName returns the connector name to operate on for
@@ -183,6 +288,129 @@ func resolveConnectorDataDir() string {
 	return ""
 }
 
+// bindConnectorLifecycleConfigHome turns Setup's explicit, validated home
+// binding into the connector's existing environment contract. Normal operator
+// calls remain unchanged when the hidden flag is absent. Setup supplies both
+// the flag and a matching environment value so teardown and VerifyClean cannot
+// silently agree on an unrelated inherited profile.
+func bindConnectorLifecycleConfigHome(connectorName string) (func(), error) {
+	home := connectorFlagConfigHome
+	if home == "" {
+		if err := validateConnectorLifecycleHookExecutable(connectorName, home); err != nil {
+			return nil, err
+		}
+		return func() {}, nil
+	}
+	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
+		!filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return nil, fmt.Errorf("config home is not an absolute normalized path")
+	}
+	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
+		return nil, fmt.Errorf("config home path is unsafe: %w", err)
+	}
+	if err := validateConnectorLifecycleHookExecutable(connectorName, home); err != nil {
+		return nil, err
+	}
+
+	variable := ""
+	switch connectorName {
+	case "codex":
+		variable = "CODEX_HOME"
+	case "claudecode":
+		variable = "CLAUDE_CONFIG_DIR"
+	case "amp":
+		// Amp has no config-home environment override. SetupOpts.ConfigHome
+		// carries the validated lifecycle path without mutating USERPROFILE.
+		return func() {}, nil
+	case "copilot":
+		variable = "COPILOT_HOME"
+	case "cursor":
+		// Cursor has no documented configuration-home environment variable.
+		// The hidden maintenance flag is carried through SetupOpts.ConfigHome
+		// instead of inventing an upstream-facing override.
+		return func() {}, nil
+	case "devin":
+		// Devin has no supported config-home environment override. The
+		// authenticated installer binding flows through SetupOpts.ConfigHome.
+		return func() {}, nil
+	case "windsurf":
+		// Windsurf has no vendor home override variable. Bind DefenseClaw's
+		// connector path resolver directly to Setup's validated profile root;
+		// never inherit a maintenance process's ambient USERPROFILE.
+		return connector.BindUserHomeDir(home)
+	case "antigravity":
+		// Google has no documented Antigravity configuration-home environment
+		// variable. The hidden maintenance flag already flows through
+		// SetupOpts.ConfigHome, so do not invent or export a vendor override.
+		return func() {}, nil
+	case "geminicli":
+		// Retired Gemini CLI cleanup uses only SetupOpts.ConfigHome from the
+		// authenticated maintenance handoff; never publish a new vendor override.
+		return func() {}, nil
+	case "opencode":
+		variable = "OPENCODE_CONFIG_DIR"
+	case "omnigent":
+		variable = "OMNIGENT_CONFIG_HOME"
+	case "hermes":
+		variable = "HERMES_HOME"
+	default:
+		return nil, fmt.Errorf("explicit config home is unsupported for connector %q", connectorName)
+	}
+	if strings.TrimSpace(home) != home || strings.ContainsAny(home, "\x00\r\n") ||
+		!filepath.IsAbs(home) || filepath.Clean(home) != home {
+		return nil, fmt.Errorf("config home is not an absolute normalized path")
+	}
+	if err := validateConnectorLifecycleConfigHomePath(home); err != nil {
+		return nil, fmt.Errorf("config home path is unsafe: %w", err)
+	}
+	if connectorName == "amp" {
+		return func() {}, nil
+	}
+	previous, existed := os.LookupEnv(variable)
+	if err := os.Setenv(variable, home); err != nil {
+		return nil, fmt.Errorf("bind %s: %w", variable, err)
+	}
+	return func() {
+		if existed {
+			_ = os.Setenv(variable, previous)
+		} else {
+			_ = os.Unsetenv(variable)
+		}
+	}, nil
+}
+
+func validateConnectorLifecycleHookExecutable(connectorName, configHome string) error {
+	executable := connectorFlagHookExe
+	if executable == "" {
+		if connectorName == "hermes" && configHome != "" {
+			return fmt.Errorf("Hermes maintenance hook executable is empty")
+		}
+		return nil
+	}
+	if connectorName != "hermes" {
+		return fmt.Errorf("explicit hook executable is unsupported for connector %q", connectorName)
+	}
+	if configHome == "" {
+		return fmt.Errorf("explicit Hermes hook executable requires an installer-bound config home")
+	}
+	if strings.TrimSpace(executable) != executable ||
+		strings.ContainsAny(executable, "\"\x00\r\n") ||
+		!filepath.IsAbs(executable) ||
+		filepath.Clean(executable) != executable ||
+		!strings.EqualFold(filepath.Base(executable), "defenseclaw-hook.exe") {
+		return fmt.Errorf("Hermes maintenance hook executable is not an absolute normalized DefenseClaw launcher path")
+	}
+	paths, err := connectorHookRuntimePaths()
+	if err != nil {
+		return fmt.Errorf("resolve canonical Hermes hook executable: %w", err)
+	}
+	canonical := strings.TrimSpace(paths.Launcher)
+	if canonical == "" || executable != canonical {
+		return fmt.Errorf("Hermes maintenance hook executable is not the exact canonical stable HookRuntime launcher")
+	}
+	return nil
+}
+
 // newConnectorRegistryWithPlugins mirrors the sidecar startup path
 // (NewGuardrailProxy / APIServer.Run) by registering both the
 // built-in connectors AND any plugin connectors discovered under the
@@ -220,8 +448,14 @@ func newConnectorRegistryWithPlugins() *connector.Registry {
 // them mirrors what the sidecar would pass at boot.
 func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 	opts := connector.SetupOpts{
-		DataDir:     dataDir,
-		Interactive: false,
+		DataDir:        dataDir,
+		ConfigHome:     connectorFlagConfigHome,
+		HookExecutable: connectorFlagHookExe,
+		Interactive:    false,
+	}
+	name := resolveActiveConnectorName(dataDir)
+	if name == "amp" {
+		opts.ConfigHome = strings.TrimSpace(connectorFlagConfigHome)
 	}
 	if cfg == nil {
 		return opts
@@ -235,7 +469,362 @@ func resolveConnectorOpts(dataDir string) connector.SetupOpts {
 		opts.ProxyAddr = fmt.Sprintf("127.0.0.1:%d", cfg.Guardrail.Port)
 	}
 	opts.WorkspaceDir = cfg.ConnectorWorkspaceDir()
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
+	opts.APIToken = cfg.Gateway.ResolvedToken()
 	return opts
+}
+
+func runConnectorLaunch(cmd *cobra.Command, args []string) error {
+	if connectorFlagJSON {
+		return errors.New("connector launch does not support --json because stdout and stderr belong to OpenHands")
+	}
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return errors.New("connector launch: no data directory configured")
+	}
+	name := resolveActiveConnectorName(dataDir)
+	if name != "openhands" {
+		return fmt.Errorf("connector launch supports only the protected OpenHands boundary, got %q", name)
+	}
+	if _, err := connectorCheckPlatformSupportOnHost(name); err != nil {
+		return fmt.Errorf("connector launch openhands: %w", err)
+	}
+	opts := resolveConnectorOpts(dataDir)
+	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
+	if err := connectorLaunchOpenHands(
+		cmd.Context(),
+		opts,
+		append([]string(nil), args...),
+		cmd.InOrStdin(),
+		cmd.OutOrStdout(),
+		cmd.ErrOrStderr(),
+	); err != nil {
+		return fmt.Errorf("connector launch openhands: %w", err)
+	}
+	return nil
+}
+
+func runConnectorReconcile(cmd *cobra.Command, _ []string) error {
+	dataDir := resolveConnectorDataDir()
+	if dataDir == "" {
+		return fmt.Errorf("connector reconcile: no data directory configured")
+	}
+	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector reconcile: %w", err)
+	}
+	defer restoreConfigHome()
+	reg := newConnectorRegistryWithPlugins()
+	conn, ok := reg.Get(name)
+	if !ok {
+		return fmt.Errorf("connector reconcile: unknown connector %q", name)
+	}
+	if name != "amp" && name != "antigravity" && name != "claudecode" && name != "codex" &&
+		name != "copilot" && name != "cursor" && name != "geminicli" && name != "hermes" && name != "omnigent" &&
+		name != "opencode" && name != "devin" {
+		return fmt.Errorf("connector reconcile: selected refresh is supported only for amp, antigravity, claudecode, codex, copilot, cursor, devin, geminicli, hermes, omnigent, and opencode")
+	}
+	if warning, supportErr := connector.CheckPlatformSupportOnHost(name); supportErr != nil {
+		return fmt.Errorf("connector reconcile %s: %w", name, supportErr)
+	} else if warning != "" {
+		fmt.Fprintf(cmd.ErrOrStderr(), "connector reconcile %s: warning: %s\n", name, warning)
+	}
+	opts := resolveConnectorOpts(dataDir)
+	if cfg != nil {
+		opts.CodexOtelEnvironment = cfg.Environment
+		opts.HookFailMode = cfg.EffectiveHookFailModeForConnector(name)
+		opts.GuardrailMode = cfg.EffectiveGuardrailModeForConnector(name)
+		opts.HILTEnabled = cfg.EffectiveHILTForConnector(name).Enabled
+		opts.ManagedEnterprise = managed.IsManagedEnterprise(cfg.DeploymentMode)
+	}
+	if name == "cursor" && !strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") {
+		// Keep maintenance output and persisted lock evidence truthful: Cursor
+		// observe mode is always fail-open even when a global closed setting is
+		// inherited for connectors that enforce failures independently.
+		opts.HookFailMode = "open"
+	}
+	opts.AgentVersion = connector.LoadCachedAgentVersion(dataDir, name)
+	opts.AgentExecutable = connector.LoadCachedAgentExecutable(dataDir, name)
+	previous := connector.LoadHookContractLockEntry(dataDir, name)
+	if opts.AgentVersion == "" {
+		// A scoped policy refresh must not downgrade a previously verified
+		// registration merely because discovery cache cleanup ran between
+		// setups. Reuse the lock's exact observed version as audit evidence.
+		opts.AgentVersion = previous.RawAgentVersion
+	}
+	resolution := connector.ResolveHookContract(name, opts.AgentVersion)
+	opts.HookContractID = resolution.Contract.ContractID
+	actionMode := cfg != nil && strings.EqualFold(
+		strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector(name)), "action",
+	)
+	if connector.HookContractNeedsActionOverride(resolution) && actionMode &&
+		os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+		return fmt.Errorf(
+			"connector reconcile %s: agent version %q is not verified against a known hook contract: %s",
+			name, opts.AgentVersion, resolution.Reason,
+		)
+	}
+	if previous.Connector != "" {
+		current := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		if connector.HookContractCompatibilityDrifted(previous, current) && actionMode &&
+			os.Getenv("DEFENSECLAW_ALLOW_HOOK_CONTRACT_DRIFT") != "1" {
+			return fmt.Errorf("connector reconcile %s: hook contract compatibility drift", name)
+		}
+	}
+	hookToken, err := connector.LoadHookAPIToken(dataDir, name)
+	if err != nil {
+		return fmt.Errorf("connector reconcile: load scoped hook token: %w", err)
+	}
+	tokenCreated := false
+	if hookToken == "" {
+		hookToken, err = connectorEnsureHookAPIToken(dataDir, name)
+		if err != nil {
+			// Load proved this connector had no token before Ensure. The atomic
+			// publisher can still report a late error after replacement became
+			// visible, so remove any newly visible token before returning.
+			if cleanupErr := connector.RemoveHookAPIToken(dataDir, name); cleanupErr != nil {
+				return errors.Join(
+					fmt.Errorf("connector reconcile: ensure scoped hook token: %w", err),
+					fmt.Errorf("connector reconcile: remove ambiguously published scoped hook token: %w", cleanupErr),
+				)
+			}
+			return fmt.Errorf("connector reconcile: ensure scoped hook token: %w", err)
+		}
+		tokenCreated = true
+	}
+	// Match the sidecar's least-privilege registration semantics: native hook
+	// connectors use the connector-scoped token for hook calls and, where
+	// supported by the vendor, native telemetry. Never write the gateway
+	// master token into agent-owned config.
+	opts.APIToken = hookToken
+	opts.HookAPIToken = hookToken
+	opts.HookAPITokenScoped = true
+
+	if name == "opencode" {
+		var lockSnapshot *connector.HookContractLockSnapshot
+		if runtime.GOOS == "windows" {
+			lockSnapshot, err = connector.CaptureHookContractLockSnapshot(dataDir)
+			if err != nil {
+				if tokenCreated {
+					_ = connector.RemoveHookAPIToken(dataDir, "opencode")
+				}
+				return fmt.Errorf("connector reconcile opencode: capture contract-lock rollback point: %w", err)
+			}
+		}
+		if err := reconcileOpenCodeRegistration(cmd.Context(), dataDir, conn, opts, lockSnapshot, previous, tokenCreated); err != nil {
+			return fmt.Errorf("connector reconcile opencode: %w", err)
+		}
+	} else if name == "amp" && runtime.GOOS == "windows" {
+		if err := reconcileAmpRegistration(cmd.Context(), dataDir, conn, opts, tokenCreated); err != nil {
+			return fmt.Errorf("connector reconcile amp: %w", err)
+		}
+	} else {
+		if err := conn.Setup(cmd.Context(), opts); err != nil {
+			return fmt.Errorf("connector reconcile %s: %w", name, err)
+		}
+		entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+		if err := connector.SaveHookContractLockEntry(dataDir, entry); err != nil {
+			return fmt.Errorf("connector reconcile %s lock: %w", name, err)
+		}
+	}
+	if connectorFlagJSON {
+		return json.NewEncoder(cmd.OutOrStdout()).Encode(map[string]any{
+			"connector": name,
+			"action":    "reconcile",
+			"ok":        true,
+			"fail_mode": opts.HookFailMode,
+		})
+	}
+	fmt.Fprintf(cmd.OutOrStdout(), "  %s %s runtime reconciled\n", Style("✓", "fg=green", "bold"), name)
+	return nil
+}
+
+func reconcileAmpRegistration(
+	ctx context.Context,
+	dataDir string,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	tokenCreated bool,
+) error {
+	lockSnapshot, err := connector.CaptureHookContractLockSnapshot(dataDir)
+	if err != nil {
+		if tokenCreated {
+			_ = connector.RemoveHookAPIToken(dataDir, "amp")
+		}
+		return fmt.Errorf("capture contract-lock rollback point: %w", err)
+	}
+	registrationSnapshot, err := connector.CapturePluginArtifactRegistrationSnapshot(opts, "amp")
+	if err != nil {
+		if tokenCreated {
+			_ = connector.RemoveHookAPIToken(dataDir, "amp")
+		}
+		return fmt.Errorf("capture plugin rollback point: %w", err)
+	}
+
+	setupStarted := false
+	lockPublishAttempted := false
+	rollback := func(cause error) error {
+		var rollbackErrs []error
+		if setupStarted {
+			if restoreErr := registrationSnapshot.Restore(); restoreErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("restore plugin transaction: %w", restoreErr))
+			} else if registrationSnapshot.InitiallyEmpty() {
+				if cleanErr := conn.VerifyClean(opts); cleanErr != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("verify plugin rollback: %w", cleanErr))
+				}
+			}
+		}
+		if lockPublishAttempted {
+			if restoreErr := lockSnapshot.Restore(); restoreErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("restore exact contract-lock snapshot: %w", restoreErr))
+			}
+		}
+		if tokenCreated {
+			if removeErr := connector.RemoveHookAPIToken(dataDir, "amp"); removeErr != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove scoped token: %w", removeErr))
+			}
+		}
+		if len(rollbackErrs) > 0 {
+			return errors.Join(cause, fmt.Errorf("Amp setup rollback failed: %w", errors.Join(rollbackErrs...)))
+		}
+		return cause
+	}
+
+	setupStarted = true
+	if err := conn.Setup(ctx, opts); err != nil {
+		return rollback(fmt.Errorf("setup plugin and custody receipt: %w", err))
+	}
+	entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	lockPublishAttempted = true
+	if err := connectorSaveAmpLock(dataDir, entry); err != nil {
+		return rollback(fmt.Errorf("publish contract lock: %w", err))
+	}
+	return nil
+}
+
+func reconcileOpenCodeRegistration(
+	ctx context.Context,
+	dataDir string,
+	conn connector.Connector,
+	opts connector.SetupOpts,
+	lockSnapshot *connector.HookContractLockSnapshot,
+	previousLock connector.HookContractLockEntry,
+	tokenCreated bool,
+) error {
+	previousActive, activeStateExisted, err := connector.ReadActiveConnectorState(dataDir)
+	if err != nil {
+		if tokenCreated {
+			_ = connector.RemoveHookAPIToken(dataDir, "opencode")
+		}
+		return fmt.Errorf("read active runtime state: %w", err)
+	}
+	previouslyInactive := connector.ConnectorExplicitlyInactive(dataDir, "opencode")
+	registrationSnapshot, err := connector.CaptureOpenCodeRegistrationSnapshot(opts)
+	if err != nil {
+		if tokenCreated {
+			_ = connector.RemoveHookAPIToken(dataDir, "opencode")
+		}
+		return fmt.Errorf("capture registration rollback point: %w", err)
+	}
+	setupStarted := false
+	lockPublishAttempted := false
+	activePublishAttempted := false
+	rollback := func(cause error) error {
+		var rollbackErrs []error
+		if setupStarted {
+			if err := registrationSnapshot.Restore(); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("restore plugin transaction: %w", err))
+			} else if registrationSnapshot.InitiallyEmpty() {
+				if err := conn.VerifyClean(opts); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("verify plugin rollback: %w", err))
+				}
+			}
+		}
+		if lockPublishAttempted {
+			if lockSnapshot != nil {
+				if err := lockSnapshot.Restore(); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore exact contract-lock snapshot: %w", err))
+				}
+			} else if err := connector.ClearHookContractLockEntry(dataDir, "opencode"); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("clear contract lock: %w", err))
+			} else if previousLock.Connector != "" {
+				if err := connector.SaveFreshHookContractLockEntry(dataDir, previousLock); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore contract lock: %w", err))
+				}
+			}
+		}
+		if activePublishAttempted {
+			if activeStateExisted {
+				if err := connector.SaveActiveConnectors(dataDir, previousActive); err != nil {
+					rollbackErrs = append(rollbackErrs, fmt.Errorf("restore active runtime state: %w", err))
+				} else if previouslyInactive {
+					if _, err := connector.MarkConnectorInactive(dataDir, "opencode"); err != nil {
+						rollbackErrs = append(rollbackErrs, fmt.Errorf("restore inactive runtime marker: %w", err))
+					}
+				}
+			} else if err := connector.RemoveActiveConnectorState(dataDir); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove active runtime state: %w", err))
+			}
+		}
+		if tokenCreated {
+			if err := connector.RemoveHookAPIToken(dataDir, "opencode"); err != nil {
+				rollbackErrs = append(rollbackErrs, fmt.Errorf("remove scoped token: %w", err))
+			}
+		}
+		if len(rollbackErrs) > 0 {
+			return errors.Join(cause, fmt.Errorf("OpenCode setup rollback failed: %w", errors.Join(rollbackErrs...)))
+		}
+		return cause
+	}
+
+	setupStarted = true
+	if err := conn.Setup(ctx, opts); err != nil {
+		return rollback(fmt.Errorf("setup plugin and custody receipt: %w", err))
+	}
+	current, err := connector.OpenCodeRegistrationCurrent(opts)
+	if err != nil || !current {
+		if err == nil {
+			err = errors.New("plugin and custody receipt are not current")
+		}
+		return rollback(fmt.Errorf("verify plugin publication: %w", err))
+	}
+
+	entry := connector.NewHookContractLockEntry(opts, conn, version.Current().BinaryVersion)
+	lockPublishAttempted = true
+	if err := connectorSaveOpenCodeLock(dataDir, entry); err != nil {
+		return rollback(fmt.Errorf("publish contract lock: %w", err))
+	}
+	active := append(append([]string(nil), previousActive...), "opencode")
+	activePublishAttempted = true
+	if err := connectorSaveOpenCodeActive(dataDir, active); err != nil {
+		return rollback(fmt.Errorf("publish active runtime state: %w", err))
+	}
+
+	loadedToken, tokenErr := connector.LoadHookAPIToken(dataDir, "opencode")
+	registrationCurrent, registrationErr := connector.OpenCodeRegistrationCurrent(opts)
+	activeCurrent := false
+	for _, activeName := range connector.LoadActiveConnectors(dataDir) {
+		if strings.EqualFold(activeName, "opencode") {
+			activeCurrent = true
+			break
+		}
+	}
+	lockCurrent := connector.OpenCodeHookContractLockEntryCurrent(dataDir, entry)
+	if registrationErr != nil || !registrationCurrent || tokenErr != nil || loadedToken != opts.APIToken ||
+		!activeCurrent || !lockCurrent {
+		return rollback(fmt.Errorf(
+			"activation verification failed (plugin=%t plugin_err=%v token=%t token_err=%v active=%t lock=%t)",
+			registrationCurrent,
+			registrationErr,
+			loadedToken == opts.APIToken,
+			tokenErr,
+			activeCurrent,
+			lockCurrent,
+		))
+	}
+	return nil
 }
 
 func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
@@ -244,9 +833,19 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector teardown: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector teardown: %w", err)
+	}
+	defer restoreConfigHome()
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
+	if !ok && name == "windsurf" {
+		// Retired Cascade is never selectable or reconcilable. It remains
+		// resolvable only here so upgrades can restore its exact managed backup.
+		conn, ok = connector.NewWindsurfConnector(), true
+	}
 	if !ok {
 		return fmt.Errorf("connector teardown: unknown connector %q (known: %s)",
 			name, strings.Join(reg.Names(), ", "))
@@ -256,7 +855,15 @@ func runConnectorTeardown(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithCancel(cmd.Context())
 	defer cancel()
 
+	restoreState, err := connector.MarkConnectorInactive(dataDir, name)
+	if err != nil {
+		return fmt.Errorf("connector %s teardown: mark connector inactive: %w", name, err)
+	}
+
 	if err := conn.Teardown(ctx, opts); err != nil {
+		if restoreErr := restoreState(); restoreErr != nil {
+			err = fmt.Errorf("%w; restore active connector state: %v", err, restoreErr)
+		}
 		if connectorFlagJSON {
 			payload := map[string]any{
 				"connector": name,
@@ -288,9 +895,18 @@ func runConnectorVerify(cmd *cobra.Command, _ []string) error {
 		return fmt.Errorf("connector verify: no data directory configured (set --data-dir or run 'defenseclaw init')")
 	}
 	name := resolveActiveConnectorName(dataDir)
+	restoreConfigHome, err := bindConnectorLifecycleConfigHome(name)
+	if err != nil {
+		return fmt.Errorf("connector verify: %w", err)
+	}
+	defer restoreConfigHome()
 
 	reg := newConnectorRegistryWithPlugins()
 	conn, ok := reg.Get(name)
+	if !ok && name == "windsurf" {
+		// Private legacy verification pairs with the teardown compatibility path.
+		conn, ok = connector.NewWindsurfConnector(), true
+	}
 	if !ok {
 		// Map "unknown connector" to exit code 2 (config error), distinct
 		// from "connector dirty" (exit 1). Cobra surfaces RunE errors as

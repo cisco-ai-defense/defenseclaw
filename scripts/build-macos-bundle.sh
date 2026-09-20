@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #
-# Assemble the macOS installer bundle: cross-build the gateway (single
-# arch or universal via lipo), copy the installer scripts + plist +
+# Assemble the Apple Silicon macOS installer bundle: cross-build the gateway,
+# copy the installer scripts + plist +
 # helpers, generate the README, then produce a tarball + sha256.
 #
 # Called by the `packaging-macos-bundle` Make target; extracted so the
@@ -10,7 +10,7 @@
 #
 # Args:
 #   $1  BUNDLE_GOOS       (currently only "darwin" is supported)
-#   $2  BUNDLE_GOARCH     ("amd64" | "arm64" | "universal")
+#   $2  BUNDLE_GOARCH     (must be "arm64")
 #   $3  BUNDLE_NAME       e.g. defenseclaw-macos-0.8.0-darwin-arm64
 #   $4  BUNDLE_DIR        e.g. dist/defenseclaw-macos-0.8.0-darwin-arm64
 #   $5  DIST_DIR          e.g. dist
@@ -66,13 +66,10 @@ if [[ "${BUNDLE_GOOS}" != "darwin" ]]; then
   echo "build-macos-bundle: BUNDLE_GOOS must be 'darwin' (got '${BUNDLE_GOOS}')" >&2
   exit 1
 fi
-case "${BUNDLE_GOARCH}" in
-  amd64|arm64|universal) ;;
-  *)
-    echo "build-macos-bundle: BUNDLE_GOARCH must be amd64, arm64, or universal (got '${BUNDLE_GOARCH}')" >&2
-    exit 1
-    ;;
-esac
+if [[ "${BUNDLE_GOARCH}" != "arm64" ]]; then
+  echo "build-macos-bundle: Intel and universal macOS bundles are unsupported; BUNDLE_GOARCH must be arm64 (got '${BUNDLE_GOARCH}')" >&2
+  exit 1
+fi
 
 echo "==> packaging macOS bundle: ${BUNDLE_NAME}"
 rm -rf "${BUNDLE_DIR}"
@@ -158,20 +155,7 @@ build_arch() {
 # runtime path .../bin/defenseclaw-gateway, which stays the canonical daemon
 # name everywhere else (launchd, systemd, watchdog, process detection).
 cd "${REPO_ROOT}"
-if [[ "${BUNDLE_GOARCH}" == "universal" ]]; then
-  command -v lipo >/dev/null 2>&1 \
-    || { echo "build-macos-bundle: 'lipo' not found — universal builds must run on macOS with Xcode CLT" >&2; exit 1; }
-  build_arch amd64 "${BUNDLE_DIR}/defenseclaw.amd64"
-  build_arch arm64 "${BUNDLE_DIR}/defenseclaw.arm64"
-  echo "==> lipo-creating universal binary"
-  lipo -create -output "${BUNDLE_DIR}/defenseclaw" \
-    "${BUNDLE_DIR}/defenseclaw.amd64" \
-    "${BUNDLE_DIR}/defenseclaw.arm64"
-  rm -f "${BUNDLE_DIR}/defenseclaw.amd64" "${BUNDLE_DIR}/defenseclaw.arm64"
-  lipo -info "${BUNDLE_DIR}/defenseclaw"
-else
-  build_arch "${BUNDLE_GOARCH}" "${BUNDLE_DIR}/defenseclaw"
-fi
+build_arch arm64 "${BUNDLE_DIR}/defenseclaw"
 chmod 0755 "${BUNDLE_DIR}/defenseclaw"
 
 # ---- copy installer scripts + plist -------------------------------------
@@ -181,11 +165,35 @@ cp packaging/macos/install.sh                       "${BUNDLE_DIR}/install.sh"
 cp packaging/macos/uninstall.sh                     "${BUNDLE_DIR}/uninstall.sh"
 cp packaging/macos/lib/installer_lib.sh             "${BUNDLE_DIR}/lib/installer_lib.sh"
 cp packaging/macos/lib/scrub_agent_configs.py       "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+cp packaging/macos/lib/render-targets.sh            "${BUNDLE_DIR}/lib/render-targets.sh"
+cp LICENSE                                           "${BUNDLE_DIR}/LICENSE"
+cp NOTICE                                            "${BUNDLE_DIR}/NOTICE"
+cp THIRD_PARTY_LICENSES.txt                          "${BUNDLE_DIR}/THIRD_PARTY_LICENSES.txt"
 cp packaging/launchd/com.cisco.secureclient.defenseclaw.plist \
     "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-guardian.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+cp packaging/launchd/com.cisco.secureclient.defenseclaw.hook-enumerator.plist \
+    "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+# Ship the guardrail rule packs beside install.sh. install.sh stages
+# them into ${DataDir}/policies/guardrail/ so the sidecar's cold-start
+# LoadRulePack finds them; without this the gateway fails init with
+# "rule-pack directory does not exist". Only guardrail/ from the repo's
+# policies/ is shipped — the openshell/, scanners/, rego/ trees and the
+# {default,strict,permissive}.yaml profile files are not consumed by
+# the managed gateway.
+mkdir -p "${BUNDLE_DIR}/policies"
+cp -R policies/guardrail "${BUNDLE_DIR}/policies/guardrail"
 chmod 0755 "${BUNDLE_DIR}/install.sh" "${BUNDLE_DIR}/uninstall.sh"
 chmod 0755 "${BUNDLE_DIR}/lib/installer_lib.sh" "${BUNDLE_DIR}/lib/scrub_agent_configs.py"
+chmod 0755 "${BUNDLE_DIR}/lib/render-targets.sh"
 chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-guardian.plist"
+chmod 0644 "${BUNDLE_DIR}/com.cisco.secureclient.defenseclaw.hook-enumerator.plist"
+chmod 0644 "${BUNDLE_DIR}/LICENSE" "${BUNDLE_DIR}/NOTICE" \
+  "${BUNDLE_DIR}/THIRD_PARTY_LICENSES.txt"
+find "${BUNDLE_DIR}/policies" -type d -exec chmod 0755 {} +
+find "${BUNDLE_DIR}/policies" -type f -exec chmod 0644 {} +
 
 # ---- README -------------------------------------------------------------
 

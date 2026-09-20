@@ -14,9 +14,9 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
-// Package gatewaylog defines the structured event schema emitted by
-// the DefenseClaw gateway sidecar and the writer stack that persists
-// those events to gateway.jsonl / stderr / OTel.
+// Package gatewaylog defines the pre-v8 structured event schema retained for
+// compatibility decoding and isolated tests. Production v8 routing uses the
+// generated observability family registry instead of this writer stack.
 //
 // The schema is intentionally small, discriminated, and forward-stable:
 // adding a field is non-breaking, renaming a field is breaking. Every
@@ -105,6 +105,11 @@ const (
 	// but only to sinks when the operator opts in.
 	EventDiagnostic EventType = "diagnostic"
 
+	// EventManagedAIDFailOpen is the bounded managed-enterprise availability
+	// producer. Only the exact unwired/unavailable fail-open branches use it;
+	// benign no-content skips remain opt-in diagnostics.
+	EventManagedAIDFailOpen EventType = "managed_aid_fail_open"
+
 	// EventScan [v7] is a per-scan completion summary emitted by
 	// skill / mcp / plugin / aibom / codeguard scanners. Carries
 	// scanner identity, target, duration, finding counts by
@@ -126,6 +131,11 @@ const (
 	// scraping CLI output.
 	EventActivity EventType = "activity"
 
+	// EventDestinationTest records only the content-free attempt and terminal
+	// outcome of an explicit operator connectivity test. It is a distinct
+	// producer so ordinary audit actions cannot claim the probe-only schema.
+	EventDestinationTest EventType = "destination_test"
+
 	// EventEgress [v7.1] records every outbound request observed
 	// by the guardrail proxy's passthrough path, classified by the
 	// Layer 1 shape detector. The three branches — known / shape /
@@ -136,9 +146,8 @@ const (
 	EventEgress EventType = "egress"
 
 	// EventLLMPrompt records a user/model prompt submitted through
-	// a monitored agent surface. Payload content is redacted by the
-	// gateway emit choke point unless redaction is explicitly
-	// disabled for the deployment.
+	// a monitored agent surface. Canonical destination routes apply their
+	// selected redaction profile before export.
 	EventLLMPrompt EventType = "llm_prompt"
 
 	// EventLLMResponse records model output and links it back to the
@@ -160,29 +169,13 @@ const (
 	// model, or tool event in the same agent execution.
 	EventHookDecision EventType = "hook_decision"
 
-	// EventAIDiscovery records sanitized continuous AI usage discovery
-	// deltas. It is metadata-only: no raw paths, commands, prompt text,
-	// file contents, or secret values.
+	// EventAIDiscovery is the classification key the canonical v8 AI discovery
+	// records are routed under -- observability.ProducerGatewayEvent with
+	// ProducerKey("ai_discovery"), which internal/observability/classification_test.go
+	// pins against these constants. Unlike every other EventType it has no
+	// envelope payload and no envelope row: the v7 ai_discovery envelope shape
+	// was retired, so the schema's event_type enum deliberately omits it.
 	EventAIDiscovery EventType = "ai_discovery"
-
-	// EventConnectorInventory reports the endpoint's roster of configured
-	// DefenseClaw connectors (built-in + plugin) as a discovery event.
-	// Metadata-only: connector names, source, and inspection/subprocess
-	// posture. Emitted in managed_enterprise for AI Defense endpoint
-	// inventory; AI Defense dispatches on the event_type.
-	EventConnectorInventory EventType = "connector_inventory"
-
-	// EventMCPInventory reports the MCP servers configured for the
-	// endpoint's active connector(s). Metadata-only: server name,
-	// transport, command basename, and URL host — never args, env, or
-	// headers (those can carry secrets).
-	EventMCPInventory EventType = "mcp_inventory"
-
-	// EventAgentInventory reports the endpoint's installed coding-agent
-	// roster, emitted at agent-discovery ingest time from the validated
-	// (already sanitized: basenames + path hashes, never raw paths)
-	// discovery report.
-	EventAgentInventory EventType = "agent_inventory"
 )
 
 // Severity is the shared severity vocabulary — keep in lockstep with
@@ -205,6 +198,30 @@ const (
 	SeverityHigh     Severity = "HIGH"
 	SeverityCritical Severity = "CRITICAL"
 )
+
+// JudgeFailureClass is the closed, internal reason vocabulary for a judge
+// invocation whose terminal action is "error". Keep this classification
+// separate from ErrorSummary: the class is safe for bounded metric labels,
+// while the summary remains centrally redacted free-form diagnostic text.
+type JudgeFailureClass string
+
+const (
+	JudgeFailureProvider      JudgeFailureClass = "provider"
+	JudgeFailureEmptyResponse JudgeFailureClass = "empty_response"
+	JudgeFailureOutputParse   JudgeFailureClass = "output_parse"
+)
+
+// Valid reports whether the value is one of the terminal judge-error classes.
+// The empty value is deliberately invalid here: successful allow/block results
+// carry no failure class, while action=error must always name one.
+func (class JudgeFailureClass) Valid() bool {
+	switch class {
+	case JudgeFailureProvider, JudgeFailureEmptyResponse, JudgeFailureOutputParse:
+		return true
+	default:
+		return false
+	}
+}
 
 // Stage identifies which stage of the guardrail pipeline produced a
 // Verdict. "final" is the composed result returned to the caller.
@@ -299,9 +316,8 @@ type Event struct {
 	// TraceID mirrors the OTel span's trace id for cross-sink
 	// correlation. Optional — unset events are still valid.
 	TraceID string `json:"trace_id,omitempty"`
-	// SpanID identifies the OTel span that emitted this event. Async
-	// integrations use it as the parent of derived spans so they remain
-	// attached to the originating gateway trace.
+	// SpanID identifies the OTel span that emitted this event. It is retained
+	// for the Agent Control bridge so derived control spans preserve origin.
 	SpanID    string    `json:"span_id,omitempty"`
 	Provider  string    `json:"provider,omitempty"`
 	Model     string    `json:"model,omitempty"`
@@ -359,8 +375,8 @@ type Event struct {
 	// Connector is the hook/proxy connector that produced this event
 	// (codex, claudecode, antigravity, openclaw, …). Optional —
 	// empty on single-connector installs and on events with no
-	// connector scope. Lets gateway.jsonl consumers (Splunk local
-	// bridge, AgentWatch) filter/group by connector with the same
+	// connector scope. Lets canonical observability consumers filter/group by
+	// connector with the same
 	// identity the audit rows and OTel telemetry carry, instead of
 	// inferring it from the model/agent fields.
 	Connector string `json:"connector,omitempty"`
@@ -439,7 +455,6 @@ type Event struct {
 	LLMResponse  *LLMResponsePayload  `json:"llm_response,omitempty"`
 	Tool         *ToolPayload         `json:"tool_invocation,omitempty"`
 	HookDecision *HookDecisionPayload `json:"hook_decision,omitempty"`
-	AIDiscovery  *AIDiscoveryPayload  `json:"ai_discovery,omitempty"`
 
 	ConnectorInventory *ConnectorInventoryPayload `json:"connector_inventory,omitempty"`
 	MCPInventory       *MCPInventoryPayload       `json:"mcp_inventory,omitempty"`
@@ -482,8 +497,6 @@ func (e *Event) StampPayloadHMAC() {
 		e.PayloadHMAC = ComputePayloadHMAC(e.Tool)
 	case e.HookDecision != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.HookDecision)
-	case e.AIDiscovery != nil:
-		e.PayloadHMAC = ComputePayloadHMAC(e.AIDiscovery)
 	case e.ConnectorInventory != nil:
 		e.PayloadHMAC = ComputePayloadHMAC(e.ConnectorInventory)
 	case e.MCPInventory != nil:
@@ -601,15 +614,20 @@ type Finding struct {
 // populated when guardrail.retain_judge_bodies is true — operators
 // opt in because raw bodies can echo user PII.
 type JudgePayload struct {
-	Kind        string    `json:"kind"` // injection | pii | tool_injection
-	Model       string    `json:"model"`
-	InputBytes  int       `json:"input_bytes"`
-	LatencyMs   int64     `json:"latency_ms"`
-	Action      string    `json:"action,omitempty"`
-	Severity    Severity  `json:"severity,omitempty"`
-	Findings    []Finding `json:"findings,omitempty"`
-	RawResponse string    `json:"raw_response,omitempty"`
-	ParseError  string    `json:"parse_error,omitempty"`
+	Kind         string            `json:"kind"` // injection | pii | tool_injection
+	Model        string            `json:"model"`
+	InputBytes   int               `json:"input_bytes"`
+	LatencyMs    int64             `json:"latency_ms"`
+	Action       string            `json:"action,omitempty"`
+	Severity     Severity          `json:"severity,omitempty"`
+	Findings     []Finding         `json:"findings,omitempty"`
+	RawResponse  string            `json:"raw_response,omitempty"`
+	FailureClass JudgeFailureClass `json:"failure_class,omitempty"`
+	ErrorSummary string            `json:"error_summary,omitempty"`
+	// ParseError is populated only when FailureClass is output_parse. Provider
+	// and empty-response failures use ErrorSummary without pretending that a
+	// parser observed malformed model output.
+	ParseError string `json:"parse_error,omitempty"`
 	// InputHash is the SHA-256 of the inspected judge *input*
 	// (the prompt/request bytes the judge was asked to evaluate),
 	// hex-encoded with the "sha256:" prefix when populated.
@@ -754,14 +772,16 @@ type DiffEntry struct {
 // Field semantics:
 //   - TargetHost: destination hostname (not the full URL — we never
 //     log the query string to avoid leaking API keys).
+//   - ResolvedIP: concrete remote peer observed by Go's HTTP transport.
+//     Set only for private-upstream events; TS callers cannot attest it.
 //   - TargetPath: URL pathname only, trimmed to 256 chars. Useful
 //     for distinguishing /chat/completions vs /messages.
 //   - BodyShape: BodyShapeNone | messages | prompt | input | contents.
 //     Empty for non-body requests (GETs reported from the TS side).
 //   - LooksLikeLLM: true when the request hit a known provider OR
 //     the shape classifier matched.
-//   - Branch: known | shape | passthrough. The three-branch Layer 1
-//     policy — downstream alerting keys on this for each surface.
+//   - Branch: known | shape | passthrough | private-upstream. The latter
+//     records use of an operator-approved private destination.
 //   - Decision: allow | block. Paired with Branch because a "shape"
 //     branch can produce either depending on allow_unknown_llm_domains.
 //   - Reason: stable short identifier matching the Go emitter's
@@ -772,6 +792,7 @@ type DiffEntry struct {
 //     a red flag that one layer has a stale allowlist.
 type EgressPayload struct {
 	TargetHost   string `json:"target_host,omitempty"`
+	ResolvedIP   string `json:"resolved_ip,omitempty"`
 	TargetPath   string `json:"target_path,omitempty"`
 	BodyShape    string `json:"body_shape,omitempty"`
 	LooksLikeLLM bool   `json:"looks_like_llm,omitempty"`
@@ -781,9 +802,9 @@ type EgressPayload struct {
 	Source       string `json:"source"`
 }
 
-// LLMPromptPayload records the prompt body submitted to a monitored model.
-// Prompt and RawRequestBody are sink-scrubbed by gateway.emitEvent unless
-// redaction is disabled.
+// LLMPromptPayload records source facts submitted to a monitored model.
+// Canonical observability v8 routing applies the selected redaction profile
+// independently for each destination before projection or export.
 type LLMPromptPayload struct {
 	PromptID       string `json:"prompt_id"`
 	TurnID         string `json:"turn_id,omitempty"`
@@ -806,8 +827,8 @@ type LLMResponsePayload struct {
 }
 
 // ToolPayload records one phase of a model-selected or agent-executed tool
-// invocation. ToolInput and ToolOutput are content-bearing and are redacted by
-// the gateway emit choke point unless redaction is disabled.
+// invocation. ToolInput and ToolOutput are content-bearing and flow through
+// canonical destination redaction before export.
 type ToolPayload struct {
 	ToolCallID      string `json:"tool_call_id,omitempty"`
 	Phase           string `json:"phase"` // call | result
@@ -818,121 +839,6 @@ type ToolPayload struct {
 	ExitCode        *int   `json:"exit_code,omitempty"`
 	ReplyToPromptID string `json:"reply_to_prompt_id,omitempty"`
 	Source          string `json:"source,omitempty"`
-}
-
-// AIDiscoveryPayload records one sanitized "new / changed / gone" AI usage
-// signal from the sidecar-native continuous discovery service.
-//
-// Privacy contract:
-//   - The "minimal" set of fields (ScanID through LastSeen) is always
-//     populated -- they carry no raw paths or unhashed values, only
-//     sha256:* digests and category/vendor/product strings drawn from
-//     the operator-curated catalog.
-//   - The "extended" set (Component, Model, Runtime, Detector, IdentityScore,
-//     PresenceScore, IdentityFactors, PresenceFactors, Evidence,
-//     RawPaths) is populated *only* when the gateway sees
-//     `privacy.disable_redaction = true`. RawPath inside each
-//     evidence row additionally requires
-//     `ai_discovery.store_raw_local_paths = true` (the two flags
-//     compose: setting one without the other still scrubs raw paths).
-//   - Every extended field is `omitempty` so receivers cannot tell
-//     from the wire whether the operator opted out or never had a
-//     value for that signal.
-type AIDiscoveryPayload struct {
-	ScanID        string   `json:"scan_id"`
-	SignalID      string   `json:"signal_id"`
-	Category      string   `json:"category"`
-	Vendor        string   `json:"vendor,omitempty"`
-	Product       string   `json:"product,omitempty"`
-	Confidence    float64  `json:"confidence,omitempty"`
-	State         string   `json:"state"` // new | changed | gone
-	EvidenceTypes []string `json:"evidence_types,omitempty"`
-	PathHashes    []string `json:"path_hashes,omitempty"`
-	Basenames     []string `json:"basenames,omitempty"`
-	WorkspaceHash string   `json:"workspace_hash,omitempty"`
-	LastSeen      string   `json:"last_seen,omitempty"`
-
-	// Extended fields below are gated by privacy.disable_redaction.
-	// The shipping helper (BuildAIDiscoveryPayload) reads the flag
-	// from the gateway config; raw call sites that build their own
-	// payload must check the same flag.
-	Detector        string                `json:"detector,omitempty"`
-	Component       *AIDiscoveryComponent `json:"component,omitempty"`
-	Model           *AIDiscoveryModel     `json:"model,omitempty"`
-	Runtime         *AIDiscoveryRuntime   `json:"runtime,omitempty"`
-	LastActiveAt    string                `json:"last_active_at,omitempty"`
-	IdentityScore   float64               `json:"identity_score,omitempty"`
-	IdentityBand    string                `json:"identity_band,omitempty"`
-	PresenceScore   float64               `json:"presence_score,omitempty"`
-	PresenceBand    string                `json:"presence_band,omitempty"`
-	IdentityFactors []AIDiscoveryFactor   `json:"identity_factors,omitempty"`
-	PresenceFactors []AIDiscoveryFactor   `json:"presence_factors,omitempty"`
-	Detectors       []string              `json:"detectors,omitempty"`
-	Evidence        []AIDiscoveryEvidence `json:"evidence,omitempty"`
-	// RawPaths additionally requires ai_discovery.store_raw_local_paths.
-	RawPaths []string `json:"raw_paths,omitempty"`
-}
-
-// AIDiscoveryComponent mirrors inventory.AIComponent.
-type AIDiscoveryComponent struct {
-	Ecosystem string `json:"ecosystem,omitempty"`
-	Name      string `json:"name,omitempty"`
-	Version   string `json:"version,omitempty"`
-	Framework string `json:"framework,omitempty"`
-}
-
-// AIDiscoveryModel mirrors inventory.LocalModelInfo. It is part of the
-// privacy-gated extended payload because model IDs can contain user-chosen or
-// private repository names. Local `/api/v1/ai-usage` responses still carry the
-// model block regardless of outbound sink redaction.
-type AIDiscoveryModel struct {
-	ID        string `json:"id"`
-	Status    string `json:"status"`
-	Format    string `json:"format,omitempty"`
-	Provider  string `json:"provider,omitempty"`
-	Recipe    string `json:"recipe,omitempty"`
-	Modality  string `json:"modality,omitempty"`
-	Device    string `json:"device,omitempty"`
-	SizeBytes int64  `json:"size_bytes,omitempty"`
-	Pinned    bool   `json:"pinned,omitempty"`
-}
-
-// AIDiscoveryRuntime mirrors inventory.ProcessRuntime.
-type AIDiscoveryRuntime struct {
-	PID       int    `json:"pid,omitempty"`
-	PPID      int    `json:"ppid,omitempty"`
-	StartedAt string `json:"started_at,omitempty"`
-	UptimeSec int64  `json:"uptime_sec,omitempty"`
-	User      string `json:"user,omitempty"`
-	Comm      string `json:"comm,omitempty"`
-}
-
-// AIDiscoveryFactor mirrors inventory.ConfidenceFactor for the wire.
-// LogitDelta is the additive contribution this evidence made to the
-// per-axis log-odds; receivers can convert via P*(1-P) to get a
-// percentage-point shift.
-type AIDiscoveryFactor struct {
-	Detector    string  `json:"detector"`
-	EvidenceID  string  `json:"evidence_id,omitempty"`
-	MatchKind   string  `json:"match_kind,omitempty"`
-	Quality     float64 `json:"quality"`
-	Specificity float64 `json:"specificity"`
-	LR          float64 `json:"lr"`
-	LogitDelta  float64 `json:"logit_delta"`
-}
-
-// AIDiscoveryEvidence mirrors inventory.AIEvidence for the wire.
-// RawPath is populated only when both privacy.disable_redaction and
-// ai_discovery.store_raw_local_paths are true.
-type AIDiscoveryEvidence struct {
-	Type          string  `json:"type"`
-	Basename      string  `json:"basename,omitempty"`
-	PathHash      string  `json:"path_hash,omitempty"`
-	ValueHash     string  `json:"value_hash,omitempty"`
-	WorkspaceHash string  `json:"workspace_hash,omitempty"`
-	RawPath       string  `json:"raw_path,omitempty"`
-	Quality       float64 `json:"quality,omitempty"`
-	MatchKind     string  `json:"match_kind,omitempty"`
 }
 
 // ConnectorInventoryPayload is the endpoint's roster of configured

@@ -28,6 +28,7 @@ from click.testing import CliRunner
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
+from defenseclaw import credential_provenance
 from defenseclaw.commands.cmd_keys import keys_cmd
 from defenseclaw.config import (
     CiscoAIDefenseConfig,
@@ -37,6 +38,7 @@ from defenseclaw.config import (
     OpenShellConfig,
 )
 from defenseclaw.context import AppContext
+from defenseclaw.main import cli
 
 
 def _make_app_context(data_dir: str, **overrides) -> AppContext:
@@ -88,6 +90,71 @@ class KeysListTests(unittest.TestCase):
                 payload = json.loads(result.output)
                 names = {item["env_name"] for item in payload}
                 self.assertIn("OPENCLAW_GATEWAY_TOKEN", names)
+
+
+class KeysProvenanceCliTests(unittest.TestCase):
+    def setUp(self):
+        credential_provenance._reset_for_tests()
+
+    def tearDown(self):
+        credential_provenance._reset_for_tests()
+
+    def _entry(self, output):
+        payload = json.loads(output)
+        return next(item for item in payload if item["env_name"] == "VIRUSTOTAL_API_KEY")
+
+    def test_set_then_separate_list_invocation_reports_dotenv(self):
+        secret = "dc-windows-test-only"
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CliRunner()
+            env = {"DEFENSECLAW_HOME": tmp}
+            clean_env = {k: v for k, v in os.environ.items() if k != "VIRUSTOTAL_API_KEY"}
+            with patch.dict(os.environ, clean_env, clear=True):
+                saved = runner.invoke(
+                    cli,
+                    ["keys", "set", "VIRUSTOTAL_API_KEY", "--value", secret],
+                    env=env,
+                )
+                self.assertEqual(saved.exit_code, 0, msg=saved.output)
+                self.assertNotIn(secret, saved.output)
+                # ``keys set`` updates its current process environment.
+                # Ending that process leaves only the persisted dotenv value.
+                os.environ.pop("VIRUSTOTAL_API_KEY", None)
+
+                listed = runner.invoke(cli, ["keys", "list", "--json"], env=env)
+                self.assertEqual(listed.exit_code, 0, msg=listed.output)
+                self.assertEqual(self._entry(listed.output)["source"], "dotenv")
+                self.assertNotIn(secret, listed.output)
+
+    def test_exported_process_value_wins_and_reports_env(self):
+        dotenv_secret = "dc-windows-test-only"
+        exported_secret = "exported-process-test-only"
+        with tempfile.TemporaryDirectory() as tmp:
+            runner = CliRunner()
+            home_env = {"DEFENSECLAW_HOME": tmp}
+            clean_env = {k: v for k, v in os.environ.items() if k != "VIRUSTOTAL_API_KEY"}
+            with patch.dict(os.environ, clean_env, clear=True):
+                saved = runner.invoke(
+                    cli,
+                    ["keys", "set", "VIRUSTOTAL_API_KEY", "--value", dotenv_secret],
+                    env=home_env,
+                )
+                self.assertEqual(saved.exit_code, 0, msg=saved.output)
+                self.assertNotIn(dotenv_secret, saved.output)
+                # Model a fresh process before exporting the overriding value.
+                os.environ.pop("VIRUSTOTAL_API_KEY", None)
+
+                listed = runner.invoke(
+                    cli,
+                    ["keys", "list", "--json", "--show-values"],
+                    env={**home_env, "VIRUSTOTAL_API_KEY": exported_secret},
+                )
+                self.assertEqual(listed.exit_code, 0, msg=listed.output)
+                entry = self._entry(listed.output)
+                self.assertEqual(entry["source"], "env")
+                self.assertEqual(entry["value_masked"], "expo…only")
+                self.assertNotIn(dotenv_secret, listed.output)
+                self.assertNotIn(exported_secret, listed.output)
 
 
 class KeysCheckTests(unittest.TestCase):

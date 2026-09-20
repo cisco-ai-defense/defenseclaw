@@ -1,0 +1,149 @@
+catalog_version: 1
+groups:
+  - token: credentials
+    detector_ids:
+      - credentials.api_token
+      - credentials.private_key
+      - credentials.authorization
+      - credentials.cookie
+      - credentials.connection_string
+  - token: secrets
+    detector_ids:
+      - secrets.assignment
+      - secrets.high_entropy
+      - secrets.url_query
+      - secrets.cloud_account_identifier
+  - token: pii
+    detector_ids:
+      - pii.email
+      - pii.telephone
+      - pii.national_identifier
+      - pii.payment_card
+      - pii.ip_address
+detectors:
+  - order: 1
+    group: credentials
+    id: credentials.api_token
+    lexical_grammar: provider_token_v1
+    semantic_validator: provider_token_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 3074
+    replacement_interval: candidate
+    fixture_set: credentials_api_token_v1
+  - order: 2
+    group: credentials
+    id: credentials.private_key
+    lexical_grammar: pem_private_key_v1
+    semantic_validator: pem_private_key_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 65536
+    replacement_interval: candidate
+    fixture_set: credentials_private_key_v1
+  - order: 3
+    group: credentials
+    id: credentials.authorization
+    lexical_grammar: authorization_header_v1
+    semantic_validator: authorization_header_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 8192
+    replacement_interval: credential_value
+    fixture_set: credentials_authorization_v1
+  - order: 4
+    group: credentials
+    id: credentials.cookie
+    lexical_grammar: cookie_header_v1
+    semantic_validator: cookie_header_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 8192
+    replacement_interval: member_value
+    fixture_set: credentials_cookie_v1
+  - order: 5
+    group: credentials
+    id: credentials.connection_string
+    lexical_grammar: connection_string_v1
+    semantic_validator: connection_string_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 8192
+    replacement_interval: credential_value
+    fixture_set: credentials_connection_string_v1
+  - order: 6
+    group: secrets
+    id: secrets.assignment
+    lexical_grammar: assignment_v1
+    semantic_validator: assignment_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 8192
+    replacement_interval: member_value
+    fixture_set: secrets_assignment_v1
+  - order: 7
+    group: secrets
+    id: secrets.high_entropy
+    lexical_grammar: entropy_ascii_v1
+    semantic_validator: shannon_entropy_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 256
+    replacement_interval: candidate
+    fixture_set: secrets_high_entropy_v1
+  - order: 8
+    group: secrets
+    id: secrets.url_query
+    lexical_grammar: uri_query_v1
+    semantic_validator: uri_query_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 8192
+    replacement_interval: member_value
+    fixture_set: secrets_url_query_v1
+  - order: 9
+    group: secrets
+    id: secrets.cloud_account_identifier
+    lexical_grammar: cloud_identifier_v1
+    semantic_validator: cloud_identifier_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 64
+    replacement_interval: account_component
+    fixture_set: secrets_cloud_account_identifier_v1
+  - order: 10
+    group: pii
+    id: pii.email
+    lexical_grammar: email_ascii_v1
+    semantic_validator: email_ascii_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 254
+    replacement_interval: candidate
+    fixture_set: pii_email_v1
+  - order: 11
+    group: pii
+    id: pii.telephone
+    lexical_grammar: nanp_telephone_v1
+    semantic_validator: nanp_telephone_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 19
+    replacement_interval: candidate
+    fixture_set: pii_telephone_v1
+  - order: 12
+    group: pii
+    id: pii.national_identifier
+    lexical_grammar: us_ssn_v1
+    semantic_validator: us_ssn_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 11
+    replacement_interval: candidate
+    fixture_set: pii_national_identifier_v1
+  - order: 13
+    group: pii
+    id: pii.payment_card
+    lexical_grammar: payment_card_v1
+    semantic_validator: luhn_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 37
+    replacement_interval: candidate
+    fixture_set: pii_payment_card_v1
+  - order: 14
+    group: pii
+    id: pii.ip_address
+    lexical_grammar: ip_address_v1
+    semantic_validator: netip_parse_addr_v1
+    input_context: valid_utf8_string_and_field_class
+    candidate_bound: 45
+    replacement_interval: candidate
+    fixture_set: pii_ip_address_v1

@@ -1,0 +1,162 @@
+# DefenseClaw deterministic benchmarks
+
+This directory contains the public benchmark harness, schemas, dataset lock,
+normalizers, authored conformance fixtures, and published scorecard for
+DefenseClaw's deterministic guardrails.
+
+The separate [`llm_judge/`](llm_judge/) lane runs local Ollama models through
+DefenseClaw's production `LLMJudge` request, shipped rule-pack prompts, JSON
+parser, and verdict mapping. It combines those predictions with the same
+datasets and deterministic engine used by this benchmark. Tool-risk training
+and protected corpora are outside this lane.
+
+Sources used by the published public suite are publicly accessible and
+revision-pinned in [`datasets.lock.json`](datasets.lock.json). The lock may also
+track candidate sources that are not admitted to a published score. Source records are downloaded into
+an ignored local data directory and are not committed. The harness never
+executes commands or tool calls from a dataset.
+
+## What is measured
+
+The suite reports three different kinds of evidence separately:
+
+1. **Binary accuracy:** TP, TN, FP, FN, precision, recall, F1, and FPR where
+   independently usable positive and negative truth exists.
+2. **Benign noise:** finding FPR and block rate on honest agent trajectories.
+3. **Coverage/conformance:** detector reach on contextual data and exact
+   positive/hard-negative behavior for authored grammars. These are not
+   population F1 estimates.
+
+`balanced` is the published name for the runtime `default` profile. It is an
+alias, not a fourth experimental arm.
+
+## Requirements
+
+- Go 1.26.4 or the exact version declared by `go.mod`
+- Python 3.11 or newer
+- `git`
+- `pyarrow` and `jsonschema` for Parquet-backed datasets
+- AWS credentials only when reproducing the optional offline GPT-OSS labeling
+  stage; no model is used at runtime
+
+## Run the smoke suite
+
+```bash
+test -z "$(git status --porcelain)"
+benchmark_commit="$(git rev-parse --verify HEAD)"
+go build -buildvcs=true -trimpath \
+  -ldflags "-X main.buildCommit=$benchmark_commit -X main.buildDirty=false" \
+  -o bin/defenseclaw-benchmark ./benchmarks/cmd/defenseclaw-benchmark
+
+./bin/defenseclaw-benchmark run \
+  --corpus benchmarks/fixtures/smoke.jsonl \
+  --dataset-lock benchmarks/datasets.lock.json \
+  --profiles default,permissive,strict \
+  --gate \
+  --output outputs/benchmarks/smoke
+
+./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/smoke
+
+./bin/defenseclaw-benchmark verify --publication \
+  --output outputs/benchmarks/smoke
+```
+
+The runner writes case-level predictions, environment and policy inventories,
+aggregate metrics, corpus and dataset manifests, and checksums.
+It refuses to evaluate a corpus unless the selected worktree is clean and the
+running binary contains clean, embedded VCS metadata matching its exact
+40-hex repository commit. The explicit linker values above support linked Git
+worktrees where Go omits `vcs.*` build settings even with `-buildvcs=true`;
+native Go build metadata takes precedence when present. Publication verification remains
+backward-compatible with older bundles that predate binary provenance fields.
+
+## Run an opt-in policy pack
+
+Opt-in policy packs are separate benchmark lanes, not additional runtime
+profiles. Select them by their repository name; each runs with the balanced
+(`default`) action posture and is reported under an `opt-in/<name>` label:
+
+```bash
+./bin/defenseclaw-benchmark run \
+  --corpus benchmarks/fixtures/cloud-production-conformance-v1.jsonl \
+  --dataset-lock benchmarks/datasets.lock.json \
+  --profiles default \
+  --opt-in-packs cloud-production-protection \
+  --output outputs/benchmarks/cloud-production-conformance
+
+./bin/defenseclaw-benchmark verify \
+  --output outputs/benchmarks/cloud-production-conformance
+
+./bin/defenseclaw-benchmark verify --publication \
+  --output outputs/benchmarks/cloud-production-conformance
+```
+
+Supported names are `cloud-production-protection`,
+`database-destruction-protection`, `infrastructure-destruction-protection`,
+`kubernetes-production-protection`, and `privacy-high-assurance`. The output
+environment records each lane's policy digest, policy root, and action posture.
+Standard `default`, `permissive`, and `strict` runs are unchanged when
+`--opt-in-packs` is omitted.
+
+## Prepare public sources
+
+Set an ignored data root and download only the sources needed for a run:
+
+```bash
+export BENCHMARK_DATA_DIR="$PWD/.benchmark-data"
+
+python benchmarks/scripts/benchmark_prepare.py \
+  --lock benchmarks/datasets.lock.json \
+  --data-dir "$BENCHMARK_DATA_DIR" \
+  --datasets atomic-red-team,nl2bash,shell-attack-evolution,tldr
+```
+
+Preparation verifies the pinned revision and declared paths. Adapters then
+project the minimum executable representation into
+[`schema/case-v1.schema.json`](schema/case-v1.schema.json):
+
+```bash
+python benchmarks/scripts/benchmark_normalize.py \
+  --lock benchmarks/datasets.lock.json \
+  --data-dir "$BENCHMARK_DATA_DIR" \
+  --datasets atomic-red-team,nl2bash,shell-attack-evolution,tldr \
+  --split validation \
+  --output "$BENCHMARK_DATA_DIR/public-command-validation.jsonl"
+```
+
+Dedicated adapters in [`scripts/`](scripts/) cover MonitoringBench,
+LinuxArena, TerminalBench, ISETrace, ATBench, InjecAgent, AgentDojo, Ylemis,
+and the other public trajectory sources listed in the lock.
+
+## Optional offline labeling
+
+The public-command truth construction used GPT-OSS batch inference only as an
+offline proposal stage. It did not participate in detector execution. The
+reproducible scripts are:
+
+- `benchmark_label_bedrock.py`: prepares, submits, and collects structured
+  batch judgments for public normalized cases;
+- `benchmark_apply_labels.py`: joins judgments by stable case ID;
+- `benchmark_finalize_proof_labels.py`: accepts deterministic-malicious truth
+  only when a literal standalone effect is present;
+- `benchmark_label_trajectory_bedrock.py` and
+  `benchmark_finalize_trajectory_proofs.py`: perform the equivalent bounded
+  trajectory proposal/finalization flow.
+
+No human adjudication was used. Source-label and model-correlated error are
+therefore limitations. A source-level attack label is never copied onto every
+tool call. Dynamic operands, missing identity, uncertain result status,
+conditional execution, and incomplete chains remain contextual or out of
+scope.
+
+## Published results
+
+- Human-readable report:
+  [`DETERMINISTIC-DETECTION-BENCHMARKS.md`](DETERMINISTIC-DETECTION-BENCHMARKS.md)
+- Machine-readable scorecard:
+  [`results/public-scorecard-v1.json`](results/public-scorecard-v1.json)
+- Public docs page: `docs-site/content/docs/benchmarks.mdx`
+
+The report explains the datasets, labeling contract, metrics, profile behavior,
+detector changes, limitations, and complete replication procedure.

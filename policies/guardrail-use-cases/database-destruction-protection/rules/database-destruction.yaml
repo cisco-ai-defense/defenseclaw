@@ -1,0 +1,33 @@
+version: 1
+category: database-destruction-protection
+rules:
+  - id: impact.sql_unbounded_delete
+    expression: >-
+      f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete &&
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])
+    pattern: 'a^'
+    tool_call_only: true
+    title: "SQL DELETE without a WHERE clause"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, database, production-safety]
+
+  - id: impact.sql_schema_destroy
+    expression: >-
+      f.tool in ['sql_query', 'db.execute'] || f.commands.exists(c, c.argv_complete &&
+      c.program in ['psql', 'mysql', 'mariadb', 'sqlcmd', 'snowsql'])
+    pattern: 'a^'
+    tool_call_only: true
+    title: "SQL schema or table-wide destructive operation"
+    severity: CRITICAL
+    confidence: 0.99
+    tags: [destructive, database, production-safety]
+
+  - id: chain.sensitive_sql_read_then_unbounded_delete_same_table
+    expression: "f.tool == 'write_query'"
+    pattern: 'a^'
+    tool_call_only: true
+    title: "Sensitive SQLite read followed by unbounded same-table delete"
+    severity: HIGH
+    confidence: 0.99
+    tags: [destructive, database, sqlite, production-safety, bounded-lineage]

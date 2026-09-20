@@ -14,13 +14,29 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from defenseclaw.tui.panels.ai_discovery import AIUsageModel, AIUsageSignal, AIUsageSnapshot, AIUsageSummary
+from defenseclaw import connector_paths
+from defenseclaw.observability.custody_status import (
+    NativeDeliveryStatus,
+    NativeDeliverySummary,
+)
+from defenseclaw.observability.v8_status import (
+    V8BucketStatus,
+    V8DestinationStatus,
+    V8OperatorStatus,
+)
+from defenseclaw.tui.panels.ai_discovery import (
+    AIUsageModel,
+    AIUsageSignal,
+    AIUsageSnapshot,
+    AIUsageSummary,
+)
 from defenseclaw.tui.panels.overview import (
     MAX_AI_DISCOVERY_OVERVIEW_ROWS,
     STALENESS_WINDOW,
     ConnectorHealth,
     DoctorCache,
     DoctorCheck,
+    DoctorRepairSummary,
     HealthSnapshot,
     OverviewConfig,
     OverviewPanelModel,
@@ -55,6 +71,73 @@ def test_gateway_health_is_broken_and_string_detail() -> None:
     assert string_detail({"summary": "  hello  "}, "summary") == "hello"
 
 
+def test_overview_keeps_runtime_health_separate_from_native_delivery_truth() -> None:
+    model = _model()
+    model.set_health(HealthSnapshot(telemetry=SubsystemHealth(state="running")))
+    model.set_native_delivery_summary(
+        NativeDeliverySummary(
+            state="available",
+            reason="",
+            observation_window_hours=24,
+            connectors=(
+                NativeDeliveryStatus(
+                    connector="codex",
+                    default=True,
+                    state="all_drop_only",
+                    normalized_batches=2,
+                    drop_only_batches=2,
+                    detail="drop-only native stream (2/2 batches); no accepted native delivery observed",
+                ),
+                NativeDeliveryStatus(
+                    connector="claudecode",
+                    default=True,
+                    state="partial_drop_only",
+                    normalized_batches=3,
+                    drop_only_batches=1,
+                    detail="partial drop-only evidence (1/3 batches); accepted native delivery observed in remaining batches",
+                ),
+                NativeDeliveryStatus(
+                    connector="opencode",
+                    default=True,
+                    state="accepted",
+                    normalized_batches=3,
+                    drop_only_batches=0,
+                    detail="accepted native delivery observed (3 batches)",
+                ),
+                NativeDeliveryStatus(
+                    connector="copilot",
+                    default=True,
+                    state="no_evidence",
+                    normalized_batches=0,
+                    drop_only_batches=0,
+                    detail="no recent native delivery evidence",
+                ),
+            ),
+            event_rows_truncated=True,
+        )
+    )
+
+    assert model.subsystem_state("telemetry") == "running"
+    rows = model.native_delivery_rows()
+    assert [(row.connector, row.state) for row in rows] == [
+        ("codex", "all_drop_only"),
+        ("claudecode", "partial_drop_only"),
+        ("opencode", "accepted"),
+        ("copilot", "no_evidence"),
+    ]
+    assert model.native_delivery_summary is not None
+    assert model.native_delivery_summary.evidence_scope == "truncated"
+
+    from defenseclaw.tui.app import DefenseClawTUI
+
+    view = type("OverviewView", (), {"overview_model": model})()
+    rendered = DefenseClawTUI._overview_observability_text(view)
+    assert "collector/runtime health does not prove accepted delivery" in rendered
+    assert "bounded 24h, truncated; counts partial" in rendered
+    for label in ("all-drop-only", "partial-drop-only", "accepted", "no-evidence"):
+        assert label in rendered
+
+
 def test_overview_standalone_hint_and_notices() -> None:
     model = _model()
     assert model.gateway_standalone_hint() == ""
@@ -77,7 +160,7 @@ def test_overview_standalone_hint_and_notices() -> None:
 
     model.set_health(HealthSnapshot(gateway=SubsystemHealth(state="reconnecting")))
     notices = model.build_notices()
-    assert any(notice.level == "error" and "Gateway is offline" in notice.message for notice in notices)
+    assert any(notice.level == "info" and "health checks will retry" in notice.message for notice in notices)
 
 
 def test_overview_mode_key_is_modal_owned_not_fake_command() -> None:
@@ -120,103 +203,113 @@ def test_omnigent_zero_traffic_notice_uses_policy_wording() -> None:
     assert "hook setup" not in notice
 
 
-def test_overview_telemetry_detail_lists_named_destinations() -> None:
+def test_overview_v8_rows_merge_policy_and_exact_live_health_without_inference() -> None:
     model = _model()
+    model.set_observability_status(
+        V8OperatorStatus(
+            source="/tmp/config.yaml",
+            data_dir="/tmp/dc",
+            plan_digest="a" * 64,
+            bucket_catalog_version=1,
+            retention_days=0,
+            local_path="/tmp/dc/audit.db",
+            judge_bodies_path="/tmp/dc/judge.db",
+            destinations=(
+                V8DestinationStatus(
+                    name="local-sqlite",
+                    kind="sqlite",
+                    enabled=True,
+                    generated=True,
+                    capabilities=("logs",),
+                    selected_signals=("logs",),
+                    policy_form="implicit_local",
+                    endpoint="/tmp/dc/audit.db",
+                    route_count=1,
+                    buckets=("compliance.activity", "model.io"),
+                    redaction_profiles=("none", "strict"),
+                ),
+                V8DestinationStatus(
+                    name="collector",
+                    kind="otlp",
+                    enabled=True,
+                    generated=False,
+                    capabilities=("logs", "traces", "metrics"),
+                    selected_signals=("logs", "traces", "metrics"),
+                    policy_form="capability_default",
+                    endpoint="https://collector.example.test/v1/traces",
+                    route_count=1,
+                    buckets=("compliance.activity", "model.io"),
+                    redaction_profiles=("none",),
+                    queue_max_items=2048,
+                    queue_max_bytes=67_108_864,
+                    export_batch_max_items=512,
+                    export_batch_max_bytes=8_388_608,
+                    scheduled_delay_ms=5000,
+                ),
+            ),
+            buckets=(
+                V8BucketStatus("compliance.activity", ("logs", "traces", "metrics"), "none"),
+                V8BucketStatus("model.io", ("logs", "traces", "metrics"), "strict"),
+            ),
+            warnings=(),
+            judge_bodies_enabled=False,
+        )
+    )
     model.set_health(
         HealthSnapshot(
             telemetry=SubsystemHealth(
                 state="running",
+                last_error="Bearer must-not-render",
                 details={
-                    "destination_count": 2,
                     "destinations": [
-                        {"name": "local-observability", "enabled": True},
                         {
-                            "name": "galileo",
-                            "enabled": True,
-                            "routing": {
-                                "accepted": 3,
-                                "dropped": 1,
-                                "total": 4,
-                                "accepted_percentage": 75,
-                            },
-                            "delivery": {
-                                "attempted": 3,
-                                "delivered": 3,
-                                "rejected": 0,
-                                "failed": 0,
-                            },
-                        },
+                            "name": "collector",
+                            "state": "degraded",
+                            "reason": "queue_full",
+                            "queue_items": 4,
+                            "max_queue_items": 16,
+                            "queue_bytes": 2048,
+                            "max_queue_bytes": 8192,
+                            "queue_dropped": 2,
+                            "last_success": "2026-07-06T10:00:00Z",
+                            "last_failure": "2026-07-06T10:01:00Z",
+                            "last_error_class": "retryable_delivery",
+                            "endpoint": "https://user:secret@evil.invalid/?token=secret",
+                        }
                     ],
+                    "retention_state": "degraded",
+                    "retention_failure": "run_failed",
                 },
             )
         )
     )
-    cards = {card.key: card for card in model.service_cards()}
-    assert cards["telemetry"].detail == "2 destinations: local-observability, Galileo (100.0% delivered)"
 
+    local, collector = model.observability_destination_rows()
+    assert local.target == "v8"
+    assert local.policy_state == "enabled"
+    assert local.state == "unavailable"
+    assert local.signals == "logs"
+    assert local.buckets == "2/2"
+    assert local.redaction == "mixed: none, strict"
+    assert local.queue == "unavailable"
+    assert local.limits == "not-applicable"
+    assert local.endpoint == "/tmp/dc/audit.db"
+    assert collector.state == "degraded"
+    assert collector.health_reason == "queue_full"
+    assert collector.redaction == "unredacted (none)"
+    assert collector.limits == ("queue=2048 items/64.0 MiB; batch=512 items/8.0 MiB; delay=5000ms")
+    assert collector.queue == "4/16 items, 2.0 KiB/8.0 KiB, 2 dropped"
+    assert collector.activity == ("ok 2026-07-06T10:00:00Z; error 2026-07-06T10:01:00Z (retryable_delivery)")
+    assert collector.endpoint == "https://collector.example.test/v1/traces"
+    assert "must-not-render" not in repr((local, collector))
+    assert "user:secret" not in repr((local, collector))
 
-def test_overview_observability_rows_combine_otel_and_audit_sinks() -> None:
-    model = _model()
-    model.set_health(
-        HealthSnapshot(
-            telemetry=SubsystemHealth(
-                state="running",
-                details={
-                    "destinations": [
-                        {
-                            "name": "galileo",
-                            "preset": "galileo",
-                            "enabled": True,
-                            "endpoint": "https://user:secret@api.example.test/otel/traces?api_key=secret",
-                            "signals": "traces",
-                            "headers": {"Galileo-API-Key": "must-not-render"},
-                            "routing": {"accepted": 3, "dropped": 1, "total": 10, "eligibility_percentage": 30},
-                            "delivery": {"attempted": 3, "collector_accepted": 3},
-                        },
-                        {
-                            "name": "local-observability",
-                            "preset": "local-otlp",
-                            "enabled": False,
-                            "endpoint": "127.0.0.1:4317",
-                            "signals": "traces, metrics, logs",
-                        },
-                    ]
-                },
-            ),
-            sinks=SubsystemHealth(
-                state="running",
-                details={
-                    "sinks": [
-                        {
-                            "name": "soc-archive",
-                            "kind": "otlp_logs",
-                            "enabled": True,
-                            "scope": "connector:codex",
-                            "endpoint": "https://user:secret@collector.example.test:4317/provider/token?token=secret",
-                        }
-                    ]
-                },
-            ),
-        )
-    )
-
-    rows = model.observability_destination_rows()
-    assert [(row.name, row.target) for row in rows] == [
-        ("Galileo", "otel"),
-        ("local-observability", "otel"),
-        ("soc-archive", "audit_sinks"),
-    ]
-    assert rows[0].routing == "collector accepted 3/3; pending 0; rejected 0; failed 0"
-    assert rows[0].endpoint == "https://api.example.test/otel/traces"
-    assert rows[0].signals == "traces"
-    assert rows[1].state == "disabled"
-    assert rows[2].signals == "audit-events"
-    assert rows[2].scope == "connector:codex"
-    assert rows[2].endpoint == "https://collector.example.test:4317/…"
-    assert "must-not-render" not in repr(rows)
-    assert "user:secret" not in repr(rows)
-    assert "api_key=secret" not in repr(rows)
-    assert "token=secret" not in repr(rows)
+    storage = model.observability_storage_status()
+    assert storage is not None
+    assert storage.retention == "unbounded"
+    assert storage.judge_capture == "disabled"
+    assert storage.retention_health == "degraded"
+    assert storage.retention_failure == "run_failed"
 
 
 def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
@@ -238,7 +331,7 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
         OverviewConfig(
             claw_mode="codex",
             guardrail_connector="codex",
-            connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+            connector_modes=(("codex", "observe"), ("cursor", "action")),
         ),
         version="test",
     )
@@ -271,6 +364,106 @@ def test_agent_detail_rolls_up_connectors_in_multi_connector() -> None:
     # Older gateway without a connectors[] array -> configured count fallback.
     multi.set_health(HealthSnapshot(connector=ConnectorHealth(name="codex", state="running")))
     assert multi.agent_detail() == "2 connectors configured"
+
+
+def test_cursor_agent_detail_has_enabled_disabled_parity_and_preserves_codex() -> None:
+    disclosure = "priority-conflict-detection=unavailable (none inferred)"
+
+    enabled = OverviewPanelModel(OverviewConfig(claw_mode="cursor"), version="test")
+    enabled.set_health(HealthSnapshot(connector=ConnectorHealth(name="cursor", state="running")))
+    assert enabled.agent_detail() == f"Cursor - {disclosure}"
+
+    disabled = OverviewPanelModel(
+        OverviewConfig(
+            claw_mode="cursor",
+            connector_modes=(("cursor", "observe"),),
+            connector_disabled=("cursor",),
+        ),
+        version="test",
+    )
+    assert disabled.agent_detail() == f"Cursor (configured, not connected) - {disclosure}"
+
+    codex = OverviewPanelModel(OverviewConfig(claw_mode="codex"), version="test")
+    codex.set_health(HealthSnapshot(connector=ConnectorHealth(name="codex", state="running")))
+    assert codex.agent_detail() == "Codex"
+
+
+def test_opencode_agent_state_requires_fresh_authenticated_heartbeat() -> None:
+    now = datetime.now(timezone.utc)
+    model = OverviewPanelModel(
+        OverviewConfig(claw_mode="opencode", guardrail_connector="opencode"),
+        version="test",
+    )
+
+    def snapshot(
+        *,
+        heartbeat: str = "",
+        state: str = "running",
+        source: object = "manual",
+    ) -> HealthSnapshot:
+        connector = ConnectorHealth(
+            name="opencode",
+            state=state,
+            source=source,
+            load_heartbeat_at=heartbeat,
+        )
+        return HealthSnapshot(
+            started_at=(now - timedelta(hours=1)).isoformat(),
+            gateway=SubsystemHealth(state="running"),
+            api=SubsystemHealth(state="running"),
+            connector=connector,
+            connectors=(connector,),
+        )
+
+    model.set_health(snapshot(heartbeat=(now - timedelta(minutes=1)).isoformat()))
+    assert model.subsystem_state("agent") == "running"
+    assert "authenticated load heartbeat is fresh" in model.agent_detail()
+
+    model.set_health(
+        snapshot(
+            heartbeat=(now - timedelta(minutes=1)).isoformat(),
+            source="automatic",
+        )
+    )
+    assert model.subsystem_state("agent") == "running"
+
+    for source in (
+        "",
+        "discovered",
+        "MANUAL",
+        "Automatic",
+        " manual",
+        "automatic ",
+        7,
+    ):
+        model.set_health(
+            snapshot(
+                heartbeat=(now - timedelta(minutes=1)).isoformat(),
+                source=source,
+            )
+        )
+        assert model.subsystem_state("agent") == "degraded"
+        assert "manual or automatic OpenCode registration" in model.agent_detail()
+
+    model.set_health(snapshot())
+    assert model.subsystem_state("agent") == "degraded"
+    assert "stopped or idle" in model.agent_detail()
+    assert "pure" not in model.agent_detail().lower()
+
+    model.set_health(snapshot(heartbeat=(now - timedelta(minutes=16)).isoformat()))
+    assert model.subsystem_state("agent") == "degraded"
+    assert "stale" in model.agent_detail()
+
+    for terminal in ("stopped", "offline", "down", "disabled"):
+        model.set_health(snapshot(state=terminal, source=""))
+        assert model.subsystem_state("agent") == terminal
+        assert f"reports {terminal}" in model.agent_detail()
+        assert "pure" not in model.agent_detail().lower()
+
+    model.set_health(snapshot(heartbeat=(now - timedelta(minutes=1)).isoformat()))
+    model.set_gateway_probe("offline", "sidecar API is unreachable")
+    assert model.subsystem_state("agent") == "degraded"
+    assert "gateway status is unavailable" in model.agent_detail()
 
 
 def test_agent_detail_reports_disabled_connectors_separately() -> None:
@@ -373,6 +566,16 @@ def test_doctor_cache_missing_required_credentials_and_keys_status() -> None:
     assert status.label == "4 missing: KEY_A, KEY_B (+2 more)"
     assert keys_overflow_suffix(5, 2) == " (+3 more)"
 
+    model.set_doctor_cache(
+        DoctorCache(
+            warned=1,
+            checks=(DoctorCheck("warn", "Doctor cache", "cache unavailable"),),
+            outcome="warning",
+            cache_valid=False,
+        )
+    )
+    assert model.keys_status().available is False
+
 
 def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
@@ -424,6 +627,106 @@ def test_doctor_box_all_green_failures_stale_and_live_recovery() -> None:
     assert all(check.badge == "STALE" for check in recovered.checks)
     assert not any("Doctor found 2 failure(s)" in notice.message for notice in model.build_notices(now=now))
     assert any("/health disagrees" in notice.message for notice in model.build_notices(now=now))
+
+
+def test_future_dated_doctor_cache_fails_closed_after_clock_skew_tolerance() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now + timedelta(minutes=6),
+            passed=5,
+            schema_version=2,
+            outcome="healthy",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+
+    assert box.stale is True
+    assert box.run_outcome == "warning"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any("Doctor cache is stale" in notice.message for notice in notices)
+    assert any("last Doctor run needs operator attention" in notice.message for notice in notices)
+
+
+def test_doctor_box_keeps_repair_failures_separate_and_never_green() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            mode="repair",
+            outcome="failed",
+            exit_code=1,
+            repair_summary=DoctorRepairSummary(applied=2, failed=1, blocked=1),
+            repair_states=("applied", "applied", "failed", "blocked"),
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ("2 applied", "1 failed", "1 blocked")
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    notices = model.build_notices(now=now)
+    assert any(notice.level == "error" and "1 failed, 1 blocked" in notice.message for notice in notices)
+
+
+def test_doctor_box_fails_closed_on_unexplained_schema_v2_outcome() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+    model = _model()
+    model.set_doctor_cache(
+        DoctorCache(
+            captured_at=now,
+            passed=5,
+            schema_version=2,
+            outcome="failed",
+        )
+    )
+
+    box = model.doctor_box(now=now)
+    assert box.summary_parts == ("5 pass",)
+    assert box.repair_summary_parts == ()
+    assert box.run_outcome == "failed"
+    assert box.all_green is False
+    assert any(
+        notice.level == "error" and "last Doctor run ended with a failed outcome" in notice.message
+        for notice in model.build_notices(now=now)
+    )
+
+
+def test_doctor_cache_fails_closed_on_understated_or_unknown_detail() -> None:
+    now = datetime(2026, 5, 20, 12, tzinfo=timezone.utc)
+
+    understated = DoctorCache(
+        captured_at=now,
+        failed=1,
+        schema_version=2,
+        outcome="healthy",
+    )
+    assert understated.outcome_state() == "failed"
+
+    unknown_repair = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        repair_states=("future_success_state",),
+    )
+    assert unknown_repair.outcome_state() == "warning"
+
+    invalid_cache = DoctorCache(
+        captured_at=now,
+        passed=1,
+        schema_version=2,
+        outcome="healthy",
+        cache_valid=False,
+    )
+    assert invalid_cache.outcome_state() == "warning"
 
 
 def test_live_health_contradicts_known_labels() -> None:
@@ -592,37 +895,88 @@ def test_sort_ai_discovery_signals_for_overview_tiebreakers() -> None:
     assert ordered[0].model.status == "loaded"
 
 
-def test_connector_labels_cover_hook_surface_connectors() -> None:
+def test_connector_labels_cover_hook_surface_connectors(monkeypatch, tmp_path) -> None:
+    hermes_home = tmp_path / "hermes-home"
+    claude_home = tmp_path / "claude-home"
+    codex_home = tmp_path / "codex-home"
+    opencode_home = tmp_path / "opencode-home"
+    devin_config = tmp_path / "devin-config"
+    gemini_home = tmp_path / "gemini-home"
+    monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(claude_home))
+    monkeypatch.setenv("CODEX_HOME", str(codex_home))
+    monkeypatch.setenv("OPENCODE_CONFIG_DIR", str(opencode_home))
+    monkeypatch.setattr(connector_paths, "devin_config_home", lambda: str(devin_config))
+    monkeypatch.setenv("DEFENSECLAW_GEMINI_CONFIG_HOME", str(gemini_home))
     cases = {
         "hermes": "Hermes",
         "cursor": "Cursor",
-        "windsurf": "Windsurf",
-        "geminicli": "Gemini CLI",
+        "devin": "Devin",
+        "geminicli": "Gemini CLI (deprecated; use Antigravity)",
         "copilot": "GitHub Copilot CLI",
     }
     for wire, want in cases.items():
         assert friendly_connector_name(wire) == want
 
-    assert ".hermes/config.yaml" in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "mcps")
+    assert str(hermes_home / "config.yaml") in connector_source_label("hermes", "config")
+    assert str(hermes_home / "skills") in connector_source_label("hermes", "skills")
+    assert str(hermes_home / "plugins") in connector_source_label("hermes", "plugins")
+    assert str(claude_home / "settings.json") in connector_source_label("claudecode", "config")
+    assert str(codex_home / "config.toml") in connector_source_label("codex", "config")
+    codex_skills = connector_source_label("codex", "skills")
+    codex_mcps = connector_source_label("codex", "mcps")
+    codex_plugins = connector_source_label("codex", "plugins")
+    assert "~/.agents/skills" in codex_skills
+    assert ".codex/skills" not in codex_skills
+    assert ".codex/config.toml" in codex_mcps
+    assert ".mcp.json" not in codex_mcps
+    assert ".claude-plugin/marketplace.json" in codex_plugins
+    assert "plugins/cache" in codex_plugins.replace("\\", "/")
     assert ".cursor/skills" in connector_source_label("cursor", "skills")
-    assert ".codeium/windsurf/hooks.json" in connector_source_label("windsurf", "config")
-    assert ".gemini/extensions" in connector_source_label("geminicli", "plugins")
+    assert "./.devin/hooks.v1.json" in connector_source_label("devin", "config")
+    assert str(devin_config / "mcp_config.json") in connector_source_label("devin", "mcps")
+    assert "closed beta" in connector_source_label("devin", "plugins")
+    gemini_guidance = connector_paths.cleanup_only_guidance("geminicli")
+    for category in ("skills", "plugins", "mcps", "config"):
+        assert connector_source_label("geminicli", category) == gemini_guidance
+    assert "Antigravity" in gemini_guidance
     assert ".github/mcp.json" in connector_source_label("copilot", "mcps")
     # opencode MCP is now managed by DefenseClaw (read+write via the bridge
     # path layer), so the source label points at its real config and no longer
     # advertises "unmanaged in v1".
     opencode_mcps = connector_source_label("opencode", "mcps")
     assert ".config/opencode/opencode.json" in opencode_mcps
+    assert "~/.opencode/opencode.json" in opencode_mcps
+    assert str(opencode_home / "opencode.json") in opencode_mcps
     assert "unmanaged" not in opencode_mcps
+    assert "OPENCODE_CONFIG" in opencode_mcps
+    assert "OPENCODE_CONFIG_CONTENT" in opencode_mcps
+    assert "enterprise precedence excluded" in opencode_mcps
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
+        "opencode", "config"
+    )
+    assert str(opencode_home / "plugins" / "defenseclaw.js") in connector_source_label(
+        "opencode", "plugins"
+    )
+    assert "excluded from inventory and scans" in connector_source_label(
+        "opencode", "plugins"
+    )
+    assert ".opencode/{agent,agents}" in connector_source_label("opencode", "agents")
+    assert "CLAUDE.md fallback" in connector_source_label("opencode", "rules")
     antigravity_mcps = connector_source_label("antigravity", "mcps")
     assert ".gemini/config/mcp_config.json" in antigravity_mcps
     assert ".agents/mcp_config.json" in antigravity_mcps
     assert "hooks-only" not in antigravity_mcps
     assert "unsupported" not in antigravity_mcps
     assert ".gemini/config/skills" in connector_source_label("antigravity", "skills")
-    assert "discovery-only" in connector_source_label("antigravity", "plugins")
+    antigravity_plugins = connector_source_label("antigravity", "plugins")
+    assert ".gemini/config/plugins" in antigravity_plugins
+    assert "read/write" in antigravity_plugins
     assert "OMNIGENT_CONFIG_HOME" in connector_source_label("omnigent", "config")
-    assert "managed by OmniGent" in connector_source_label("omnigent", "mcps")
+    assert "OMNIGENT_CONFIG" in connector_source_label("omnigent", "config")
+    assert "--config" in connector_source_label("omnigent", "config")
+    assert "unsupported/unverified" in connector_source_label("omnigent", "mcps")
     assert "unsupported" in connector_source_label("omnigent", "skills")
 
     health = HealthSnapshot(connector=ConnectorHealth(name="codex"))
@@ -640,14 +994,14 @@ def test_multi_connector_rows_lists_each_connector_with_mode() -> None:
         OverviewConfig(
             claw_mode="codex",
             guardrail_connector="codex",
-            connector_modes=(("codex", "enforce"), ("cursor", "observe")),
+            connector_modes=(("codex", "observe"), ("cursor", "action")),
         ),
         version="test",
     )
     rows = model.multi_connector_rows()
     assert [value for _, value in rows] == [
-        "Codex (codex) — mode=enforce",
-        "Cursor (cursor) — mode=observe",
+        "Codex (codex) — mode=observe",
+        "Cursor (cursor) — mode=action, priority-conflict-detection=unavailable (none inferred)",
     ]
     # Indented sub-lines: blank label so the key:<16 formatting nests
     # them under the single "Agent" line.
@@ -689,8 +1043,20 @@ def test_multi_connector_rows_append_effective_rule_pack() -> None:
     )
     assert partial.multi_connector_rows() == [
         ("", "Codex (codex) — mode=action, strict"),
-        ("", "Cursor (cursor) — mode=observe"),
+        (
+            "",
+            "Cursor (cursor) — mode=observe, priority-conflict-detection=unavailable (none inferred)",
+        ),
     ]
+
+    disabled = OverviewPanelModel(
+        OverviewConfig(
+            connector_modes=(("codex", "action"), ("cursor", "observe")),
+            connector_disabled=("cursor",),
+        ),
+        version="test",
+    )
+    assert disabled.multi_connector_rows()[1] == partial.multi_connector_rows()[1]
 
 
 def test_multi_connector_rows_noop_for_single_connector() -> None:

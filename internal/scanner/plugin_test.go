@@ -18,10 +18,16 @@ package scanner
 
 import (
 	"context"
+	"fmt"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // TestParsePluginOutput_RealFormat verifies that parsePluginOutput correctly
@@ -124,6 +130,12 @@ func TestParsePluginOutput_RealFormat(t *testing.T) {
 	if len(findings[0].Tags) != 1 || findings[0].Tags[0] != "permissions" {
 		t.Errorf("finding[0].Tags = %v, want [permissions]", findings[0].Tags)
 	}
+	if findings[0].Confidence != 0.9 {
+		t.Errorf("finding[0].Confidence = %v, want 0.9", findings[0].Confidence)
+	}
+	if findings[0].EvidenceSummary != `"permissions": ["fs:*"]` {
+		t.Errorf("finding[0].EvidenceSummary = %q", findings[0].EvidenceSummary)
+	}
 
 	// Verify second finding (CRITICAL)
 	if findings[1].Severity != SeverityCritical {
@@ -189,6 +201,50 @@ func TestPluginScanner_Integration(t *testing.T) {
 		}
 	}
 
+	// The target CLI is v8-only and its scan occurrence must enter the
+	// process-owned runtime rather than a private Python SQLite writer. Give the
+	// integration a real HTTP acknowledgement boundary so it does not inherit a
+	// developer's machine config or silently bypass canonical admission.
+	emitted := make(chan []byte, 1)
+	runtime := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/v1/observability/cli" {
+			http.NotFound(w, r)
+			return
+		}
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			http.Error(w, "body", http.StatusBadRequest)
+			return
+		}
+		emitted <- body
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(runtime.Close)
+	runtimeURL, err := url.Parse(runtime.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(t.TempDir(), "config.yaml")
+	configSource := fmt.Sprintf(
+		"config_version: 8\ndata_dir: %q\ngateway:\n  api_bind: %s\n  api_port: %s\n  token: integration-token\nobservability: {}\n",
+		filepath.Dir(configPath), runtimeURL.Hostname(), runtimeURL.Port(),
+	)
+	if err := os.WriteFile(configPath, []byte(configSource), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	repositoryRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatal(err)
+	}
+	gatewayBinary := filepath.Join(t.TempDir(), "defenseclaw-gateway")
+	buildGateway := exec.Command("go", "build", "-o", gatewayBinary, "./cmd/defenseclaw")
+	buildGateway.Dir = repositoryRoot
+	if output, err := buildGateway.CombinedOutput(); err != nil {
+		t.Fatalf("build current gateway config helper: %v: %s", err, output)
+	}
+	t.Setenv("DEFENSECLAW_CONFIG", configPath)
+	t.Setenv("DEFENSECLAW_GATEWAY_BIN", gatewayBinary)
+
 	scanner := NewPluginScanner(binary)
 
 	// Scan this repo's extensions/defenseclaw directory as a real target
@@ -197,9 +253,23 @@ func TestPluginScanner_Integration(t *testing.T) {
 		t.Skipf("skipping: target %s not found", target)
 	}
 
+	awaitEmission := func(scanName string) {
+		t.Helper()
+		select {
+		case payload := <-emitted:
+			if len(payload) == 0 {
+				t.Fatalf("%s canonical CLI scan admission payload was empty", scanName)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatalf("%s canonical CLI scan admission was not attempted", scanName)
+		}
+	}
+
+	// Default scans recognize the bundled first-party extension by canonical
+	// identity and must not report its own signatures/runtime as malware.
 	result, err := scanner.Scan(context.Background(), target)
 	if err != nil {
-		t.Fatalf("Scan failed: %v", err)
+		t.Fatalf("default Scan failed: %v", err)
 	}
 
 	if result.Scanner != "plugin-scanner" {
@@ -208,6 +278,19 @@ func TestPluginScanner_Integration(t *testing.T) {
 	if result.Target != target {
 		t.Errorf("Target = %q, want %q", result.Target, target)
 	}
+	awaitEmission("default")
+	if len(result.Findings) != 0 {
+		t.Fatalf("default self scan returned %d findings, want 0", len(result.Findings))
+	}
+
+	// Developers can explicitly audit DefenseClaw itself. This second pass
+	// preserves the real analyzer and Go JSON-parser coverage.
+	scanner.IncludeSelf = true
+	result, err = scanner.Scan(context.Background(), target)
+	if err != nil {
+		t.Fatalf("include-self Scan failed: %v", err)
+	}
+	awaitEmission("include-self")
 	// The extension has real findings (child_process import, localhost refs, etc.)
 	if len(result.Findings) == 0 {
 		t.Error("expected at least 1 finding from scanning extensions/defenseclaw")
@@ -288,6 +371,20 @@ func TestPluginScanCommand(t *testing.T) {
 		s := &PluginScanner{BinaryPath: "defenseclaw", Policy: "strict", Profile: "enterprise"}
 		_, args := s.pluginScanCommand("/tmp/plugin")
 		want := []string{"plugin", "scan", "--json", "/tmp/plugin", "--policy", "strict", "--profile", "enterprise"}
+		if len(args) != len(want) {
+			t.Fatalf("len(args) = %d, want %d (%v)", len(args), len(want), args)
+		}
+		for i := range want {
+			if args[i] != want[i] {
+				t.Fatalf("args[%d] = %q, want %q", i, args[i], want[i])
+			}
+		}
+	})
+
+	t.Run("include self is explicit", func(t *testing.T) {
+		s := &PluginScanner{BinaryPath: "defenseclaw", IncludeSelf: true}
+		_, args := s.pluginScanCommand("/tmp/plugin")
+		want := []string{"plugin", "scan", "--json", "/tmp/plugin", "--include-self"}
 		if len(args) != len(want) {
 			t.Fatalf("len(args) = %d, want %d (%v)", len(args), len(want), args)
 		}

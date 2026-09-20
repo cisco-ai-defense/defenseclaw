@@ -44,6 +44,11 @@ class Finding:
     tags: list[str] = field(default_factory=list)
     rule_id: str = ""
     line_number: int | None = None
+    confidence: float | None = None
+    # Correlation findings use this for a bounded rule/location/confidence
+    # chain. Atomic source excerpts remain internal to their scanner so CLI
+    # JSON does not widen the sensitive-data surface.
+    evidence: str = ""
 
     def to_dict(self) -> dict[str, Any]:
         d: dict[str, Any] = {
@@ -60,6 +65,10 @@ class Finding:
             d["rule_id"] = self.rule_id
         if self.line_number is not None:
             d["line_number"] = self.line_number
+        if self.confidence is not None:
+            d["confidence"] = self.confidence
+        if self.evidence:
+            d["evidence"] = self.evidence
         return d
 
 
@@ -156,6 +165,30 @@ class ActionEntry:
     # every connector. A non-empty value scopes the action to one connector
     # (e.g. "hermes"). Mirrors ActionEntry.Connector in internal/audit/store.go.
     connector: str = ""
+
+
+@dataclass
+class QuarantineRecord:
+    """Durable provenance for one physically quarantined asset.
+
+    Enforcement decisions remain in :class:`ActionEntry`; this record exists
+    only to make the filesystem move recoverable after those decisions change.
+    A single physical item may be associated with more than one connector.
+    """
+
+    id: str
+    target_type: str
+    target_name: str
+    original_path: str
+    quarantine_path: str
+    content_hash: str
+    reason: str = ""
+    state: str = "active"
+    ownership_json: str = "{}"
+    restore_path: str = ""
+    created_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    updated_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    connectors: tuple[str, ...] = ()
 
 
 @dataclass

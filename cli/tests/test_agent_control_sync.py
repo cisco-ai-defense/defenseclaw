@@ -623,7 +623,7 @@ class PackagingTests(unittest.TestCase):
 
 
 class FakeSDK:
-    __version__ = "8.2.0"
+    __version__ = "8.5.0"
 
     def __init__(self, controls: list[dict[str, Any]]) -> None:
         self.controls = controls

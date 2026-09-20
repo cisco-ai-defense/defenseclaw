@@ -168,7 +168,7 @@ class TestScanAllUX(_MCPScanUXBase):
         servers = [
             MCPServerEntry(name=n, url=u) for n, u in names_urls
         ]
-        self.app.cfg.mcp_servers = lambda connector=None: servers
+        self.app.cfg.mcp_servers = lambda connector=None, **_: servers
 
     @patch("defenseclaw.scanner.mcp.MCPScannerWrapper.scan")
     def test_scan_all_renders_preamble_and_summary(self, mock_scan) -> None:
@@ -243,14 +243,14 @@ class TestScanAllUX(_MCPScanUXBase):
             ("only", "http://only.example/mcp"),
         ])
         result = self.invoke(["scan", "--all"])
-        self.assertEqual(result.exit_code, 0, result.output)
+        self.assertEqual(result.exit_code, 1, result.output)
         self.assertIn("[ERROR] only", result.output)
         # errored=N appears only when there's at least one error.
         self.assertIn("errored=1", result.output)
         self.assertIn("Summary: 1 MCP server scanned", result.output)
 
     def test_scan_all_no_servers_message(self) -> None:
-        self.app.cfg.mcp_servers = lambda connector=None: []
+        self.app.cfg.mcp_servers = lambda connector=None, **_: []
         result = self.invoke(["scan", "--all"])
         self.assertEqual(result.exit_code, 0, result.output)
         self.assertIn("No MCP servers configured", result.output)

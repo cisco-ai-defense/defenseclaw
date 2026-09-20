@@ -20,7 +20,7 @@ from typing import Any, Literal
 from defenseclaw.tui.services import connector_filter as connector_filter_svc
 from defenseclaw.tui.services.overview_state import friendly_connector_name
 
-InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "models", "memory"]
+InventorySubTab = Literal["summary", "skills", "plugins", "mcp", "agents", "tools", "models", "memory"]
 InventoryFilter = Literal["", "eligible", "warning", "blocked", "loaded", "disabled"]
 
 INVENTORY_CATEGORIES: tuple[str, ...] = ("skills", "plugins", "mcp", "agents", "tools", "models", "memory")
@@ -31,6 +31,7 @@ INVENTORY_SUBTABS: tuple[InventorySubTab, ...] = (
     "plugins",
     "mcp",
     "agents",
+    "tools",
     "models",
     "memory",
 )
@@ -40,6 +41,7 @@ INVENTORY_SUBTAB_LABELS: Mapping[InventorySubTab, str] = {
     "plugins": "Plugins",
     "mcp": "MCPs",
     "agents": "Agents",
+    "tools": "Tools",
     "models": "Models",
     "memory": "Memory",
 }
@@ -201,6 +203,30 @@ class InventoryAgent:
 
 
 @dataclass(frozen=True)
+class InventoryTool:
+    id: str
+    name: str = ""
+    kind: str = ""
+    source: str = ""
+    description: str = ""
+    connector: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryTool:
+        return cls(
+            id=str(raw.get("id") or raw.get("name") or ""),
+            name=str(raw.get("name") or ""),
+            kind=str(raw.get("kind") or ""),
+            source=str(raw.get("source") or ""),
+            description=str(raw.get("description") or ""),
+        )
+
+    @property
+    def display_name(self) -> str:
+        return self.name or self.id
+
+
+@dataclass(frozen=True)
 class InventoryModelProvider:
     id: str
     source: str = ""
@@ -265,6 +291,7 @@ class InventorySummary:
     models: Mapping[str, Any] = field(default_factory=dict)
     memory: Mapping[str, Any] = field(default_factory=dict)
     errors: Any = 0
+    limitations: Any = 0
     policy_skills: Mapping[str, Any] = field(default_factory=dict)
     scan_skills: Mapping[str, Any] = field(default_factory=dict)
     policy_plugins: Mapping[str, Any] = field(default_factory=dict)
@@ -284,10 +311,28 @@ class InventorySummary:
             models=_mapping(raw.get("model_providers")),
             memory=_mapping(raw.get("memory")),
             errors=raw.get("errors") or 0,
+            limitations=raw.get("limitations") or 0,
             policy_skills=_mapping(raw.get("policy_skills")),
             scan_skills=_mapping(raw.get("scan_skills")),
             policy_plugins=_mapping(raw.get("policy_plugins")),
             scan_plugins=_mapping(raw.get("scan_plugins")),
+        )
+
+
+@dataclass(frozen=True)
+class InventoryLimitation:
+    connector: str = ""
+    category: str = ""
+    status: str = "unsupported"
+    reason: str = ""
+
+    @classmethod
+    def from_mapping(cls, raw: Mapping[str, Any]) -> InventoryLimitation:
+        return cls(
+            connector=str(raw.get("connector") or ""),
+            category=str(raw.get("category") or ""),
+            status=str(raw.get("status") or "unsupported"),
+            reason=str(raw.get("reason") or ""),
         )
 
 
@@ -304,15 +349,18 @@ class InventorySnapshot:
     connector_skill_dirs: tuple[str, ...] = ()
     connector_plugin_dirs: tuple[str, ...] = ()
     connector_mcp_files: tuple[str, ...] = ()
+    connector_rule_files: tuple[str, ...] = ()
+    connector_policy_settings: Mapping[str, Any] = field(default_factory=dict)
     live: bool = False
     skills: tuple[InventorySkill, ...] = ()
     plugins: tuple[InventoryPlugin, ...] = ()
     mcps: tuple[InventoryMCP, ...] = ()
     agents: tuple[InventoryAgent, ...] = ()
-    tools: tuple[Mapping[str, Any], ...] = ()
+    tools: tuple[InventoryTool, ...] = ()
     models: tuple[InventoryModelProvider, ...] = ()
     memory: tuple[InventoryMemory, ...] = ()
     errors: tuple[Any, ...] = ()
+    limitations: tuple[InventoryLimitation, ...] = ()
     summary: InventorySummary = field(default_factory=InventorySummary)
 
     @classmethod
@@ -330,6 +378,12 @@ class InventorySnapshot:
             connector_skill_dirs=tuple(str(item) for item in raw.get("connector_skill_dirs") or ()),
             connector_plugin_dirs=tuple(str(item) for item in raw.get("connector_plugin_dirs") or ()),
             connector_mcp_files=tuple(str(item) for item in raw.get("connector_mcp_files") or ()),
+            connector_rule_files=tuple(str(item) for item in raw.get("connector_rule_files") or ()),
+            connector_policy_settings=(
+                raw.get("connector_policy_settings")
+                if isinstance(raw.get("connector_policy_settings"), Mapping)
+                else {}
+            ),
             live=bool(raw.get("live")),
             skills=tuple(
                 InventorySkill.from_mapping(item)
@@ -351,7 +405,11 @@ class InventorySnapshot:
                 for item in raw.get("agents") or ()
                 if isinstance(item, Mapping)
             ),
-            tools=tuple(item for item in raw.get("tools") or () if isinstance(item, Mapping)),
+            tools=tuple(
+                InventoryTool.from_mapping(item)
+                for item in raw.get("tools") or ()
+                if isinstance(item, Mapping)
+            ),
             models=tuple(
                 InventoryModelProvider.from_mapping(item)
                 for item in raw.get("model_providers") or ()
@@ -363,6 +421,11 @@ class InventorySnapshot:
                 if isinstance(item, Mapping)
             ),
             errors=tuple(raw.get("errors") or ()),
+            limitations=tuple(
+                InventoryLimitation.from_mapping(item)
+                for item in raw.get("limitations") or ()
+                if isinstance(item, Mapping)
+            ),
             summary=InventorySummary.from_mapping(summary_raw if isinstance(summary_raw, Mapping) else None),
         )
 
@@ -389,6 +452,7 @@ class InventorySummaryState:
     version: str = ""
     generated_at: str = ""
     errors: str = "0"
+    limitations: str = "0"
     scan_skill_coverage: Mapping[str, str] = field(default_factory=dict)
     scan_plugin_coverage: Mapping[str, str] = field(default_factory=dict)
 
@@ -654,6 +718,7 @@ class InventoryPanelModel:
             plugins=tuple(replace(item, connector=connector) for item in snap.plugins),
             mcps=tuple(replace(item, connector=connector) for item in snap.mcps),
             agents=tuple(replace(item, connector=connector) for item in snap.agents),
+            tools=tuple(replace(item, connector=connector) for item in snap.tools),
             models=tuple(replace(item, connector=connector) for item in snap.models),
             memory=tuple(replace(item, connector=connector) for item in snap.memory),
         )
@@ -665,19 +730,31 @@ class InventoryPanelModel:
         plugins = tuple(item for snap in snaps for item in snap.plugins)
         mcps = tuple(item for snap in snaps for item in snap.mcps)
         agents = tuple(item for snap in snaps for item in snap.agents)
+        tools = tuple(item for snap in snaps for item in snap.tools)
         models = tuple(item for snap in snaps for item in snap.models)
         memory = tuple(item for snap in snaps for item in snap.memory)
         total_errors = sum(len(snap.errors) for snap in snaps)
-        total_items = len(skills) + len(plugins) + len(mcps) + len(agents) + len(models) + len(memory)
+        limitations = tuple(item for snap in snaps for item in snap.limitations)
+        total_items = (
+            len(skills)
+            + len(plugins)
+            + len(mcps)
+            + len(agents)
+            + len(tools)
+            + len(models)
+            + len(memory)
+        )
         summary = InventorySummary(
             total_items=total_items,
             skills={"count": str(len(skills))},
             plugins={"count": str(len(plugins))},
             mcp={"count": str(len(mcps))},
             agents={"count": str(len(agents))},
+            tools={"count": str(len(tools))},
             models={"count": str(len(models))},
             memory={"count": str(len(memory))},
             errors=str(total_errors),
+            limitations=str(len(limitations)),
         )
         return replace(
             primary,
@@ -686,8 +763,11 @@ class InventoryPanelModel:
             plugins=plugins,
             mcps=mcps,
             agents=agents,
+            tools=tools,
             models=models,
             memory=memory,
+            errors=tuple(error for snap in snaps for error in snap.errors),
+            limitations=limitations,
             summary=summary,
         )
 
@@ -730,6 +810,8 @@ class InventoryPanelModel:
                 return len(self.filtered_mcps())
             case "agents":
                 return len(self.filtered_agents())
+            case "tools":
+                return len(self.filtered_tools())
             case "models":
                 return len(self.filtered_models())
             case "memory":
@@ -775,6 +857,11 @@ class InventoryPanelModel:
             return ()
         return tuple(agent for agent in self.inventory.agents if self._connector_keep(agent))
 
+    def filtered_tools(self) -> tuple[InventoryTool, ...]:
+        if self.inventory is None:
+            return ()
+        return tuple(tool for tool in self.inventory.tools if self._connector_keep(tool))
+
     def filtered_models(self) -> tuple[InventoryModelProvider, ...]:
         if self.inventory is None:
             return ()
@@ -819,6 +906,7 @@ class InventoryPanelModel:
             "plugins": _map_val(inv.summary.plugins, "count"),
             "mcp": _map_val(inv.summary.mcp, "count"),
             "agents": _map_val(inv.summary.agents, "count"),
+            "tools": _map_val(inv.summary.tools, "count"),
             "models": _map_val(inv.summary.models, "count"),
             "memory": _map_val(inv.summary.memory, "count"),
         }
@@ -836,6 +924,7 @@ class InventoryPanelModel:
             version=inv.version,
             generated_at=inv.generated_at,
             errors=str(inv.summary.errors),
+            limitations=str(inv.summary.limitations),
             scan_skill_coverage=_string_map(inv.summary.scan_skills),
             scan_plugin_coverage=_string_map(inv.summary.scan_plugins),
         )
@@ -862,11 +951,14 @@ class InventoryPanelModel:
             ),
             ("MCPs", summary.counts["mcp"]),
             ("Agents", summary.counts["agents"]),
+            ("Tools", summary.counts["tools"]),
             ("Models", summary.counts["models"]),
             ("Memory", summary.counts["memory"]),
         ]
         if summary.errors not in {"0", "", "<nil>", "None"}:
             rows.append(("Errors", summary.errors))
+        if summary.limitations not in {"0", "", "<nil>", "None"}:
+            rows.append(("Unsupported capabilities", f"{summary.limitations} (informational)"))
         if skill_verdicts := _verdict_summary(summary.policy_skill_verdicts):
             rows.append(("Skill policy verdicts", skill_verdicts))
         if plugin_verdicts := _verdict_summary(summary.policy_plugin_verdicts):
@@ -949,6 +1041,20 @@ class InventoryPanelModel:
                         ("Max Concurrent", str(agent.max_concurrent)),
                     ),
                 )
+            case "tools":
+                tool_rows = self.filtered_tools()
+                if not 0 <= self.cursor < len(tool_rows):
+                    return None
+                tool = tool_rows[self.cursor]
+                return InventoryDetailInfo(
+                    f"TOOL: {tool.display_name}",
+                    (
+                        ("ID", tool.id),
+                        ("Kind", tool.kind),
+                        ("Source", tool.source),
+                        ("Description", tool.description),
+                    ),
+                )
             case "models":
                 model_rows = self.filtered_models()
                 if not 0 <= self.cursor < len(model_rows):
@@ -996,6 +1102,8 @@ class InventoryPanelModel:
                 base = ("ID", "Source", "Transport", "Command/URL")
             case "agents":
                 base = ("ID", "Source", "Model", "Workspace", "Default")
+            case "tools":
+                base = ("ID", "Name", "Kind", "Source")
             case "models":
                 base = ("ID", "Source", "Default Model", "Status")
             case "memory":
@@ -1060,6 +1168,14 @@ class InventoryPanelModel:
                         (agent.id, agent.source, agent.model, agent.workspace, "yes" if agent.default else "no"),
                     )
                     for agent in self.filtered_agents()
+                )
+            case "tools":
+                return tuple(
+                    self._with_connector_cell(
+                        tool,
+                        (tool.id, tool.display_name, tool.kind, tool.source),
+                    )
+                    for tool in self.filtered_tools()
                 )
             case "models":
                 return tuple(
@@ -1165,6 +1281,7 @@ class InventoryPanelModel:
             "plugins": _kept(self.inventory.plugins),
             "mcp": _kept(self.inventory.mcps),
             "agents": _kept(self.inventory.agents),
+            "tools": _kept(self.inventory.tools),
             "models": _kept(self.inventory.models),
             "memory": _kept(self.inventory.memory),
         }
@@ -1230,6 +1347,7 @@ __all__ = [
     "InventoryFilter",
     "InventoryMCP",
     "InventoryMemory",
+    "InventoryLimitation",
     "InventoryModelProvider",
     "InventoryPanelAction",
     "InventoryPanelModel",
@@ -1242,4 +1360,5 @@ __all__ = [
     "InventorySubTabInfo",
     "InventorySummary",
     "InventorySummaryState",
+    "InventoryTool",
 ]

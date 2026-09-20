@@ -125,6 +125,7 @@ func csPIIScanContent(content []byte, path string) []Finding {
 
 			findings = append(findings, Finding{
 				ID:          rule.id,
+				RuleID:      rule.id,
 				Severity:    rule.severity,
 				Title:       fmt.Sprintf("PII detected: %s", rule.category),
 				Description: fmt.Sprintf("Matched value: %s", csRedactPII(match)),

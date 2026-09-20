@@ -18,11 +18,13 @@ package gateway
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -42,16 +44,118 @@ func TestHandleAIUsageDisabled(t *testing.T) {
 	if !strings.Contains(w.Body.String(), `"enabled":false`) {
 		t.Fatalf("disabled response missing: %s", w.Body.String())
 	}
+	if !strings.Contains(w.Body.String(), `"lookup_model_provenance_online":false`) {
+		t.Fatalf("disabled response missing online provenance state: %s", w.Body.String())
+	}
+}
+
+func TestHandleAIUsageReportsRuntimeModelProvenanceOptIn(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(map[bool]string{false: "disabled", true: "enabled"}[enabled], func(t *testing.T) {
+			api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+			service := inventory.NewContinuousDiscoveryServiceWithOptions(
+				inventory.AIDiscoveryOptions{
+					Enabled:                     true,
+					LookupModelProvenanceOnline: enabled,
+				},
+				nil,
+			)
+			api.SetAIDiscoveryService(service)
+
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage", nil)
+			w := httptest.NewRecorder()
+			api.handleAIUsage(w, req)
+
+			if w.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200; body=%s", w.Code, w.Body.String())
+			}
+			var payload struct {
+				LookupModelProvenanceOnline bool `json:"lookup_model_provenance_online"`
+			}
+			if err := json.Unmarshal(w.Body.Bytes(), &payload); err != nil {
+				t.Fatalf("decode response: %v", err)
+			}
+			if payload.LookupModelProvenanceOnline != enabled {
+				t.Fatalf(
+					"lookup_model_provenance_online = %t, want %t; body=%s",
+					payload.LookupModelProvenanceOnline, enabled, w.Body.String(),
+				)
+			}
+		})
+	}
+}
+
+func TestAPIServerAIDiscoveryLeasePinsOneService(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	first := &inventory.ContinuousDiscoveryService{}
+	second := &inventory.ContinuousDiscoveryService{}
+	api.SetAIDiscoveryService(first)
+
+	got, release := api.leaseAIDiscovery()
+	if got != first {
+		release()
+		t.Fatalf("leased service = %p, want first %p", got, first)
+	}
+	if api.aiDiscoveryMu.TryLock() {
+		api.aiDiscoveryMu.Unlock()
+		release()
+		t.Fatal("discovery writer lock succeeded while handler lease was active")
+	}
+	release()
+	if !api.aiDiscoveryMu.TryLock() {
+		t.Fatal("discovery writer lock remained blocked after handler lease release")
+	}
+	api.aiDiscoveryMu.Unlock()
+
+	api.SetAIDiscoveryService(second)
+	got, release = api.leaseAIDiscovery()
+	defer release()
+	if got != second {
+		t.Fatalf("leased service after swap = %p, want second %p", got, second)
+	}
+}
+
+func TestAPIServerAIDiscoveryConcurrentSwapAndUsage(t *testing.T) {
+	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
+	services := []*inventory.ContinuousDiscoveryService{{}, {}}
+	api.SetAIDiscoveryService(services[0])
+
+	const iterations = 200
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			api.SetAIDiscoveryService(services[i%len(services)])
+		}
+	}()
+	go func() {
+		defer wg.Done()
+		for i := 0; i < iterations; i++ {
+			req := httptest.NewRequest(http.MethodGet, "/api/v1/ai-usage", nil)
+			w := httptest.NewRecorder()
+			api.handleAIUsage(w, req)
+			if w.Code != http.StatusOK {
+				t.Errorf("iteration %d: status = %d, want 200", i, w.Code)
+				return
+			}
+		}
+	}()
+	wg.Wait()
 }
 
 func TestHandleAIUsageDiscoveryRejectsRawPath(t *testing.T) {
 	api := NewAPIServer("127.0.0.1:0", NewSidecarHealth(), nil, nil, nil)
-	api.SetAIDiscoveryService(inventory.NewContinuousDiscoveryServiceWithOptions(
-		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir(), EmitOTel: false},
+	service := inventory.NewContinuousDiscoveryServiceWithOptions(
+		inventory.AIDiscoveryOptions{Enabled: true, DataDir: t.TempDir()},
 		nil,
-		nil,
-		nil,
-	))
+	)
+	t.Cleanup(func() {
+		if closed, err := service.CloseIfNeverStarted(); err != nil || !closed {
+			t.Errorf("close prepared AI discovery service = (%t, %v), want (true, nil)", closed, err)
+		}
+	})
+	api.SetAIDiscoveryService(service)
 	body := `{
 	  "summary": {"scan_id":"scan-1"},
 	  "signals": [{"category":"ai_cli","state":"new","basenames":["/tmp/raw"]}]
@@ -89,8 +193,6 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 			IncludeEnvVarNames:      false,
 			IncludeNetworkDomains:   false,
 			StoreRawLocalPaths:      true,
-			DisableRedaction:        false,
-			EmitOTel:                false,
 		},
 		[]inventory.AISignature{{
 			ID:          "raw-ai-config",
@@ -99,8 +201,6 @@ func TestHandleAIUsageRedactsStoredRawPaths(t *testing.T) {
 			Category:    inventory.SignalWorkspaceArtifact,
 			ConfigPaths: []string{"~/.raw-ai/config.json"},
 		}},
-		nil,
-		nil,
 	)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

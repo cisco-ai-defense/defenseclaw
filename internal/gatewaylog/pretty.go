@@ -114,12 +114,5 @@ func writePretty(w io.Writer, e Event) {
 		fmt.Fprintf(w, "%s [hook:%s] event=%s action=%s raw_action=%s enforced=%t would_block=%t step=%d\n",
 			ts, h.Connector, h.Event, h.Action, h.RawAction, h.Enforced, h.WouldBlock, h.StepIdx)
 
-	case EventAIDiscovery:
-		if e.AIDiscovery == nil {
-			return
-		}
-		a := e.AIDiscovery
-		fmt.Fprintf(w, "%s [ai_discovery:%s] %s %s confidence=%.2f\n",
-			ts, a.Category, a.State, a.Product, a.Confidence)
 	}
 }

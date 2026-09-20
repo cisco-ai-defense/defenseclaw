@@ -5,11 +5,11 @@ on:
     - cron: "0 7 * * *"
 
 concurrency:
-  # Pull-request E2E runs share a scarce self-hosted runner. Keep them queued
-  # rather than canceling an in-flight PR job when another stacked PR updates or
-  # is rerun; branch/manual/scheduled runs still collapse to the newest ref.
+  # The schedule uses two stable, marker-owned slots on a persistent runner.
+  # Preserve the active execution when schedules overlap. GitHub retains the
+  # newest pending run, whose fail-closed recovery reuses these stable slots.
   group: e2e-${{ github.workflow }}-${{ github.head_ref || github.ref }}
-  cancel-in-progress: ${{ github.event_name != 'pull_request' }}
+  cancel-in-progress: false
 
 jobs:
   core:
@@ -45,6 +45,9 @@ jobs:
       SPLUNK_ENV_FILE: ../env/.env.example
       SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: core
+      # Stable per-job slots let a later serialized schedule authenticate,
+      # repair, and replace state left by a hard-aborted prior run.
+      E2E_INSTALL_NAME: defenseclaw-e2e-slot-core
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-core
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-core
       E2E_REQUIRE_AGENT_INSTALL: "false"
@@ -68,10 +71,30 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Select isolated DefenseClaw home
+        run: |
+          # RUNNER_TEMP is emptied by the Actions runner before each job. Keep
+          # marker-authenticated crash recovery beside the checkout instead so
+          # our own helper controls repair and retirement on the next schedule.
+          E2E_INSTALL_HOME="${RUNNER_WORKSPACE}/${E2E_INSTALL_NAME}"
+          {
+            echo "E2E_INSTALL_HOME=${E2E_INSTALL_HOME}"
+            echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
+            echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
+        with:
+          # This job runs on a persistent host and never pushes. Do not leave
+          # the short-lived Actions credential behind in its Git config.
+          persist-credentials: false
 
       - name: Clean DefenseClaw
         run: |
+          # Refuse an unowned path before cleanup follows it. An owned retry
+          # may contain root-owned test output, so repair it before replacement.
+          python3 scripts/e2e-source-install.py authorize-cleanup "${E2E_INSTALL_HOME}"
+
           if [ -f "${SPLUNK_MOCK_PID_FILE}" ]; then
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
@@ -90,8 +113,7 @@ jobs:
           # /tmp/go-build* etc.) — see scripts/runner-cleanup.sh.
           bash scripts/runner-cleanup.sh
 
-          rm -rf ~/.defenseclaw
-          rm -f ~/.local/bin/defenseclaw-gateway
+          python3 scripts/e2e-source-install.py prepare "${E2E_INSTALL_HOME}"
           rm -rf ~/.openclaw/extensions/defenseclaw*
           rm -rf ~/.openclaw/workspace/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
           rm -rf ~/.openclaw/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
@@ -105,7 +127,7 @@ jobs:
 
           prefix = os.environ["E2E_TEST_PREFIX"]
           cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
-          quarantine_root = Path(os.path.expanduser("~/.defenseclaw/quarantine"))
+          quarantine_root = Path(os.environ["DEFENSECLAW_HOME"]) / "quarantine"
           for sub in ("skills", "plugins"):
               root = quarantine_root / sub
               if root.is_dir():
@@ -332,20 +354,20 @@ jobs:
         # `gateway-install` -> `sync-openclaw-extension` picks up the
         # real tree. `make plugin install` gives us that sequence in
         # one line.
-        run: make plugin install
+        run: |
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          PATH="${E2E_PATH}" make \
+            USER_HOME="${E2E_INSTALL_HOME}" \
+            OC_EXT_DIR="$HOME/.openclaw/extensions/defenseclaw" \
+            plugin install
 
       - name: Activate venv
         run: |
-          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          echo "PATH=${{ github.workspace }}/.venv/bin:${E2E_PATH}" >> "$GITHUB_ENV"
 
       - name: Install OPA
         run: |
-          if command -v opa >/dev/null 2>&1; then
-            opa version
-            exit 0
-          fi
-
           case "$(uname -m)" in
             aarch64|arm64) OPA_ARCH="arm64" ;;
             x86_64|amd64) OPA_ARCH="amd64" ;;
@@ -358,25 +380,26 @@ jobs:
           curl -fsSL \
             -o /tmp/opa \
             "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
-          install -m 0755 /tmp/opa "$HOME/.local/bin/opa"
-          opa version
+          install -d -m 0755 "${E2E_INSTALL_HOME}/.local/bin"
+          install -m 0755 /tmp/opa "${E2E_INSTALL_HOME}/.local/bin/opa"
+          "${E2E_INSTALL_HOME}/.local/bin/opa" version
 
       - name: Init DefenseClaw
         run: |
           defenseclaw init
 
-          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
-          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
-          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> "${DEFENSECLAW_HOME}/.env"
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${OPENAI_API_KEY:-}" ]; then
-            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
-            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
-            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
+            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> "${DEFENSECLAW_HOME}/.env"
           fi
 
           defenseclaw setup skill-scanner \
@@ -405,33 +428,58 @@ jobs:
           GUARDRAIL_ENABLED=false
           GUARDRAIL_REASON="core profile does not require live guardrail"
 
-          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> "${DEFENSECLAW_HOME}/.env"
           export OC_MODEL MODEL_NAME API_KEY_ENV GUARDRAIL_ENABLED GUARDRAIL_REASON
           python3 - <<'PY'
           import os
           import yaml
 
-          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          cfg_path = os.path.join(os.environ['DEFENSECLAW_HOME'], 'config.yaml')
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          # v4 config schema: legacy `splunk:` block is rejected at startup.
-          # Point the local Splunk container (brought up by the "Start
-          # Splunk" step above) at the new generic sinks framework.
-          cfg.pop('splunk', None)
+          # Configure the local and mock HEC collectors as canonical v8
+          # destinations. JSONL is explicit in v8, so keep one optional test
+          # destination for the envelope/correlation assertions below.
           mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
-          cfg['audit_sinks'] = [
+          observability = cfg.setdefault('observability', {})
+          destinations = observability.setdefault('destinations', [])
+          managed_names = {'e2e-gateway-jsonl', 'splunk-local', 'splunk-mock'}
+          destinations[:] = [
+              destination for destination in destinations
+              if destination.get('name') not in managed_names
+          ]
+          destinations.extend([
+              {
+                  'name':    'e2e-gateway-jsonl',
+                  'kind':    'jsonl',
+                  'enabled': True,
+                  'path':    os.path.join(os.environ['DEFENSECLAW_HOME'], 'gateway.jsonl'),
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
+                  },
+              },
               {
                   'name':    'splunk-local',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_local',
-                      'source':     'defenseclaw',
-                      'sourcetype': 'defenseclaw:json',
-                      'insecure_skip_verify': True,
+                  'endpoint':   'https://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'tls': {'insecure_skip_verify': True},
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
               # Phase 6 mock HEC collector — observability_assertions.sh
@@ -442,16 +490,23 @@ jobs:
                   'name':    'splunk-mock',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_mock',
-                      'source':     'defenseclaw-mock',
-                      'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                  'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_mock',
+                  'source':     'defenseclaw-mock',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
-          ]
+          ])
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -462,6 +517,7 @@ jobs:
               yaml.dump(cfg, f, default_flow_style=False)
           PY
 
+          defenseclaw config validate
           defenseclaw-gateway restart || defenseclaw-gateway start
           # Wait up to 30s for the sidecar to become healthy rather than a
           # fixed 5s sleep (self-hosted runners can be slow under load).
@@ -474,20 +530,20 @@ jobs:
           done
           defenseclaw-gateway status || {
             echo "--- gateway.log (tail) ---"
-            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/gateway.log" 2>/dev/null || true
             echo "--- gateway.jsonl (tail) ---"
-            tail -n 200 ~/.defenseclaw/gateway.jsonl 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/gateway.jsonl" 2>/dev/null || true
             echo "--- watchdog.log (tail) ---"
-            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/watchdog.log" 2>/dev/null || true
             exit 1
           }
 
-      - name: Validate gateway.jsonl schema
+      - name: Validate canonical v8 JSONL destination
         run: |
-          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
-            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          if [ -s "${DEFENSECLAW_HOME}/gateway.jsonl" ]; then
+            python3 scripts/assert-observability-v8-jsonl.py "${DEFENSECLAW_HOME}/gateway.jsonl" --min-records 1
           else
-            echo "gateway.jsonl not yet populated — skipping schema check"
+            echo "optional v8 JSONL test destination not yet populated — deferred until post-traffic assertions"
           fi
 
       # `make install` only installs the runtime venv (cli-install →
@@ -503,16 +559,18 @@ jobs:
         run: uv pip install --group dev --python "${{ github.workspace }}/.venv/bin/python"
 
       - name: Unit tests
-        run: make test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" test
 
       - name: TypeScript plugin tests
-        run: make ts-test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" ts-test
 
       - name: Rego policy tests
-        run: make rego-test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" rego-test
 
       - name: Repair persistent state and config before E2E tests
-        run: RUNNER_CLEANUP_STATE_ONLY=1 bash scripts/runner-cleanup.sh
+        run: |
+          python3 scripts/e2e-source-install.py verify "${E2E_INSTALL_HOME}"
+          RUNNER_CLEANUP_STATE_ONLY=1 bash scripts/runner-cleanup.sh
 
       - name: E2E tests
         run: bash scripts/test-e2e-full-stack.sh
@@ -523,10 +581,6 @@ jobs:
       - name: Observability assertions
         if: always()
         run: |
-          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
-            echo "gateway.jsonl not populated — skipping observability assertions"
-            exit 0
-          fi
           MOCK_ARGS=()
           # Core profile runs with guardrail disabled, so there will
           # never be a defenseclaw:judge envelope — passing
@@ -538,8 +592,8 @@ jobs:
             echo "[assertions] splunk-mock log captured $(wc -l <"${SPLUNK_MOCK_LOG}" | tr -d ' ') envelope(s)"
           fi
           bash test/e2e/observability_assertions.sh \
-              --jsonl ~/.defenseclaw/gateway.jsonl \
-              --db ~/.defenseclaw/audit.db \
+              --jsonl "${DEFENSECLAW_HOME}/gateway.jsonl" \
+              --db "${DEFENSECLAW_HOME}/audit.db" \
               --ts-window-seconds 3600 \
               --no-require-verdict \
               "${MOCK_ARGS[@]}"
@@ -551,9 +605,9 @@ jobs:
           STAGE=/tmp/defenseclaw-logs-core
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
-          if [ -d "$HOME/.defenseclaw" ]; then
+          if [ -d "${DEFENSECLAW_HOME}" ]; then
             for pat in '*.log' '*.jsonl' 'config.yaml' 'doctor_cache.json'; do
-              find "$HOME/.defenseclaw" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
+              find "${DEFENSECLAW_HOME}" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
             done
           fi
           cp -v /tmp/splunk-mock-core.log "$STAGE/" 2>/dev/null || true
@@ -585,18 +639,19 @@ jobs:
             cd -
           } || true
 
-          rm -rf ~/.defenseclaw
-          rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
 
-          # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
+          # Stop services and repair root-owned state before removing the
+          # exact marker-authenticated run root.
+          python3 scripts/e2e-source-install.py authorize-cleanup "${E2E_INSTALL_HOME}"
           bash scripts/runner-cleanup.sh
+          python3 scripts/e2e-source-install.py cleanup "${E2E_INSTALL_HOME}"
 
   full-live:
     name: Full Live E2E
     # Core and full-live both mutate persistent self-hosted runner state
-    # (~/.defenseclaw, ~/.openclaw, docker/systemd user services, and shared
-    # cleanup scripts). Run full-live only after core so their setup/cleanup
+    # (run-owned DefenseClaw state, ~/.openclaw, docker/systemd user services,
+    # and shared cleanup scripts). Run full-live only after core so their setup/cleanup
     # phases cannot cancel or corrupt each other on the same runner.
     needs: core
     if: ${{ always() && (github.event_name == 'schedule' || (needs.core.result == 'success' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository)))) }}
@@ -640,6 +695,9 @@ jobs:
       SPLUNK_ENV_FILE: ../env/.env.example
       SPLUNK_PASSWORD: DefenseClawLocalMode1!
       E2E_PROFILE: full-live
+      # Stable per-job slots let a later serialized schedule authenticate,
+      # repair, and replace state left by a hard-aborted prior run.
+      E2E_INSTALL_NAME: defenseclaw-e2e-slot-full-live
       DEFENSECLAW_RUN_ID: gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
       E2E_TEST_PREFIX: e2e-gh-${{ github.run_id }}-${{ github.run_attempt }}-full-live
       E2E_REQUIRE_AGENT_INSTALL: "true"
@@ -667,10 +725,30 @@ jobs:
       run:
         shell: bash
     steps:
+      - name: Select isolated DefenseClaw home
+        run: |
+          # RUNNER_TEMP is emptied by the Actions runner before each job. Keep
+          # marker-authenticated crash recovery beside the checkout instead so
+          # our own helper controls repair and retirement on the next schedule.
+          E2E_INSTALL_HOME="${RUNNER_WORKSPACE}/${E2E_INSTALL_NAME}"
+          {
+            echo "E2E_INSTALL_HOME=${E2E_INSTALL_HOME}"
+            echo "DEFENSECLAW_HOME=${E2E_INSTALL_HOME}/.defenseclaw"
+            echo "DEFENSECLAW_CUSTOM_PROVIDERS_PATH=${E2E_INSTALL_HOME}/.defenseclaw/custom-providers.json"
+          } >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v4
+        with:
+          # This job runs on a persistent host and never pushes. Do not leave
+          # the short-lived Actions credential behind in its Git config.
+          persist-credentials: false
 
       - name: Clean DefenseClaw
         run: |
+          # Refuse an unowned path before cleanup follows it. An owned retry
+          # may contain root-owned test output, so repair it before replacement.
+          python3 scripts/e2e-source-install.py authorize-cleanup "${E2E_INSTALL_HOME}"
+
           if [ -f "${SPLUNK_MOCK_PID_FILE}" ]; then
             kill -TERM "$(cat "${SPLUNK_MOCK_PID_FILE}")" 2>/dev/null || true
             rm -f "${SPLUNK_MOCK_PID_FILE}"
@@ -709,8 +787,7 @@ jobs:
           # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
           bash scripts/runner-cleanup.sh
 
-          rm -rf ~/.defenseclaw
-          rm -f ~/.local/bin/defenseclaw-gateway
+          python3 scripts/e2e-source-install.py prepare "${E2E_INSTALL_HOME}"
           rm -rf ~/.openclaw/extensions/defenseclaw*
           rm -rf ~/.openclaw/workspace/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
           rm -rf ~/.openclaw/skills/"${E2E_TEST_PREFIX}"* 2>/dev/null || true
@@ -724,7 +801,7 @@ jobs:
 
           prefix = os.environ["E2E_TEST_PREFIX"]
           cfg_path = Path(os.path.expanduser("~/.openclaw/openclaw.json"))
-          quarantine_root = Path(os.path.expanduser("~/.defenseclaw/quarantine"))
+          quarantine_root = Path(os.environ["DEFENSECLAW_HOME"]) / "quarantine"
           for sub in ("skills", "plugins"):
               root = quarantine_root / sub
               if root.is_dir():
@@ -945,20 +1022,20 @@ jobs:
         # `gateway-install` -> `sync-openclaw-extension` picks up the
         # real tree. `make plugin install` gives us that sequence in
         # one line.
-        run: make plugin install
+        run: |
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          PATH="${E2E_PATH}" make \
+            USER_HOME="${E2E_INSTALL_HOME}" \
+            OC_EXT_DIR="$HOME/.openclaw/extensions/defenseclaw" \
+            plugin install
 
       - name: Activate venv
         run: |
-          echo "${{ github.workspace }}/.venv/bin" >> "$GITHUB_PATH"
-          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          E2E_PATH="$(python3 scripts/e2e-source-install.py path "${E2E_INSTALL_HOME}")"
+          echo "PATH=${{ github.workspace }}/.venv/bin:${E2E_PATH}" >> "$GITHUB_ENV"
 
       - name: Install OPA
         run: |
-          if command -v opa >/dev/null 2>&1; then
-            opa version
-            exit 0
-          fi
-
           case "$(uname -m)" in
             aarch64|arm64) OPA_ARCH="arm64" ;;
             x86_64|amd64) OPA_ARCH="amd64" ;;
@@ -971,8 +1048,9 @@ jobs:
           curl -fsSL \
             -o /tmp/opa \
             "https://openpolicyagent.org/downloads/v1.14.1/opa_linux_${OPA_ARCH}_static"
-          install -m 0755 /tmp/opa "$HOME/.local/bin/opa"
-          opa version
+          install -d -m 0755 "${E2E_INSTALL_HOME}/.local/bin"
+          install -m 0755 /tmp/opa "${E2E_INSTALL_HOME}/.local/bin/opa"
+          "${E2E_INSTALL_HOME}/.local/bin/opa" version
 
       - name: Prepare OpenClaw Anthropic model + auth
         run: |
@@ -1151,6 +1229,8 @@ jobs:
           # kept for our in-process Bifrost callers. Both point at the same
           # ABSK… token held in the BIFROST_API_KEY secret.
           for key in (
+              "DEFENSECLAW_HOME",
+              "DEFENSECLAW_CUSTOM_PROVIDERS_PATH",
               "ANTHROPIC_API_KEY",
               "OPENAI_API_KEY",
               "OPENCLAW_GATEWAY_TOKEN",
@@ -1178,20 +1258,20 @@ jobs:
         run: |
           defenseclaw init
 
-          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
-          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> ~/.defenseclaw/.env
-          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_GATEWAY_TOKEN=${DEFENSECLAW_GATEWAY_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+          echo "OPENCLAW_GATEWAY_TOKEN=${OPENCLAW_GATEWAY_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+          echo "DEFENSECLAW_RUN_ID=${DEFENSECLAW_RUN_ID}" >> "${DEFENSECLAW_HOME}/.env"
           if [ -n "${ANTHROPIC_API_KEY:-}" ]; then
-            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> ~/.defenseclaw/.env
+            echo "ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${OPENAI_API_KEY:-}" ]; then
-            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+            echo "OPENAI_API_KEY=${OPENAI_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${GOOGLE_API_KEY:-}" ]; then
-            echo "GOOGLE_API_KEY=${GOOGLE_API_KEY}" >> ~/.defenseclaw/.env
+            echo "GOOGLE_API_KEY=${GOOGLE_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
-            echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> ~/.defenseclaw/.env
+            echo "AZURE_OPENAI_API_KEY=${AZURE_OPENAI_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           # BIFROST_API_KEY = AWS Bedrock bearer token (ABSK…). Consumed by the
           # guardrail sidecar via api_key_env=BIFROST_API_KEY (set in the
@@ -1199,17 +1279,17 @@ jobs:
           # AWS_BEARER_TOKEN_BEDROCK + AWS_REGION feed OpenClaw's stock
           # amazon-bedrock provider (AWS SDK default chain).
           if [ -n "${BIFROST_API_KEY:-}" ]; then
-            echo "BIFROST_API_KEY=${BIFROST_API_KEY}" >> ~/.defenseclaw/.env
+            echo "BIFROST_API_KEY=${BIFROST_API_KEY}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${AWS_BEARER_TOKEN_BEDROCK:-}" ]; then
-            echo "AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}" >> ~/.defenseclaw/.env
+            echo "AWS_BEARER_TOKEN_BEDROCK=${AWS_BEARER_TOKEN_BEDROCK}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${AWS_REGION:-}" ]; then
-            echo "AWS_REGION=${AWS_REGION}" >> ~/.defenseclaw/.env
+            echo "AWS_REGION=${AWS_REGION}" >> "${DEFENSECLAW_HOME}/.env"
           fi
           if [ -n "${SPLUNK_ACCESS_TOKEN:-}" ]; then
-            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> ~/.defenseclaw/.env
-            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> ~/.defenseclaw/.env
+            echo "SPLUNK_ACCESS_TOKEN=${SPLUNK_ACCESS_TOKEN}" >> "${DEFENSECLAW_HOME}/.env"
+            echo "SPLUNK_REALM=${SPLUNK_REALM}" >> "${DEFENSECLAW_HOME}/.env"
           fi
 
           defenseclaw setup skill-scanner \
@@ -1276,33 +1356,58 @@ jobs:
             echo "Guardrail live check status: ${GUARDRAIL_REASON}"
           fi
 
-          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> ~/.defenseclaw/.env
+          echo "DEFENSECLAW_SPLUNK_HEC_TOKEN=00000000-0000-0000-0000-000000000001" >> "${DEFENSECLAW_HOME}/.env"
           export OC_MODEL GUARDRAIL_MODEL MODEL_NAME API_KEY_ENV GUARDRAIL_ENABLED GUARDRAIL_REASON
           python3 - <<'PY'
           import os
           import yaml
 
-          cfg_path = os.path.expanduser('~/.defenseclaw/config.yaml')
+          cfg_path = os.path.join(os.environ['DEFENSECLAW_HOME'], 'config.yaml')
           with open(cfg_path) as f:
               cfg = yaml.safe_load(f) or {}
 
-          # v4 config schema: legacy `splunk:` block is rejected at startup.
-          # Point the local Splunk container (brought up by the "Start
-          # Splunk" step above) at the new generic sinks framework.
-          cfg.pop('splunk', None)
+          # Configure the local and mock HEC collectors as canonical v8
+          # destinations. JSONL is explicit in v8, so keep one optional test
+          # destination for the envelope/correlation assertions below.
           mock_port = os.environ.get('SPLUNK_MOCK_PORT', '18088')
-          cfg['audit_sinks'] = [
+          observability = cfg.setdefault('observability', {})
+          destinations = observability.setdefault('destinations', [])
+          managed_names = {'e2e-gateway-jsonl', 'splunk-local', 'splunk-mock'}
+          destinations[:] = [
+              destination for destination in destinations
+              if destination.get('name') not in managed_names
+          ]
+          destinations.extend([
+              {
+                  'name':    'e2e-gateway-jsonl',
+                  'kind':    'jsonl',
+                  'enabled': True,
+                  'path':    os.path.join(os.environ['DEFENSECLAW_HOME'], 'gateway.jsonl'),
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
+                  },
+              },
               {
                   'name':    'splunk-local',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   'https://127.0.0.1:8088/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_local',
-                      'source':     'defenseclaw',
-                      'sourcetype': 'defenseclaw:json',
-                      'insecure_skip_verify': True,
+                  'endpoint':   'https://127.0.0.1:8088/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_local',
+                  'source':     'defenseclaw',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'tls': {'insecure_skip_verify': True},
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
               # Phase 6 mock HEC collector (see core job for rationale).
@@ -1310,16 +1415,23 @@ jobs:
                   'name':    'splunk-mock',
                   'kind':    'splunk_hec',
                   'enabled': True,
-                  'splunk_hec': {
-                      'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
-                      'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
-                      'index':      'defenseclaw_mock',
-                      'source':     'defenseclaw-mock',
-                      'sourcetype': 'defenseclaw:json',
-                      'verify_tls': False,
+                  'endpoint':   f'http://127.0.0.1:{mock_port}/services/collector/event',
+                  'token_env':  'DEFENSECLAW_SPLUNK_HEC_TOKEN',
+                  'index':      'defenseclaw_mock',
+                  'source':     'defenseclaw-mock',
+                  'sourcetype': 'defenseclaw:json',
+                  'sourcetype_overrides': {
+                      'llm-judge-response': 'defenseclaw:judge',
+                      'guardrail-verdict': 'defenseclaw:verdict',
+                  },
+                  'network_safety': {'allow_private_networks': True},
+                  'send': {
+                      'signals': ['logs'],
+                      'buckets': ['*'],
+                      'redaction_profile': 'none',
                   },
               },
-          ]
+          ])
 
           cfg.setdefault('guardrail', {})
           cfg['guardrail']['enabled'] = False
@@ -1360,6 +1472,7 @@ jobs:
               yaml.dump(cfg, f, default_flow_style=False)
           PY
 
+          defenseclaw config validate
           defenseclaw-gateway restart || defenseclaw-gateway start
           # Wait up to 30s for the sidecar to become healthy rather than a
           # fixed 5s sleep (self-hosted runners can be slow under load).
@@ -1372,21 +1485,21 @@ jobs:
           done
           defenseclaw-gateway status || {
             echo "--- gateway.log (tail) ---"
-            tail -n 200 ~/.defenseclaw/gateway.log 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/gateway.log" 2>/dev/null || true
             echo "--- gateway.jsonl (tail) ---"
-            tail -n 200 ~/.defenseclaw/gateway.jsonl 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/gateway.jsonl" 2>/dev/null || true
             echo "--- watchdog.log (tail) ---"
-            tail -n 200 ~/.defenseclaw/watchdog.log 2>/dev/null || true
+            tail -n 200 "${DEFENSECLAW_HOME}/watchdog.log" 2>/dev/null || true
             exit 1
           }
 
-      - name: Validate gateway.jsonl schema
+      - name: Validate canonical v8 JSONL destination
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
         run: |
-          if [ -f ~/.defenseclaw/gateway.jsonl ]; then
-            python3 scripts/assert-gateway-jsonl.py ~/.defenseclaw/gateway.jsonl --min-events 1
+          if [ -s "${DEFENSECLAW_HOME}/gateway.jsonl" ]; then
+            python3 scripts/assert-observability-v8-jsonl.py "${DEFENSECLAW_HOME}/gateway.jsonl" --min-records 1
           else
-            echo "gateway.jsonl not yet populated — skipping schema check"
+            echo "optional v8 JSONL test destination not yet populated — deferred until post-traffic assertions"
           fi
 
       # `make install` only installs the runtime venv (cli-install →
@@ -1404,15 +1517,15 @@ jobs:
 
       - name: Unit tests
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
-        run: make test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" test
 
       - name: TypeScript plugin tests
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
-        run: make ts-test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" ts-test
 
       - name: Rego policy tests
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
-        run: make rego-test
+        run: make USER_HOME="${E2E_INSTALL_HOME}" rego-test
 
       - name: E2E tests
         if: ${{ env.FULL_LIVE_SKIP != '1' }}
@@ -1424,12 +1537,8 @@ jobs:
       # request_id format, and audit.db correlation after E2E
       # traffic has been driven through the sidecar.
       - name: Observability assertions
-        if: always()
+        if: ${{ always() && env.FULL_LIVE_SKIP != '1' }}
         run: |
-          if [ ! -f ~/.defenseclaw/gateway.jsonl ]; then
-            echo "gateway.jsonl not populated — skipping observability assertions"
-            exit 0
-          fi
           MOCK_ARGS=()
           # Full-live only expects a defenseclaw:judge envelope when
           # the live guardrail was actually enabled — otherwise the
@@ -1439,7 +1548,7 @@ jobs:
           GUARDRAIL_ENABLED=$(python3 -c '
           import yaml, os
           try:
-              with open(os.path.expanduser("~/.defenseclaw/config.yaml")) as f:
+              with open(os.path.join(os.environ["DEFENSECLAW_HOME"], "config.yaml")) as f:
                   cfg = yaml.safe_load(f) or {}
               print(str(cfg.get("guardrail", {}).get("enabled", False)).lower())
           except Exception:
@@ -1458,8 +1567,8 @@ jobs:
               echo "[assertions] guardrail_enabled=${GUARDRAIL_ENABLED}; full-live-success-marker=${marker_present} - skipping splunk-mock sourcetype assertion"
           fi
           bash test/e2e/observability_assertions.sh \
-              --jsonl ~/.defenseclaw/gateway.jsonl \
-              --db ~/.defenseclaw/audit.db \
+              --jsonl "${DEFENSECLAW_HOME}/gateway.jsonl" \
+              --db "${DEFENSECLAW_HOME}/audit.db" \
               --ts-window-seconds 3600 \
               --no-require-verdict \
               "${MOCK_ARGS[@]}"
@@ -1471,9 +1580,9 @@ jobs:
           STAGE=/tmp/defenseclaw-logs-full-live
           rm -rf "$STAGE"
           mkdir -p "$STAGE"
-          if [ -d "$HOME/.defenseclaw" ]; then
+          if [ -d "${DEFENSECLAW_HOME}" ]; then
             for pat in '*.log' '*.jsonl' 'config.yaml' 'doctor_cache.json'; do
-              find "$HOME/.defenseclaw" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
+              find "${DEFENSECLAW_HOME}" -maxdepth 2 -type f -name "$pat" -exec cp --parents {} "$STAGE/" \; 2>/dev/null || true
             done
           fi
           cp -v /tmp/splunk-mock-full-live.log "$STAGE/" 2>/dev/null || true
@@ -1525,12 +1634,13 @@ jobs:
             cd -
           } || true
 
-          rm -rf ~/.defenseclaw
-          rm -f ~/.local/bin/defenseclaw-gateway
           rm -rf ~/.openclaw/extensions/defenseclaw*
 
-          # Generic host-wide cleanup — see scripts/runner-cleanup.sh.
+          # Stop services and repair root-owned state before removing the
+          # exact marker-authenticated run root.
+          python3 scripts/e2e-source-install.py authorize-cleanup "${E2E_INSTALL_HOME}"
           bash scripts/runner-cleanup.sh
+          python3 scripts/e2e-source-install.py cleanup "${E2E_INSTALL_HOME}"
 
   # Plan E4 / item 2: connector matrix axis. Runs the four connector
   # artifact + lifecycle test packages in parallel on the public

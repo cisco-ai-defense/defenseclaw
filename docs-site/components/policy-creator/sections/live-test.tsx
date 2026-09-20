@@ -329,10 +329,12 @@ export function LiveTestPane({ policy }: { policy: Policy }) {
     // grow past the viewport and clip the verdict / Input JSON pane.
     <div className="flex h-full min-h-0 flex-col rounded-lg border border-fd-border bg-fd-card">
       <header className="flex flex-col gap-1 border-b border-fd-border bg-fd-card/80 p-4 backdrop-blur-sm">
-        <h3 className="text-sm font-semibold text-fd-foreground">Live Test</h3>
+        <h3 className="text-sm font-semibold text-fd-foreground">Live Test: OPA / Rego</h3>
         <p className="text-[11px] text-fd-muted-foreground">
-          Evaluates your policy in your browser via OPA-WASM. No data leaves the page —
-          custom inputs stay in localStorage.
+          Evaluates OPA policy domains in your browser via OPA-WASM. It does not execute
+          regex, CEL, ActionFacts, bounded chains, or YARA; validate those with the
+          DefenseClaw host and benchmark harness. No data leaves the page, and custom
+          inputs stay in localStorage.
         </p>
       </header>
 

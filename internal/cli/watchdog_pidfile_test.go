@@ -32,6 +32,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -41,9 +42,11 @@ func TestWatchdogPIDFile_RoundTripJSON(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "watchdog.pid")
 	want := watchdogPIDInfo{
-		PID:        os.Getpid(),
-		Executable: "/some/path/defenseclaw-gateway",
-		StartTime:  time.Now().Unix(),
+		PID:           os.Getpid(),
+		Executable:    "/some/path/defenseclaw-gateway",
+		StartTime:     time.Now().Unix(),
+		StartIdentity: "opaque-kernel-identity",
+		ControlName:   "opaque-control-capability",
 	}
 
 	f, err := acquireWatchdogPIDFile(pidPath, want)
@@ -56,7 +59,8 @@ func TestWatchdogPIDFile_RoundTripJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("readWatchdogPIDInfo: %v", err)
 	}
-	if got.PID != want.PID || got.Executable != want.Executable || got.StartTime != want.StartTime {
+	if got.PID != want.PID || got.Executable != want.Executable || got.StartTime != want.StartTime ||
+		got.StartIdentity != want.StartIdentity || got.ControlName != want.ControlName {
 		t.Fatalf("round-trip mismatch: got=%+v want=%+v", got, want)
 	}
 
@@ -106,6 +110,31 @@ func TestWatchdogPIDFile_RejectsMalformed(t *testing.T) {
 	}
 }
 
+func TestRemoveWatchdogPIDIfOwnedPreservesReplacement(t *testing.T) {
+	pidPath := filepath.Join(t.TempDir(), "watchdog.pid")
+	replacement := watchdogPIDInfo{PID: 222, StartIdentity: "replacement", ControlName: "replacement-control"}
+	data, err := json.Marshal(replacement)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(pidPath, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removeWatchdogPIDIfOwned(pidPath, watchdogPIDInfo{PID: 111, StartIdentity: "old", ControlName: "old-control"})
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("replacement PID file was removed: %v", err)
+	}
+	removeWatchdogPIDIfOwned(pidPath, watchdogPIDInfo{PID: 222, StartIdentity: "different", ControlName: "replacement-control"})
+	if _, err := os.Stat(pidPath); err != nil {
+		t.Fatalf("start-identity mismatch removed replacement: %v", err)
+	}
+	removeWatchdogPIDIfOwned(pidPath, replacement)
+	if _, err := os.Stat(pidPath); !os.IsNotExist(err) {
+		t.Fatalf("owned PID file still exists: %v", err)
+	}
+}
+
 func TestAcquireWatchdogPIDFile_RejectsConcurrentAcquire(t *testing.T) {
 	// hardening: the flock prevents a second watchdog from
 	// taking ownership of the same data dir. The first acquirer holds
@@ -145,12 +174,94 @@ func TestAcquireWatchdogPIDFile_ReleasedOnClose(t *testing.T) {
 	_ = second.Close()
 }
 
+func TestWatchdogHeldUnixOwnershipWithMalformedPublicationFailsClosed(t *testing.T) {
+	dataDir := t.TempDir()
+	t.Setenv("DEFENSECLAW_HOME", dataDir)
+	t.Setenv("DEFENSECLAW_CONFIG", filepath.Join(dataDir, "missing-config.yaml"))
+	pidPath := filepath.Join(dataDir, watchdogPIDFile)
+
+	holder, err := acquireWatchdogPIDFile(pidPath, watchdogPIDInfo{PID: os.Getpid()})
+	if err != nil {
+		t.Fatalf("acquire held ownership: %v", err)
+	}
+	defer holder.Close()
+
+	malformed := []byte("malformed-owned-publication\n")
+	if err := holder.Truncate(0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Seek(0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := holder.Write(malformed); err != nil {
+		t.Fatal(err)
+	}
+	if err := holder.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	inspection := inspectWatchdogPIDOwnership(pidPath)
+	if !inspection.locked || inspection.publicationErr == nil {
+		t.Fatalf("held malformed inspection = %+v", inspection)
+	}
+
+	originalWait := watchdogOwnedRecordWait
+	originalTerminate := watchdogRequestTerminate
+	terminateCalled := false
+	watchdogOwnedRecordWait = func(path string, _, _ time.Duration) (watchdogPIDInfo, error) {
+		return waitForWatchdogOwnedRecord(path, 50*time.Millisecond, 5*time.Millisecond)
+	}
+	watchdogRequestTerminate = func(watchdogPIDInfo, *os.Process) error {
+		terminateCalled = true
+		return nil
+	}
+	t.Cleanup(func() {
+		watchdogOwnedRecordWait = originalWait
+		watchdogRequestTerminate = originalTerminate
+	})
+
+	var stopErr error
+	stopOutput := captureStdout(t, func() { stopErr = runWatchdogStop(nil, nil) })
+	if stopErr == nil {
+		t.Fatal("stop reported success while ownership was held with malformed publication")
+	}
+	if strings.Contains(strings.ToLower(stopOutput), "not running") ||
+		strings.Contains(strings.ToLower(stopOutput), "stopped") {
+		t.Fatalf("stop falsely reported stopped state: %q", stopOutput)
+	}
+	var statusErr error
+	statusOutput := captureStdout(t, func() { statusErr = runWatchdogStatus(nil, nil) })
+	if statusErr == nil {
+		t.Fatal("status reported success while ownership was held with malformed publication")
+	}
+	if strings.Contains(strings.ToLower(statusOutput), "running") {
+		t.Fatalf("status falsely reported a healthy running state: %q", statusOutput)
+	}
+	if terminateCalled {
+		t.Fatal("held malformed publication caused a process signal")
+	}
+	got, err := os.ReadFile(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(malformed) {
+		t.Fatalf("held malformed publication mutated: got %q want %q", got, malformed)
+	}
+	inspection = inspectWatchdogPIDOwnership(pidPath)
+	if !inspection.locked || inspection.publicationErr == nil {
+		t.Fatalf("ownership no longer truthful after stop/status: %+v", inspection)
+	}
+}
+
 func TestWatchdogIsLocked(t *testing.T) {
 	dir := t.TempDir()
 	pidPath := filepath.Join(dir, "watchdog.pid")
 
 	// File missing => not locked.
-	if locked, _ := watchdogIsLocked(pidPath); locked {
+	if locked, _, err := watchdogIsLocked(pidPath); err != nil || locked {
+		if err != nil {
+			t.Fatal(err)
+		}
 		t.Fatal("expected !locked for missing file")
 	}
 
@@ -174,7 +285,10 @@ func TestWatchdogIsLocked(t *testing.T) {
 		t.Fatalf("sync: %v", err)
 	}
 
-	locked, info := watchdogIsLocked(pidPath)
+	locked, info, err := watchdogIsLocked(pidPath)
+	if err != nil {
+		t.Fatal(err)
+	}
 	if !locked {
 		t.Fatal("expected locked while holder still owns the flock")
 	}
@@ -207,6 +321,13 @@ func TestVerifyWatchdogProcess_LiveProcessAccepted(t *testing.T) {
 	// no Executable falls back to the signal-0 check and must accept.
 	if !verifyWatchdogProcess(watchdogPIDInfo{PID: os.Getpid()}) {
 		t.Fatal("verifyWatchdogProcess rejected the live test process")
+	}
+}
+
+func TestVerifyWatchdogProcess_UnverifiableStartIdentityRejected(t *testing.T) {
+	info := watchdogPIDInfo{PID: os.Getpid(), StartIdentity: "stale-process-identity"}
+	if verifyWatchdogProcess(info) {
+		t.Fatal("verifyWatchdogProcess accepted an unverifiable start identity")
 	}
 }
 

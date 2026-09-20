@@ -1,18 +1,70 @@
 # DefenseClaw Changelog
 
-All notable changes to this project are documented here. The format
-follows [Keep a Changelog](https://keepachangelog.com) and the
-project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+This file preserves development rollups and historical change notes. It is not
+a complete published-release index: the release workflow stamps isolated build
+checkouts, so repository source metadata and headings can lag published tags.
+Use [GitHub Releases](https://github.com/cisco-ai-defense/defenseclaw/releases)
+for released versions and assets, and the
+[documentation website](https://cisco-ai-defense.github.io/defenseclaw/docs/)
+for current behavior.
 
 ## [Unreleased] — Hook collector unification
 
 This rollup unifies the agent hook collector across all 8 hook-first
-connectors (codex, claudecode, hermes, cursor, windsurf, geminicli,
+connectors (codex, claudecode, hermes, cursor, devin, antigravity,
 copilot, openhands) onto a single declarative `HookProfile`-driven pipeline.
 There are **no new environment variables** — the unification is the
 default and only path; the V1 OTLP builders and the per-phase
 feature flags that existed in early review iterations have been
 deleted.
+
+### Observability v8
+
+- Defaults an omitted `observability.local.retention_days` to a rolling seven-day
+  local SQLite window. The startup-and-six-hour reaper applies that UTC cutoff
+  in dependency order; it drains expired or bounded guardrail-chain dependencies
+  before eligible unreferenced `correlation_events`, while preserving active
+  cursors, pending operations, unexpired receipts, and their graph anchors.
+  Explicit values still win,
+  including `0` for unbounded retention. Deleted pages remain reusable by
+  SQLite, but the database file does not shrink automatically;
+  the separate OPA `audit.retention_days` policy is unchanged. This changes the
+  prior omitted default from 90 days: an existing v8 configuration without an
+  explicit value adopts seven days on its first upgraded gateway startup and
+  deletes eligible days 8–90. Set an explicit longer value before upgrading if
+  that history must be preserved.
+- Replaces separate `otel`, `audit_sinks`, and global redaction policy with one
+  strict `config_version: 8` `observability` graph for bucket collection,
+  mandatory local SQLite history, redaction profiles, routing, retention,
+  sampling, metric policy, and every optional destination.
+- Fresh v8 is full fidelity: all registered logs, traces, and metrics collect;
+  local SQLite stores every collected log unredacted; and an enabled destination
+  with omitted `send`/`routes` exports every reviewed bucket and every signal its
+  kind supports under profile `none`. General OTLP sends logs/traces/metrics,
+  logs-only kinds send logs, Prometheus sends metrics, and Galileo sends traces.
+- Adds centralized per-destination field-class profiles (`none`, `sensitive`,
+  `content`, `strict`, and custom detect/whole/hash/remove policy), ordered
+  first-match routes, and independent queue/health/accounting for multi-backend
+  fan-out.
+- Preserves the full root-agent/subagent/turn/workflow/model/tool lifecycle and
+  the `local-observability-v1` Agent360/dashboard contract while expanding the
+  generated `galileo-rich-v2` trace projection.
+- One authenticated target-release resolver command automatically stages supported
+  POSIX v7 installations through the published `0.8.4` protocol-2 bridge, re-execs
+  under a fresh bridge controller, then backs up, converts, validates, and atomically
+  activates v8. It preserves narrower v7 signal/routing/redaction behavior, promotes
+  inline observability secrets to locked environment references, refreshes owned
+  local-dashboard assets without resetting volumes, and restores healthy `0.8.4`
+  state after a failed conversion, start, or health check. No separate migration
+  apply command is required; the v8 gateway does not rewrite v7 config at startup or
+  run both formats in parallel. Windows refuses before mutation because no Windows
+  `0.8.4` bridge was published.
+
+Breaking change: fresh-v8 telemetry is unredacted by default, and legacy
+`otel`, `audit_sinks`, `privacy.disable_redaction`, and associated ambient OTel
+policy variables are not accepted as v8 runtime policy. Review
+`defenseclaw observability plan` before enabling a destination across a trust
+boundary.
 
 ### Packaging / upgrade hotfix
 
@@ -30,17 +82,125 @@ deleted.
 
 ### Behaviour changes (no flag)
 
+- **Claude Code post-tool findings are advisory and provenance-aware**:
+  `PostToolUse` and `PostToolBatch` retain findings plus shadow `would_block`
+  telemetry without stopping the next model turn. Returned source text is no
+  longer evaluated as an executable command or sensitive-path request; typed
+  command/path enforcement remains on `PreToolUse`, and physically verified
+  standalone source reads reuse the Codex low-noise source boundary.
+- **Trusted-action enforcement now requires exact, same-rule proof**: raw,
+  partial, parser-shadow, and unpinned evidence remains detection-only;
+  ordinary sensitive reads are advisory unless paired with mutation or
+  external egress, and Claude Code instruction-file mutation protection
+  requires authenticated same-session load context; exact identities are
+  retained, while recognized instruction paths with unprovable native identity
+  fail closed only for proven canonical mutations. Parser uncertainty is
+  counted separately by `defenseclaw.guardrail.parser_uncertainty`, so it does
+  not inflate guardrail evaluation or block-rate metrics. Newly exact egress
+  coverage includes curl FTP account/alternative operands and Telnet
+  negotiation metadata on POSIX or structured argv, cross-platform SOCKS proxy
+  credentials, and portable static `echo` or format-only `printf` output
+  flowing into one exact external curl stdin upload. Exact static ASCII DNS
+  hostname bytes are now covered only where curl or GNU Wget is proved to emit
+  them: generated authority, HTTP CONNECT, remote-resolved SOCKS4a/5h
+  destination fields, plaintext HTTP Host or canonical HTTPS SNI observed
+  after a SOCKS handshake, and canonical HTTPS origin SNI. GNU Wget's
+  canonical generated authority and origin SNI additionally require ambient
+  configuration to be disabled. Every component is bound to the exact external
+  origin or proxy network fact. Raw CMD/PowerShell curl now gains exact ordinary
+  HTTP(S) headers, origin credentials, inline/body and file-upload projection,
+  plus supported direct proxy/SOCKS credentials. Exact plaintext HTTP metadata
+  and inline bodies are also bound to the external SOCKS observer when that
+  exact target uses the proxy.
+  PowerShell hostname projection additionally requires explicit `curl.exe` or
+  `wget.exe`; its bare aliases and raw-Windows FTP control, SMTP envelope, and
+  Telnet metadata remain detection-only.
+  Curl `--haproxy-clientip` remains LOW and detection-only on every surface,
+  including direct HTTP(S), explicit proxy/SOCKS or preproxy routes,
+  `--noproxy`, multiple targets or `--next`, static or dynamic values,
+  setup-preempted commands, aliases, and trusted or untrusted executable-path
+  spellings. A curl 8.7.1 source and loopback-wire audit confirms that a capable
+  direct build writes the PROXY preamble before the HTTP request or, for HTTPS,
+  before TLS. It also establishes a 1976-byte future-projector ceiling and the
+  pre-wire `--ipv4`/literal-IPv6 exclusion. Those facts are rationale, not
+  current authority: the option is absent before curl 8.2.0 and is compiled out
+  with `CURL_DISABLE_PROXY`, while executable spelling authenticates neither
+  version nor build. [#770](https://github.com/cisco-ai-defense/defenseclaw/issues/770)
+  owns the required executable-capability boundary.
+  `mkfs.minix` now shares the formatter owner for raw-device targets;
+  image files, help/version calls, invalid grammar, near-miss executables, and
+  local-only routes or numeric destinations, non-ASCII IDN spellings,
+  dynamic/config-driven
+  targets, wrappers, pipelines, shell redirections, promptable authentication, unresolved
+  file/TLS setup, a modeled eagerly checked compression/TLS/authentication
+  capability option, a modeled final enabled capability toggle, conflicting pre-wire options, direct plaintext
+  HTTP Host overrides with no remaining proxy-visible authority, an HTTPS
+  proxy route without authenticated HTTPS-proxy feature facts, unsupported
+  multi-hop proxy chains, and other
+  ambiguous egress forms cannot mint action
+  authority; they remain advisory where a compatible detector still matches and
+  otherwise stay quiet.
+- **Amp is now a first-class connector on macOS, Linux, and native Windows**:
+  setup installs an owner-only authenticated system policy plugin for Amp's five
+  documented callbacks; action mode gates `tool.call` before execution and can
+  withhold unsafe `tool.result` output before model delivery. CLI, TUI, macOS
+  app, native Windows setup, discovery, doctor, upgrade/uninstall, MCP, skills,
+  plugins, Agent360, Galileo, audit, and hook-generated observability all share
+  the same connector contract. Amp exposes no documented native OTLP,
+  `traceparent`, `session.end`, or dedicated subagent lifecycle callback, so
+  DefenseClaw correlates only source-backed thread events and governs delegation
+  tools at their `tool.call` boundary.
+- **Windows runtime custody remains verifiable while services are live**:
+  detached gateway, watchdog, startup, and hook-recovery processes no longer
+  use the protected data directory as their current working directory, so
+  Doctor can hold its exact anti-replacement lease without weakening Windows
+  sharing or ACL checks. Fresh device identities now publish an owner-private
+  random provenance secret, an HMAC bound to the exact Ed25519 key bytes, and
+  finally the key itself with create-new semantics. A portable relative
+  `gateway.device_key_file` remains compatible by resolving strictly beneath
+  the canonical absolute `data_dir`; rooted, drive-relative, ADS, traversal,
+  and outside-root spellings still fail closed before read or mutation. On
+  POSIX, every validated nested-directory entry is synced before deeper work
+  and re-synced on retry after an interrupted attempt. Existing unprovenanced
+  keys are never blessed after the fact; they remain usable but Doctor reports
+  them for continuity review. After `DELETEUSERDATA=1`, post-reboot Windows
+  cleanup now re-verifies the exact recorded Codex, Claude Code, and Amp homes
+  through a configless child bound to the exact transaction, journal, digest,
+  and Setup process instance; the child retains one stable parent handle and
+  checks its creation identity and liveness before and after authorization. It
+  neither recreates the deleted data root nor weakens ordinary
+  `connector verify`, which still requires a valid v8 runtime configuration.
+  Managed-plugin residue verification normalizes only line terminators and
+  recognizes exact canonical historical marker lines, so LF- and CRLF-built
+  gateways find managed residue across upgrades without matching marker-like
+  suffixes or operator prose.
+  Native Windows CI now requires both live
+  audit-database custody and HMAC-bound device identity checks to pass.
+- **`make all` is again the explicit same-checkout developer reinstall**:
+  markerless or older source-owned state may advance with the checkout for
+  local development. Foreign, newer, release-managed, and different-checkout
+  installations still refuse before mutation, and direct install targets do
+  not inherit the developer reclaim path. Running `make` or `make help` now
+  explains the source-build, developer-activation, and release-upgrade paths;
+  `make build` no longer directs developers into the strict install target.
 - **AI Discovery inventories Lemonade and local model artifacts**: the built-in
   catalog now recognizes Lemonade Server, bounded loopback metadata reads show
   installed/loaded models, and independent filesystem discovery covers GGUF,
   MLX/safetensors, ONNX, Core ML, TFLite, Q4NX, Hugging Face caches, Ollama
   stores, and contextual PyTorch model files without opening model binaries.
+- **Skill, MCP, and plugin scans now degrade cleanly when optional LLM
+  credentials are unavailable**: the local/static analyzers still complete,
+  the CLI and TUI show a nonfatal skip warning, and Setup/Keys identifies the
+  missing credential. Auto mode adds the LLM analyzer only when its model and
+  authentication are usable; local providers and Bedrock's AWS credential
+  chain remain supported without a DefenseClaw API key.
 - **Antigravity local surfaces now match the PR #365 contract**:
   MCP reads/writes `~/.gemini/config/mcp_config.json` and
   `<workspace>/.agents/mcp_config.json`; hooks remain global-only at
   `~/.gemini/config/hooks.json`; AgentSkills folder form is supported
-  while rules/plugins/plugin-contained agents remain discovery-only
-  unless Google documents a write contract.
+  while rules and global/workspace/plugin-contained agents remain discovery-only. Antigravity
+  plugins now install to Google's documented global/workspace plugin paths;
+  the Antigravity CLI staging directory remains an additional discovery path.
 - **W3C trace propagation is enabled for trusted hook routes**
   (`/api/v1/<connector>/hook`, `/api/v1/codex/notify`) when the
   caller is loopback and the connector route is registered. The
@@ -110,7 +270,7 @@ deleted.
   pipeline (vs. an out-of-tree handler registration that bypasses
   audit/metrics).
 - New audit action `connector-hook-synthetic` (Go +
-  `cli/defenseclaw/audit_actions.py` + `OBSERVABILITY-CONTRACT.md`)
+  `cli/defenseclaw/audit_actions.py` + `schemas/audit-event.json`)
   for the synthetic Stop visibility row.
 
 ### F6 audit-action parity
@@ -438,7 +598,7 @@ are addressed in this rollup.
 - **M6 — End-to-end integration coverage per connector.** The new
   `agent_hook_e2e_test.go` drives an HTTP request through
   `handleAgentHook` for every registered connector
-  (claudecode, codex, hermes, cursor, windsurf, geminicli, copilot, openhands)
+  (claudecode, codex, hermes, cursor, devin, antigravity, copilot, openhands)
   and asserts:
 
   - HTTP 200 with valid JSON,
@@ -561,7 +721,7 @@ Claude Code now talk directly to their native upstreams in both
   its own permission flow. `--mode observe` (the default) keeps the
   previous record-only behavior.
 - The shared connector-alias factory used by the other hook-
-  enforced connectors (`hermes`, `cursor`, `windsurf`, `geminicli`,
+  enforced connectors (`hermes`, `cursor`, `devin`, `antigravity`,
   `copilot`, `openhands`) gains the same `--mode {observe,action}`
   knob.
 - The interactive wizard (`defenseclaw setup guardrail`) drops the

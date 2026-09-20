@@ -1,5 +1,5 @@
 #!/bin/bash
-# defenseclaw-managed-hook v6
+# defenseclaw-managed-hook v7
 # Shell-side hook hardening helpers.
 DEFENSECLAW_BAKED_HOOK_PATH=""
 #
@@ -38,6 +38,14 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        directories could re-admit an agent-planted binary. Windows no
 #        longer uses these bash hooks (it runs the hook natively in the Go
 #        binary), so the Git Bash /mingw64 workaround is no longer needed.
+#   v7 — adds defenseclaw_user_identity_args, which the connector hooks
+#        call to attach the real user's OS identity to the gateway
+#        request. Call sites guard on the function being defined, so a
+#        hook rendered by this build against an older helper loses the
+#        per-user attribution rather than failing the hook. The bump is
+#        how an operator tells "telemetry unattributed because the
+#        helper predates it" from "unattributed because the lookup
+#        failed".
 #   v5 — adds defenseclaw_read_stdin_capped, a bounded replacement for
 #        the historical PAYLOAD=$(cat) idiom. The unbounded read pulled
 #        the entire agent payload into a shell variable BEFORE the
@@ -68,6 +76,22 @@ DEFENSECLAW_BAKED_HOOK_PATH=""
 #        routes (/api/v1/<connector>/hook, /api/v1/codex/notify) via
 #        shouldExtractHookTrace, so an unscoped caller cannot splice
 #        an arbitrary trace context into the gateway's trace tree.
+#   v6 — refuses the stock macOS /usr/bin/python3 CLT launcher stub.
+#        Adds _dc_python3_usable, which additionally verifies
+#        `xcode-select -p` succeeds before trusting a python3 binary
+#        under /usr/bin on Darwin, and switches both python3 call sites
+#        (_dc_jq's fallback and defenseclaw_read_stdin_capped's tier 1)
+#        to the new gate. Without the guard, QA on stock macOS hosts
+#        (AVC + codex, no Xcode CLT) saw the "install command line
+#        developer tools" GUI dialog pop on every hook invocation and
+#        the subsequent codex hook then received an empty stdin payload,
+#        posted a bad request to the gateway, and blocked the user's
+#        prompt with a "codex hook error: gateway returned HTTP 400"
+#        message. Internal-only helper; no hook-script signatures
+#        changed and the schema marker stays at v6, so older gateways
+#        that already wrote a v6 helper here (bare `command -v python3`
+#        gate) still get the fix on next write via writeHookHelpers'
+#        same-version bytes-different path.
 #
 # Sourced at the top of every hook in this directory (claude-code-hook.sh,
 # codex-hook.sh, inspect-*.sh) BEFORE any agent-supplied data is touched.
@@ -165,6 +189,129 @@ defenseclaw_harden_env() {
   # forever. Runs AFTER PATH lockdown so we don't pick up an attacker-
   # planted `find`.
   _defenseclaw_sweep_stale_hook_dirs
+}
+
+# Resolve optional connector identity for the shared inspect-* scripts.  The
+# selected connector is runtime state, never a render-time property of the one
+# physical shared script.  Reject anything outside the connector-name grammar
+# before it can participate in a token filename or HTTP header.
+defenseclaw_shared_runtime_connector() {
+  local connector="${DEFENSECLAW_CONNECTOR:-}"
+  # Non-managed shells may supply an ephemeral connector selection, matching
+  # the existing fail-mode/token override contract. Guardian-managed hooks do
+  # not trust process environment for connector identity and use only the
+  # installer-owned sidecars below.
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    connector=""
+  fi
+  case "$connector" in
+    *[!a-z0-9_-]*) return 0 ;;
+    *) printf '%s' "$connector" ;;
+  esac
+  if [ -n "$connector" ]; then
+    return 0
+  fi
+  local hook_dir="${1:-}"
+  local candidate found="" suffix recorded
+  for candidate in "${hook_dir}"/.hookcfg.*; do
+    [ -f "$candidate" ] && [ ! -L "$candidate" ] || continue
+    suffix="${candidate##*.hookcfg.}"
+    [ "$suffix" != "legacy" ] && [ "$suffix" != "lock" ] || continue
+    case "$suffix" in
+      ""|*[!a-z0-9_-]*) continue ;;
+    esac
+    # Ignore lock files, interrupted atomic-write debris, and unrelated files
+    # that merely share the prefix. A valid record must identify itself with
+    # the exact connector encoded in its filename.
+    recorded="$(defenseclaw_flat_hookcfg_value "$candidate" DEFENSECLAW_CONNECTOR 2>/dev/null || true)"
+    [ "$recorded" = "$suffix" ] || continue
+    if [ -n "$found" ]; then
+      # Multiple connector records are intentionally ambiguous unless the
+      # caller supplies DEFENSECLAW_CONNECTOR.
+      return 0
+    fi
+    found="$suffix"
+  done
+  if [ -n "$found" ]; then
+    printf '%s' "$found"
+    return 0
+  fi
+  local config="${hook_dir}/.hookcfg"
+  if [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      connector="$(jq -r '.fail_modes | keys | if length == 1 then .[0] else empty end' "$config" 2>/dev/null || true)"
+    elif command -v python3 >/dev/null 2>&1; then
+      connector="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); k=list((d.get("fail_modes") or {}).keys()); print(k[0] if len(k)==1 else "")' "$config" 2>/dev/null || true)"
+    fi
+    case "$connector" in
+      ""|*[!a-z0-9_-]*) return 0 ;;
+      *) printf '%s' "$connector" ;;
+    esac
+  fi
+}
+
+defenseclaw_flat_hookcfg_value() {
+  local config="$1"
+  local wanted="$2"
+  local key value
+  [ -f "$config" ] && [ ! -L "$config" ] || return 1
+  while IFS='=' read -r key value; do
+    if [ "$key" = "$wanted" ]; then
+      printf '%s' "$value"
+      return 0
+    fi
+  done < "$config"
+  return 1
+}
+
+# Return the shared legacy token path or the connector-scoped token path named
+# by runtime state.  This does not search token files and never embeds one
+# connector's credential path into shared script bytes.
+defenseclaw_shared_hook_token_file() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  if [ -n "$connector" ] && [ -f "${hook_dir}/.hook-${connector}.token" ]; then
+    printf '%s/.hook-%s.token' "$hook_dir" "$connector"
+  else
+    printf '%s/.token' "$hook_dir"
+  fi
+}
+
+# Resolve the selected connector's fail mode from the connector-aware shared
+# runtime state.  An explicit process value still wins for non-managed
+# ephemeral shells; guardian-managed hooks trust only installer-owned state.
+# Malformed, ambiguous, or missing state fails closed.
+defenseclaw_shared_runtime_fail_mode() {
+  local hook_dir="$1"
+  local connector="${2:-}"
+  local mode="${DEFENSECLAW_FAIL_MODE:-}"
+  if [ "${DEFENSECLAW_MANAGED_HOOK:-0}" = "1" ]; then
+    mode=""
+  fi
+  local config="${hook_dir}/.hookcfg"
+  local flat_config="${hook_dir}/.hookcfg.legacy"
+  if [ -n "$connector" ]; then
+    flat_config="${hook_dir}/.hookcfg.${connector}"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ]; then
+    mode="$(defenseclaw_flat_hookcfg_value "$flat_config" DEFENSECLAW_FAIL_MODE 2>/dev/null || true)"
+  fi
+  if [ "$mode" != "open" ] && [ "$mode" != "closed" ] && [ -f "$config" ]; then
+    if command -v jq >/dev/null 2>&1; then
+      if [ -n "$connector" ]; then
+        mode="$(jq -r --arg connector "$connector" '.fail_modes[$connector] // empty' "$config" 2>/dev/null || true)"
+      else
+        mode="$(jq -r '.legacy_fail_mode // empty' "$config" 2>/dev/null || true)"
+      fi
+    elif command -v python3 >/dev/null 2>&1; then
+      mode="$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1], encoding="utf-8")); c=sys.argv[2]; print((d.get("fail_modes") or {}).get(c, "") if c else d.get("legacy_fail_mode", ""))' "$config" "$connector" 2>/dev/null || true)"
+    fi
+  fi
+  if [ "$mode" = "open" ]; then
+    printf open
+  else
+    printf closed
+  fi
 }
 
 # _defenseclaw_sweep_stale_hook_dirs removes orphaned hook-tmp.*
@@ -339,15 +486,61 @@ defenseclaw_json_string_field() {
   fi
 }
 
+# _dc_python3_usable returns 0 when python3 is on PATH AND can be safely
+# invoked. On stock macOS hosts without Xcode Command Line Tools,
+# /usr/bin/python3 exists as a launcher stub that pops the "install
+# command line developer tools" GUI dialog on first invocation and then
+# exits non-zero without executing the script — a bare `command -v
+# python3` check treats that stub as usable, and the resulting invocation
+# both harasses the operator with an installer dialog and returns an
+# empty body that fails the downstream hook (gateway sees a truncated
+# payload, responds HTTP 400, hook fails closed and blocks the user's
+# prompt). Skip the stub by verifying `xcode-select -p` succeeds when
+# python3 resolves under /usr/bin on Darwin; if CLT is not installed,
+# treat python3 as absent and fall through to the head(1) / string-only
+# paths.
+#
+# `xcode-select -p` itself is safe to run without CLT: it is a macOS
+# system binary (part of the base OS, not CLT) whose only side effect
+# is to print the currently selected developer directory or exit 2. The
+# GUI installer dialog is triggered by `xcode-select --install`, which
+# this helper never invokes.
+_dc_python3_usable() {
+  local _dc_p3 _dc_uname
+  _dc_p3="$(command -v python3 2>/dev/null || printf '')"
+  [ -n "$_dc_p3" ] || return 1
+  _dc_uname="$(uname -s 2>/dev/null || printf unknown)"
+  case "$_dc_uname" in
+    Darwin) : ;;
+    *) return 0 ;;
+  esac
+  case "$_dc_p3" in
+    /usr/bin/python3*)
+      # Any /usr/bin/python3* on macOS is a CLT-managed path; the base
+      # OS itself does not ship a working Python interpreter there.
+      # Confirm CLT is present before trusting the binary.
+      xcode-select -p >/dev/null 2>&1 || return 1
+      ;;
+  esac
+  return 0
+}
+
 # _dc_jq is a drop-in shim for jq covering the small subset of filters
 # used by DefenseClaw hook scripts.  When the real jq binary is present
 # (all Unix installs; some Windows installs) it is used unchanged.
 # When jq is absent the shim tries python3 (handles both string and
 # object fields such as claude_code_output), then falls back to
-# defenseclaw_json_string_field for string-only fields.  Object fields
-# (e.g. claude_code_output) return empty from the string-only fallback;
-# hook scripts handle empty output correctly (fall through to exit-2
-# block path).
+# defenseclaw_json_string_field for string-only fields. For object fields
+# (e.g. codex_output), a valid response where the field is absent still
+# produces the requested jq default. A present structured value cannot be
+# decoded by the string-only fallback and fails closed at the response layer.
+#
+# The python3 probe uses _dc_python3_usable, which refuses the stock
+# macOS /usr/bin/python3 CLT stub. Without that guard, `command -v
+# python3` returns success on a stock Mac, we invoke the stub, macOS
+# pops the "install command line developer tools" dialog, and the
+# subsequent gateway call fails with HTTP 400. See _dc_python3_usable
+# above for the full rationale.
 #
 # Supported filter forms (covers all patterns in DefenseClaw hooks):
 #   .field                    — raw value
@@ -380,7 +573,12 @@ _dc_jq() {
   # All values are passed via env to avoid shell quoting issues.
   # The script uses only double-quoted Python strings so it is safe
   # inside shell single quotes.
-  if command -v python3 >/dev/null 2>&1; then
+  #
+  # _dc_python3_usable (not a bare `command -v python3`) guards the probe
+  # so we never invoke the macOS CLT stub at /usr/bin/python3, which
+  # would trigger an "install command line developer tools" GUI dialog
+  # and return no output.
+  if _dc_python3_usable; then
     DCJQ_FILTER="$_dcjq_filter" DCJQ_RAW="$_dcjq_raw" DCJQ_COMPACT="$_dcjq_compact" \
     DCJQ_EXIT="$_dcjq_exit" \
       python3 -c \
@@ -450,7 +648,7 @@ else:
       ;;
   esac
   case "$_dcjq_field" in
-    action|reason|block_reason|decision|permissionDecision|permissionDecisionReason)
+    action|reason|block_reason|decision|permissionDecision|permissionDecisionReason|hook_event_name)
       _dcjq_json="$(cat)"
       if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
         printf '%s\n' "$_dcjq_value"
@@ -466,7 +664,21 @@ else:
       fi
       ;;
     *)
-      cat >/dev/null
+      _dcjq_json="$(cat)"
+      if _dcjq_value="$(defenseclaw_json_string_field "$_dcjq_json" "$_dcjq_field")"; then
+        # This fallback cannot validate an object field that is present as a
+        # string. Treat it as a schema error instead of emitting an attacker-
+        # controlled scalar where the hook expects structured JSON.
+        return 1
+      else
+        _dcjq_status=$?
+      fi
+      if [ "$_dcjq_status" -eq 1 ]; then
+        if [ "$_dcjq_default_kind" != "empty" ]; then
+          printf '%s\n' "$_dcjq_default"
+        fi
+        return 0
+      fi
       return 1
       ;;
   esac
@@ -522,17 +734,15 @@ defenseclaw_response_failure_reason() {
   esac
 }
 
-# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) for
-# guardian-installed managed hooks, or when an unmanaged operator explicitly
-# opts into strict availability via DEFENSECLAW_STRICT_AVAILABILITY=1. The
-# unmanaged default is to fail open on
-# transport failures (gateway down / network error / 5xx) regardless
-# of FAIL_MODE — a DefenseClaw outage must NEVER brick the user's
-# coding agent. FAIL_MODE still governs response-layer failures (4xx,
-# bad JSON, missing action) where the gateway answered but its answer
-# was wrong; those represent likely misconfiguration that the operator
-# should be told about loudly.
+# defenseclaw_should_fail_closed_on_unreachable returns 0 (true) when the
+# connector's effective fail mode is closed, for guardian-installed managed
+# hooks, or when strict availability is enabled. Fail mode therefore has one
+# consistent meaning across malformed responses, auth failures, and transport
+# failures instead of silently opening only the latter class.
 defenseclaw_should_fail_closed_on_unreachable() {
+  case "${FAIL_MODE:-open}" in
+    closed) return 0 ;;
+  esac
   case "${DEFENSECLAW_MANAGED_HOOK:-0}" in
     1|true|TRUE|yes|YES) return 0 ;;
   esac
@@ -562,7 +772,7 @@ defenseclaw_emit_unreachable_stderr() {
   local subject="${1:-tool}"
   local reason="${2:-unknown}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: gateway unreachable, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1): ${reason}" >&2
+    echo "defenseclaw: gateway unreachable, blocking ${subject} (fail mode closed): ${reason}" >&2
   else
     echo "defenseclaw: gateway unreachable, allowing ${subject}: ${reason}" >&2
   fi
@@ -575,19 +785,15 @@ defenseclaw_emit_unreachable_stderr() {
 # the historical behaviour was to exit 0 ("can't talk to gateway →
 # don't brick the agent"). That bypassed FAIL_MODE entirely.
 #
-# This helper preserves the historical default (allow-and-warn) but
-# routes the bypass through the same DEFENSECLAW_STRICT_AVAILABILITY
-# escape hatch as transport failures: an operator who explicitly opts
-# into strict availability gets fail-closed even on a missing-token
-# misconfiguration, AND every bypass — strict or not — is recorded in
-# hook-failures.jsonl so the audit log is honest about the missed
-# inspection.
+# This helper routes the bypass through the connector's FAIL_MODE and
+# the DEFENSECLAW_STRICT_AVAILABILITY force-closed override. Every bypass
+# is recorded in hook-failures.jsonl so the audit log is honest about the
+# missed inspection.
 #
 # Usage:
 #   defenseclaw_handle_missing_token CONNECTOR HOOK_NAME SUBJECT
 #
-# Exits 0 (allow) on the historical default path or 2 (block) when
-# strict availability is set. Never returns to the caller.
+# Exits 0 for fail-open or 2 for fail-closed. Never returns to the caller.
 defenseclaw_handle_missing_token() {
   local connector="${1:-unknown}"
   local hook_name="${2:-unknown}"
@@ -595,7 +801,7 @@ defenseclaw_handle_missing_token() {
   local reason="missing gateway token (.token absent and DEFENSECLAW_GATEWAY_TOKEN unset)"
   defenseclaw_log_hook_failure "$connector" "$hook_name" "$reason" transport "${FAIL_MODE:-open}"
   if defenseclaw_should_fail_closed_on_unreachable; then
-    echo "defenseclaw: ${reason}, blocking ${subject} (DEFENSECLAW_STRICT_AVAILABILITY=1)" >&2
+    echo "defenseclaw: ${reason}, blocking ${subject} (fail mode closed)" >&2
     exit 2
   fi
   exit 0
@@ -645,7 +851,15 @@ defenseclaw_read_stdin_capped() {
   # body instead of failing closed. python3 is the same interpreter the
   # _dc_jq shim already relies on, so requiring it here adds no new dep on
   # the hosts these hooks actually run on.
-  if command -v python3 >/dev/null 2>&1; then
+  #
+  # _dc_python3_usable (not a bare `command -v python3`) is the gate:
+  # stock macOS hosts without CLT resolve /usr/bin/python3 to a launcher
+  # stub that would trigger an OS installer dialog on first invocation
+  # and return no body at all — the hook would then post an empty payload
+  # to the gateway, get HTTP 400, and fail closed. Skipping the stub
+  # falls through to the head(1) tier which reads stdin correctly on
+  # stock macOS.
+  if _dc_python3_usable; then
     local _dc_body _dc_rc
     _dc_body="$(DCHOOK_CAP="$cap" python3 -c \
 'import sys,os
@@ -807,4 +1021,55 @@ defenseclaw_extract_trace_context() {
         response "${FAIL_MODE:-open}"
     fi
   fi
+}
+
+# defenseclaw_user_identity_args
+#
+# Emits curl arguments carrying the OS identity of the user this hook is
+# running as, one argument per line, in the same shape as
+# defenseclaw_extract_trace_context.
+#
+# Callers must read this with a `while IFS= read -r` loop rather than
+# `mapfile`. macOS ships bash 3.2, where mapfile does not exist, so a mapfile
+# reader leaves the argument array empty and the endpoint silently sends no
+# identity at all — on every stock macOS host, which is most of them.
+#
+# Identity has to be read here. These hooks reach the gateway over HTTP, and
+# under a managed install the gateway runs as a service account with its own
+# token and home directory; asking it who the user is would attribute every
+# event on the endpoint to that one service identity. Only the hook runs as
+# the real user.
+#
+# The gateway accepts these headers from loopback only, and treats them as
+# attribution evidence rather than an authenticated assertion: any local
+# process can reach the loopback listener and claim any value. Never use them
+# for an authorization decision.
+#
+# Both values are rejected unless they match a conservative character class.
+# A header value carrying CR or LF would let an account name append a second
+# header or a request line to every hook call this endpoint makes.
+#
+# Every failure path is silent and returns success: this is called from a
+# guardrail hook under errexit, where a nonzero return would convert a missing
+# telemetry field into a blocked or allowed tool call.
+defenseclaw_user_identity_args() {
+  command -v id >/dev/null 2>&1 || return 0
+
+  local uid name
+  uid="$(id -u 2>/dev/null)" || uid=""
+  case "$uid" in
+    '' | *[!0-9]*) ;;
+    *)
+      printf '%s\n' "-H"
+      printf '%s\n' "X-DefenseClaw-User-Id: $uid"
+      ;;
+  esac
+
+  name="$(id -un 2>/dev/null)" || name=""
+  case "$name" in
+    '' | *[!A-Za-z0-9._-]*) return 0 ;;
+  esac
+  printf '%s\n' "-H"
+  printf '%s\n' "X-DefenseClaw-User-Name: $name"
+  return 0
 }

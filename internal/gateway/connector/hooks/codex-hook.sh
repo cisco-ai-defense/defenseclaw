@@ -64,13 +64,55 @@ defenseclaw_harden_resources
 defenseclaw_harden_env
 
 # Fail mode governs response-layer failures (4xx, bad JSON, missing
-# action). Transport failures (gateway unreachable / 5xx) are handled
-# separately by fail_unreachable below — they ALWAYS allow unless the
-# operator has set DEFENSECLAW_STRICT_AVAILABILITY=1, because a
-# DefenseClaw outage must not brick the user's agent. Set BEFORE the
+# action) and transport failures (gateway unreachable / timeout / 5xx).
+# DEFENSECLAW_STRICT_AVAILABILITY=1 remains a force-closed override. Set BEFORE the
 # missing-token check so defenseclaw_handle_missing_token below has a
 # stable FAIL_MODE to log against.
 FAIL_MODE="${DEFENSECLAW_FAIL_MODE:-{{.FailMode}}}"
+
+# Setup binds each handler to one finite vendor event and hook contract. Keep
+# those values out of environment variables so the registered command remains
+# the single command-identity source of truth.
+BOUND_EVENT=
+BOUND_CONTRACT=
+
+fail_binding() {
+  local reason="$1"
+  defenseclaw_log_hook_failure codex codex-hook "$reason" response "$FAIL_MODE"
+  echo "defenseclaw: codex hook binding error: $reason" >&2
+  if [ "$FAIL_MODE" = "open" ]; then
+    exit 0
+  fi
+  exit 2
+}
+
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --event)
+      [ "$#" -ge 2 ] || fail_binding "missing value for --event"
+      [ -z "$BOUND_EVENT" ] || fail_binding "duplicate --event binding"
+      BOUND_EVENT="$2"
+      shift 2
+      ;;
+    --hook-contract)
+      [ "$#" -ge 2 ] || fail_binding "missing value for --hook-contract"
+      [ -z "$BOUND_CONTRACT" ] || fail_binding "duplicate --hook-contract binding"
+      BOUND_CONTRACT="$2"
+      shift 2
+      ;;
+    *)
+      fail_binding "unexpected registered command argument"
+      ;;
+  esac
+done
+
+case "${BOUND_CONTRACT}:${BOUND_EVENT}" in
+  codex-hooks-v1:SessionStart|codex-hooks-v1:UserPromptSubmit|codex-hooks-v1:PreToolUse|codex-hooks-v1:PermissionRequest|codex-hooks-v1:PostToolUse|codex-hooks-v1:Stop) ;;
+  codex-hooks-v2:SessionStart|codex-hooks-v2:UserPromptSubmit|codex-hooks-v2:PreToolUse|codex-hooks-v2:PermissionRequest|codex-hooks-v2:PostToolUse|codex-hooks-v2:PreCompact|codex-hooks-v2:PostCompact|codex-hooks-v2:Stop) ;;
+  codex-hooks-v3:SessionStart|codex-hooks-v3:UserPromptSubmit|codex-hooks-v3:PreToolUse|codex-hooks-v3:PermissionRequest|codex-hooks-v3:PostToolUse|codex-hooks-v3:SubagentStart|codex-hooks-v3:SubagentStop|codex-hooks-v3:PreCompact|codex-hooks-v3:PostCompact|codex-hooks-v3:Stop) ;;
+  codex-hooks-v4:SessionStart|codex-hooks-v4:UserPromptSubmit|codex-hooks-v4:PreToolUse|codex-hooks-v4:PermissionRequest|codex-hooks-v4:PostToolUse|codex-hooks-v4:SubagentStart|codex-hooks-v4:SubagentStop|codex-hooks-v4:PreCompact|codex-hooks-v4:PostCompact|codex-hooks-v4:Stop|codex-hooks-v4:SessionEnd) ;;
+  *) fail_binding "registered event is not part of the bound Codex hook contract" ;;
+esac
 
 # Bail early when neither the companion .token file nor the env var
 # carries a token: without one the gateway will reject every request
@@ -87,6 +129,10 @@ if [ ! -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   defenseclaw_handle_missing_token codex codex-hook "codex tool"
 fi
 
+# Drop inherited export attributes before these names receive private values.
+# A plain Bash assignment preserves the exported bit of an inherited variable,
+# which would otherwise copy the hook payload or bearer into curl's environment.
+unset PAYLOAD API_TOKEN CURL_CONFIG_TOKEN
 PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   echo "defenseclaw: codex hook refusing oversized payload" >&2
   if [ "$FAIL_MODE" = "closed" ]; then
@@ -95,6 +141,17 @@ PAYLOAD="$(defenseclaw_read_stdin_capped)" || {
   fi
   exit 0
 }
+
+PAYLOAD_EVENT="$(printf '%s' "$PAYLOAD" | _dc_jq -r '.hook_event_name // empty' 2>/dev/null)" || {
+  fail_binding "Codex hook stdin is not valid JSON"
+}
+if [ -z "$PAYLOAD_EVENT" ]; then
+  fail_binding "Codex hook stdin is missing hook_event_name"
+fi
+if [ "$PAYLOAD_EVENT" != "$BOUND_EVENT" ]; then
+  fail_binding "Codex hook stdin event does not match the registered event"
+fi
+
 API_ADDR="{{.APIAddr}}"
 
 # Source the token file written by defenseclaw setup (0o600, never baked
@@ -111,10 +168,14 @@ elif [ -f "${HOOK_DIR}/{{.TokenFile}}" ] && [ -z "${DEFENSECLAW_GATEWAY_TOKEN:-}
   . "${HOOK_DIR}/{{.TokenFile}}"
 fi
 API_TOKEN="${DEFENSECLAW_GATEWAY_TOKEN:-}"
+# The hook needs only its private shell-local copy from this point forward.
+# Drop the exported source before trace extraction or descriptor writers can
+# spawn child processes.
+unset DEFENSECLAW_GATEWAY_TOKEN
 
 # Transport-layer failure: gateway is unreachable, the connection was
 # refused, the request timed out, or the gateway answered with 5xx.
-# Always allow unless the operator opted into strict availability.
+# Follow FAIL_MODE; strict availability is an additional force-closed override.
 fail_unreachable() {
   defenseclaw_log_hook_failure codex codex-hook "$1" transport "$FAIL_MODE"
   defenseclaw_emit_unreachable_stderr "codex tool" "$1"
@@ -139,11 +200,6 @@ fail_response() {
   exit 2
 }
 
-AUTH_HEADER_ARGS=()
-if [ -n "${API_TOKEN}" ]; then
-  AUTH_HEADER_ARGS=(-H "Authorization: Bearer ${API_TOKEN}")
-fi
-
 # W3C trace propagation: mapfile fills
 # TRACE_HEADER_ARGS with a sequence of `-H "traceparent: …"` /
 # `-H "tracestate: …"` arguments; invalid env values are dropped
@@ -155,16 +211,76 @@ if command -v mapfile >/dev/null 2>&1; then
   mapfile -t TRACE_HEADER_ARGS < <(defenseclaw_extract_trace_context)
 fi
 
+# Per-user attribution: the gateway cannot read the real user's identity from
+# its own service-account process, so the hook reports it.
+# Read with a read loop rather than mapfile: macOS ships bash 3.2, which has
+# no mapfile, and there the array would stay empty and the endpoint would send
+# no identity at all.
+IDENTITY_HEADER_ARGS=()
+if declare -F defenseclaw_user_identity_args >/dev/null 2>&1; then
+  while IFS= read -r identity_header_arg; do
+    IDENTITY_HEADER_ARGS+=("$identity_header_arg")
+  done < <(defenseclaw_user_identity_args)
+fi
+
+HOOK_MAX_TIME=10
+if [ "$BOUND_EVENT" = "SessionEnd" ]; then
+  # Codex's host maximum is three seconds. Leave one second for response
+  # parsing and process teardown, matching the native launcher budget.
+  HOOK_MAX_TIME=2
+fi
+
+# Keep authentication and the hook event off the curl command line. Process
+# inspection is available to other same-user processes on supported hosts, so
+# passing either value as a literal argv entry discloses the gateway credential
+# and the potentially sensitive tool payload. curl reads both through inherited
+# descriptors instead; argv contains only the descriptor paths. The
+# descriptor-backed --config form works on curl releases older than 7.55.0,
+# unlike --header @file.
+AUTH_HEADER_ARGS=()
+AUTH_HEADER_FD_OPEN=0
+if [ -n "${API_TOKEN}" ]; then
+  # A bearer token is an HTTP field value, so CR/LF is never valid. Reject it
+  # before formatting curl configuration, then escape the two metacharacters
+  # recognized inside a quoted curl config value.
+  case "${API_TOKEN}" in
+    *$'\n'*|*$'\r'*) fail_response "invalid gateway token" ;;
+  esac
+  CURL_CONFIG_TOKEN="${API_TOKEN//\\/\\\\}"
+  CURL_CONFIG_TOKEN="${CURL_CONFIG_TOKEN//\"/\\\"}"
+  exec 8< <(printf '%s\n' "header = \"Authorization: Bearer ${CURL_CONFIG_TOKEN}\"")
+  AUTH_HEADER_FD_OPEN=1
+  AUTH_HEADER_ARGS=(--config "/dev/fd/8")
+fi
+
+# curl does not need the shell-local values once the private descriptors are
+# open. Clear them before spawning curl so no credential or payload is
+# inherited as process environment.
+exec 9< <(printf '%s' "${PAYLOAD}")
+API_TOKEN=
+PAYLOAD=
+CURL_CONFIG_TOKEN=
+unset API_TOKEN PAYLOAD CURL_CONFIG_TOKEN
+
+CURL_STATUS=0
 RESPONSE=$(curl -s -w "\n%{http_code}" -X POST "http://${API_ADDR}/api/v1/codex/hook" \
   -H "Content-Type: application/json" \
   -H "X-DefenseClaw-Client: codex-hook/1.0" \
+  -H "X-DefenseClaw-Hook-Event: ${BOUND_EVENT}" \
+  -H "X-DefenseClaw-Hook-Contract: ${BOUND_CONTRACT}" \
   "${AUTH_HEADER_ARGS[@]+"${AUTH_HEADER_ARGS[@]}"}" \
   "${TRACE_HEADER_ARGS[@]+"${TRACE_HEADER_ARGS[@]}"}" \
+  "${IDENTITY_HEADER_ARGS[@]+"${IDENTITY_HEADER_ARGS[@]}"}" \
   --connect-timeout 2 \
-  --max-time 10 \
-  -d "$PAYLOAD" 2>/dev/null) || {
+  --max-time "$HOOK_MAX_TIME" \
+  --data-binary "@/dev/fd/9" 2>/dev/null) || CURL_STATUS=$?
+exec 9<&-
+if [ "$AUTH_HEADER_FD_OPEN" = "1" ]; then
+  exec 8<&-
+fi
+if [ "$CURL_STATUS" -ne 0 ]; then
   fail_unreachable "gateway unreachable"
-}
+fi
 
 HTTP_CODE=$(echo "$RESPONSE" | tail -1)
 RESULT=$(echo "$RESPONSE" | sed '$d')
@@ -187,9 +303,13 @@ if [ -n "$OUTPUT" ] && [ "$OUTPUT" != "null" ]; then
   echo "$OUTPUT"
 fi
 
-ACTION=$(echo "$RESULT" | _dc_jq -r '.action // "allow"' 2>/dev/null) || {
+ACTION=$(echo "$RESULT" | _dc_jq -r '.action // empty' 2>/dev/null) || {
   fail_response "failed to parse action from response"
 }
+case "$ACTION" in
+  allow|block|confirm) ;;
+  *) fail_response "invalid or missing action in gateway response" ;;
+esac
 
 # Codex's hook protocol is strictly EITHER structured JSON on stdout
 # with exit 0 (Codex parses the decision from the JSON) OR exit 2

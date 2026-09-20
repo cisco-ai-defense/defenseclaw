@@ -31,8 +31,8 @@ import (
 //  3. guardrail.retain_judge_bodies = true (durable, via SetRetainJudgeBodies)
 //
 // A regression here would silently persist model-echoed PII into
-// gateway.jsonl, the OTel logs pipeline, and every configured audit
-// sink — which is exactly the failure mode the review called out.
+// canonical log destinations, including OTLP and local SQLite, which is the
+// failure mode this regression test protects against.
 
 const judgePayload = "The user prompt contains phone 555-123-4567 and email a@b.com"
 

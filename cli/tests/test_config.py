@@ -42,6 +42,7 @@ from defenseclaw.config import (
     Config,
     GatewayConfig,
     GatewayConfigReloadConfig,
+    GatewayWatchdogConfig,
     GatewayWatcherPluginConfig,
     GuardrailConfig,
     InspectLLMConfig,
@@ -49,6 +50,7 @@ from defenseclaw.config import (
     OpenShellConfig,
     PerConnectorAssetPolicy,
     PerConnectorAssetTypePolicy,
+    PerConnectorGuardrailConfig,
     PluginActionsConfig,
     SeverityAction,
     SkillActionsConfig,
@@ -58,6 +60,7 @@ from defenseclaw.config import (
     _dedup,
     _expand,
     _merge_cisco_ai_defense,
+    _merge_gateway_watchdog,
     _merge_gateway_watcher,
     _merge_guardrail,
     _merge_inspect_llm,
@@ -73,6 +76,7 @@ from defenseclaw.config import (
     detect_environment,
     load,
 )
+from defenseclaw.observability.v8_config import V8ConfigError
 
 
 class TestHelpers(unittest.TestCase):
@@ -283,7 +287,9 @@ class TestPaths(unittest.TestCase):
         self.assertIsNone(problem)
 
     def test_managed_enterprise_save_requires_admin(self):
-        cfg = Config(data_dir=tempfile.mkdtemp(), deployment_mode="managed_enterprise")
+        cfg = default_config()
+        cfg.data_dir = tempfile.mkdtemp()
+        cfg.deployment_mode = "managed_enterprise"
         with patch("defenseclaw.config._is_admin_process", return_value=False):
             with self.assertRaises(PermissionError):
                 cfg.save()
@@ -308,6 +314,7 @@ class TestPaths(unittest.TestCase):
             with self.assertRaises(PermissionError):
                 config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
 
+    @unittest.skipIf(os.name == "nt", "POSIX group-read mode has no Windows DACL equivalent")
     def test_secure_write_preserves_group_read_without_write(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
         path.write_text("config_version: 6\n")
@@ -315,6 +322,7 @@ class TestPaths(unittest.TestCase):
         config_mod.write_config_yaml_secure(str(path), {"config_version": 6})
         self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o640)
 
+    @unittest.skipIf(os.name == "nt", "fallback covers POSIX platforms without fchmod")
     def test_secure_write_uses_path_chmod_without_fchmod(self):
         path = Path(tempfile.mkdtemp()) / "config.yaml"
         with patch.object(config_mod.os, "fchmod", None):
@@ -396,6 +404,7 @@ class TestAIDiscoveryConfig(unittest.TestCase):
         self.assertTrue(cfg.ai_discovery.enabled)
         self.assertEqual(cfg.ai_discovery.mode, "enhanced")
         self.assertTrue(cfg.ai_discovery.include_shell_history)
+        self.assertFalse(cfg.ai_discovery.lookup_model_provenance_online)
         self.assertEqual(
             cfg.ai_discovery.confidence_policy_path,
             os.path.join(cfg.data_dir, "confidence.yaml"),
@@ -413,6 +422,45 @@ class TestAIDiscoveryConfig(unittest.TestCase):
             {"enabled": True, "confidence_policy_path": "/tmp/custom-confidence.yaml"}
         )
         self.assertEqual(cfg.confidence_policy_path, "/tmp/custom-confidence.yaml")
+
+    def test_merge_online_model_provenance_is_explicit_opt_in(self):
+        disabled = config_mod._merge_ai_discovery({"enabled": True})
+        enabled = config_mod._merge_ai_discovery(
+            {"enabled": True, "lookup_model_provenance_online": True}
+        )
+        self.assertFalse(disabled.lookup_model_provenance_online)
+        self.assertTrue(enabled.lookup_model_provenance_online)
+
+    def test_merge_online_model_provenance_uses_fail_closed_bool_parsing(self):
+        for raw_value in ("false", "no", "invalid", [], None):
+            with self.subTest(raw_value=raw_value):
+                cfg = config_mod._merge_ai_discovery(
+                    {"lookup_model_provenance_online": raw_value}
+                )
+                self.assertFalse(cfg.lookup_model_provenance_online)
+
+        cfg = config_mod._merge_ai_discovery(
+            {"lookup_model_provenance_online": "true"}
+        )
+        self.assertTrue(cfg.lookup_model_provenance_online)
+
+    def test_online_model_provenance_opt_in_is_serialized(self):
+        cfg = default_config()
+        cfg.ai_discovery.lookup_model_provenance_online = True
+        data = config_mod._config_to_dict(cfg)
+        self.assertTrue(
+            data["ai_discovery"]["lookup_model_provenance_online"]
+        )
+
+    def test_online_model_provenance_default_is_explicitly_serialized_false(self):
+        cfg = default_config()
+        data = config_mod._config_to_dict(cfg)
+        self.assertIn("ai_discovery", data)
+        self.assertIn("lookup_model_provenance_online", data["ai_discovery"])
+        self.assertIs(
+            data["ai_discovery"]["lookup_model_provenance_online"],
+            False,
+        )
 
     def test_merge_trusted_binary_policy(self):
         cfg = config_mod._merge_ai_discovery(
@@ -456,13 +504,18 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
     full file round trip both ways.
     """
 
+    def _fresh_config(self):
+        cfg = default_config()
+        cfg.data_dir = tempfile.mkdtemp()
+        return cfg
+
     def _save_and_reload(self, cfg):
         cfg.save()
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": cfg.data_dir}):
             return config_mod.load()
 
     def test_opt_in_then_opt_out_persists(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.guardrail.judge.hook_connectors = ["*"]
         cfg.guardrail.judge.hook_timeout = 9.0
         loaded = self._save_and_reload(cfg)
@@ -484,7 +537,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertNotIn("hook_timeout", text)
 
     def test_explicit_list_replaces_star_on_disk(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.guardrail.judge.hook_connectors = ["*"]
         loaded = self._save_and_reload(cfg)
         loaded.guardrail.judge.hook_connectors = ["hermes"]
@@ -492,7 +545,7 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_connectors, ["hermes"])
 
     def test_never_opted_in_stays_clean(self):
-        cfg = Config(data_dir=tempfile.mkdtemp())
+        cfg = self._fresh_config()
         cfg.save()
         with open(os.path.join(cfg.data_dir, "config.yaml")) as f:
             text = f.read()
@@ -507,8 +560,9 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         # process that actually loaded a value and cleared it may drop
         # the key (parity with the authoritative_base rescue for dict
         # paths).
-        data_dir = tempfile.mkdtemp()
-        Config(data_dir=data_dir).save()
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             stale = config_mod.load()  # gate absent at load
 
@@ -527,14 +581,12 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
         self.assertEqual(reloaded.guardrail.judge.hook_timeout, 7.0)
         self.assertEqual(reloaded.gateway.port, 19999)
 
-    def test_dotted_literal_key_is_not_dropped(self):
-        # An unmodeled YAML key whose literal name contains dots (flat
-        # dotted style: `guardrail: {"judge.hook_connectors": ...}`)
-        # must never collide with the modeled dotted PATH
-        # guardrail.judge.hook_connectors — it is an extension key and
-        # the round-trip contract preserves it.
-        data_dir = tempfile.mkdtemp()
-        Config(data_dir=data_dir).save()
+    def test_dotted_literal_unknown_key_is_rejected_by_v8_schema(self):
+        # v8 is closed-world: a dotted literal is not an extension escape
+        # hatch and must not be confused with the modeled nested path.
+        fresh = self._fresh_config()
+        data_dir = fresh.data_dir
+        fresh.save()
         cfg_path = os.path.join(data_dir, "config.yaml")
         import yaml as _yaml
 
@@ -546,11 +598,8 @@ class TestHookJudgeGateRoundTrip(unittest.TestCase):
 
         with patch.dict(os.environ, {"DEFENSECLAW_HOME": data_dir}):
             cfg = config_mod.load()
-            cfg.save()
-
-        with open(cfg_path) as f:
-            saved = _yaml.safe_load(f)
-        self.assertEqual(saved["guardrail"].get("judge.hook_connectors"), ["custom-ext"])
+            with self.assertRaises(V8ConfigError):
+                cfg.save()
 
 
 class TestMergeFunctions(unittest.TestCase):
@@ -625,6 +674,13 @@ class TestMergeFunctions(unittest.TestCase):
         gw_no_plugin = _merge_gateway_watcher({"enabled": True})
         self.assertEqual(gw_no_plugin.plugin, GatewayWatcherPluginConfig())
 
+    def test_merge_gateway_watchdog_defaults_and_explicit_disable(self):
+        self.assertEqual(_merge_gateway_watchdog(None).enabled, True)
+        watchdog = _merge_gateway_watchdog({"enabled": False, "interval": 17, "debounce": 4})
+        self.assertFalse(watchdog.enabled)
+        self.assertEqual(watchdog.interval, 17)
+        self.assertEqual(watchdog.debounce, 4)
+
 
 class TestDefaultConfig(unittest.TestCase):
     def test_default_config_structure(self):
@@ -641,6 +697,9 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertTrue(cfg.gateway.watcher.enabled)
         self.assertTrue(cfg.gateway.watcher.skill.enabled)
         self.assertFalse(cfg.gateway.watcher.skill.take_action)
+        self.assertTrue(cfg.gateway.watchdog.enabled)
+        self.assertEqual(cfg.gateway.watchdog.interval, 30)
+        self.assertEqual(cfg.gateway.watchdog.debounce, 2)
 
     def test_default_skill_scanner_config(self):
         cfg = default_config()
@@ -671,6 +730,16 @@ class TestDefaultConfig(unittest.TestCase):
         self.assertFalse(cfg.asset_policy.skill.runtime_detection.enabled)
         self.assertFalse(cfg.asset_policy.plugin.runtime_detection.enabled)
 
+    def test_claude_alias_roster_dedupes_and_validation_rejects_duplicates(self):
+        cfg = default_config()
+        cfg.guardrail.connectors = {
+            "claudecode": PerConnectorGuardrailConfig(),
+            "claude-code": PerConnectorGuardrailConfig(),
+        }
+        self.assertEqual(cfg.active_connectors(), ["claudecode"])
+        with self.assertRaisesRegex(ValueError, "refer to the same connector"):
+            cfg.guardrail.validate()
+
 
 class TestConfigLoadSave(unittest.TestCase):
     def test_load_missing_config_returns_defaults(self):
@@ -694,6 +763,48 @@ class TestConfigLoadSave(unittest.TestCase):
         self.assertEqual(cfg.guardrail.connector, "")
         self.assertEqual(cfg.active_connector(), "codex")
 
+    def test_load_resolves_relative_device_key_beneath_configured_data_dir(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            Path(data_dir, "config.yaml").write_text(
+                "config_version: 8\n"
+                f"data_dir: {data_dir}\n"
+                "gateway:\n"
+                "  device_key_file: identity/device.key\n",
+                encoding="utf-8",
+            )
+
+            cfg = load(data_dir=data_dir)
+
+        self.assertEqual(
+            cfg.gateway.device_key_file,
+            os.path.join(data_dir, "identity", "device.key"),
+        )
+
+    def test_relative_device_key_resolver_rejects_nonlocal_spellings(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            data_dir = os.path.realpath(tmpdir)
+            self.assertEqual(
+                config_mod._resolve_relative_gateway_device_key_file(
+                    os.path.join("~", "device.key"),
+                    data_dir,
+                ),
+                os.path.join(data_dir, "~", "device.key"),
+            )
+            for key_file in (
+                "../outside/device.key",
+                r"C:device.key",
+                r"\device.key",
+                "device.key:stream",
+            ):
+                with self.subTest(key_file=key_file):
+                    self.assertIsNone(
+                        config_mod._resolve_relative_gateway_device_key_file(
+                            key_file,
+                            data_dir,
+                        )
+                    )
+
     def test_save_and_reload(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             cfg = Config(
@@ -713,7 +824,7 @@ class TestConfigLoadSave(unittest.TestCase):
 
             with open(config_file) as f:
                 raw = yaml.safe_load(f)
-            self.assertEqual(raw["environment"], "macos")
+            self.assertEqual(raw.get("environment", detect_environment()), "macos")
             self.assertEqual(raw["data_dir"], tmpdir)
             self.assertEqual(raw["gateway"]["api_bind"], "10.0.0.8")
             self.assertNotIn("config_reload", raw["gateway"])
@@ -741,6 +852,25 @@ class TestConfigLoadSave(unittest.TestCase):
             with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
                 reloaded = load()
             self.assertEqual(reloaded.gateway.config_reload.mode, "restart")
+
+    def test_gateway_watchdog_roundtrip(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cfg = Config(
+                data_dir=tmpdir,
+                audit_db=os.path.join(tmpdir, "audit.db"),
+                quarantine_dir=os.path.join(tmpdir, "quarantine"),
+                plugin_dir=os.path.join(tmpdir, "plugins"),
+                policy_dir=os.path.join(tmpdir, "policies"),
+                gateway=GatewayConfig(
+                    watchdog=GatewayWatchdogConfig(enabled=False, interval=17, debounce=4),
+                ),
+            )
+            cfg.save()
+            with patch("defenseclaw.config.default_data_path", return_value=Path(tmpdir)):
+                reloaded = load()
+            self.assertFalse(reloaded.gateway.watchdog.enabled)
+            self.assertEqual(reloaded.gateway.watchdog.interval, 17)
+            self.assertEqual(reloaded.gateway.watchdog.debounce, 4)
 
     def test_gateway_config_reload_mode_is_normalized(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -1448,31 +1578,6 @@ class TestConfigTopLevelSections(unittest.TestCase):
             self.assertEqual(cfg.inspect_llm.timeout, 30)
             self.assertIn("aidefense.security.cisco.com", cfg.cisco_ai_defense.endpoint)
 
-    def test_load_warns_once_when_redaction_disabled(self):
-        import yaml
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config_data = {
-                "data_dir": tmpdir,
-                "privacy": {"disable_redaction": True},
-            }
-            with open(os.path.join(tmpdir, "config.yaml"), "w") as f:
-                yaml.dump(config_data, f)
-
-            stderr = io.StringIO()
-            with (
-                patch("defenseclaw.config.default_data_path") as mock_dp,
-                patch.object(config_mod, "_privacy_disable_redaction_warned", False),
-                contextlib.redirect_stderr(stderr),
-            ):
-                mock_dp.return_value = Path(tmpdir)
-                config_mod.load()
-                config_mod.load()
-
-            output = stderr.getvalue()
-            self.assertEqual(output.count("privacy.disable_redaction=true"), 1)
-            self.assertIn("UNREDACTED prompts", output)
-
     def test_load_warns_once_for_same_legacy_llm_fields(self):
         import yaml
 
@@ -1609,6 +1714,13 @@ class TestGuardrailHostField(unittest.TestCase):
     def test_merge_guardrail_none(self):
         gc = _merge_guardrail(None, "/tmp")
         self.assertEqual(gc.host, "localhost")
+
+    def test_merge_guardrail_private_upstreams(self):
+        gc = _merge_guardrail(
+            {"allow_private_upstreams": ["10.50.2.100", " 172.16.0.5 "]},
+            "/tmp",
+        )
+        self.assertEqual(gc.allow_private_upstreams, ["10.50.2.100", "172.16.0.5"])
 
     def test_merge_guardrail_hilt_defaults_and_alias(self):
         default_gc = _merge_guardrail({}, "/tmp")

@@ -42,15 +42,31 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 			Availability:  pb.StatsAvailability_STATS_AVAILABILITY_ERROR,
 		}, err
 	}
+	// Counter-presence policy under proto3 `optional`:
+	//
+	//   TotalScans, ActiveAlerts — ALWAYS present, even at zero.
+	//   AVC's UI treats these as the two primary KPI tiles and needs to
+	//   render "0" on a fresh install; leaving them absent would force
+	//   an em-dash / hidden state that miscommunicates "unsupported"
+	//   for a counter that is actually zero. Use alwaysU64Ptr.
+	//
+	//   BlockedSkills, AllowedSkills, BlockedMcpServers, AllowedMcpServers
+	//   — omitted when zero (nonZeroU64Ptr). These feed secondary
+	//   drill-down views where "absent" is a useful signal ("this
+	//   endpoint hasn't observed any skill / MCP activity yet"). Absent
+	//   also lets AVC hide the corresponding tile until real data lands.
+	//
+	// See the doc comment on StatsSnapshot in secureclient.proto for
+	// the wire contract this policy composes with.
 	return &pb.StatsSnapshot{
 		SchemaVersion:     schemaVersion,
 		Availability:      pb.StatsAvailability_STATS_AVAILABILITY_AVAILABLE,
-		TotalScans:        uint64(clampNonNeg(c.TotalScans)),
-		ActiveAlerts:      uint64(clampNonNeg(c.Alerts)),
-		BlockedSkills:     uint64(clampNonNeg(c.BlockedSkills)),
-		AllowedSkills:     uint64(clampNonNeg(c.AllowedSkills)),
-		BlockedMcpServers: uint64(clampNonNeg(c.BlockedMCPs)),
-		AllowedMcpServers: uint64(clampNonNeg(c.AllowedMCPs)),
+		TotalScans:        alwaysU64Ptr(c.TotalScans),
+		ActiveAlerts:      alwaysU64Ptr(c.Alerts),
+		BlockedSkills:     nonZeroU64Ptr(c.BlockedSkills),
+		AllowedSkills:     nonZeroU64Ptr(c.AllowedSkills),
+		BlockedMcpServers: nonZeroU64Ptr(c.BlockedMCPs),
+		AllowedMcpServers: nonZeroU64Ptr(c.AllowedMCPs),
 	}, nil
 }
 
@@ -60,16 +76,23 @@ func snapshotStats(src statsSource) (*pb.StatsSnapshot, error) {
 // on a fresh install produces zero counters in both the AVAILABLE
 // and ERROR snapshots; only the enum transition tells the consumer
 // "we lost our stats source" and it must be surfaced as an update.
+//
+// GetX() returns 0 for both nil and *x=0, so absent-vs-present-zero
+// collapses to "equal" — the intended semantics under the new proto3
+// `optional` contract (presence signals supported/unsupported, value
+// signals the count; the availability enum signals reachability). Do
+// NOT switch to raw pointer comparison; a nil ↔ *0 flip is not a
+// change from the consumer's perspective.
 func statsChanged(a, b *pb.StatsSnapshot) bool {
 	if a == nil || b == nil {
 		return a != b
 	}
-	return a.TotalScans != b.TotalScans ||
-		a.ActiveAlerts != b.ActiveAlerts ||
-		a.BlockedSkills != b.BlockedSkills ||
-		a.AllowedSkills != b.AllowedSkills ||
-		a.BlockedMcpServers != b.BlockedMcpServers ||
-		a.AllowedMcpServers != b.AllowedMcpServers ||
+	return a.GetTotalScans() != b.GetTotalScans() ||
+		a.GetActiveAlerts() != b.GetActiveAlerts() ||
+		a.GetBlockedSkills() != b.GetBlockedSkills() ||
+		a.GetAllowedSkills() != b.GetAllowedSkills() ||
+		a.GetBlockedMcpServers() != b.GetBlockedMcpServers() ||
+		a.GetAllowedMcpServers() != b.GetAllowedMcpServers() ||
 		a.Availability != b.Availability
 }
 
@@ -81,4 +104,30 @@ func clampNonNeg(n int) int {
 		return 0
 	}
 	return n
+}
+
+// nonZeroU64Ptr clamps a signed count to non-negative and returns a
+// pointer only when the result is strictly positive. Nil signals
+// "counter absent" on the wire (proto3 optional); a positive value
+// is present on the wire. Used for the secondary counters
+// (blocked/allowed skills + MCP servers) where consumers benefit
+// from an explicit "not yet observed" absent state.
+func nonZeroU64Ptr(n int) *uint64 {
+	v := clampNonNeg(n)
+	if v == 0 {
+		return nil
+	}
+	u := uint64(v)
+	return &u
+}
+
+// alwaysU64Ptr clamps a signed count to non-negative and returns a
+// pointer that is ALWAYS present, even at zero. Used for TotalScans
+// and ActiveAlerts, which back AVC's primary KPI tiles — those tiles
+// must render "0" on a fresh install rather than the em-dash /
+// hidden state that absent implies. Every other counter should use
+// nonZeroU64Ptr instead.
+func alwaysU64Ptr(n int) *uint64 {
+	u := uint64(clampNonNeg(n))
+	return &u
 }

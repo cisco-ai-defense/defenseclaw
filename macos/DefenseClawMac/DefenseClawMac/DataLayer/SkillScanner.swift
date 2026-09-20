@@ -23,6 +23,14 @@
 
 import Foundation
 
+private func codexHomePath() -> String {
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    let configured = ProcessInfo.processInfo.environment["CODEX_HOME"]?
+        .trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    if configured.isEmpty { return home + "/.codex" }
+    return NSString(string: configured).expandingTildeInPath
+}
+
 enum SkillScanner {
     /// Home-relative skill directories per connector (connector_paths.skill_dirs).
     /// Workspace-relative variants are omitted — the app has no project cwd.
@@ -31,18 +39,26 @@ enum SkillScanner {
         func p(_ parts: String...) -> String { ([home] + parts).joined(separator: "/") }
         switch connector.lowercased().replacingOccurrences(of: "-", with: "") {
         case "claudecode": return [p(".claude", "skills")]
-        case "codex": return [p(".codex", "skills")]
+        case "codex": return [p(".agents", "skills"), codexHomePath() + "/skills"]
         case "zeptoclaw": return [p(".zeptoclaw", "skills")]
         case "hermes": return [p(".hermes", "skills")]
-        case "cursor": return [p(".cursor", "skills"), p(".agents", "skills")]
-        case "geminicli": return [p(".gemini", "skills")]
+        case "cursor":
+            return [p(".cursor", "skills"), p(".agents", "skills"),
+                    p(".claude", "skills"), p(".codex", "skills")]
+        case "devin": return [p(".config", "devin", "skills"), p(".agents", "skills")]
         case "copilot": return [p(".copilot", "skills")]
         case "openhands":
             return [p(".agents", "skills"), p(".openhands", "skills"),
                     p(".openhands", "microagents"),
                     p(".openhands", "skills", "installed")]
         case "openclaw": return [p(".openclaw", "workspace", "skills")]
-        default: return [] // windsurf, antigravity: no skills surface
+        case "antigravity":
+            return [p(".gemini", "config", "skills"),
+                    p(".gemini", "antigravity-cli", "skills")]
+        case "amp":
+            return [p(".config", "agents", "skills"), p(".agents", "skills"),
+                    p(".config", "amp", "skills"), p(".claude", "skills")]
+        default: return []
         }
     }
 
@@ -60,14 +76,46 @@ enum SkillScanner {
                 guard fm.fileExists(atPath: dir, isDirectory: &isDir), isDir.boolValue,
                       let entries = try? fm.contentsOfDirectory(atPath: dir)
                 else { continue }
-                for entry in entries.sorted() {
-                    // Parity with skill_list.py: dot-directories (e.g. .system)
-                    // are listed too; only the openhands "installed" container
-                    // is special-cased upstream, which we don't scan here.
+                let orderedEntries = entries.sorted { left, right in
+                    if left == ".system" { return false }
+                    if right == ".system" { return true }
+                    return left < right
+                }
+                for entry in orderedEntries {
                     let full = dir + "/" + entry
-                    guard fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue,
-                          seen.insert(entry).inserted
+                    guard fm.fileExists(atPath: full, isDirectory: &isDir), isDir.boolValue
                     else { continue }
+                    let isCodexSystemContainer = connector.lowercased()
+                        .replacingOccurrences(of: "-", with: "") == "codex"
+                        && entry == ".system"
+                    let isBundledCodexSystem = isCodexSystemContainer
+                        && URL(fileURLWithPath: dir).standardizedFileURL.path
+                            == URL(fileURLWithPath: codexHomePath() + "/skills")
+                                .standardizedFileURL.path
+                    if isCodexSystemContainer {
+                        guard let children = try? fm.contentsOfDirectory(atPath: full) else { continue }
+                        for child in children.sorted() {
+                            let childPath = full + "/" + child
+                            guard fm.fileExists(atPath: childPath, isDirectory: &isDir),
+                                  isDir.boolValue,
+                                  isEligible(at: childPath),
+                                  seen.insert(child).inserted
+                            else { continue }
+                            items.append(SkillItem(
+                                key: "\(connector)/\(child)",
+                                name: child,
+                                version: "—",
+                                source: full,
+                                enabled: true,
+                                skillDescription: readDescription(at: childPath),
+                                connector: connector,
+                                fromFilesystem: true,
+                                bundled: isBundledCodexSystem
+                            ))
+                        }
+                        continue
+                    }
+                    guard seen.insert(entry).inserted else { continue }
                     items.append(SkillItem(
                         key: "\(connector)/\(entry)",
                         name: entry,
@@ -157,25 +205,42 @@ enum MCPScanner {
         case "claudecode":
             return [(p(".claude", "settings.json"), .settingsJSON([["mcpServers"]]))]
         case "codex":
-            return [(p(".codex", "config.toml"), .codexTOML)]
+            return [(codexHomePath() + "/config.toml", .codexTOML)]
         case "zeptoclaw":
             return [(p(".zeptoclaw", "config.json"), .settingsJSON([["mcp", "servers"], ["mcpServers"]]))]
         case "hermes":
             return [(p(".hermes", "config.yaml"), .yaml([["mcp", "servers"], ["mcpServers"]]))]
         case "cursor":
             return [(p(".cursor", "mcp.json"), .dotMCPJSON)]
-        case "windsurf":
-            return [(p(".codeium", "windsurf", "mcp_config.json"), .dotMCPJSON)]
-        case "geminicli":
-            return [(p(".gemini", "settings.json"), .settingsJSON([["mcpServers"]]))]
+        case "devin":
+            return [
+                (p(".config", "devin", "mcp_config.json"), .dotMCPJSON),
+                // Legacy MCP read compatibility only; writes target mcp_config.json.
+                (p(".config", "devin", "config.json"), .dotMCPJSON),
+            ]
         case "copilot":
             return [(p(".copilot", "mcp-config.json"), .dotMCPJSON)]
         case "openhands":
             return [(p(".openhands", "mcp.json"), .dotMCPJSON)]
         case "openclaw":
             return [(p(".openclaw", "openclaw.json"), .settingsJSON([["mcp", "servers"], ["mcpServers"]]))]
+        case "antigravity":
+            return [(p(".gemini", "config", "mcp_config.json"), .settingsJSON([["mcpServers"]]))]
+        case "opencode":
+            return [
+                (p(".config", "opencode", "config.json"), .settingsJSON([["mcp"]])),
+                (p(".config", "opencode", "opencode.json"), .settingsJSON([["mcp"]])),
+                (p(".config", "opencode", "opencode.jsonc"), .settingsJSON([["mcp"]])),
+                (p(".opencode", "opencode.json"), .settingsJSON([["mcp"]])),
+                (p(".opencode", "opencode.jsonc"), .settingsJSON([["mcp"]])),
+            ]
+        case "amp":
+            return [
+                (p(".config", "amp", "settings.json"), .settingsJSON([["amp.mcpServers"], ["mcpServers"]])),
+                (p(".config", "amp", "settings.jsonc"), .settingsJSON([["amp.mcpServers"], ["mcpServers"]])),
+            ]
         default:
-            return [] // antigravity: no documented MCP surface
+            return []
         }
     }
 
@@ -206,6 +271,12 @@ enum MCPScanner {
                     let endpoint = url.isEmpty
                         ? ([command] + args).filter { !$0.isEmpty }.joined(separator: " ")
                         : url
+                    let bundled = isBundledCodexMCP(
+                        connector: connector,
+                        source: source.path,
+                        name: name,
+                        config: cfg
+                    )
                     items.append(MCPItem(
                         name: name,
                         transport: transport,
@@ -214,12 +285,29 @@ enum MCPScanner {
                         enabled: true,
                         source: source.path,
                         connector: connector,
-                        fromFilesystem: true
+                        fromFilesystem: true,
+                        bundled: bundled
                     ))
                 }
             }
         }
         return (items, checked)
+    }
+
+    private static func isBundledCodexMCP(
+        connector: String,
+        source: String,
+        name: String,
+        config: [String: Any]
+    ) -> Bool {
+        guard connector.lowercased().replacingOccurrences(of: "-", with: "") == "codex",
+              name == "openaiDeveloperDocs",
+              URL(fileURLWithPath: source).standardizedFileURL.path
+                == URL(fileURLWithPath: codexHomePath() + "/config.toml").standardizedFileURL.path,
+              config.count == 1,
+              config["url"] as? String == "https://developers.openai.com/mcp"
+        else { return false }
+        return true
     }
 
     /// JSON registries: try each key path (empty path = whole document is the
@@ -266,6 +354,10 @@ enum MCPScanner {
                     // [mcp_servers.<name>.env] etc. are sub-tables of a server,
                     // not servers themselves — tomllib nests these upstream.
                     if name.contains(".") {
+                        let parent = String(name.split(separator: ".", maxSplits: 1)[0])
+                        if servers[parent] != nil {
+                            servers[parent]?["__has_nested_table"] = true
+                        }
                         current = nil
                     } else {
                         current = name
@@ -288,6 +380,11 @@ enum MCPScanner {
                 servers[current]?[key] = parts.filter { !$0.isEmpty }
             } else if rawValue.hasPrefix("\"") || rawValue.hasPrefix("'") {
                 servers[current]?[key] = rawValue.trimmingCharacters(in: CharacterSet(charactersIn: "\"'"))
+            } else {
+                // Retain unsupported/inline fields as provenance evidence.
+                // The scanner need not interpret them, but their presence must
+                // prevent a modified user table from inheriting bundled status.
+                servers[current]?[key] = rawValue
             }
         }
         return servers
@@ -330,9 +427,8 @@ enum PluginScanner {
         case "codex": return [p(".codex", "plugins"), p(".codex", "plugins", "cache")]
         case "zeptoclaw": return [p(".zeptoclaw", "plugins"), p(".zeptoclaw", "plugins", "cache")]
         case "hermes": return [p(".hermes", "plugins")]
-        case "geminicli": return [p(".gemini", "extensions")]
         case "openclaw": return [p(".openclaw", "extensions")]
-        default: return [] // cursor, windsurf, copilot, openhands, antigravity: no plugin surface
+        default: return [] // cursor, devin (closed beta), copilot, openhands, antigravity, deprecated Gemini CLI
         }
     }
 

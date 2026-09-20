@@ -13,8 +13,7 @@ import (
 
 // TestAgentRegistry_SidecarStable pins the core invariant: the
 // sidecar instance id is minted once at construction and stable for
-// the registry's lifetime. Everything else in the v7 observability
-// contract depends on this.
+// the registry's lifetime. Runtime correlation depends on this.
 func TestAgentRegistry_SidecarStable(t *testing.T) {
 	r := NewAgentRegistry("agent-prod", "Prod Agent")
 
@@ -104,13 +103,11 @@ func TestAgentRegistry_ResolveShape(t *testing.T) {
 	}
 }
 
-// TestAgentRegistry_ResolveSessionScopedAcrossAgents pins the v7
-// observability contract: agent_instance_id is session-scoped
-// ("Per conversation" per docs/OBSERVABILITY-CONTRACT.md), so two
-// requests in the same session MUST resolve to the same instance
-// id regardless of which logical agent id they carry (header
-// present vs. absent, header A vs. header B). Otherwise SIEM
-// "all events in this conversation" groupings split.
+// TestAgentRegistry_ResolveSessionScopedAcrossAgents pins the
+// session-scoped identity invariant: two requests in the same session
+// MUST resolve to the same instance id regardless of which logical agent
+// id they carry (header present vs. absent, header A vs. header B).
+// Otherwise SIEM "all events in this conversation" groupings split.
 func TestAgentRegistry_ResolveSessionScopedAcrossAgents(t *testing.T) {
 	r := NewAgentRegistry("configured-agent", "Configured")
 	ctx := context.Background()

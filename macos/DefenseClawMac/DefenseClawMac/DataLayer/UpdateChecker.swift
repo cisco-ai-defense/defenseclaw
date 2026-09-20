@@ -34,6 +34,32 @@ struct ReleaseInfo: Sendable, Equatable {
     var notes: String
 }
 
+struct RuntimeInstallerInfo: Sendable, Equatable {
+    var tag: String
+    var assetURL: URL
+    var assetSHA256: String
+    var releaseURL: URL
+
+    var localFileName: String {
+        "defenseclaw-install-\(tag).sh"
+    }
+
+    var downloadCommand: String {
+        let destination = "$HOME/Downloads/\(localFileName)"
+        let temporary = destination + ".download"
+        return "tmp=\"\(temporary)\"; dest=\"\(destination)\"; /usr/bin/curl -fL --proto '=https' --tlsv1.2 --output \"$tmp\" '\(assetURL.absoluteString)' && actual=\"$(/usr/bin/shasum -a 256 \"$tmp\" | /usr/bin/awk '{print $1}')\" && test \"$actual\" = '\(assetSHA256)' && /bin/mv -f \"$tmp\" \"$dest\""
+    }
+
+    var reviewCommand: String {
+        "/usr/bin/open -a TextEdit \"$HOME/Downloads/\(localFileName)\""
+    }
+
+    var runCommand: String {
+        let script = "$HOME/Downloads/\(localFileName)"
+        return "script=\"\(script)\"; actual=\"$(/usr/bin/shasum -a 256 \"$script\" | /usr/bin/awk '{print $1}')\"; test \"$actual\" = '\(assetSHA256)' && /bin/bash \"$script\""
+    }
+}
+
 enum UpgradeState: Equatable {
     case idle
     case checking
@@ -51,6 +77,10 @@ actor UpdateChecker {
     /// The underlying DefenseClaw runtime (CLI + gateway) — upgraded via
     /// `defenseclaw upgrade`, but version-checked against its releases here.
     static let runtimeRepo = "cisco-ai-defense/defenseclaw"
+    nonisolated static let expectedBundleIdentifier = "com.cisco.defenseclaw.macos"
+    nonisolated static let expectedTeamIdentifier = ""
+    nonisolated static let expectedCodeRequirement =
+        #"anchor apple generic and identifier "com.cisco.defenseclaw.macos""#
 
     static var currentVersion: String {
         (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0"
@@ -83,6 +113,24 @@ actor UpdateChecker {
     /// Latest DefenseClaw runtime release (upstream repo).
     func latestRuntimeRelease() async -> ReleaseInfo? {
         await fetchLatest(repo: Self.runtimeRepo, requireSelfUpdateAsset: false)
+    }
+
+    /// Latest release-owned shell installer. Unlike a raw branch URL, this
+    /// asset is bound to the release's GitHub-provided SHA-256 digest; the
+    /// generated Terminal commands verify that digest before both review and
+    /// execution.
+    func latestRuntimeInstaller() async -> RuntimeInstallerInfo? {
+        guard let url = URL(
+            string: "https://api.github.com/repos/\(Self.runtimeRepo)/releases/latest"
+        ) else { return nil }
+        var request = URLRequest(url: url, timeoutInterval: 10)
+        request.setValue("application/vnd.github+json", forHTTPHeaderField: "Accept")
+        guard let (data, response) = try? await URLSession.shared.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200,
+              let dict = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tag = dict["tag_name"] as? String
+        else { return nil }
+        return Self.runtimeInstallerInfo(from: dict, tag: tag)
     }
 
     /// Parse "defenseclaw, version 0.7.0"-style output into "0.7.0".
@@ -145,6 +193,37 @@ actor UpdateChecker {
             let name = ($0["name"] as? String) ?? ""
             return Self.isEligibleSelfUpdateAsset(name: name, version: version)
         }
+    }
+
+    nonisolated static func runtimeInstallerInfo(
+        from dict: [String: Any],
+        tag: String
+    ) -> RuntimeInstallerInfo? {
+        guard tag.range(of: #"^[A-Za-z0-9._-]+$"#, options: .regularExpression) != nil else {
+            return nil
+        }
+        let assets = (dict["assets"] as? [[String: Any]]) ?? []
+        guard let asset = assets.first(where: { ($0["name"] as? String) == "install.sh" }),
+              let urlString = asset["browser_download_url"] as? String,
+              let assetURL = URL(string: urlString),
+              assetURL.scheme == "https",
+              assetURL.host == "github.com",
+              assetURL.path == "/cisco-ai-defense/defenseclaw/releases/download/\(tag)/install.sh"
+        else { return nil }
+        let digest = ((asset["digest"] as? String) ?? "")
+            .replacingOccurrences(of: "sha256:", with: "")
+            .lowercased()
+        guard digest.range(of: #"^[0-9a-f]{64}$"#, options: .regularExpression) != nil,
+              let releaseURL = URL(
+                  string: "https://github.com/cisco-ai-defense/defenseclaw/releases/tag/\(tag)"
+              )
+        else { return nil }
+        return RuntimeInstallerInfo(
+            tag: tag,
+            assetURL: assetURL,
+            assetSHA256: digest,
+            releaseURL: releaseURL
+        )
     }
 
     // MARK: - Download + install + restart
@@ -227,7 +306,7 @@ actor UpdateChecker {
         let newApp = unpackDir.appendingPathComponent(appName)
 
         guard let bundle = Bundle(url: newApp),
-              bundle.bundleIdentifier == "com.cisco.defenseclaw.macos",
+              bundle.bundleIdentifier == Self.expectedBundleIdentifier,
               (bundle.infoDictionary?["CFBundleShortVersionString"] as? String) == release.version
         else {
             return "The downloaded app has an unexpected bundle identifier or version."
@@ -237,7 +316,10 @@ actor UpdateChecker {
             return "The app-only update unexpectedly contains a runtime payload."
         }
         let signature = await Self.runProcess(
-            "/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", newApp.path]
+            "/usr/bin/codesign", [
+                "--verify", "--deep", "--strict", "--verbose=2",
+                "-R=\(Self.expectedCodeRequirement)", newApp.path,
+            ]
         )
         guard signature.exitCode == 0 else {
             return "The downloaded app failed code-signature verification: \(signature.output)"
@@ -264,7 +346,10 @@ actor UpdateChecker {
             return "Install failed: \(copy.output)\(rollback.map { " Rollback also failed: \($0)" } ?? "")"
         }
         let installedSignature = await Self.runProcess(
-            "/usr/bin/codesign", ["--verify", "--deep", "--strict", "--verbose=2", targetPath]
+            "/usr/bin/codesign", [
+                "--verify", "--deep", "--strict", "--verbose=2",
+                "-R=\(Self.expectedCodeRequirement)", targetPath,
+            ]
         )
         if installedSignature.exitCode != 0 {
             let rollback = Self.restoreBackup(backup: backup, targetPath: targetPath)

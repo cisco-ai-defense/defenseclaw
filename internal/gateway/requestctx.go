@@ -21,10 +21,6 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/codes"
-	semconv "go.opentelemetry.io/otel/semconv/v1.26.0"
 	"go.opentelemetry.io/otel/trace"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
@@ -52,8 +48,8 @@ import (
 const RequestIDHeader = "X-DefenseClaw-Request-Id"
 
 // maxRequestIDLength bounds how much of a client-supplied request ID
-// we trust. Every correlation ID is fanned out to SQLite,
-// gateway.jsonl, OTel attributes, and the Splunk HEC envelope, so a
+// we trust. Every correlation ID can be routed to local SQLite and configured
+// observability destinations, so a
 // malicious or misconfigured client that sends a 1 MiB "request id"
 // header would get that value replicated across every logging
 // system — a cheap denial-of-service amplification. 128 chars is
@@ -160,19 +156,17 @@ func sanitizeClientRequestID(id string) string {
 }
 
 func emitGatewayError(ctx context.Context, sub gatewaylog.Subsystem, code gatewaylog.ErrorCode, msg string, cause error) {
-	payload := &gatewaylog.ErrorPayload{
-		Subsystem: string(sub),
-		Code:      string(code),
-		Message:   msg,
-	}
+	// This helper runs before a request has selected a generated family owner.
+	// Keep the immediate human-facing diagnostic, but never resurrect the
+	// retired gatewaylog writer. Request-bounded generated producers record the
+	// corresponding terminal operation when one exists.
+	_ = ctx
+	causeClass := ""
 	if cause != nil {
-		payload.Cause = cause.Error()
+		causeClass = " cause=present"
 	}
-	emitEvent(ctx, gatewaylog.Event{
-		EventType: gatewaylog.EventError,
-		Severity:  gatewaylog.SeverityHigh,
-		Error:     payload,
-	})
+	fmt.Fprintf(os.Stderr, "[gateway] subsystem=%s code=%s message=%s%s\n",
+		sanitizeAlertField(string(sub)), sanitizeAlertField(string(code)), sanitizeAlertField(msg), causeClass)
 }
 
 // correlationNormRL rate-limits noteCorrelationNormalized to once per minute
@@ -394,84 +388,20 @@ func isTrustedProxyPeer(ipStr string) bool {
 	return false
 }
 
-// otelHTTPServerMiddleware creates a server span for each request and
-// records HTTP semantic attributes. Inner middleware should call
-// enrichHTTPSpanFromContext so defenseclaw.* correlation fields land on
-// the same span.
+// inboundTraceContextMiddleware admits the narrowly scoped W3C parent used by
+// connector hooks without constructing a second, unregistered SDK server
+// span. Canonical v8 operation owners start the generated family span later,
+// after collection and sampling have been evaluated by the pinned graph.
 //
 // SECURITY (Plan B5): the path-token OTLP endpoint encodes the master gateway
-// bearer token as a URL segment, so the route AND the url.path attribute MUST
-// be sanitized before any backend sees them. Failing to sanitize would leak
-// the master credential into whatever observability sink the gateway exports
-// to. See sanitizeRouteForTelemetry in otel_ingest.go.
-func otelHTTPServerMiddleware(serverName string, next http.Handler) http.Handler {
-	tracer := otel.Tracer("defenseclaw")
+// bearer token as a URL segment. extractIncomingTraceContext remains scoped to
+// registered loopback hook/notify routes, so this middleware never consumes or
+// exports that sensitive path. See shouldExtractHookTrace.
+func inboundTraceContextMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		safePath := sanitizeRouteForTelemetry(r.URL.Path)
-		route := safePath
-		if r.Pattern != "" {
-			route = r.Pattern
-		}
-		spanName := r.Method + " " + route
-		// Pull the W3C traceparent header from the request so the
-		// hook span links back to the agent's parent span.
-		// extractIncomingTraceContext returns r.Context() unchanged
-		// for routes other than /api/v1/<connector>/hook and
-		// /api/v1/codex/notify; see shouldExtractHookTrace for the
-		// security justification.
-		parentCtx := extractIncomingTraceContext(r.Context(), r)
-		ctx, span := tracer.Start(parentCtx, spanName,
-			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(attribute.String("defenseclaw.http.server", serverName)),
-		)
-		// Deferred span.End so a panic deeper in the handler stack
-		// (e.g. an evaluator that did not yet pick up the
-		// safeEvaluateHook recover) still finalises the server
-		// span. Without this defer, a panic between Start and End
-		// would leak an unfinalised span at the trace backend and
-		// hide the failure from tracing dashboards. Status
-		// attributes that depend on the response (status code,
-		// query) are recorded BEFORE the panic could re-trigger,
-		// so the only thing that may be missing on the panic path
-		// is the response-status attribute set — which is the
-		// correct signal that the request did not complete cleanly.
-		defer span.End()
-		sw := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(sw, r.WithContext(ctx))
-		status := sw.status
-		if status >= 400 {
-			span.SetStatus(codes.Error, http.StatusText(status))
-		}
-		span.SetAttributes(
-			semconv.HTTPRequestMethodKey.String(r.Method),
-			semconv.HTTPRouteKey.String(route),
-			semconv.HTTPResponseStatusCode(status),
-		)
-		host := r.Host
-		if host == "" {
-			host = r.URL.Host
-		}
-		if h, p, err := net.SplitHostPort(host); err == nil {
-			span.SetAttributes(
-				semconv.ServerAddressKey.String(h),
-				semconv.ServerPortKey.String(p),
-			)
-		} else if host != "" {
-			span.SetAttributes(semconv.ServerAddressKey.String(host))
-		}
-		span.SetAttributes(semconv.URLPath(safePath))
-		q := r.URL.RawQuery
-		if q != "" {
-			span.SetAttributes(semconv.URLQuery(sanitizeQueryForSpan(q)))
-		}
+		ctx := extractIncomingTraceContext(r.Context(), r)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
-}
-
-func sanitizeQueryForSpan(q string) string {
-	if len(q) > 512 {
-		return q[:512] + "…"
-	}
-	return q
 }
 
 // ScanCorrelationFromContext bundles the correlation + agent
@@ -487,55 +417,44 @@ func ScanCorrelationFromContext(ctx context.Context) audit.ScanCorrelation {
 	if ctx == nil {
 		return audit.ScanCorrelation{}
 	}
+	envelope := audit.EnvelopeFromContext(ctx)
 	aid := AgentIdentityFromContext(ctx)
+	if aid.AgentID == "" {
+		aid.AgentID = envelope.AgentID
+	}
+	if aid.AgentName == "" {
+		aid.AgentName = envelope.AgentName
+	}
+	if aid.AgentInstanceID == "" {
+		aid.AgentInstanceID = envelope.AgentInstanceID
+	}
 	tid := TraceIDFromContext(ctx)
+	if tid == "" {
+		tid = envelope.TraceID
+	}
+	var spanID string
 	if tid == "" {
 		if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
 			tid = sp.SpanContext().TraceID().String()
+			spanID = sp.SpanContext().SpanID().String()
+		}
+	} else if sp := trace.SpanFromContext(ctx); sp != nil && sp.SpanContext().IsValid() {
+		// Never pair a span ID with a different explicit/envelope trace ID.
+		// A stale middleware envelope is still useful as a trace-only join, but
+		// fabricating an invalid W3C parent pair is worse than omitting span_id.
+		if strings.EqualFold(tid, sp.SpanContext().TraceID().String()) {
+			spanID = sp.SpanContext().SpanID().String()
 		}
 	}
 	return audit.ScanCorrelation{
-		RequestID:       RequestIDFromContext(ctx),
-		SessionID:       SessionIDFromContext(ctx),
+		RunID:           envelope.RunID,
+		RequestID:       firstNonEmpty(RequestIDFromContext(ctx), envelope.RequestID),
+		SessionID:       firstNonEmpty(SessionIDFromContext(ctx), envelope.SessionID),
 		TraceID:         tid,
+		SpanID:          spanID,
 		AgentID:         aid.AgentID,
 		AgentName:       aid.AgentName,
 		AgentInstanceID: aid.AgentInstanceID,
-		Connector:       audit.EnvelopeFromContext(ctx).Connector,
-	}
-}
-
-// enrichHTTPSpanFromContext stamps defenseclaw correlation identifiers onto
-// the active span (the HTTP server span when otelHTTPServerMiddleware is outermost).
-func enrichHTTPSpanFromContext(ctx context.Context) {
-	span := trace.SpanFromContext(ctx)
-	if span == nil || !span.IsRecording() {
-		return
-	}
-	if runID := gatewaylog.ProcessRunID(); runID != "" {
-		span.SetAttributes(attribute.String("defenseclaw.run.id", runID))
-	}
-	if id := RequestIDFromContext(ctx); id != "" {
-		span.SetAttributes(attribute.String("defenseclaw.request_id", id))
-	}
-	if sid := SessionIDFromContext(ctx); sid != "" {
-		span.SetAttributes(attribute.String("gen_ai.conversation.id", sid))
-	}
-	aid := AgentIdentityFromContext(ctx)
-	if aid.AgentID != "" {
-		span.SetAttributes(attribute.String("defenseclaw.agent_id", aid.AgentID))
-	}
-	if aid.AgentType != "" {
-		span.SetAttributes(attribute.String("gen_ai.agent.type", aid.AgentType))
-	}
-	if aid.AgentInstanceID != "" {
-		span.SetAttributes(attribute.String("defenseclaw.agent_instance_id", aid.AgentInstanceID))
-	}
-	tid := TraceIDFromContext(ctx)
-	if tid == "" {
-		tid = span.SpanContext().TraceID().String()
-	}
-	if tid != "" {
-		span.SetAttributes(attribute.String("defenseclaw.trace_id", tid))
+		Connector:       envelope.Connector,
 	}
 }

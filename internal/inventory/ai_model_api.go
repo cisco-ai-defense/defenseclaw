@@ -88,16 +88,21 @@ type localModelAPIProbe struct {
 }
 
 type localModelSourceMetadata struct {
-	Checkpoint   string `json:"checkpoint"`
-	OwnedBy      string `json:"owned_by"`
-	Digest       string `json:"digest"`
-	ModifiedAt   string `json:"modified_at"`
-	RuntimeState string `json:"runtime_state"`
-	SizeVRAM     int64  `json:"size_vram"`
+	Checkpoint        string   `json:"checkpoint"`
+	OwnedBy           string   `json:"owned_by"`
+	Digest            string   `json:"digest"`
+	ModifiedAt        string   `json:"modified_at"`
+	RuntimeState      string   `json:"runtime_state"`
+	Family            string   `json:"family"`
+	Families          []string `json:"families,omitempty"`
+	ParameterSize     string   `json:"parameter_size"`
+	QuantizationLevel string   `json:"quantization_level"`
+	SizeVRAM          int64    `json:"size_vram"`
 }
 
 type localModelObservation struct {
 	model        LocalModelInfo
+	provenance   modelProvenanceHints
 	pid          int
 	lastActiveAt *time.Time
 	source       localModelSourceMetadata
@@ -1036,6 +1041,7 @@ func parseOpenAIModels(body []byte, lemonade bool, limit, cursor int) ([]localMo
 				Checkpoint: boundedLocalEvidenceMetadata(item.Checkpoint),
 				OwnedBy:    boundedLocalEvidenceMetadata(item.OwnedBy),
 			},
+			provenance: checkpointProvenanceHints(item.Checkpoint),
 		}
 		observation.cursorAfter = page.cursor()
 		if lemonade {
@@ -1131,6 +1137,7 @@ func parseLemonadeHealth(body []byte, limit, cursor int) ([]localModelObservatio
 				Checkpoint:   boundedLocalEvidenceMetadata(item.Checkpoint),
 				RuntimeState: boundedLocalEvidenceMetadata(item.Status),
 			},
+			provenance: checkpointProvenanceHints(item.Checkpoint),
 		}
 		observation.cursorAfter = page.cursor()
 		out = append(out, observation)
@@ -1159,7 +1166,11 @@ type ollamaModelMetadata struct {
 	Size       json.Number `json:"size"`
 	SizeVRAM   json.Number `json:"size_vram"`
 	Details    struct {
-		Format string `json:"format"`
+		Format            string   `json:"format"`
+		Family            string   `json:"family"`
+		Families          []string `json:"families"`
+		ParameterSize     string   `json:"parameter_size"`
+		QuantizationLevel string   `json:"quantization_level"`
 	} `json:"details"`
 }
 
@@ -1197,6 +1208,13 @@ func parseOllamaModels(body []byte, status string, limit, cursor int) ([]localMo
 		if !ok {
 			continue
 		}
+		families := uniqueBoundedModelReferences(item.Details.Families, maxModelBaseModels)
+		family := boundedLocalModelField(item.Details.Family, maxLocalModelFieldBytes)
+		provenanceReferences := append([]string(nil), families...)
+		if family != "" {
+			provenanceReferences = append([]string{family}, provenanceReferences...)
+		}
+		quantization := boundedLocalModelField(item.Details.QuantizationLevel, maxModelQuantizationBytes)
 		observation := localModelObservation{
 			model: LocalModelInfo{
 				ID:        id,
@@ -1205,9 +1223,18 @@ func parseOllamaModels(body []byte, status string, limit, cursor int) ([]localMo
 				SizeBytes: positiveInt64(item.Size),
 			},
 			source: localModelSourceMetadata{
-				Digest:     boundedLocalEvidenceMetadata(item.Digest),
-				ModifiedAt: boundedLocalEvidenceMetadata(item.ModifiedAt),
-				SizeVRAM:   positiveInt64(item.SizeVRAM),
+				Digest:            boundedLocalEvidenceMetadata(item.Digest),
+				ModifiedAt:        boundedLocalEvidenceMetadata(item.ModifiedAt),
+				Family:            family,
+				Families:          families,
+				ParameterSize:     boundedLocalModelField(item.Details.ParameterSize, maxLocalModelFieldBytes),
+				QuantizationLevel: quantization,
+				SizeVRAM:          positiveInt64(item.SizeVRAM),
+			},
+			provenance: modelProvenanceHints{
+				References:   provenanceReferences,
+				Quantization: quantization,
+				Source:       "ollama_metadata",
 			},
 		}
 		observation.cursorAfter = page.cursor()
@@ -1339,6 +1366,7 @@ func signalForLocalAPIModel(probe localModelAPIProbe, detector string, observati
 	providerKey := probe.providerKey
 	model := observation.model
 	model.Provider = boundedLocalModelField(providerKey, maxLocalModelProviderBytes)
+	enrichLocalModelProvenance(&model, observation.provenance)
 	sourceHash := hashValue(probe.origin)
 	evidencePayload := struct {
 		Provider string                   `json:"provider"`

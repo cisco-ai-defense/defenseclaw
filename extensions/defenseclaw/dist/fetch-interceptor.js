@@ -39,22 +39,41 @@ const _require = createRequire(import.meta.url);
 const https = _require("https");
 // eslint-disable-next-line @typescript-eslint/no-var-requires
 const http = _require("http");
-/**
- * Domains that should be intercepted. Seeded from the embedded
- * providers.json at import time; can be extended at runtime by
- * `bootstrapProviderOverlay()` once the sidecar's
- * GET /v1/config/providers endpoint is reachable. Declared `let` so
- * the overlay can grow the list in place without the rest of the
- * module holding a stale snapshot.
- */
-let LLM_DOMAINS = providersConfig.providers.flatMap((p) => p.domains);
-/**
- * Ollama runs locally — intercept by matching its default port.
- * Seeded from providers.json; can be extended at runtime by the
- * overlay fetch so new Ollama deployments on non-standard ports do
- * not silently bypass the guardrail.
- */
-let OLLAMA_PORTS = providersConfig.ollama_ports.map(String);
+// undici — Node 18+ backs globalThis.fetch with undici's internal dispatcher.
+// SDKs that capture the pre-patch fetch reference or call undici.request()
+// directly bypass globalThis.fetch / https.request patches entirely.
+let undici = null;
+try {
+    undici = _require("undici");
+}
+catch {
+    // undici not bundled (older Node or stripped runtime) — skip
+}
+// ─── Shared cross-instance state ───
+// The plugin .js may be evaluated in multiple V8 contexts (e.g.
+// [gateway] + [plugins] in OpenClaw). Each evaluation creates its
+// own module-scoped variables. Using a well-known globalThis slot
+// ensures all instances share one canonical domain/port list and
+// only one instance installs the transport patch.
+const INTERCEPTOR_STATE_KEY = Symbol.for("defenseclaw.interceptor.state");
+function getOrCreateSharedState() {
+    const existing = globalThis[INTERCEPTOR_STATE_KEY];
+    if (existing)
+        return existing;
+    const state = {
+        llmDomains: providersConfig.providers.flatMap((p) => p.domains),
+        ollamaPorts: providersConfig.ollama_ports.map(String),
+        installed: false,
+        guardrailPort: null,
+    };
+    globalThis[INTERCEPTOR_STATE_KEY] = state;
+    return state;
+}
+const _shared = getOrCreateSharedState();
+// Module-level aliases that point into shared state so existing code
+// (isLLMUrl, applyProviderRegistry, etc.) continues to work unchanged.
+let LLM_DOMAINS = _shared.llmDomains;
+let OLLAMA_PORTS = _shared.ollamaPorts;
 /**
  * Apply a merged provider registry from the Go sidecar. Additive
  * only — we never drop a built-in domain or port because the
@@ -151,7 +170,14 @@ export async function bootstrapProviderOverlay(guardrailPort, options) {
     const ctrl = new AbortController();
     const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-        const res = await doFetch(`http://127.0.0.1:${guardrailPort}/v1/config/providers`, { method: "GET", signal: ctrl.signal, cache: "no-store" });
+        const res = await doFetch(`http://127.0.0.1:${guardrailPort}/v1/config/providers`, {
+            method: "GET",
+            signal: ctrl.signal,
+            cache: "no-store",
+            headers: options?.token
+                ? { [DC_AUTH_HEADER]: `Bearer ${options.token}` }
+                : undefined,
+        });
         if (!res.ok)
             return;
         // If Content-Length advertises more than the cap, bail early —
@@ -234,6 +260,33 @@ function extractHost(urlStr) {
         return "";
     }
 }
+export const UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV = "DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES";
+const CHATGPT_CODEX_RESPONSES_PATH = "/backend-api/codex/responses";
+function truthyEnv(name) {
+    return (process.env[name] || "").trim().toLowerCase() === "1";
+}
+function isChatGPTCodexResponseBackendUrl(urlStr) {
+    try {
+        const parsed = new URL(urlStr);
+        return (parsed.hostname.toLowerCase() === "chatgpt.com" &&
+            (parsed.pathname === CHATGPT_CODEX_RESPONSES_PATH ||
+                parsed.pathname.startsWith(`${CHATGPT_CODEX_RESPONSES_PATH}/`)));
+    }
+    catch {
+        return false;
+    }
+}
+/**
+ * The ChatGPT/Codex responses backend carries prompt/completion traffic, so it
+ * must stay on the guardrail path by default. Operators who explicitly prefer
+ * availability over inspection while OAuth-aware proxy support is missing can
+ * opt into an unguarded escape hatch with
+ * DEFENSECLAW_UNGUARDED_CHATGPT_CODEX_RESPONSES=1.
+ */
+export function shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr) {
+    return (isChatGPTCodexResponseBackendUrl(urlStr) &&
+        truthyEnv(UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV));
+}
 /**
  * Host-boundary domain match. A registered entry "api.openai.com"
  * matches the exact host "api.openai.com" and any subdomain
@@ -241,7 +294,36 @@ function extractHost(urlStr) {
  * "api.openai.com.evil.test" or a substring match somewhere inside
  * the query string. Entries are stored lower-cased (see
  * applyProviderRegistry + providers.json build step).
+ *
+ * Avarice F-1589: pattern entries with `*` wildcards
+ * ("bedrock-runtime.*.amazonaws.com") match exactly one DNS label
+ * for each `*`. Legacy bare-prefix entries that end with `.` (e.g.
+ * "bedrock-runtime.") are explicitly rejected because the Go
+ * matcher treats them as full hostnames now and they would silently
+ * never match anything here.
  */
+function matchesWildcardDomain(host, pattern) {
+    const hostLabels = host.split(".");
+    const patternLabels = pattern.split(".");
+    if (hostLabels.length < patternLabels.length)
+        return false;
+    // Anchor at the right (TLD) so leading `*` segments can absorb
+    // arbitrary subdomains (e.g. an attacker prefix).
+    const offset = hostLabels.length - patternLabels.length;
+    for (let i = 0; i < patternLabels.length; i++) {
+        const p = patternLabels[i];
+        const h = hostLabels[offset + i];
+        if (p === "*")
+            continue;
+        if (p !== h)
+            return false;
+    }
+    // For exact match (no leading wildcard) require label counts to
+    // match, so "api.openai.com" doesn't accept "evil.api.openai.com"
+    // here — that's handled by the explicit subdomain branch in
+    // matchesLLMDomain.
+    return offset === 0 || patternLabels[0] === "*";
+}
 function matchesLLMDomain(host) {
     if (!host)
         return false;
@@ -254,6 +336,19 @@ function matchesLLMDomain(host) {
         const bare = slash >= 0 ? domain.slice(0, slash) : domain;
         if (!bare)
             continue;
+        // Avarice F-1589 / F-1185: explicitly reject the legacy
+        // ends-with-dot form ("bedrock-runtime.") which the Go side
+        // used to treat as a hostname prefix. With matchProviderDomain
+        // upgraded to require label-pinned wildcards, the corresponding
+        // TS matcher MUST also reject the legacy form to keep the two
+        // sides in sync.
+        if (bare.endsWith("."))
+            continue;
+        if (bare.includes("*")) {
+            if (matchesWildcardDomain(host, bare))
+                return true;
+            continue;
+        }
         if (host === bare)
             return true;
         if (host.endsWith("." + bare))
@@ -285,9 +380,27 @@ export function isLLMUrl(url, guardrailPort) {
     return false;
 }
 function isAlreadyProxied(url, guardrailPort) {
-    // Only skip requests already targeting the guardrail proxy itself.
-    return (url.includes(`127.0.0.1:${guardrailPort}`) ||
-        url.includes(`localhost:${guardrailPort}`));
+    // Avarice F-1585: a substring check of the form
+    //   url.includes("127.0.0.1:<port>")
+    // would match any provider URL that happens to embed that string
+    // anywhere — path, query, fragment — and skip the guardrail
+    // entirely. Parse and compare hostname + port directly so a
+    // crafted query parameter like
+    //   https://api.openai.com/v1/chat/completions?proxy=127.0.0.1:43099
+    // routes through the proxy as expected.
+    let parsed;
+    try {
+        parsed = new URL(url);
+    }
+    catch {
+        return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    const port = parsed.port || (parsed.protocol === "https:" ? "443" : "80");
+    if (host !== "127.0.0.1" && host !== "localhost" && host !== "::1") {
+        return false;
+    }
+    return port === String(guardrailPort);
 }
 // ---------------------------------------------------------------------------
 // Layer 1: request-shape detection
@@ -313,6 +426,10 @@ export const LLM_PATH_SUFFIXES = [
     ":streamGenerateContent",
     "/converse",
     "/converse-stream",
+    // Bedrock InvokeModel REST shape: POST /model/<id>/invoke and the
+    // streaming /invoke-with-response-stream variant.
+    "/invoke",
+    "/invoke-with-response-stream",
     "/api/chat",
     "/api/generate",
     "/responses",
@@ -381,6 +498,39 @@ export function hasLLMPathSuffix(urlStr) {
     const path = extractPath(urlStr);
     return LLM_PATH_SUFFIXES.some(s => path.endsWith(s) || path.includes(s));
 }
+/**
+ * Strip credential material out of `u`, mutating the URL in place. Provider
+ * secrets are routinely smuggled in the query string — Gemini's `?key=`, AWS
+ * SigV4 pre-signed `?X-Amz-Signature=` / `?X-Amz-Credential=`, and assorted
+ * `?token=` shapes — and occasionally in `user:pass@` userinfo. Any URL
+ * written to a log line or egress telemetry event must have these stripped
+ * first. The actual outbound request is built from a separate, unmodified
+ * URL, so redaction here never perturbs the proxied call.
+ */
+function redactUrlSecrets(u) {
+    for (const k of [...u.searchParams.keys()]) {
+        u.searchParams.set(k, "<redacted>");
+    }
+    if (u.username)
+        u.username = "";
+    if (u.password)
+        u.password = "";
+}
+/**
+ * Scrub secret-bearing query parameters out of a URL before it is written to
+ * a console log. Falls back to the original string if the URL cannot be
+ * parsed.
+ */
+export function scrubUrlForLog(urlStr) {
+    try {
+        const u = new URL(urlStr);
+        redactUrlSecrets(u);
+        return u.toString();
+    }
+    catch {
+        return urlStr;
+    }
+}
 /** Returns true when the hostname is on the package-registry / telemetry allowlist. */
 export function isKnownSafeDomain(urlStr) {
     let host = "";
@@ -447,8 +597,13 @@ function decodeUtf8Safe(buf) {
  * the cap; subsequent chunks are never read, so a pathological body
  * (GBs) never allocates past `cap` bytes. Returns the raw byte
  * sequence so the caller can decide on encoding.
+ *
+ * `cancelRemainder` defaults to true for standalone streams (sidecar
+ * overlay responses). Request.clone() tees the body; awaiting
+ * cancel() on one tee branch can stay pending until the sibling is
+ * consumed (#732), so Request peeks must pass false.
  */
-async function readStreamBounded(stream, cap) {
+async function readStreamBounded(stream, cap, options) {
     const reader = stream.getReader();
     const chunks = [];
     let total = 0;
@@ -469,13 +624,19 @@ async function readStreamBounded(stream, cap) {
         }
     }
     finally {
-        // Cancel the rest of the stream so the underlying transport
-        // does not keep delivering bytes we will never consume.
-        try {
-            await reader.cancel();
+        if (options?.cancelRemainder === false) {
+            // Fire-and-forget: awaiting tee-branch cancel() can deadlock
+            // against the unconsumed sibling (#732), but skipping cancel
+            // entirely leaves the rest of a multi-GB body queued.
+            void reader.cancel().catch(() => undefined);
         }
-        catch {
-            /* ignore */
+        else {
+            try {
+                await reader.cancel();
+            }
+            catch {
+                /* ignore */
+            }
         }
         try {
             reader.releaseLock();
@@ -492,8 +653,147 @@ async function readStreamBounded(stream, cap) {
     }
     return out;
 }
+function hasOwnBody(init) {
+    // Native fetch(request, { body: null | undefined }) inherits the
+    // Request body. Only a non-null init.body replaces it.
+    return Boolean(init &&
+        Object.prototype.hasOwnProperty.call(init, "body") &&
+        init.body != null);
+}
+/**
+ * Classify a bounded peek. Full JSON wins; if the 64 KiB cap sliced
+ * mid-document, recover the top-level LLM key from the prefix so a
+ * large messages[] body is not treated as non-LLM.
+ */
+function classifyPeekText(text) {
+    if (!text)
+        return "none";
+    try {
+        return classifyBodyShape(JSON.parse(text));
+    }
+    catch {
+        return classifyTruncatedRootKeys(text);
+    }
+}
+/** Recover an LLM shape from a 64 KiB-truncated JSON object prefix. */
+function classifyTruncatedRootKeys(text) {
+    const keys = new Set(rootObjectKeys(text));
+    if (keys.has("messages"))
+        return "messages";
+    if (keys.has("contents"))
+        return "contents";
+    if (keys.has("inputs"))
+        return "input";
+    if (keys.has("input"))
+        return "input";
+    if (keys.has("prompt"))
+        return "prompt";
+    return "none";
+}
+/**
+ * Collect object keys at depth 1 so a nested `"messages"` (or similar)
+ * cannot classify a non-LLM body after the peek cap slices the document.
+ */
+function rootObjectKeys(text) {
+    const keys = [];
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = 0; i < text.length; i++) {
+        const ch = text[i];
+        if (inString) {
+            if (escape) {
+                escape = false;
+                continue;
+            }
+            if (ch === "\\") {
+                escape = true;
+                continue;
+            }
+            if (ch === "\"") {
+                inString = false;
+            }
+            continue;
+        }
+        if (ch === "\"") {
+            if (depth === 1) {
+                const match = /^"((?:\\.|[^"\\])*)"\s*:/.exec(text.slice(i));
+                if (match) {
+                    keys.push(match[1].replace(/\\(.)/g, "$1"));
+                    i += match[0].length - 1;
+                    continue;
+                }
+            }
+            inString = true;
+            continue;
+        }
+        if (ch === "{" || ch === "[") {
+            depth++;
+            continue;
+        }
+        if (ch === "}" || ch === "]") {
+            depth = Math.max(0, depth - 1);
+        }
+    }
+    return keys;
+}
+function requestDuplex(value) {
+    if (!value || !("duplex" in value))
+        return undefined;
+    return value.duplex === "half" ? "half" : undefined;
+}
+function peekConcreteBody(body) {
+    if (body == null)
+        return "none";
+    if (typeof body === "string") {
+        return classifyPeekText(body.slice(0, BODY_PEEK_CAP_BYTES));
+    }
+    if (body instanceof Uint8Array) {
+        return classifyPeekText(decodeUtf8Safe(body.subarray(0, BODY_PEEK_CAP_BYTES)));
+    }
+    if (body instanceof ArrayBuffer) {
+        return classifyPeekText(decodeUtf8Safe(new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES)));
+    }
+    // ReadableStream, FormData, Blob, etc. — consuming them would break
+    // the downstream fetch. Fall back to path-only detection.
+    return "none";
+}
+function combineAbortSignals(requestSignal, initSignal) {
+    // Native fetch(request, { signal }) uses the init signal only.
+    if (initSignal)
+        return initSignal;
+    return requestSignal;
+}
+/**
+ * Fetch `request` + `init` precedence used by shape detection and the
+ * proxy rewrite. Caller `init` wins, matching native Fetch.
+ */
+export function resolveEffectiveFetchInit(input, init) {
+    const req = input instanceof Request ? input : null;
+    const headers = init?.headers != null
+        ? new Headers(init.headers)
+        : new Headers(req?.headers);
+    return {
+        method: String(init?.method ?? req?.method ?? "GET"),
+        headers,
+        body: hasOwnBody(init) ? init.body : (req ? req.body : undefined),
+        signal: combineAbortSignals(req?.signal, init?.signal),
+        redirect: init?.redirect ?? req?.redirect,
+        credentials: init?.credentials ?? req?.credentials,
+        cache: init?.cache ?? req?.cache,
+        integrity: init?.integrity ?? req?.integrity,
+        keepalive: init?.keepalive ?? req?.keepalive,
+        mode: init?.mode ?? req?.mode,
+        referrer: init?.referrer ?? req?.referrer,
+        referrerPolicy: init?.referrerPolicy ?? req?.referrerPolicy,
+    };
+}
 export async function peekBodyForShape(input, init) {
     try {
+        // Fetch spec: a supplied init.body replaces the Request body.
+        if (hasOwnBody(init)) {
+            return peekConcreteBody(init.body);
+        }
         if (input instanceof Request) {
             // input.clone() keeps the caller's Request body intact for the
             // downstream originalFetch call. Prefer a streaming read
@@ -506,7 +806,11 @@ export async function peekBodyForShape(input, init) {
                 .body;
             let bytes;
             if (stream && typeof stream.getReader === "function") {
-                bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES);
+                // Do not await tee-branch cancel(): it can deadlock against
+                // the unconsumed original Request body (#732).
+                bytes = await readStreamBounded(stream, BODY_PEEK_CAP_BYTES, {
+                    cancelRemainder: false,
+                });
             }
             else {
                 const text = await cloned.text().catch(() => "");
@@ -519,54 +823,13 @@ export async function peekBodyForShape(input, init) {
                 const capped = text.length > BODY_PEEK_CAP_BYTES
                     ? text.slice(0, BODY_PEEK_CAP_BYTES)
                     : text;
-                try {
-                    return classifyBodyShape(JSON.parse(capped));
-                }
-                catch {
-                    return "none";
-                }
+                return classifyPeekText(capped);
             }
             if (bytes.byteLength === 0)
                 return "none";
-            try {
-                return classifyBodyShape(JSON.parse(decodeUtf8Safe(bytes)));
-            }
-            catch {
-                return "none";
-            }
+            return classifyPeekText(decodeUtf8Safe(bytes));
         }
-        const body = init?.body;
-        if (body == null)
-            return "none";
-        if (typeof body === "string") {
-            try {
-                return classifyBodyShape(JSON.parse(body.slice(0, BODY_PEEK_CAP_BYTES)));
-            }
-            catch {
-                return "none";
-            }
-        }
-        if (body instanceof Uint8Array) {
-            const slice = body.subarray(0, BODY_PEEK_CAP_BYTES);
-            try {
-                return classifyBodyShape(JSON.parse(decodeUtf8Safe(slice)));
-            }
-            catch {
-                return "none";
-            }
-        }
-        if (body instanceof ArrayBuffer) {
-            const view = new Uint8Array(body).subarray(0, BODY_PEEK_CAP_BYTES);
-            try {
-                return classifyBodyShape(JSON.parse(decodeUtf8Safe(view)));
-            }
-            catch {
-                return "none";
-            }
-        }
-        // ReadableStream, FormData, Blob, etc. — consuming them would break
-        // the downstream fetch. Fall back to path-only detection.
-        return "none";
+        return peekConcreteBody(init?.body);
     }
     catch {
         return "none";
@@ -680,6 +943,50 @@ export const DEFENSECLAW_CORRELATION_HEADER_NAMES = [
     HEADER_DEFENSECLAW_SIDECAR_INSTANCE_ID,
     HEADER_DEFENSECLAW_TRACE_ID,
 ];
+const INTERCEPTION_SELF_TEST_URL = "https://api.openai.com/v1/chat/completions";
+const INTERCEPTION_SELF_TEST_INTERVAL_MS = 60_000;
+export const INTERCEPTION_PROBE_HEADER = "X-DC-Interception-Probe";
+function readUndiciHeader(headers, name) {
+    if (headers == null) {
+        return "";
+    }
+    const wanted = name.toLowerCase();
+    if (Array.isArray(headers)) {
+        for (let i = 0; i < headers.length - 1; i += 2) {
+            if (String(headers[i]).toLowerCase() === wanted) {
+                return String(headers[i + 1]);
+            }
+        }
+        return "";
+    }
+    if (typeof headers === "object") {
+        for (const [key, value] of Object.entries(headers)) {
+            if (key.toLowerCase() === wanted) {
+                return Array.isArray(value) ? String(value[0] ?? "") : String(value ?? "");
+            }
+        }
+    }
+    return "";
+}
+function completeUndiciProbe(handler) {
+    const sink = handler;
+    try {
+        sink.onConnect?.(() => undefined);
+        sink.onHeaders?.(200, [
+            Buffer.from(INTERCEPTION_PROBE_HEADER.toLowerCase()),
+            Buffer.from("1"),
+            Buffer.from("content-type"),
+            Buffer.from("application/json"),
+        ], () => undefined, "OK");
+        sink.onData?.(Buffer.from('{"id":"dc-intercept-probe"}'));
+        sink.onComplete?.([]);
+        return true;
+    }
+    catch (err) {
+        sink.onError?.(err instanceof Error ? err : new Error(String(err)));
+        return false;
+    }
+}
 /**
  * Creates an interceptor that, when started, patches globalThis.fetch to
  * redirect LLM API calls through the guardrail proxy.
@@ -698,22 +1005,91 @@ export function createFetchInterceptor(portOrOpts) {
     const proxyBase = `http://127.0.0.1:${guardrailPort}`;
     let originalFetch = null;
     let originalHttpsRequest = null;
+    let originalHttpRequest = null;
+    let originalHttpGet = null;
+    let originalUndiciDispatcher = null;
     let egressReporter = null;
+    let chatgptCodexPassthroughWarned = false;
+    let selfTestTimer = null;
+    const loggedInterceptHosts = new Set();
+    let lastUndiciProbeDestination = "";
+    function describeLayers() {
+        return {
+            fetch: originalFetch !== null && globalThis.fetch !== originalFetch,
+            httpRequest: originalHttpRequest !== null && http.request !== originalHttpRequest,
+            httpsRequest: originalHttpsRequest !== null && https.request !== originalHttpsRequest,
+            httpGet: originalHttpGet !== null && http.get !== originalHttpGet,
+            undiciDispatcher: Boolean(undici &&
+                originalUndiciDispatcher &&
+                undici.getGlobalDispatcher() !== originalUndiciDispatcher),
+        };
+    }
+    function logStartupBanner(layers) {
+        console.log(`[defenseclaw] interceptor layers fetch=${layers.fetch} https.request=${layers.httpsRequest} ` +
+            `http.request=${layers.httpRequest} http.get=${layers.httpGet} undici=${layers.undiciDispatcher} ` +
+            `fetch_resolvable=${typeof globalThis.fetch === "function"} undici_resolvable=${Boolean(undici)}`);
+    }
+    function noteInterceptLayer(layer, urlStr) {
+        let host = urlStr;
+        try {
+            host = new URL(urlStr).hostname;
+        }
+        catch {
+            // keep the raw string when URL parsing fails
+        }
+        const key = `${layer}:${host}`;
+        if (loggedInterceptHosts.has(key))
+            return;
+        loggedInterceptHosts.add(key);
+        console.log(`[defenseclaw] intercept via=${layer} host=${host}`);
+    }
     // Extract { host, path } from a URL string without throwing. Missing
     // pieces are tolerated so the caller's downstream fetch is never
-    // perturbed by a malformed URL in telemetry.
+    // perturbed by a malformed URL in telemetry. Query-parameter values are
+    // redacted so secret-bearing URLs (Gemini ?key=, AWS SigV4 signatures)
+    // never reach the egress telemetry sink.
     function extractHostPath(urlStr) {
         try {
             const u = new URL(urlStr);
+            redactUrlSecrets(u);
             return { host: u.hostname, path: `${u.pathname}${u.search}` };
         }
         catch {
             return { host: "", path: urlStr };
         }
     }
+    function reportChatGPTCodexResponsePassthrough(urlStr) {
+        if (!chatgptCodexPassthroughWarned) {
+            chatgptCodexPassthroughWarned = true;
+            console.warn(`[defenseclaw] ${UNGUARDED_CHATGPT_CODEX_RESPONSES_ENV}=1: ` +
+                `ChatGPT/Codex responses are being passed through unguarded: ${scrubUrlForLog(urlStr)}`);
+        }
+        const hp = extractHostPath(urlStr);
+        egressReporter?.report({
+            targetHost: hp.host,
+            targetPath: hp.path,
+            bodyShape: "none",
+            looksLikeLLM: true,
+            branch: "passthrough",
+            decision: "allow",
+            reason: "chatgpt-codex-oauth-passthrough",
+        });
+    }
     function start() {
         if (originalFetch)
-            return; // already started
+            return; // this instance already started
+        // Idempotent cross-instance guard: if another module evaluation
+        // already patched the transport, we only bootstrap the overlay
+        // (so our operator-added domains merge into the shared list) and
+        // return without re-wrapping fetch/https/http/undici.
+        if (_shared.installed) {
+            void bootstrapProviderOverlay(guardrailPort, {
+                fetchImpl: globalThis.fetch,
+            });
+            return;
+        }
+        _shared.installed = true;
+        _shared.guardrailPort = guardrailPort;
         originalFetch = globalThis.fetch;
         egressReporter = createEgressReporter({ guardrailPort });
         // Layer 4 (governance): pull the sidecar's merged provider
@@ -725,6 +1101,7 @@ export function createFetchInterceptor(portOrOpts) {
         // wrapper we're about to install.
         void bootstrapProviderOverlay(guardrailPort, {
             fetchImpl: originalFetch,
+            token: loadSidecarConfig().token,
         });
         globalThis.fetch = async (input, init) => {
             const urlStr = String(input instanceof Request ? input.url : input);
@@ -733,17 +1110,21 @@ export function createFetchInterceptor(portOrOpts) {
             if (isAlreadyProxied(urlStr, guardrailPort)) {
                 return originalFetch(input, init);
             }
+            if (shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+                reportChatGPTCodexResponsePassthrough(urlStr);
+                return originalFetch(input, init);
+            }
             // Layer 0: the known-provider allowlist is cheap and path-free.
             const knownLLM = isLLMUrl(urlStr, guardrailPort);
             let shouldIntercept = knownLLM;
             let shapeBranch = knownLLM ? "known" : "passthrough";
             let bodyShape = "none";
+            const effective = resolveEffectiveFetchInit(input, init);
             // Layer 1: request-shape detection. Only peek the body when the
             // allowlist didn't already match — peeking costs a clone().
             if (!knownLLM) {
-                const method = (input instanceof Request ? input.method : init?.method) ?? "GET";
                 bodyShape = await peekBodyForShape(input, init);
-                if (isLLMShapedRequest(urlStr, method, bodyShape, guardrailPort)) {
+                if (isLLMShapedRequest(urlStr, effective.method, bodyShape, guardrailPort)) {
                     shouldIntercept = true;
                     shapeBranch = "shape";
                 }
@@ -773,22 +1154,70 @@ export function createFetchInterceptor(portOrOpts) {
             }
             // Rewrite: keep path + query, replace scheme://host with proxy.
             const proxied = `${proxyBase}${original.pathname}${original.search}`;
-            // Merge all original headers and add proxy-hop headers.
-            const headers = new Headers(input instanceof Request ? input.headers : init?.headers);
+            noteInterceptLayer("fetch", urlStr);
+            if (new Headers(effective.headers).get(INTERCEPTION_PROBE_HEADER) === "1") {
+                return new Response(JSON.stringify({ id: "dc-intercept-probe" }), {
+                    status: 200,
+                    headers: { "content-type": "application/json", [INTERCEPTION_PROBE_HEADER]: "1" },
+                });
+            }
+            // Merge effective headers (Request + init overrides) and add
+            // proxy-hop headers. init wins, matching native Fetch (#742).
+            const headers = new Headers(effective.headers);
             const providerKey = extractProviderKey(headers);
             const proxyHdrs = buildProxyHeaders(original.origin, providerKey, getCorrelationHeaders);
             for (const [k, v] of Object.entries(proxyHdrs)) {
                 headers.set(k, v);
             }
-            // Build new init, preserving all original properties.
-            const newInit = input instanceof Request
-                ? { method: input.method, body: input.body, headers }
-                : { ...(init ?? {}), headers };
+            // Peek used a clone. Consume the original Request tee branch so
+            // the leftover sibling is not left unread.
+            let rewriteBody = effective.body;
+            if (!hasOwnBody(init) && input instanceof Request && !input.bodyUsed) {
+                rewriteBody = input.body ?? effective.body;
+            }
+            // Preserve Request metadata and caller init extras (duplex, etc.),
+            // then apply the resolved method/body/signal/redirect family.
+            const duplex = requestDuplex(init) ??
+                (input instanceof Request ? requestDuplex(input) : undefined) ??
+                (typeof ReadableStream !== "undefined" &&
+                    rewriteBody instanceof ReadableStream
+                    ? "half"
+                    : undefined);
+            const newInit = {
+                ...(input instanceof Request
+                    ? {
+                        method: input.method,
+                        redirect: input.redirect,
+                        credentials: input.credentials,
+                        cache: input.cache,
+                        integrity: input.integrity,
+                        keepalive: input.keepalive,
+                        mode: input.mode,
+                        referrer: input.referrer,
+                        referrerPolicy: input.referrerPolicy,
+                        signal: input.signal,
+                    }
+                    : {}),
+                ...(init ?? {}),
+                method: effective.method,
+                body: rewriteBody,
+                headers,
+                signal: effective.signal ?? undefined,
+                redirect: effective.redirect,
+                credentials: effective.credentials,
+                cache: effective.cache,
+                integrity: effective.integrity,
+                keepalive: effective.keepalive,
+                mode: effective.mode,
+                referrer: effective.referrer,
+                referrerPolicy: effective.referrerPolicy,
+                ...(duplex ? { duplex } : {}),
+            };
             if (shapeBranch === "shape") {
-                console.log(`[defenseclaw] intercepted LLM-shaped call → ${urlStr} (body_shape=${bodyShape}) proxied via ${proxyBase}`);
+                console.log(`[defenseclaw] intercepted LLM-shaped call → ${scrubUrlForLog(urlStr)} (body_shape=${bodyShape}) proxied via ${proxyBase}`);
             }
             else {
-                console.log(`[defenseclaw] intercepted LLM call → ${urlStr} proxied via ${proxyBase}`);
+                console.log(`[defenseclaw] intercepted LLM call → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
             }
             const response = await originalFetch(proxied, newInit);
             const blocked = response.headers.get("x-defenseclaw-blocked") === "true";
@@ -810,10 +1239,13 @@ export function createFetchInterceptor(portOrOpts) {
             });
             return response;
         };
-        // Also patch https.request so axios, undici, and other non-fetch HTTP
-        // clients are intercepted. All of them ultimately use node:https.request.
+        // Also patch https.request so axios and other HTTP clients that
+        // delegate to node:https are intercepted. Note: undici-based clients
+        // (including Node 18+ globalThis.fetch) are covered by the undici
+        // dispatcher patch above, not this https.request patch.
         originalHttpsRequest = https.request.bind(https);
-        const originalHttpRequest = http.request.bind(http);
+        originalHttpRequest = http.request.bind(http);
+        originalHttpGet = http.get.bind(http);
         /**
          * Normalize the varied `https.request` call shapes into a single URL string
          * we can match against LLM provider domains. Callers may pass:
@@ -826,25 +1258,81 @@ export function createFetchInterceptor(portOrOpts) {
          * `host` and `hostname` and fold `path` back in to match on domain + path.
          */
         function buildUrlStringFromArgs(urlOrOptions, secondArg) {
-            if (typeof urlOrOptions === "string")
-                return urlOrOptions;
-            if (urlOrOptions instanceof URL)
-                return urlOrOptions.toString();
-            const opts = urlOrOptions;
+            // Avarice F-1587: when the first argument is a URL string or
+            // URL object, Node still merges the second options object's
+            // hostname/port/path/protocol overrides on top of it. The
+            // legacy code returned the first argument verbatim, so a
+            // caller could pass a benign URL ("https://example.com/foo")
+            // alongside an options bag containing
+            //   { hostname: "api.openai.com", path: "/v1/messages" }
+            // and the interceptor classified the request using only the
+            // benign URL. Force-merge the options overlay here so the
+            // shape and known-provider checks see the actual
+            // post-merge target.
             const overlay = (typeof secondArg === "object" && secondArg !== null
                 ? secondArg
+                : null);
+            if (typeof urlOrOptions === "string" || urlOrOptions instanceof URL) {
+                const base = typeof urlOrOptions === "string" ? urlOrOptions : urlOrOptions.toString();
+                if (!overlay)
+                    return base;
+                let parsed;
+                try {
+                    parsed = new URL(base);
+                }
+                catch {
+                    return base;
+                }
+                if (typeof overlay.hostname === "string" && overlay.hostname) {
+                    parsed.hostname = overlay.hostname;
+                }
+                else if (typeof overlay.host === "string" && overlay.host) {
+                    // overlay.host may include a port; fold it into hostname.
+                    const colon = overlay.host.lastIndexOf(":");
+                    if (colon > -1) {
+                        parsed.hostname = overlay.host.slice(0, colon);
+                        parsed.port = overlay.host.slice(colon + 1);
+                    }
+                    else {
+                        parsed.hostname = overlay.host;
+                    }
+                }
+                if (overlay.port !== undefined && overlay.port !== null) {
+                    parsed.port = String(overlay.port);
+                }
+                if (typeof overlay.path === "string" && overlay.path) {
+                    // overlay.path is path+search per Node convention; take the
+                    // first '?' as the search separator if present.
+                    const q = overlay.path.indexOf("?");
+                    if (q >= 0) {
+                        parsed.pathname = overlay.path.slice(0, q);
+                        parsed.search = overlay.path.slice(q);
+                    }
+                    else {
+                        parsed.pathname = overlay.path;
+                        parsed.search = "";
+                    }
+                }
+                if (typeof overlay.protocol === "string" && overlay.protocol) {
+                    parsed.protocol = overlay.protocol;
+                }
+                return parsed.toString();
+            }
+            const opts = urlOrOptions;
+            const optsOverlay = (typeof secondArg === "object" && secondArg !== null
+                ? secondArg
                 : {});
-            const host = (typeof overlay.hostname === "string" && overlay.hostname) ||
-                (typeof overlay.host === "string" && overlay.host) ||
+            const host = (typeof optsOverlay.hostname === "string" && optsOverlay.hostname) ||
+                (typeof optsOverlay.host === "string" && optsOverlay.host) ||
                 (typeof opts.hostname === "string" && opts.hostname) ||
                 (typeof opts.host === "string" && opts.host) ||
                 "";
-            const port = (overlay.port !== undefined ? String(overlay.port) : "") ||
+            const port = (optsOverlay.port !== undefined ? String(optsOverlay.port) : "") ||
                 (opts.port !== undefined ? String(opts.port) : "");
-            const path = (typeof overlay.path === "string" && overlay.path) ||
+            const path = (typeof optsOverlay.path === "string" && optsOverlay.path) ||
                 (typeof opts.path === "string" && opts.path) ||
                 "/";
-            const proto = (typeof overlay.protocol === "string" && overlay.protocol) ||
+            const proto = (typeof optsOverlay.protocol === "string" && optsOverlay.protocol) ||
                 (typeof opts.protocol === "string" && opts.protocol) ||
                 "https:";
             if (!host)
@@ -854,6 +1342,10 @@ export function createFetchInterceptor(portOrOpts) {
         }
         function patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback) {
             const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+            if (urlStr && shouldPassthroughChatGPTCodexResponseBackendUrl(urlStr)) {
+                reportChatGPTCodexResponsePassthrough(urlStr);
+                return originalHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+            }
             // Path-only shape detection for https.request — the body is
             // written via req.write after this call returns, so peeking is
             // not an option. hasLLMPathSuffix still catches the overwhelming
@@ -865,6 +1357,7 @@ export function createFetchInterceptor(portOrOpts) {
                 hasLLMPathSuffix(urlStr));
             const knownForHTTPS = Boolean(urlStr && isLLMUrl(urlStr, guardrailPort) && !isAlreadyProxied(urlStr, guardrailPort));
             if (urlStr && (knownForHTTPS || shapedForHTTPS)) {
+                noteInterceptLayer("https.request", urlStr);
                 let opts = {};
                 let cb = callback;
                 if (typeof optionsOrCallback === "function") {
@@ -930,10 +1423,10 @@ export function createFetchInterceptor(portOrOpts) {
                     agent: false,
                 };
                 if (!knownForHTTPS && shapedForHTTPS) {
-                    console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${urlStr} (path-match) proxied via ${proxyBase}`);
+                    console.log(`[defenseclaw] intercepted LLM-shaped call (https.request) → ${scrubUrlForLog(urlStr)} (path-match) proxied via ${proxyBase}`);
                 }
                 else {
-                    console.log(`[defenseclaw] intercepted LLM call (https.request) → ${urlStr} proxied via ${proxyBase}`);
+                    console.log(`[defenseclaw] intercepted LLM call (https.request) → ${scrubUrlForLog(urlStr)} proxied via ${proxyBase}`);
                 }
                 // Egress telemetry for the https.request branches. body_shape
                 // is intentionally "none" because req.write happens after we
@@ -950,7 +1443,10 @@ export function createFetchInterceptor(portOrOpts) {
                         reason: !knownForHTTPS && shapedForHTTPS ? "shape-match" : "known-provider",
                     });
                 }
-                return http.request(newOpts, cb);
+                // F-1586: now that http.request is also patched, the proxy
+                // hop must use the captured original to avoid recursing
+                // back into this branch.
+                return originalHttpRequest(newOpts, cb);
             }
             // Non-intercepted https.request — report silent passthrough so
             // the TUI/egress event log sees LLM-looking calls slipping past
@@ -971,7 +1467,234 @@ export function createFetchInterceptor(portOrOpts) {
             return originalHttpsRequest(urlOrOptions, optionsOrCallback, callback);
         }
         https.request = patchedHttpsRequest;
+        // Avarice F-1586: plain `http.request` callers (e.g. local
+        // Ollama clients hitting http://127.0.0.1:11434/api/chat)
+        // bypassed the interceptor entirely because only `https.request`
+        // and `globalThis.fetch` were patched. We share `patchedHttpsRequest`
+        // — it already routes through the proxy as plain http via
+        // `http.request` — but we explicitly downgrade the protocol on
+        // the first argument so a caller-supplied "http:" URL doesn't
+        // get rewritten to "https:".
+        function patchedHttpRequest(urlOrOptions, optionsOrCallback, callback) {
+            const urlStr = buildUrlStringFromArgs(urlOrOptions, optionsOrCallback);
+            // Layer 0: known provider domain or registered local LLM port
+            // with a recognizable LLM path (original Ollama-only gate).
+            const knownCandidate = Boolean(urlStr &&
+                isLLMUrl(urlStr, guardrailPort) &&
+                hasLLMPathSuffix(urlStr) &&
+                !isAlreadyProxied(urlStr, guardrailPort));
+            // Layer 1: path-shape detection — catches local LLM proxies
+            // (e.g. http://127.0.0.1:18800/v1/chat/completions) that are
+            // not registered in ollama_ports but have a recognizable LLM
+            // path suffix. Only applies to non-safe domains so we don't
+            // accidentally intercept unrelated http traffic.
+            const shapedCandidate = Boolean(urlStr &&
+                !knownCandidate &&
+                !isKnownSafeDomain(urlStr) &&
+                !isAlreadyProxied(urlStr, guardrailPort) &&
+                hasLLMPathSuffix(urlStr));
+            if (!knownCandidate && !shapedCandidate) {
+                return originalHttpRequest(urlOrOptions, optionsOrCallback, callback);
+            }
+            // Re-use the https.request patched path. The proxy hop is
+            // plain http already, so the protocol downgrade is a no-op.
+            return patchedHttpsRequest(urlOrOptions, optionsOrCallback, callback);
+        }
+        http.request = patchedHttpRequest;
+        // `http.get` is `http.request` plus an implicit `req.end()`. Some
+        // streaming clients call it directly, so it must be patched too —
+        // otherwise an http.get to a local Ollama endpoint slips past the
+        // proxy. Delegate to the shared patched request path and preserve the
+        // auto-end semantics so the GET actually fires.
+        function patchedHttpGet(urlOrOptions, optionsOrCallback, callback) {
+            const req = patchedHttpRequest(urlOrOptions, optionsOrCallback, callback);
+            try {
+                req.end?.();
+            }
+            catch {
+                // Sink/stub requests may not implement end(); ignore.
+            }
+            return req;
+        }
+        http.get = patchedHttpGet;
+        // ─── Undici dispatcher interception ───
+        // Node 18+ globalThis.fetch is backed by undici's internal
+        // dispatcher. If a SDK (e.g. @anthropic-ai/sdk, openai v4+)
+        // captured the original globalThis.fetch reference before our
+        // swap, or calls undici.request()/fetch() directly, traffic
+        // bypasses our globalThis.fetch patch. Intercepting at the
+        // dispatcher level catches ALL undici-routed traffic.
+        if (undici &&
+            typeof undici.getGlobalDispatcher === "function" &&
+            typeof undici.setGlobalDispatcher === "function") {
+            originalUndiciDispatcher = undici.getGlobalDispatcher();
+            const parentDispatcher = originalUndiciDispatcher;
+            const interceptingDispatch = (opts, handler) => {
+                const origin = opts.origin?.toString() ?? "";
+                const pathStr = opts.path ?? "";
+                const urlStr = origin + pathStr;
+                if (urlStr &&
+                    !isAlreadyProxied(urlStr, guardrailPort) &&
+                    !isKnownSafeDomain(urlStr) &&
+                    (isLLMUrl(urlStr, guardrailPort) || hasLLMPathSuffix(urlStr))) {
+                    opts.origin = proxyBase;
+                    const existingHeaders = (opts.headers ?? {});
+                    const providerKey = extractProviderKeyFromRecord(existingHeaders);
+                    const proxyHdrs = buildProxyHeaders(origin + pathStr, providerKey, getCorrelationHeaders);
+                    opts.headers = { ...existingHeaders, ...proxyHdrs };
+                    noteInterceptLayer("undici", urlStr);
+                    egressReporter?.report({
+                        targetHost: new URL(origin).hostname,
+                        targetPath: pathStr,
+                        bodyShape: "none",
+                        looksLikeLLM: true,
+                        branch: "undici",
+                        decision: "intercept",
+                        reason: "undici-dispatcher",
+                    });
+                    if (readUndiciHeader(opts.headers, INTERCEPTION_PROBE_HEADER) === "1") {
+                        lastUndiciProbeDestination = `${proxyBase}${pathStr || "/v1/chat/completions"}`;
+                        return completeUndiciProbe(handler);
+                    }
+                }
+                return parentDispatcher.dispatch(opts, handler);
+            };
+            // Proxy object that delegates dispatch to our interceptor and
+            // all other Dispatcher methods to the original.
+            const proxyDispatcher = Object.create(parentDispatcher, {
+                dispatch: { value: interceptingDispatch, writable: true, configurable: true },
+            });
+            undici.setGlobalDispatcher(proxyDispatcher);
+        }
         console.log(`[defenseclaw] LLM fetch interceptor active (proxy: ${proxyBase})`);
+        const layers = describeLayers();
+        logStartupBanner(layers);
+        scheduleSelfTest();
+    }
+    async function verifyInterception() {
+        const layers = describeLayers();
+        const expectedDest = `${proxyBase}/v1/chat/completions`;
+        if (!originalFetch) {
+            return {
+                ok: false,
+                destination: "",
+                layers,
+                reason: "interceptor-not-started",
+            };
+        }
+        // The probe posts to INTERCEPTION_SELF_TEST_URL (a real provider host) and
+        // only short-circuits inside our own wrapper. If globalThis.fetch is not
+        // ours -- never installed, or replaced by another module after start() --
+        // the probe would become genuine unguarded egress from the guardrail
+        // itself, repeated on every verify tick. describeLayers() already reports
+        // that condition with no network call, so answer from it instead.
+        if (!layers.fetch) {
+            return {
+                ok: false,
+                destination: "",
+                layers,
+                reason: "interception-self-test-fetch-missing",
+            };
+        }
+        let destination = "";
+        const probeInit = {
+            method: "POST",
+            headers: {
+                "content-type": "application/json",
+                [INTERCEPTION_PROBE_HEADER]: "1",
+            },
+            body: JSON.stringify({
+                model: "defenseclaw-intercept-probe",
+                messages: [{ role: "user", content: "defenseclaw-intercept-probe" }],
+            }),
+        };
+        try {
+            const response = await globalThis.fetch(INTERCEPTION_SELF_TEST_URL, probeInit);
+            // Probe hops short-circuit inside the wrapper after rewrite. A
+            // 200 with the probe header means the rewrite happened and the
+            // original fetch was never used for a provider host.
+            if (response.headers.get(INTERCEPTION_PROBE_HEADER) === "1") {
+                destination = expectedDest;
+            }
+        }
+        catch {
+            // Keep the miss path for a broken wrapper.
+        }
+        lastUndiciProbeDestination = "";
+        if (undici && typeof undici.request === "function" && layers.undiciDispatcher) {
+            try {
+                const response = await undici.request(INTERCEPTION_SELF_TEST_URL, probeInit);
+                await response.body?.text?.();
+            }
+            catch {
+                // Rewrite is recorded on the dispatcher even if the sink is stubbed.
+            }
+        }
+        const requiredLayers = layers.fetch && layers.httpsRequest && layers.httpRequest && layers.httpGet;
+        const undiciRequired = Boolean(undici);
+        const undiciOk = !undiciRequired ||
+            (layers.undiciDispatcher && lastUndiciProbeDestination === expectedDest);
+        const ok = destination === expectedDest && requiredLayers && undiciOk;
+        let reason = "interception-self-test-miss";
+        if (ok) {
+            reason = "interception-self-test";
+        }
+        else if (destination === expectedDest && requiredLayers && !undiciOk) {
+            reason = "interception-self-test-undici-miss";
+        }
+        return {
+            ok,
+            destination,
+            layers,
+            reason,
+        };
+    }
+    async function publishSelfTest(result) {
+        if (!originalFetch)
+            return;
+        const token = loadSidecarConfig().token;
+        const headers = { "Content-Type": "application/json" };
+        if (token)
+            headers[DC_AUTH_HEADER] = `Bearer ${token}`;
+        try {
+            const controller = new AbortController();
+            const timeout = setTimeout(() => controller.abort(), 2_000);
+            await originalFetch(`http://127.0.0.1:${guardrailPort}/v1/events/egress`, {
+                method: "POST",
+                headers,
+                body: JSON.stringify({
+                    target_host: "api.openai.com",
+                    target_path: "/v1/chat/completions",
+                    body_shape: "messages",
+                    looks_like_llm: true,
+                    branch: "selftest",
+                    decision: result.ok ? "intercept" : "allow",
+                    reason: result.reason,
+                }),
+                signal: controller.signal,
+            });
+            clearTimeout(timeout);
+        }
+        catch {
+            // Self-test telemetry is best-effort and must not stall the plugin.
+        }
+    }
+    async function runSelfTest() {
+        const result = await verifyInterception();
+        console.log(`[defenseclaw] interception self-test ok=${result.ok} dest=${result.destination || "none"} ` +
+            `reason=${result.reason}`);
+        await publishSelfTest(result);
+        return result;
+    }
+    function scheduleSelfTest() {
+        if (selfTestTimer)
+            return;
+        selfTestTimer = setInterval(() => {
+            void runSelfTest();
+        }, INTERCEPTION_SELF_TEST_INTERVAL_MS);
+        if (typeof selfTestTimer === "object" && selfTestTimer && "unref" in selfTestTimer) {
+            selfTestTimer.unref?.();
+        }
     }
     function stop() {
         if (originalFetch) {
@@ -981,12 +1704,36 @@ export function createFetchInterceptor(portOrOpts) {
         // Restore https.request (safe because we used CJS require, not frozen ESM)
         if (originalHttpsRequest) {
             https.request = originalHttpsRequest;
+            originalHttpsRequest = null;
+        }
+        // Avarice F-1586: also restore the http.request patch so test
+        // teardown leaves the runtime clean.
+        if (originalHttpRequest) {
+            http.request = originalHttpRequest;
+            originalHttpRequest = null;
+        }
+        if (originalHttpGet) {
+            http.get = originalHttpGet;
+            originalHttpGet = null;
+        }
+        // Restore undici global dispatcher
+        if (undici && originalUndiciDispatcher) {
+            undici.setGlobalDispatcher(originalUndiciDispatcher);
+            originalUndiciDispatcher = null;
         }
         if (egressReporter) {
             egressReporter.stop();
             egressReporter = null;
         }
+        chatgptCodexPassthroughWarned = false;
+        loggedInterceptHosts.clear();
+        if (selfTestTimer) {
+            clearInterval(selfTestTimer);
+            selfTestTimer = null;
+        }
+        _shared.installed = false;
+        _shared.guardrailPort = null;
         console.log("[defenseclaw] LLM fetch interceptor stopped");
     }
-    return { start, stop };
+    return { start, stop, describeLayers, verifyInterception, runSelfTest };
 }

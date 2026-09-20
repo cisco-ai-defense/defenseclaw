@@ -74,7 +74,20 @@ class SeverityCountsInScanMapTests(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.runner = CliRunner()
-        self.app.logger.log_scan(_result("myskill"))
+        result = _result("myskill")
+        # This is a read-model fixture, not a telemetry integration. Seed the
+        # forensic row directly so the test never depends on a live gateway or
+        # revives the removed Python logger persistence path.
+        self.app.store.insert_scan_result(
+            "scan-severity-counts",
+            result.scanner,
+            result.target,
+            result.timestamp,
+            int(result.duration.total_seconds() * 1000),
+            len(result.findings),
+            result.max_severity(),
+            result.to_json(),
+        )
 
     def tearDown(self):
         cleanup_app(self.app, self.db_path, self.tmp_dir)

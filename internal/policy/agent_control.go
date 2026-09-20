@@ -89,6 +89,27 @@ func loadAgentControlData(regoDir string, data map[string]interface{}) (AgentCon
 	}
 
 	path := filepath.Join(regoDir, agentControlDataFilename)
+	pathInfo, statErr := os.Lstat(path)
+	if statErr == nil {
+		if pathInfo.Mode()&os.ModeSymlink != 0 || !pathInfo.Mode().IsRegular() {
+			return AgentControlPolicyStatus{}, fmt.Errorf("policy: %s must be a non-symlink regular file", agentControlDataFilename)
+		}
+		entries, readDirErr := os.ReadDir(regoDir)
+		if readDirErr != nil {
+			return AgentControlPolicyStatus{}, fmt.Errorf("policy: inspect %s: %w", agentControlDataFilename, readDirErr)
+		}
+		for _, entry := range entries {
+			if entry.Name() == agentControlDataFilename {
+				continue
+			}
+			aliasInfo, aliasErr := os.Stat(filepath.Join(regoDir, entry.Name()))
+			if aliasErr == nil && aliasInfo.Mode().IsRegular() && os.SameFile(pathInfo, aliasInfo) {
+				return AgentControlPolicyStatus{}, fmt.Errorf("policy: %s has hard links; refusing ambiguous managed state", agentControlDataFilename)
+			}
+		}
+	} else if !os.IsNotExist(statErr) {
+		return AgentControlPolicyStatus{}, fmt.Errorf("policy: inspect %s: %w", agentControlDataFilename, statErr)
+	}
 	raw, err := safefile.ReadRegular(path, maxAgentControlDataBytes)
 	if errors.Is(err, os.ErrNotExist) {
 		data["agent_control"] = disabledAgentControlData()

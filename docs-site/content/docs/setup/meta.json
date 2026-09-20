@@ -3,7 +3,8 @@
   "pages": [
     "index",
     "guardrail",
-    "agent-control",
+    "semantic-routing",
+    "sandbox",
     "unified-llm-key",
     "skill-scanner",
     "mcp-scanner",

@@ -1,0 +1,10 @@
+{
+  "name": "agent:example-agent",
+  "attributes": {
+    "session.id": "conv_0123456789abcdef",
+    "gen_ai.operation.name": "invoke_agent",
+    "gen_ai.agent.name": "example-agent",
+    "gen_ai.provider.name": "example-provider",
+    "gen_ai.request.model": "example-model"
+  }
+}

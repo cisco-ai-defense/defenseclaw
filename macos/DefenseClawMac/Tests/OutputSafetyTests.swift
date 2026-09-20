@@ -14,6 +14,7 @@
 //
 // SPDX-License-Identifier: Apache-2.0
 
+import Darwin
 import Foundation
 
 // Minimal standalone-test dependency for CLIRunner.doctor(). The production
@@ -35,11 +36,14 @@ actor StreamedLineRecorder {
 @main
 struct OutputSafetyTests {
     static func main() async {
+        CLIProcessGroupLauncher.execIfRequested()
         await capturesNormalOutput()
         await truncatesANewlineLessLine()
         await capsTotalOutputAndReportsFailure()
         await taskCancellationInterruptsChildAndDrainsPipe()
+        resolvesRuntimePythonAdjacentToSelectedCLI()
         parsesBoundedInventoryDocuments()
+        normalizesInventoryCapabilityNotes()
         rejectsOversizedAndAdversarialInventoryOutput()
         print("CLI output and inventory parser safety tests passed")
     }
@@ -47,7 +51,8 @@ struct OutputSafetyTests {
     private static func capturesNormalOutput() async {
         let result = await CLIRunner().run(
             binary: "/usr/bin/python3",
-            arguments: ["-c", "import sys; sys.stdout.write('alpha\\nbeta')"]
+            arguments: ["-c", "import sys; sys.stdout.write('alpha\\nbeta')"],
+            mutation: false
         )
         expect(result.succeeded, "normal command succeeds")
         expect(!result.outputTruncated, "normal command is not truncated")
@@ -59,7 +64,8 @@ struct OutputSafetyTests {
         let recorder = StreamedLineRecorder()
         let result = await CLIRunner().run(
             binary: "/usr/bin/python3",
-            arguments: ["-c", "import sys; sys.stdout.write('x' * \(count))"]
+            arguments: ["-c", "import sys; sys.stdout.write('x' * \(count))"],
+            mutation: false
         ) { line in
             await recorder.append(line)
         }
@@ -90,7 +96,8 @@ struct OutputSafetyTests {
             arguments: [
                 "-c",
                 "import sys; sys.stdout.write(('y' * 80 + '\\n') * (\(count) // 81 + 1))",
-            ]
+            ],
+            mutation: false
         )
         expect(result.exitCode == 0, "large-output child is fully drained")
         expect(result.outputTruncated, "total output cap sets truncation state")
@@ -116,13 +123,15 @@ struct OutputSafetyTests {
             sys.exit(130)
 
         signal.signal(signal.SIGINT, handle_interrupt)
+        signal.alarm(8)
         print("ready", flush=True)
         time.sleep(30)
         """
         let task = Task {
             await runner.run(
                 binary: "/usr/bin/python3",
-                arguments: ["-c", childProgram]
+                arguments: ["-c", childProgram],
+                mutation: false
             ) { line in
                 await recorder.append(line)
             }
@@ -143,6 +152,28 @@ struct OutputSafetyTests {
         expect(
             result.output.contains(interruptionSentinel),
             "output produced by the SIGINT handler is drained before return"
+        )
+    }
+
+    private static func resolvesRuntimePythonAdjacentToSelectedCLI() {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("defenseclaw-python-resolution-\(UUID().uuidString)")
+        let bin = root.appendingPathComponent("venv/bin", isDirectory: true)
+        let cli = bin.appendingPathComponent("defenseclaw")
+        let linkedCLI = root.appendingPathComponent("defenseclaw-link")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try? FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        FileManager.default.createFile(atPath: cli.path, contents: Data())
+        try? FileManager.default.createSymbolicLink(at: linkedCLI, withDestinationURL: cli)
+
+        let candidates = CLIRunner.runtimePythonCandidates(
+            contextPythonPath: root.appendingPathComponent("home-venv/bin/python").path,
+            selectedCLIPath: linkedCLI.path
+        )
+        expect(candidates.count == 2, "selected CLI contributes a runtime interpreter candidate")
+        expect(
+            candidates[1] == bin.appendingPathComponent("python").path,
+            "selected CLI symlink resolves to its sibling Python"
         )
     }
 
@@ -176,6 +207,105 @@ struct OutputSafetyTests {
         expect(
             InventoryOutputParser.firstJSONArrayData(in: unmatchedArrayOpeners) != nil,
             "array parser finds valid JSON after unmatched openers without rescanning"
+        )
+    }
+
+    private static func normalizesInventoryCapabilityNotes() {
+        let capabilityNotes: [[String: Any]] = [
+            [
+                "command": "codex:agents",
+                "error": "agents are not a first-class concept on this connector",
+            ],
+            [
+                "command": "codex:tools",
+                "error": "tool registry is owned by each plugin's manifest",
+            ],
+            [
+                "command": "codex:models",
+                "error": "model providers are configured inside the framework",
+            ],
+            [
+                "command": "codex:memory",
+                "error": "memory backend is private to the framework",
+            ],
+        ]
+        let capabilityOnly: [String: Any] = [
+            "connector": "codex",
+            "errors": capabilityNotes,
+            "summary": ["errors": 4],
+        ]
+        expect(
+            InventoryOutputParser.actionableErrorCount(in: capabilityOnly) == 0,
+            "expected connector capability notes are not counted as failures"
+        )
+
+        let repeatedWarning = Array(
+            repeating: "Warning: 4 connector inventory command(s) failed",
+            count: 5
+        ).joined(separator: "\n")
+        let capabilityResult = InventoryOutputParseResult(
+            documents: Array(repeating: capabilityOnly, count: 5),
+            diagnostics: repeatedWarning
+        )
+        expect(
+            InventoryOutputParser.userFacingDiagnostics(from: capabilityResult).isEmpty,
+            "aggregate warnings disappear when every reported error is a capability note"
+        )
+
+        let encodedDocuments = try? JSONSerialization.data(
+            withJSONObject: capabilityResult.documents,
+            options: [.sortedKeys]
+        )
+        let mixedOutput = repeatedWarning + "\n"
+            + (encodedDocuments.flatMap { String(data: $0, encoding: .utf8) } ?? "")
+        let parsedCapabilityOutput = InventoryOutputParser.parse(mixedOutput)
+        expect(
+            parsedCapabilityOutput?.documents.count == 5,
+            "multi-connector capability payload parses with runtime diagnostics"
+        )
+        if let parsedCapabilityOutput {
+            expect(
+                InventoryOutputParser.userFacingDiagnostics(from: parsedCapabilityOutput).isEmpty,
+                "parsed runtime capability warnings are suppressed"
+            )
+        }
+
+        var mixed = capabilityOnly
+        mixed["errors"] = capabilityNotes + [[
+            "command": "codex:skills",
+            "error": "permission denied",
+        ]]
+        let mixedResult = InventoryOutputParseResult(
+            documents: [mixed],
+            diagnostics: repeatedWarning + "\nscanner cache is stale"
+        )
+        expect(
+            InventoryOutputParser.actionableErrorCount(in: mixed) == 1,
+            "real inventory failures remain actionable"
+        )
+        expect(
+            InventoryOutputParser.userFacingDiagnostics(from: mixedResult)
+                == "Warning: 1 connector inventory command(s) failed\nscanner cache is stale",
+            "warnings are deduplicated and unrelated diagnostics are preserved"
+        )
+
+        var wrongCategory = capabilityOnly
+        wrongCategory["errors"] = [[
+            "command": "codex:skills",
+            "error": "agents are not a first-class concept on this connector",
+        ]]
+        expect(
+            InventoryOutputParser.actionableErrorCount(in: wrongCategory) == 1,
+            "capability text under the wrong command remains actionable"
+        )
+
+        let legacy: [String: Any] = [
+            "connector": "codex",
+            "summary": ["errors": 3],
+        ]
+        expect(
+            InventoryOutputParser.actionableErrorCount(in: legacy) == 3,
+            "legacy summaries without structured errors retain their count"
         )
     }
 

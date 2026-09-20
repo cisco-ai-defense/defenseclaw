@@ -24,14 +24,27 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/defenseclaw/defenseclaw/internal/guardrail"
 )
+
+// profiledRegexCase keeps the ordinary/default ScanAllRules contract used by
+// TestSecuritySuiteRegex while recording the stronger strict-pack contract for
+// broad atomic signals that were intentionally removed from default and
+// permissive to reduce false positives.
+type profiledRegexCase struct {
+	regexCase
+	StrictExpectedSeverityAtLeast string `json:"strict_expected_severity_at_least,omitempty"`
+}
 
 // TestGenerateRegexImportFromEvalCorpus regenerates the "eval-" rows of
 // regex/corpus.jsonl from the labeled eval corpus (gated by
 // SECURITY_SUITE_IMPORT=1). Benign items the regex layer leaves clean become
-// false-positive guards; attacks it already flags become regression locks;
-// items it doesn't handle deterministically are skipped and stay in the live
-// tier. Curated rows are preserved verbatim.
+// false-positive guards; attacks it handles deterministically become
+// regression locks. Action-rule matches stay on the raw ScanAllRules surface,
+// while contextual content findings stay on the inspector surface. Items not
+// handled by either deterministic boundary remain in the live tier. Curated
+// rows are preserved verbatim.
 func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 	if os.Getenv("SECURITY_SUITE_IMPORT") != "1" {
 		t.Skip("generator; set SECURITY_SUITE_IMPORT=1 to regenerate the generated block of regex/corpus.jsonl")
@@ -40,7 +53,16 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 	g := NewGuardrailInspector("local", nil, nil, "")
 	g.SetDetectionStrategy("regex_only", "", "", "", false)
 
-	var imported []regexCase
+	strictPack, err := guardrail.LoadRulePack(filepath.Join("..", "..", "policies", "guardrail", "strict"))
+	if err != nil {
+		t.Fatalf("load strict rule pack: %v", err)
+	}
+	strictGeneration, err := compileRulePackCategories(strictPack)
+	if err != nil {
+		t.Fatalf("compile strict rule pack: %v", err)
+	}
+
+	var imported []profiledRegexCase
 	var keptBenign, keptAttack, skipBenign, skipAttack int
 
 	for _, judge := range []string{"injection", "pii", "exfil", "tool_injection"} {
@@ -50,24 +72,54 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 				dir = "prompt"
 			}
 			v := g.Inspect(context.Background(), dir, it.Content, nil, "model", "observe")
-			high := v != nil && severityRank[v.Severity] >= severityRank["HIGH"]
-
-			c := regexCase{
-				ID:        "eval-" + it.ID,
-				Direction: dir,
-				ToolName:  it.ToolName,
-				Content:   it.Content,
-				IsAttack:  it.IsAttack,
-				Surfaces:  []string{"inspector"},
+			inspectorSeverity := "NONE"
+			if v != nil {
+				inspectorSeverity = v.Severity
 			}
+			actionSeverity := HighestSeverity(regexActionFindings(it.Content, it.ToolName))
+
+			c := profiledRegexCase{
+				regexCase: regexCase{
+					ID:        "eval-" + it.ID,
+					Direction: dir,
+					ToolName:  it.ToolName,
+					Content:   it.Content,
+					IsAttack:  it.IsAttack,
+				},
+			}
+			strictActionSeverity := HighestSeverity(scanRuleGeneration(
+				strictGeneration, it.Content, it.ToolName, ruleScanOptions{},
+			))
 			switch {
-			case it.IsAttack && high:
+			case it.IsAttack && severityRank[actionSeverity] >= severityRank["HIGH"]:
+				// Commands, sensitive paths, cognitive-file operations, and C2
+				// are action categories. Preserve their raw regex fallback coverage
+				// without asserting that prompt/completion prose executed an action.
+				c.Surfaces = []string{"scan_all_rules"}
 				c.ExpectedSeverityAtLeast = "HIGH"
 				imported = append(imported, c)
 				keptAttack++
-			case it.IsAttack && !high:
+			case it.IsAttack && severityRank[strictActionSeverity] >= severityRank["HIGH"]:
+				// Broad atomic command/path signals are intentionally quiet in the
+				// default and permissive packs, but remain strict-profile detections.
+				c.Surfaces = []string{"scan_all_rules"}
+				c.ForbiddenSeverityAtLeast = "HIGH"
+				c.StrictExpectedSeverityAtLeast = "HIGH"
+				imported = append(imported, c)
+				keptAttack++
+			case it.IsAttack && severityRank[inspectorSeverity] >= severityRank["MEDIUM"]:
+				c.Surfaces = []string{"inspector"}
+				if severityRank[inspectorSeverity] >= severityRank["HIGH"] {
+					c.ExpectedSeverityAtLeast = "HIGH"
+				} else {
+					c.ExpectedSeverityAtLeast = "MEDIUM"
+				}
+				imported = append(imported, c)
+				keptAttack++
+			case it.IsAttack:
 				skipAttack++ // judge-only; lives in the live tier
-			case !it.IsAttack && !high:
+			case severityRank[inspectorSeverity] < severityRank["HIGH"]:
+				c.Surfaces = []string{"inspector"}
 				c.ForbiddenSeverityAtLeast = "HIGH"
 				imported = append(imported, c)
 				keptBenign++
@@ -125,4 +177,46 @@ func TestGenerateRegexImportFromEvalCorpus(t *testing.T) {
 	t.Logf("regex import written to %s", path)
 	t.Logf("benign: kept=%d skipped(regex-flagged)=%d", keptBenign, skipBenign)
 	t.Logf("attack: kept=%d skipped(judge-only)=%d", keptAttack, skipAttack)
+}
+
+func regexActionFindings(text, toolName string) []RuleFinding {
+	// Generate against the same production entry point replayed by the
+	// resulting corpus. Direct category regex scans can retain a compatibility
+	// candidate that the trusted ActionFacts boundary correctly suppresses.
+	return ScanAllRules(text, toolName)
+}
+
+// TestSecuritySuiteRegexStrictProfile locks coverage for corpus rows whose
+// broad atomic signal is deliberately detection-only outside the strict
+// posture. The base regex suite simultaneously verifies those rows remain
+// quiet under the default pack.
+func TestSecuritySuiteRegexStrictProfile(t *testing.T) {
+	cases := readJSONL[profiledRegexCase](t, "regex", "corpus.jsonl")
+
+	pack, err := guardrail.LoadRulePack(filepath.Join("..", "..", "policies", "guardrail", "strict"))
+	if err != nil {
+		t.Fatalf("load strict rule pack: %v", err)
+	}
+	generation, err := compileRulePackCategories(pack)
+	if err != nil {
+		t.Fatalf("compile strict rule pack: %v", err)
+	}
+
+	covered := 0
+	for _, c := range cases {
+		if c.StrictExpectedSeverityAtLeast == "" {
+			continue
+		}
+		covered++
+		c := c
+		t.Run(c.ID, func(t *testing.T) {
+			findings := scanRuleGeneration(generation, c.Content, c.ToolName, ruleScanOptions{})
+			assertExpectation(t, expectation{
+				ExpectedSeverityAtLeast: c.StrictExpectedSeverityAtLeast,
+			}, HighestSeverity(findings), ruleFindingStrings(findings))
+		})
+	}
+	if covered == 0 {
+		t.Fatal("regex corpus contains no strict-profile expectations")
+	}
 }

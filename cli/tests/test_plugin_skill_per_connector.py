@@ -87,6 +87,10 @@ class PluginPerConnectorCLITests(unittest.TestCase):
     def setUp(self):
         self.app, self.tmp_dir, self.db_path = make_app_context()
         self.app.cfg.active_connectors = lambda: ["codex", "hermes"]  # type: ignore[method-assign]
+        connector_roots = {name: os.path.join(self.tmp_dir, f"{name}-plugins") for name in ("codex", "hermes")}
+        for root in connector_roots.values():
+            os.makedirs(root)
+        self.app.cfg.plugin_dirs = lambda connector=None: [connector_roots[connector or "codex"]]  # type: ignore[method-assign]
         self.runner = CliRunner()
         self.pe = PolicyEngine(self.app.store)
 
@@ -193,14 +197,20 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
     def test_per_connector_block_blocks_only_that_peer(self):
         self.pe.block_for_connector("plugin", "p", "codex", "blocked on codex")
         blocked = evaluate_admission(
-            self.pe, policy_dir=self.app.cfg.policy_dir,
-            target_type="plugin", name="p", connector="codex",
+            self.pe,
+            policy_dir=self.app.cfg.policy_dir,
+            target_type="plugin",
+            name="p",
+            connector="codex",
         )
         self.assertEqual(blocked.verdict, "blocked")
         # hermes has no block → not blocked (scan required, no result yet).
         other = evaluate_admission(
-            self.pe, policy_dir=self.app.cfg.policy_dir,
-            target_type="plugin", name="p", connector="hermes",
+            self.pe,
+            policy_dir=self.app.cfg.policy_dir,
+            target_type="plugin",
+            name="p",
+            connector="hermes",
         )
         self.assertNotEqual(other.verdict, "blocked")
 
@@ -208,8 +218,11 @@ class AdmissionHonorsPerConnectorTests(unittest.TestCase):
         self.pe.block("skill", "s", "global block")
         for c in ("codex", "hermes", "openclaw"):
             d = evaluate_admission(
-                self.pe, policy_dir=self.app.cfg.policy_dir,
-                target_type="skill", name="s", connector=c,
+                self.pe,
+                policy_dir=self.app.cfg.policy_dir,
+                target_type="skill",
+                name="s",
+                connector=c,
             )
             self.assertEqual(d.verdict, "blocked", c)
 

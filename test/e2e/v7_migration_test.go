@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/defenseclaw/defenseclaw/internal/audit"
 	_ "modernc.org/sqlite"
@@ -35,7 +36,7 @@ func TestMigration_FromV0_FreshInstall(t *testing.T) {
 	}
 }
 
-func TestMigration_FromV5(t *testing.T) {
+func TestUnsupportedPreV8HistoryIsPurgedAtCutover(t *testing.T) {
 	t.Parallel()
 	src := filepath.Join("testdata", "v5_audit.sqlite")
 	b, err := os.ReadFile(src)
@@ -74,13 +75,25 @@ func TestMigration_FromV5(t *testing.T) {
 		t.Fatalf("sql.Open: %v", err)
 	}
 	defer db.Close()
-	var details string
-	err = db.QueryRow(`SELECT details FROM audit_events WHERE id = 'legacy-row'`).Scan(&details)
-	if err != nil {
-		t.Fatalf("legacy row: %v", err)
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id = 'legacy-row'`).Scan(&count); err != nil {
+		t.Fatalf("count purged pre-v8 row: %v", err)
 	}
-	if details != "keep-me" {
-		t.Fatalf("details = %q, want keep-me", details)
+	if count != 0 {
+		t.Fatalf("pre-v8 audit rows after destructive cutoff = %d, want 0", count)
+	}
+
+	if err := st.LogEvent(audit.Event{
+		ID: "post-cutover-row", Timestamp: time.Now().UTC(), Action: "post-cutover",
+		Actor: "defenseclaw", Details: "current-v8", Severity: "INFO",
+	}); err != nil {
+		t.Fatalf("post-cutover LogEvent: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM audit_events WHERE id = 'post-cutover-row'`).Scan(&count); err != nil {
+		t.Fatalf("count post-cutover row: %v", err)
+	}
+	if count != 1 {
+		t.Fatalf("post-cutover audit rows = %d, want 1", count)
 	}
 }
 

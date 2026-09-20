@@ -192,7 +192,7 @@ FROM audit_events ORDER BY timestamp ASC`
 			return err
 		}
 		emitted++
-		if connFilter != "" && auditExportLimit > 0 && emitted >= auditExportLimit {
+		if auditExportLimit > 0 && emitted >= auditExportLimit {
 			break
 		}
 	}
@@ -291,7 +291,7 @@ func exportAuditEventsFallback(db *sql.DB, out io.Writer, prov version.Provenanc
 			return err
 		}
 		emitted++
-		if connFilter != "" && auditExportLimit > 0 && emitted >= auditExportLimit {
+		if auditExportLimit > 0 && emitted >= auditExportLimit {
 			break
 		}
 	}

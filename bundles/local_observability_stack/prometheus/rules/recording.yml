@@ -5,20 +5,26 @@
 #   level = job | service | route | scanner | sink | webhook
 #   agg   = rate5m | ratio5m | p95_5m | ...
 groups:
-  - name: defenseclaw.verdict
+  - name: defenseclaw.guardrail
     interval: 30s
     rules:
-      - record: service:defenseclaw_gateway_verdicts:rate5m
-        expr: sum(rate(defenseclaw_gateway_verdicts_total[5m]))
-      - record: service:defenseclaw_gateway_verdicts_by_action:rate5m
-        expr: sum by (verdict_action) (rate(defenseclaw_gateway_verdicts_total[5m]))
-      - record: service:defenseclaw_gateway_verdicts_by_stage:rate5m
-        expr: sum by (verdict_stage) (rate(defenseclaw_gateway_verdicts_total[5m]))
-      - record: service:defenseclaw_gateway_block_ratio:5m
+      # Canonical source family: metric.defenseclaw.guardrail.evaluations.
+      # The labels below are the frozen local-observability-v1 projections of
+      # defenseclaw.guardrail.effective_action, defenseclaw.connector.source,
+      # and defenseclaw.metric.guardrail.scanner.
+      - record: service:defenseclaw_guardrail_evaluations:rate5m
+        expr: sum(rate(defenseclaw_guardrail_evaluations_total[5m]))
+      - record: service:defenseclaw_guardrail_evaluations_by_action:rate5m
+        expr: sum by (guardrail_action_taken) (rate(defenseclaw_guardrail_evaluations_total[5m]))
+      - record: service:defenseclaw_guardrail_evaluations_by_connector:rate5m
+        expr: sum by (guardrail_connector) (rate(defenseclaw_guardrail_evaluations_total[5m]))
+      - record: service:defenseclaw_guardrail_evaluations_by_scanner:rate5m
+        expr: sum by (guardrail_scanner) (rate(defenseclaw_guardrail_evaluations_total[5m]))
+      - record: service:defenseclaw_guardrail_block_ratio:5m
         expr: |
-          sum(rate(defenseclaw_gateway_verdicts_total{verdict_action="block"}[5m]))
+          sum(rate(defenseclaw_guardrail_evaluations_total{guardrail_action_taken="block"}[5m]))
           /
-          clamp_min(sum(rate(defenseclaw_gateway_verdicts_total[5m])), 0.0001)
+          clamp_min(sum(rate(defenseclaw_guardrail_evaluations_total[5m])), 0.0001)
 
   - name: defenseclaw.http
     interval: 30s
@@ -64,14 +70,6 @@ groups:
             clamp_min(sum(rate(defenseclaw_slo_block_latency_milliseconds_count[5m])), 0.0001)
           )
           or on() vector(1)
-      - record: slo:defenseclaw_tui_refresh:ratio_5m
-        expr: |
-          (
-            sum(rate(defenseclaw_slo_tui_refresh_milliseconds_bucket{le="5000"}[5m]))
-            /
-            clamp_min(sum(rate(defenseclaw_slo_tui_refresh_milliseconds_count[5m])), 0.0001)
-          )
-          or on() vector(1)
       # 30-day multi-window burn rate building blocks.
       - record: slo:defenseclaw_block_latency:errors_1h
         expr: |
@@ -89,13 +87,15 @@ groups:
   - name: defenseclaw.sinks
     interval: 30s
     rules:
-      # defenseclaw.audit.sink.failures is tagged sink.kind/sink.name/sink.reason,
-      # NOT `sink`. Do not change this group-by without also updating
-      # alerts.yml::DefenseClawAuditSinkFailures.
+      # defenseclaw.audit.sink.failures uses canonical
+      # defenseclaw.metric.sink.{kind,name,reason} attributes and the generated
+      # local labels sink_kind / sink_name / sink_reason. Do not change this
+      # group-by without also updating alerts.yml::DefenseClawAuditSinkFailures.
       - record: sink:defenseclaw_audit_sink_failures:rate5m
         expr: sum by (sink_kind, sink_name) (rate(defenseclaw_audit_sink_failures_total[5m]))
-      # defenseclaw.audit.sink.batches.* is tagged sink/kind (legacy
-      # RecordSinkBatchDelivered/Failed shape); keep `sink` here.
+      # defenseclaw.audit.sink.batches.* uses the frozen
+      # local-observability-v1 `sink` compatibility label. Keep `sink` here
+      # until the declared alias-removal window closes.
       #
       # Drop-ratio is semantically undefined on a silent sink: a
       # single dropped batch with zero deliveries within the lookback
@@ -124,10 +124,13 @@ groups:
   - name: defenseclaw.exporters
     interval: 30s
     rules:
+      # Canonical source family:
+      # metric.defenseclaw.telemetry.exporter.last_export_ts. Deliberately
+      # group by its generated exporter label and do not pin a deployment job.
       - record: exporter:defenseclaw_otlp_freshness:seconds
         expr: time() - max by (exporter) (defenseclaw_telemetry_exporter_last_export_ts_seconds)
 
-  # Observability-pipeline self-monitoring. Loki silently drops log
+  # Observability-pipeline self-monitoring. Loki rejects log
   # entries that exceed `max_line_size` or `max_structured_metadata_size`,
   # which manifests as missing audit events on dashboards rather than
   # an obvious failure. We pre-aggregate the per-reason discard rate

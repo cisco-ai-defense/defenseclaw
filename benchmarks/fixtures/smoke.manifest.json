@@ -1,0 +1,29 @@
+{
+  "adapter_statistics": {
+    "defenseclaw-smoke": {
+      "rows_emitted": 15,
+      "rows_read": 15
+    }
+  },
+  "cases": 15,
+  "counts": {
+    "defenseclaw-smoke": 15
+  },
+  "datasets": [
+    "defenseclaw-smoke"
+  ],
+  "exact_payload_duplicates_removed": 0,
+  "label_conflicts_excluded": 0,
+  "output_sha256": "78a3e27266636fa995b102cb1d07662b6297331ddf93777f2582342ae8deca9d",
+  "schema_version": "1",
+  "source": {
+    "bytes": 9615,
+    "dataset": "defenseclaw-smoke",
+    "license": "Apache-2.0",
+    "path": "benchmarks/fixtures/smoke.jsonl",
+    "redistribution": "vendored",
+    "revision": "1",
+    "rows": 15,
+    "sha256": "78a3e27266636fa995b102cb1d07662b6297331ddf93777f2582342ae8deca9d"
+  }
+}

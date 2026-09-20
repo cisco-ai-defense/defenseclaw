@@ -1,0 +1,9 @@
+{
+  "hook_event_name": "session.start",
+  "session_id": "dc-e2e-amp",
+  "thread_id": "dc-e2e-amp",
+  "source_event_id": "session.start:dc-e2e-amp:start:windows-contract:0",
+  "source_sequence": "0",
+  "agent_name": "amp",
+  "agent_type": "amp"
+}

@@ -29,14 +29,13 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/defenseclaw/defenseclaw/internal/guardrail"
+	"github.com/defenseclaw/defenseclaw/internal/config"
 	"github.com/defenseclaw/defenseclaw/internal/policy"
 )
 
 func init() {
 	rootCmd.AddCommand(policyCmd)
 	policyCmd.AddCommand(policyValidateCmd)
-	policyCmd.AddCommand(policyValidateRulePackCmd)
 	policyCmd.AddCommand(policyShowCmd)
 	policyCmd.AddCommand(policyEvaluateCmd)
 	policyCmd.AddCommand(policyEvaluateFirewallCmd)
@@ -47,22 +46,6 @@ func init() {
 	policyEvaluateCmd.Flags().String("target-name", "", "Target name to evaluate")
 	policyEvaluateCmd.Flags().String("severity", "", "Max severity of scan result (empty = pre-scan)")
 	policyEvaluateCmd.Flags().Int("findings", 0, "Number of findings")
-	policyValidateCmd.Flags().StringVar(&policyValidateRegoDir, "rego-dir", "", "Policy Rego directory to validate")
-	policyValidateCmd.Flags().StringVar(&policyValidateAgentControlCandidate, "candidate-agent-control", "", "Validate this Agent Control supplemental file instead of the active file")
-	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackBaseDir, "base-dir", "", "Operator rule-pack directory to preserve beneath the overlay")
-	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackOverlayDir, "overlay-dir", "", "Managed rules-only overlay directory to validate")
-	policyValidateRulePackCmd.Flags().StringVar(&policyValidateRulePackRegexSource, "regex-source", guardrail.RegexSourceHybrid, "Regex policy source (local, agent_control, hybrid)")
-	// Native pre-publication validation must be side-effect free and usable
-	// before the gateway/audit database is running. An explicit --rego-dir is
-	// self-contained and skips root bootstrap; the normal no-flag command keeps
-	// the existing config-backed policy_dir resolution and full CLI lifecycle.
-	policyValidateCmd.PersistentPreRunE = func(cmd *cobra.Command, args []string) error {
-		if strings.TrimSpace(policyValidateRegoDir) != "" {
-			return nil
-		}
-		return rootCmd.PersistentPreRunE(cmd, args)
-	}
-	policyValidateRulePackCmd.PersistentPreRunE = func(*cobra.Command, []string) error { return nil }
 
 	policyEvaluateFirewallCmd.Flags().String("destination", "", "Destination hostname or IP")
 	policyEvaluateFirewallCmd.Flags().Int("port", 443, "Destination port")
@@ -76,14 +59,6 @@ var policyCmd = &cobra.Command{
 	Long:  "Validate, inspect, evaluate, and reload DefenseClaw OPA policies.",
 }
 
-var (
-	policyValidateRegoDir               string
-	policyValidateAgentControlCandidate string
-	policyValidateRulePackBaseDir       string
-	policyValidateRulePackOverlayDir    string
-	policyValidateRulePackRegexSource   string
-)
-
 // ---------------------------------------------------------------------------
 // policy validate
 // ---------------------------------------------------------------------------
@@ -92,28 +67,14 @@ var policyValidateCmd = &cobra.Command{
 	Use:   "validate",
 	Short: "Compile-check all Rego modules and validate data.json",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		regoDir := policyValidateRegoDir
-		if strings.TrimSpace(regoDir) == "" {
-			regoDir = resolveRegoDir()
-		}
-		if regoDir == "" {
-			return fmt.Errorf("policy: cannot resolve rego directory — set policy_dir in config")
-		}
-		regoDir = normalizePolicyRegoDir(regoDir)
-
-		candidate := policyValidateAgentControlCandidate
-		if strings.TrimSpace(candidate) != "" {
-			staged, cleanup, err := stageAgentControlCandidate(regoDir, candidate)
-			if err != nil {
-				return err
-			}
-			defer cleanup()
-			regoDir = staged
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
-		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", regoDir)
+		fmt.Fprintf(os.Stderr, "Validating Rego in %s ...\n", paths.regoDir)
 
-		engine, err := policy.New(regoDir)
+		engine, err := policy.NewExact(paths.regoDir)
 		if err != nil {
 			return fmt.Errorf("policy: load failed: %w", err)
 		}
@@ -121,25 +82,12 @@ var policyValidateCmd = &cobra.Command{
 		if err := engine.Compile(); err != nil {
 			return fmt.Errorf("policy: compilation failed:\n%w", err)
 		}
-		if strings.TrimSpace(candidate) != "" {
-			if err := validateAgentControlGuardrailSmoke(engine); err != nil {
-				return fmt.Errorf("policy: Agent Control smoke validation failed: %w", err)
-			}
-			status := engine.Status().AgentControl
-			fmt.Printf("Agent Control candidate: artifact_digest=%s source_digest=%s\n", status.ArtifactDigest, status.SourceDigest)
-		}
 
 		fmt.Println("All Rego modules compiled successfully.")
 
-		dataPath := filepath.Join(regoDir, "data.json")
-		raw, err := os.ReadFile(dataPath)
+		data, err := policy.LoadDataExact(paths.regoDir)
 		if err != nil {
-			return fmt.Errorf("policy: read data.json: %w", err)
-		}
-
-		var data map[string]interface{}
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("policy: invalid data.json: %w", err)
+			return fmt.Errorf("policy: load effective data: %w", err)
 		}
 
 		required := []string{"config", "actions", "severity_ranking"}
@@ -154,112 +102,6 @@ var policyValidateCmd = &cobra.Command{
 	},
 }
 
-func validateAgentControlGuardrailSmoke(engine *policy.Engine) error {
-	inputs := []policy.GuardrailInput{
-		{
-			Direction:   "prompt",
-			Mode:        "action",
-			ScannerMode: "local",
-			LocalResult: &policy.GuardrailScanResult{Action: "allow", Severity: "NONE", Findings: []string{}},
-		},
-		{
-			Direction:   "prompt",
-			Mode:        "action",
-			ScannerMode: "local",
-			LocalResult: &policy.GuardrailScanResult{Action: "alert", Severity: "HIGH", Findings: []string{"smoke"}},
-		},
-	}
-	for i, input := range inputs {
-		out, err := engine.EvaluateGuardrail(context.Background(), input)
-		if err != nil {
-			return fmt.Errorf("case %d: %w", i, err)
-		}
-		switch out.Action {
-		case "allow", "alert", "block", "confirm":
-		default:
-			return fmt.Errorf("case %d returned invalid action %q", i, out.Action)
-		}
-	}
-	return nil
-}
-
-func stageAgentControlCandidate(regoDir, candidate string) (string, func(), error) {
-	info, err := os.Stat(regoDir)
-	if err != nil || !info.IsDir() {
-		return "", func() {}, fmt.Errorf("policy: invalid rego directory %s", regoDir)
-	}
-	rawCandidate, err := os.ReadFile(candidate)
-	if err != nil {
-		return "", func() {}, fmt.Errorf("policy: read Agent Control candidate: %w", err)
-	}
-	staged, err := os.MkdirTemp("", "defenseclaw-policy-validate-")
-	if err != nil {
-		return "", func() {}, err
-	}
-	cleanup := func() { _ = os.RemoveAll(staged) }
-	entries, err := os.ReadDir(regoDir)
-	if err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			continue
-		}
-		name := entry.Name()
-		if filepath.Ext(name) != ".rego" && name != "data.json" && name != "data-sandbox.json" {
-			continue
-		}
-		raw, readErr := os.ReadFile(filepath.Join(regoDir, name))
-		if readErr != nil {
-			cleanup()
-			return "", func() {}, readErr
-		}
-		if writeErr := os.WriteFile(filepath.Join(staged, name), raw, 0o600); writeErr != nil {
-			cleanup()
-			return "", func() {}, writeErr
-		}
-	}
-	if err := os.WriteFile(filepath.Join(staged, "data-agent-control.json"), rawCandidate, 0o600); err != nil {
-		cleanup()
-		return "", func() {}, err
-	}
-	return staged, cleanup, nil
-}
-
-func normalizePolicyRegoDir(policyDir string) string {
-	nested := filepath.Join(policyDir, "rego")
-	if info, err := os.Stat(nested); err == nil && info.IsDir() {
-		return nested
-	}
-	return policyDir
-}
-
-// ---------------------------------------------------------------------------
-// policy validate-rule-pack — strict managed-overlay validation
-// ---------------------------------------------------------------------------
-
-var policyValidateRulePackCmd = &cobra.Command{
-	Use:   "validate-rule-pack",
-	Short: "Strictly validate a managed rules-only overlay",
-	RunE: func(_ *cobra.Command, _ []string) error {
-		overlayDir := strings.TrimSpace(policyValidateRulePackOverlayDir)
-		if overlayDir == "" {
-			return fmt.Errorf("policy: --overlay-dir is required")
-		}
-		pack, err := guardrail.LoadRulePackForRegexSource(
-			policyValidateRulePackBaseDir,
-			[]string{overlayDir},
-			policyValidateRulePackRegexSource,
-		)
-		if err != nil {
-			return fmt.Errorf("policy: managed rule-pack validation failed: %w", err)
-		}
-		fmt.Printf("Managed rule-pack overlay valid (%d rule files).\n", len(pack.RuleFiles))
-		return nil
-	},
-}
-
 // ---------------------------------------------------------------------------
 // policy show
 // ---------------------------------------------------------------------------
@@ -268,20 +110,14 @@ var policyShowCmd = &cobra.Command{
 	Use:   "show",
 	Short: "Display the current OPA data.json policy configuration",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		regoDir := resolveRegoDir()
-		if regoDir == "" {
-			return fmt.Errorf("policy: cannot resolve rego directory")
-		}
-
-		dataPath := filepath.Join(regoDir, "data.json")
-		raw, err := os.ReadFile(dataPath)
+		paths, err := resolvePolicyPaths()
 		if err != nil {
-			return fmt.Errorf("policy: read data.json: %w", err)
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
-		var data map[string]interface{}
-		if err := json.Unmarshal(raw, &data); err != nil {
-			return fmt.Errorf("policy: parse data.json: %w", err)
+		data, err := policy.LoadDataExact(paths.regoDir)
+		if err != nil {
+			return fmt.Errorf("policy: load effective data: %w", err)
 		}
 
 		out, err := json.MarshalIndent(data, "", "  ")
@@ -301,9 +137,9 @@ var policyEvaluateCmd = &cobra.Command{
 	Use:   "evaluate",
 	Short: "Dry-run the admission policy for a given input",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		regoDir := resolveRegoDir()
-		if regoDir == "" {
-			return fmt.Errorf("policy: cannot resolve rego directory")
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
 		targetType, _ := cmd.Flags().GetString("target-type")
@@ -315,7 +151,7 @@ var policyEvaluateCmd = &cobra.Command{
 			return fmt.Errorf("--target-name is required")
 		}
 
-		engine, err := policy.New(regoDir)
+		engine, err := policy.NewExact(paths.regoDir)
 		if err != nil {
 			return err
 		}
@@ -355,9 +191,9 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 	Use:   "evaluate-firewall",
 	Short: "Dry-run the firewall policy for a given destination",
 	RunE: func(cmd *cobra.Command, _ []string) error {
-		regoDir := resolveRegoDir()
-		if regoDir == "" {
-			return fmt.Errorf("policy: cannot resolve rego directory")
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
 		destination, _ := cmd.Flags().GetString("destination")
@@ -369,7 +205,7 @@ var policyEvaluateFirewallCmd = &cobra.Command{
 			return fmt.Errorf("--destination is required")
 		}
 
-		engine, err := policy.New(regoDir)
+		engine, err := policy.NewExact(paths.regoDir)
 		if err != nil {
 			return err
 		}
@@ -470,15 +306,18 @@ var policyDomainsCmd = &cobra.Command{
 	Use:   "domains",
 	Short: "List firewall domain allowlist and blocklist from active policy",
 	RunE: func(_ *cobra.Command, _ []string) error {
-		regoDir := resolveRegoDir()
-		if regoDir == "" {
-			return fmt.Errorf("policy: cannot resolve rego directory")
+		paths, err := resolvePolicyPaths()
+		if err != nil {
+			return fmt.Errorf("policy: resolve paths: %w", err)
 		}
 
-		dataPath := filepath.Join(regoDir, "data.json")
-		raw, err := os.ReadFile(dataPath)
+		effectiveData, err := policy.LoadDataExact(paths.regoDir)
 		if err != nil {
-			return fmt.Errorf("policy: read data.json: %w", err)
+			return fmt.Errorf("policy: load effective data: %w", err)
+		}
+		raw, err := json.Marshal(effectiveData)
+		if err != nil {
+			return fmt.Errorf("policy: encode effective data: %w", err)
 		}
 
 		var data struct {
@@ -514,31 +353,273 @@ var policyDomainsCmd = &cobra.Command{
 // helpers
 // ---------------------------------------------------------------------------
 
-func resolveRegoDir() string {
-	if cfg != nil && cfg.PolicyDir != "" {
-		if info, err := os.Stat(cfg.PolicyDir); err == nil && info.IsDir() {
-			dataJSON := filepath.Join(cfg.PolicyDir, "data.json")
-			if _, err := os.Stat(dataJSON); err == nil {
-				return cfg.PolicyDir
+type resolvedPolicyPaths struct {
+	rootDir  string
+	regoDir  string
+	dataPath string
+}
+
+// resolvePolicyPaths resolves one immutable layout for every local policy
+// command. Current installations use <policy-root>/rego; releases through
+// 0.3.x used the flat policy root. Canonical evidence always wins, including a
+// data.json without modules, so an incomplete or malformed canonical layout
+// cannot silently downgrade to stale flat policy data.
+func resolvePolicyPaths() (resolvedPolicyPaths, error) {
+	root, err := resolvePolicyRoot()
+	if err != nil {
+		return resolvedPolicyPaths{}, err
+	}
+
+	nestedDir, err := resolveContainedPolicyPath(root, filepath.Join(root, "rego"))
+	if err != nil {
+		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical Rego directory: %w", err)
+	}
+	nestedData, err := resolveContainedPolicyPath(root, filepath.Join(nestedDir, "data.json"))
+	if err != nil {
+		return resolvedPolicyPaths{}, fmt.Errorf("resolve canonical policy data: %w", err)
+	}
+	nestedModules, err := policyDirectoryHasRego(root, nestedDir)
+	if err != nil {
+		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical Rego directory: %w", err)
+	}
+	nestedDataExists, err := policyDataFileExists(nestedData)
+	if err != nil {
+		return resolvedPolicyPaths{}, fmt.Errorf("inspect canonical policy data: %w", err)
+	}
+
+	paths := resolvedPolicyPaths{rootDir: root}
+	if nestedModules || nestedDataExists {
+		paths.regoDir = nestedDir
+		paths.dataPath = nestedData
+	} else {
+		flatData, err := resolveContainedPolicyPath(root, filepath.Join(root, "data.json"))
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("resolve legacy policy data: %w", err)
+		}
+		flatModules, err := policyDirectoryHasRego(root, root)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy Rego directory: %w", err)
+		}
+		flatDataExists, err := policyDataFileExists(flatData)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect legacy policy data: %w", err)
+		}
+		if flatModules || flatDataExists {
+			paths.regoDir = root
+			paths.dataPath = flatData
+		} else {
+			paths.regoDir = nestedDir
+			paths.dataPath = nestedData
+		}
+	}
+
+	// Reject another policy generation below the selected canonical directory.
+	// This keeps the selection unambiguous even for future engine callers that
+	// still recognize a nested rego directory.
+	if paths.regoDir != root {
+		deeperDir, err := resolveContainedPolicyPath(root, filepath.Join(paths.regoDir, "rego"))
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested Rego directory: %w", err)
+		}
+		deeperData, err := resolveContainedPolicyPath(root, filepath.Join(deeperDir, "data.json"))
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("resolve nested policy data: %w", err)
+		}
+		deeperModules, err := policyDirectoryHasRego(root, deeperDir)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested Rego directory: %w", err)
+		}
+		deeperDataExists, err := policyDataFileExists(deeperData)
+		if err != nil {
+			return resolvedPolicyPaths{}, fmt.Errorf("inspect nested policy data: %w", err)
+		}
+		if deeperModules || deeperDataExists {
+			return resolvedPolicyPaths{}, fmt.Errorf("policy root contains an unsupported nested rego/rego layout")
+		}
+	}
+
+	if err := validatePolicyEnginePaths(root, paths.regoDir); err != nil {
+		return resolvedPolicyPaths{}, err
+	}
+	return paths, nil
+}
+
+func resolvePolicyRoot() (string, error) {
+	root := ""
+	if cfg != nil {
+		if configured := strings.TrimSpace(cfg.PolicyDir); configured != "" {
+			root = configured
+		} else if dataDir := strings.TrimSpace(cfg.DataDir); dataDir != "" {
+			root = filepath.Join(dataDir, "policies")
+		}
+	}
+	if root == "" {
+		dataDir := strings.TrimSpace(config.DefaultDataPath())
+		if dataDir == "" {
+			return "", fmt.Errorf("managed data directory is empty")
+		}
+		root = filepath.Join(dataDir, "policies")
+	}
+
+	resolved, err := canonicalPolicyPath(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve policy root: %w", err)
+	}
+	if info, statErr := os.Stat(resolved); statErr == nil {
+		if !info.IsDir() {
+			return "", fmt.Errorf("policy root is not a directory")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("inspect policy root: %w", statErr)
+	}
+	return resolved, nil
+}
+
+func resolveContainedPolicyPath(root, candidate string) (string, error) {
+	clean := filepath.Clean(candidate)
+	if !policyPathContained(root, clean) {
+		return "", fmt.Errorf("policy path escapes configured root")
+	}
+	resolved, err := canonicalPolicyPath(clean)
+	if err != nil {
+		return "", err
+	}
+	if !policyPathContained(root, resolved) {
+		return "", fmt.Errorf("resolved policy path escapes configured root")
+	}
+	return resolved, nil
+}
+
+func canonicalPolicyPath(path string) (string, error) {
+	if path == "" {
+		return "", fmt.Errorf("path is empty")
+	}
+	if strings.IndexByte(path, 0) >= 0 {
+		return "", fmt.Errorf("path contains NUL")
+	}
+	if policyPathHasParentSegment(path) {
+		return "", fmt.Errorf("path contains a parent segment")
+	}
+	if !filepath.IsAbs(path) {
+		return "", fmt.Errorf("path must be absolute")
+	}
+
+	absolute, err := filepath.Abs(filepath.Clean(path))
+	if err != nil {
+		return "", fmt.Errorf("normalize path: %w", err)
+	}
+	if err := validatePolicyPlatformPath(absolute); err != nil {
+		return "", err
+	}
+	if info, statErr := os.Lstat(absolute); statErr == nil {
+		if info.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Errorf("policy path is a symbolic link")
+		}
+	} else if !os.IsNotExist(statErr) {
+		return "", fmt.Errorf("inspect path: %w", statErr)
+	}
+
+	resolved, err := resolveExistingPolicyPathPrefix(absolute)
+	if err != nil {
+		return "", fmt.Errorf("canonicalize path: %w", err)
+	}
+	if err := validatePolicyPlatformPath(resolved); err != nil {
+		return "", err
+	}
+	return filepath.Clean(resolved), nil
+}
+
+func resolveExistingPolicyPathPrefix(absolute string) (string, error) {
+	candidate := absolute
+	var suffix []string
+	for {
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil {
+			for index := len(suffix) - 1; index >= 0; index-- {
+				resolved = filepath.Join(resolved, suffix[index])
 			}
+			return filepath.Clean(resolved), nil
 		}
+		if !os.IsNotExist(err) {
+			return "", err
+		}
+		parent := filepath.Dir(candidate)
+		if parent == candidate {
+			return filepath.Clean(absolute), nil
+		}
+		suffix = append(suffix, filepath.Base(candidate))
+		candidate = parent
+	}
+}
+
+func policyDirectoryHasRego(root, dir string) (bool, error) {
+	entries, err := os.ReadDir(dir)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
 	}
 
-	exe, err := os.Executable()
-	if err == nil {
-		candidate := filepath.Join(filepath.Dir(exe), "..", "policies", "rego")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
+	found := false
+	for _, entry := range entries {
+		if filepath.Ext(entry.Name()) != ".rego" {
+			continue
+		}
+		modulePath, err := resolveContainedPolicyPath(root, filepath.Join(dir, entry.Name()))
+		if err != nil {
+			return false, err
+		}
+		info, err := os.Lstat(modulePath)
+		if err != nil {
+			return false, err
+		}
+		if !info.Mode().IsRegular() {
+			return false, fmt.Errorf("Rego module is not a regular file")
+		}
+		found = true
+	}
+	return found, nil
+}
+
+func policyDataFileExists(path string) (bool, error) {
+	info, err := os.Lstat(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !info.Mode().IsRegular() {
+		return false, fmt.Errorf("policy data is not a regular file")
+	}
+	return true, nil
+}
+
+func validatePolicyEnginePaths(root, regoDir string) error {
+	supplemental, err := resolveContainedPolicyPath(root, filepath.Join(regoDir, "data-sandbox.json"))
+	if err != nil {
+		return fmt.Errorf("resolve supplemental policy data: %w", err)
+	}
+	if _, err := policyDataFileExists(supplemental); err != nil {
+		return fmt.Errorf("inspect supplemental policy data: %w", err)
+	}
+	return nil
+}
+
+func policyPathContained(root, candidate string) bool {
+	relative, err := filepath.Rel(root, candidate)
+	if err != nil || filepath.IsAbs(relative) || relative == ".." {
+		return false
+	}
+	return !strings.HasPrefix(relative, ".."+string(filepath.Separator))
+}
+
+func policyPathHasParentSegment(path string) bool {
+	for _, segment := range strings.Split(strings.ReplaceAll(path, "\\", "/"), "/") {
+		if segment == ".." {
+			return true
 		}
 	}
-
-	wd, err := os.Getwd()
-	if err == nil {
-		candidate := filepath.Join(wd, "policies", "rego")
-		if info, err := os.Stat(candidate); err == nil && info.IsDir() {
-			return candidate
-		}
-	}
-
-	return ""
+	return false
 }

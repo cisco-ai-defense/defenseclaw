@@ -1,0 +1,3 @@
+Setup abgeschlossen.
+{"type":"item.completed","item":{"id":"item-german","type":"command_execution","command":"/bin/bash -lc 'python train.py'","aggregated_output":"ausgeschlossen","exit_code":0,"status":"completed"}}
+{"type":"turn.completed","usage":{}}

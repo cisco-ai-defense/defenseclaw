@@ -73,6 +73,15 @@ func Register(f Factory) {
 	factory = f
 }
 
+// Registered reports whether this build carries a factory at all. A
+// binary compiled without managed-cloud support can never inspect; a
+// registered factory that fails may only be waiting on the agent.
+func Registered() bool {
+	mu.RLock()
+	defer mu.RUnlock()
+	return factory != nil
+}
+
 // New constructs a Provider using the registered factory. Returns
 // ErrNoProviderRegistered when no factory has been installed.
 func New(cfg Config) (Provider, error) {

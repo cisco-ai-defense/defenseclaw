@@ -55,7 +55,7 @@ type geminiAdapter struct{}
 // Name implements FormatAdapter.
 func (geminiAdapter) Name() string { return "gemini" }
 
-// InjectionSite is the gateway.jsonl label written when InjectSystem
+// InjectionSite is the canonical observability label used when InjectSystem
 // succeeds. Kept distinct from anthropic/system so dashboards can slice
 // by wire format.
 func (geminiAdapter) InjectionSite() string { return "gemini/systemInstruction" }

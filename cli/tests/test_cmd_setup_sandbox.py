@@ -20,6 +20,8 @@ from defenseclaw.commands.cmd_setup_sandbox import (
     write_device_key_provenance,
 )
 
+from tests.environment import requires_symlink_privilege
+
 
 def _patch_no_sudo():
     return patch("defenseclaw.commands.cmd_init_sandbox._needs_sudo", return_value=False)
@@ -201,6 +203,7 @@ class TestGenerateLauncherScripts(unittest.TestCase):
                 f"{name} not found",
             )
 
+    @unittest.skipIf(os.name == "nt", "Linux sandbox launcher executable bits have no Windows contract")
     def test_scripts_are_executable(self):
         _generate_launcher_scripts(
             self.data_dir,
@@ -484,6 +487,7 @@ class TestLauncherScriptConditionals(unittest.TestCase):
         self.assertIn("DEFENSECLAW_SANDBOX_FORCE_REGEX_CLEANUP", content)
 
 
+@unittest.skipIf(os.name == "nt", "OpenShell pre-pairing is part of the unsupported Linux sandbox")
 class TestPrePairDevice(unittest.TestCase):
     def setUp(self):
         self.data_dir = tempfile.mkdtemp(prefix="dclaw-pair-test-")
@@ -951,6 +955,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
             [call("tee", "--", "/etc/example"), call("chmod", "600", "--", "/etc/example")],
         )
 
+    @unittest.skipIf(os.name == "nt", "root-owned POSIX trust chain is Linux-only")
     def test_privileged_script_requires_trusted_ancestors(self):
         script = "/opt/defenseclaw/install.sh"
         trusted_file = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
@@ -975,6 +980,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertIsNone(cmd_init_sandbox._trusted_root_owned_file(script))
 
+    @unittest.skipIf(os.name == "nt", "root-owned alternatives chain is Linux-only")
     def test_trusted_system_command_accepts_root_owned_alternatives_chain(self):
         link = SimpleNamespace(st_mode=stat.S_IFLNK | 0o777, st_uid=0)
         executable = SimpleNamespace(st_mode=stat.S_IFREG | 0o755, st_uid=0)
@@ -1002,6 +1008,7 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertEqual(cmd_init_sandbox._trusted_system_command("iptables"), "/usr/sbin/iptables-nft")
 
+    @requires_symlink_privilege
     def test_existing_openclaw_integration_requires_pin(self):
         with tempfile.TemporaryDirectory() as data_dir, tempfile.TemporaryDirectory() as sandbox_home:
             target = os.path.join(data_dir, "openclaw")
@@ -1018,10 +1025,17 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
             traversal.assert_not_called()
             acls.assert_not_called()
 
-    def test_install_preserves_openshell_version_across_sudo(self):
+    def test_install_preserves_openshell_integrity_env_across_sudo(self):
         cfg = SimpleNamespace(openshell=SimpleNamespace(sandbox_version="1.2.3"))
         command = ["/usr/bin/sudo", "/bin/bash", "/trusted/install", "--install-dir", "/usr/local/bin"]
+        integrity_env = {
+            "OPENSHELL_SANDBOX_SHA256": "a" * 64,
+            "DEFENSECLAW_OPENSHELL_BINARY_SHA256": "b" * 64,
+            "DEFENSECLAW_OPENSHELL_ARCH_DIGEST": "sha256:" + ("c" * 64),
+            "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED": "0",
+        }
         with (
+            patch.dict(os.environ, integrity_env, clear=False),
             patch.object(cmd_init_sandbox, "_find_installer_script", return_value="/trusted/install"),
             patch.object(cmd_init_sandbox, "_trusted_privileged_argv", return_value=command.copy()),
             patch.object(cmd_init_sandbox, "_needs_sudo", return_value=True),
@@ -1030,8 +1044,16 @@ class TestTrustedPrivilegedCommands(unittest.TestCase):
         ):
             self.assertTrue(cmd_init_sandbox._install_openshell_sandbox(cfg))
         argv = run.call_args.args[0]
-        self.assertEqual(argv[1], "--preserve-env=OPENSHELL_VERSION")
-        self.assertEqual(run.call_args.kwargs["env"]["OPENSHELL_VERSION"], "1.2.3")
+        self.assertEqual(
+            argv[1],
+            "--preserve-env=OPENSHELL_VERSION,OPENSHELL_SANDBOX_SHA256,"
+            "DEFENSECLAW_OPENSHELL_BINARY_SHA256,DEFENSECLAW_OPENSHELL_ARCH_DIGEST,"
+            "DEFENSECLAW_OPENSHELL_ALLOW_UNPINNED",
+        )
+        passed_env = run.call_args.kwargs["env"]
+        self.assertEqual(passed_env["OPENSHELL_VERSION"], "1.2.3")
+        for name, value in integrity_env.items():
+            self.assertEqual(passed_env[name], value)
 
 
 if __name__ == "__main__":

@@ -8,14 +8,46 @@ keywords:
 
 ZeptoClaw is the second proxy connector. DefenseClaw rewrites `~/.zeptoclaw/config.json` providers to point at the local guardrail proxy; every request is inspected on its way out and every response on its way back.
 
+## Platform support
+
+| Platform | Status | Notes |
+| --- | --- | --- |
+| macOS and Linux | **Supported** | DefenseClaw hosts the required guardrail proxy. Linux can use the real OpenShell sandbox; macOS resolves that preference to shell shims. |
+| Native Windows x64 | **Unsupported** | ZeptoClaw publishes macOS/Linux builds, and its DefenseClaw integration requires the guardrail proxy that DefenseClaw does not host on Windows. |
+
 ## Setup
+
+<Tabs items={['macOS / Linux', 'Windows']}>
+
+<Tab value="macOS / Linux">
 
 ```bash
 defenseclaw setup zeptoclaw --mode observe --restart
 defenseclaw setup zeptoclaw --mode action --rule-pack default --restart
 ```
 
-`setup zeptoclaw` is an alias around [`defenseclaw setup guardrail --connector zeptoclaw`](/docs/setup/guardrail) and inherits every guardrail flag. Like OpenClaw the proxy is **always** in the data path: there is no observability-only branch, only `--mode observe` (log without blocking) vs `--mode action` (enforce).
+</Tab>
+
+<Tab value="Windows">
+
+<Callout type="warning" title="Native Windows setup is unsupported">
+DefenseClaw does not host the guardrail proxy on Windows, and ZeptoClaw does
+not publish a native Windows build for this integration. There is no supported
+WSL, Docker, VM, or mixed native/POSIX workaround; run the connector on macOS
+or Linux.
+</Callout>
+
+</Tab>
+
+</Tabs>
+
+`setup zeptoclaw` is the dedicated ZeptoClaw alias. It delegates to the shared
+guardrail setup backend and exposes the proxy connector's common setup
+options; it is not a byte-for-byte copy of every `setup guardrail` flag. See
+the [quick-alias reference](/docs/setup/guardrail/aliases) for the alias and
+[full guardrail setup](/docs/setup/guardrail) for the complete wizard. The
+proxy is always in the data path: `--mode observe` records without policy
+blocking, while `--mode action` enforces.
 
 #### What this command sets vs. leaves at defaults
 
@@ -32,7 +64,7 @@ The flags above explicitly set: connector, mode, and (optionally) rule pack. Eve
 | Hook fail-mode | current config; `closed` on a fresh install (`open` is retained for migrated legacy configs) | `defenseclaw guardrail fail-mode <open\|closed>` (no flag) |
 | Proxy port | `4000` | `--port <int>` |
 | Block message | empty (uses built-in copy) | `--block-message "<text>"` |
-| Redaction | enabled | `--disable-redaction` (trusted single-tenant only) |
+| Redaction | v8 bucket/profile policy (`none` for fresh v8) | Edit `observability.destinations[].routes[].selector.buckets` and `observability.redaction_profiles`; then follow [Redaction → Verify policy](/docs/reference/redaction#verify-policy). |
 | Verify after setup | on | `--no-verify` |
 
 See [the full flag reference](/docs/setup/guardrail#every-flag) for the complete table or run `defenseclaw setup guardrail --help`.
@@ -50,7 +82,13 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-The proxy is in the data path but nothing blocks. Every prompt and response lands in `~/.defenseclaw/gateway.jsonl`. Run this for at least a week before promoting — see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
+The proxy is in the data path but nothing blocks. Every collected prompt and
+response produces a projection in mandatory SQLite event history. On a fresh v8
+configuration, the effective local profile is `none`, so registered prompt,
+response, tool, path, and identifier fields can remain full fidelity. A global
+or bucket profile can redact the local projection; optional destinations receive
+their own selected projection. Run this for at least a week before promoting —
+see [Defaults → tuning by risk tolerance](/docs/defaults#tuning-by-risk-tolerance).
 
 </Tab>
 
@@ -83,7 +121,8 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-Adds the LLM judge as a second pass on regex-flagged prompts. Costs a few cents per turn; cuts false positives meaningfully on semantic jailbreaks regex misses.
+Adds the configured LLM judge as a second pass on regex-flagged prompts.
+Latency and provider cost depend on the selected judge model.
 
 </Tab>
 
@@ -97,11 +136,29 @@ defenseclaw setup zeptoclaw \
   --restart
 ```
 
-Block MEDIUM and above, alert on LOW, and do not offer approval for findings that have already crossed the block threshold. Pair with the OpenShell sandbox profile and a reviewed first-party allow-list for full lockdown.
+Block MEDIUM and above, alert on LOW, and do not offer approval for findings
+that have already crossed the block threshold. Pair it with the
+[OpenShell sandbox profile](/docs/setup/sandbox) and a reviewed first-party
+allow-list for additional containment.
 
 </Tab>
 
 </Tabs>
+
+<Callout title="Treat local event history as sensitive data">
+The mandatory database is configured by `observability.local` (by default,
+`~/.defenseclaw/audit.db`) and retains seven days on a fresh configuration. Set
+`observability.local.retention_days` to the reviewed retention period and limit
+host access to the DefenseClaw data directory. A global
+`observability.defaults.redaction_profile` or a bucket
+`redaction_profile` also governs SQLite; a destination or route profile governs
+only that export trust boundary. Verify the effective result with
+`defenseclaw config show --effective --section observability` and
+`defenseclaw observability plan`. See [Redaction](/docs/reference/redaction) for
+the resolution order and [Observability](/docs/observability#local-history)
+for retention behavior. Retention removes eligible rows and makes their pages
+available for SQLite reuse, but the database file does not shrink automatically.
+</Callout>
 
 #### Decision aids — should I turn this on?
 
@@ -113,7 +170,7 @@ Block MEDIUM and above, alert on LOW, and do not offer approval for findings tha
 </Cards>
 
 <Callout>
-Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt--flag-mapping) table gives you the CI-shaped command for the same configuration.
+Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [interactive wizard](/docs/setup/guardrail#watch-the-interactive-flow) walks you through every choice with safe defaults pre-selected and inline help. The [Prompt → flag mapping](/docs/setup/guardrail#prompt-flag-mapping) table gives you the CI-shaped command for the same configuration.
 </Callout>
 
 ## Files DefenseClaw will modify
@@ -133,7 +190,8 @@ Not sure what to pick? Run `defenseclaw setup guardrail` (no flags) — the [int
 
 ## Hook capabilities
 
-<HookEventsList connector="zeptoclaw" />
+The proxy can block inspected requests, responses, and tool-call payloads.
+ZeptoClaw has no native ask event.
 
 <Callout>
 ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback with `raw_action` preserved so operators can review the original request in the TUI or audit log; neither surface can resume it.
@@ -141,10 +199,14 @@ ZeptoClaw has no native ask surface. Confirm verdicts take an immediate fallback
 
 ## Subprocess policy
 
-`sandbox` — same openshell-sandbox path as OpenClaw.
+The preferred policy is `sandbox`. On Linux, DefenseClaw installs the real
+OpenShell sandbox policy using Landlock and seccomp, with shell shims as a
+supplement. On macOS, `sandbox` resolves to shell shims only; those shims
+inspect supported command paths but do not provide Linux syscall or filesystem
+isolation. See [Sandbox setup](/docs/setup/sandbox) for the Linux workflow.
 
 ## Disable
 
 ```bash
-defenseclaw setup guardrail --disable
+defenseclaw guardrail disable --yes
 ```

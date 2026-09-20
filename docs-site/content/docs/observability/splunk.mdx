@@ -12,17 +12,26 @@ keywords:
 
 DefenseClaw ships a single command — `defenseclaw setup splunk` — with three independent pipelines you can mix and match:
 
+<Callout type="warning" title="Native Windows local mode is optional and narrowly certified">
+Remote HEC and Splunk Observability destinations do not require Docker. The
+local Windows Docker mode requires native x64 Windows Pro, Enterprise, or
+Education; Hyper-V; machine-installed Docker Desktop using Linux containers;
+Compose v2; and a real `docker.exe`. WSL2/per-user engines, Windows containers,
+and command-wrapper shims are outside that certification.
+</Callout>
+
 | Pipeline | Use case | What it does |
 | --- | --- | --- |
 | `--logs` | Local demo / dev | Brings up Splunk Free in Docker, installs the bundled local-mode app, sends events via HEC |
-| `--enterprise` | Production SIEM | Configures the gateway's HEC sink to point at *your* Splunk; no Docker, no install |
+| `--enterprise` | Production SIEM | Configures the gateway's HEC destination to point at *your* Splunk; no Docker, no install |
 | `--o11y` | Splunk Observability Cloud | Sends OTLP traces / metrics / logs to your realm |
 
-You can run more than one. They write to different blocks in `~/.defenseclaw/config.yaml`, so adding one never undoes another.
+You can run more than one. In config v8, HEC and O11y become independent
+entries under `observability.destinations`, so adding one never replaces another.
 
 ## Local mode (`--logs`)
 
-The fastest path to a working Splunk demo. One command brings up Splunk Free 9.x in Docker, installs the bundled `defenseclaw_local_mode` app (with five dashboards), and points the gateway's HEC sink at it.
+The fastest path to a working Splunk demo. One command brings up Splunk Free 9.x in Docker, installs the bundled `defenseclaw_local_mode` app (with five dashboards), and points the gateway's HEC destination at it.
 
 ```bash
 defenseclaw setup splunk --logs --accept-splunk-license
@@ -41,14 +50,16 @@ What happens:
     **Bridge bootstrap.** `splunk-claw-bridge up` (shipped in `bundles/splunk_local_bridge/`) launches the container, waits for `/services/server/info`, and provisions an HEC token.
   </Step>
   <Step>
-    **Sink wiring.** Writes a `splunk_hec` audit sink into `config.yaml` pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`.
+    **Destination wiring.** Writes a logs-capable `kind: splunk_hec` v8 destination pointing at `http://127.0.0.1:8088/services/collector/event`, index `defenseclaw_local`, sourcetype `defenseclaw:json`. The reviewed private-network opt-in applies only to this local destination.
   </Step>
   <Step>
     **App install.** Copies `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode` into the container — five dashboards plus shared SPL macros.
   </Step>
 </Steps>
 
-Open Splunk at [http://localhost:8000](http://localhost:8000) (default credentials are surfaced by `defenseclaw setup splunk --show-credentials`). The bundled app shows up as **DefenseClaw (local mode)**.
+Open Splunk at [http://localhost:8000](http://localhost:8000). The bundled app
+shows up as **DefenseClaw (local mode)**. Generated HEC and bootstrap values are
+sensitive; do not reveal them in routine diagnostics or support output.
 
 ### Bundled dashboards
 
@@ -99,30 +110,36 @@ and PR [#236](https://github.com/cisco-ai-defense/defenseclaw/pull/236).
 
 All five views read from a shared set of SPL macros under `bundles/splunk_local_bridge/splunk/apps/defenseclaw_local_mode/default/macros.conf`, scoped to `index=defenseclaw_local`. The macros normalize the gateway's JSON envelope so the dashboards don't have to repeat field extractions.
 
-The gateway ships audit events: the discriminator is the top-level `action` field (the `audit.Action` enum — `connector-hook`, `guardrail-block`, `guardrail-verdict`, `approval-request`, …), **not** a `kind` field. The connector dimension lives in the top-level `connector` field and, on hook rows, in `structured.connector`.
+The v8 Splunk adapter wraps the already-selected, already-redacted canonical log
+projection and derives compatibility aliases only from those immutable bytes. A
+removed field never reappears through a raw fallback. The canonical bucket,
+family/event name, action, source, connector, severity, trace/span IDs, and
+structured body remain available for new SPL, while documented v7 aliases remain
+available only during their compatibility window.
 
 Useful starting queries:
 
 ```spl title="Codex hook activity in the last hour"
-index=defenseclaw_local sourcetype=defenseclaw:json action="connector-hook" structured.connector="codex"
-| stats count by structured.event_type, structured.action, structured.would_block
+index=defenseclaw_local sourcetype=defenseclaw:json bucket="agent.lifecycle" connector="codex"
+| stats count by event_name, action, outcome
 | sort -count
 ```
 
 ```spl title="Blocked guardrail actions, broken down by connector"
-index=defenseclaw_local sourcetype=defenseclaw:json action="guardrail-block"
-| stats count by connector, structured.rule_id, structured.severity
+index=defenseclaw_local sourcetype=defenseclaw:json bucket="enforcement.action" action="block"
+| stats count by connector, source, severity
 | sort -count
 ```
 
 ```spl title="Hook throughput per connector (spot a noisy agent)"
-index=defenseclaw_local sourcetype=defenseclaw:json action="connector-hook"
-| timechart span=5m count by structured.connector
+index=defenseclaw_local sourcetype=defenseclaw:json bucket="agent.lifecycle"
+| timechart span=5m count by connector
 ```
 
 ## Enterprise mode (`--enterprise`)
 
-Send events to an existing Splunk deployment. No Docker, no app install — just configure the HEC sink.
+Send events to an existing Splunk deployment. No Docker, no app install — just
+configure the logs-only HEC destination.
 
 ```bash
 defenseclaw setup splunk --enterprise \
@@ -138,14 +155,16 @@ defenseclaw setup splunk --enterprise \
 | `--hec-token` | HEC token. Reads `DEFENSECLAW_SPLUNK_HEC_TOKEN` if omitted. |
 | `--index` | Defaults to `defenseclaw`. Create it ahead of time. |
 | `--sourcetype` | Defaults to `_json`. Use `defenseclaw:json` if you've imported the bundled macros. |
-| `--app-name` | Pretty name shown in the gateway TUI as the sink label. |
+| `--app-name` | Pretty name shown in the gateway TUI as the destination label. |
 | `--skip-test` | Skip the live HEC probe (useful in air-gapped CI). |
 
 The CLI runs a one-shot probe by default — it sends a test event and confirms HEC returns 200 before persisting the config. If your HEC is behind a VPN, pass `--skip-test`.
 
 ### Field mapping in your Splunk
 
-The events arrive as JSON with the envelope described in [Observability](/docs/observability). For Splunk Cloud or Splunk Enterprise without the bundled app, you'll typically want:
+The events arrive as v8 canonical log projections inside the HEC adapter envelope
+described in [Observability](/docs/observability). For Splunk Cloud or Splunk
+Enterprise without the bundled app, you'll typically want:
 
 ```ini title="props.conf"
 [defenseclaw:json]
@@ -171,7 +190,12 @@ defenseclaw setup splunk --o11y \
   --traces --metrics --logs
 ```
 
-This writes the `otel:` block in `config.yaml` (same as `setup local-observability`, but pointed at `https://ingest.us1.signalfx.com`). Toggle individual signals with `--no-traces` / `--no-metrics` / `--no-logs` if you don't pay for all three.
+This writes an OTLP entry under `observability.destinations` (same pipeline as
+`setup local-observability`, pointed at `https://ingest.us1.signalfx.com`). With
+no explicit `send`/`routes`, general OTLP selects all logs, traces, metrics, and
+buckets, unredacted. Toggle individual signals with `--no-traces` /
+`--no-metrics` / `--no-logs` if your entitlement or data policy is narrower, and
+set a redaction profile when the realm must not receive full content.
 
 ## Disable
 
@@ -181,17 +205,23 @@ defenseclaw setup splunk --disable --enterprise
 defenseclaw setup splunk --disable --o11y
 ```
 
-`--disable` removes the matching block from `config.yaml` (and stops the local container if you ran `--logs`). It does not touch other sinks.
+`--disable` disables the matching named destination (and stops the local container
+if you ran `--logs`). It does not touch other destinations.
 
 ## Verify
 
 ```bash
 defenseclaw doctor
 
-tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.kind == "guardrail.verdict")'
+defenseclaw observability plan
+defenseclaw setup observability list
 ```
 
-`doctor` confirms the HEC endpoint is reachable and the token is valid. The JSONL tail mirrors what's being shipped to Splunk (the gateway writes the same payload to local JSONL and remote sinks) — useful when you suspect a sink is dropping events.
+`doctor` confirms destination health without exposing credentials or response
+bodies. The plan shows the exact selected buckets/signals and effective profile.
+Local SQLite remains the durable log history. Configure a separate `kind: jsonl`
+destination only when a file stream is also required; it is not an implicit mirror
+of the Splunk projection.
 
 ## Troubleshooting
 
@@ -214,4 +244,4 @@ tail -f ~/.defenseclaw/gateway.jsonl | jq 'select(.kind == "guardrail.verdict")'
 
 - [Local observability stack](/docs/observability/local-observability) — the OTel + Grafana sibling
 - [Defaults](/docs/defaults) — what the gateway emits before you tune anything
-- [Reference → Configuration](/docs/reference/configuration) — every audit-sink schema
+- [Reference → Configuration](/docs/reference/configuration) — the v8 destination schema

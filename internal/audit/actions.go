@@ -260,12 +260,14 @@ const (
 	ActionSetupHookConnector       Action = "setup-hook-connector"
 	ActionSetupConnectorMode       Action = "setup-connector-mode"
 	ActionSetupRedactionToggle     Action = "setup-redaction-toggle"
+	ActionSetupRedactionPolicy     Action = "setup-redaction-policy"
 	ActionSetupNotificationsToggle Action = "setup-notifications-toggle"
 	ActionSetupNotificationsSet    Action = "setup-notifications-set"
 	ActionSetupSplunk              Action = "setup-splunk"
 	ActionSetupObservability       Action = "setup-observability"
 	ActionSetupLocalObservability  Action = "setup-local-observability"
 	ActionSetupWebhook             Action = "setup-webhook"
+	ActionSetupRouting             Action = "setup-routing"
 	ActionDoctor                   Action = "doctor"
 	ActionUpgrade                  Action = "upgrade"
 	ActionInitGateway              Action = "init-gateway"
@@ -459,12 +461,14 @@ func AllActions() []Action {
 		ActionSetupHookConnector,
 		ActionSetupConnectorMode,
 		ActionSetupRedactionToggle,
+		ActionSetupRedactionPolicy,
 		ActionSetupNotificationsToggle,
 		ActionSetupNotificationsSet,
 		ActionSetupSplunk,
 		ActionSetupObservability,
 		ActionSetupLocalObservability,
 		ActionSetupWebhook,
+		ActionSetupRouting,
 		ActionDoctor,
 		ActionUpgrade,
 		ActionInitGateway,

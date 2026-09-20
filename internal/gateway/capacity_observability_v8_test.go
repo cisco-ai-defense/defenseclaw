@@ -1,0 +1,240 @@
+// Copyright 2026 Cisco Systems, Inc. and its affiliates
+// SPDX-License-Identifier: Apache-2.0
+
+package gateway
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"testing"
+	"time"
+
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/observability"
+	"github.com/defenseclaw/defenseclaw/internal/observability/delivery"
+	observabilityruntime "github.com/defenseclaw/defenseclaw/internal/observability/runtime"
+)
+
+type capacityHealthRuntime struct {
+	*observabilityruntime.Runtime
+	snapshot      observabilityruntime.DestinationHealthSnapshot
+	snapshotCalls int
+}
+
+func (runtime *capacityHealthRuntime) DestinationHealthSnapshot(
+	context.Context,
+) (observabilityruntime.DestinationHealthSnapshot, error) {
+	runtime.snapshotCalls++
+	return runtime.snapshot, nil
+}
+
+func TestCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) {
+	var lastErr error
+	for attempt := 0; attempt < 2; attempt++ {
+		lastErr = runCapacityMetricsUseCompleteGeneratedV8Families(t)
+		if lastErr == nil {
+			return
+		}
+		var metricErr *observabilityruntime.GeneratedMetricError
+		if !errors.As(lastErr, &metricErr) || metricErr.Code() != observabilityruntime.GeneratedMetricRecordFailed {
+			t.Fatal(lastErr)
+		}
+	}
+	t.Fatal(lastErr)
+}
+
+func runCapacityMetricsUseCompleteGeneratedV8Families(t *testing.T) error {
+	t.Helper()
+	runtime, capture := newProxyGeneratedMetricRuntime(t)
+	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute), store: capture.store}
+	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
+	results, err := runtime.RecordGeneratedMetricBatch(t.Context(), items)
+	if err != nil {
+		recorded := capture.metricSnapshot()
+		failedFamily := observability.EventName("")
+		if len(recorded) < len(items) {
+			failedFamily = items[len(recorded)].Family
+		}
+		return fmt.Errorf(
+			"capacity batch failed after %d/%d metrics at family %q (capture_closed=%t): %w",
+			len(recorded), len(items), failedFamily, capture.closed.Load(), err,
+		)
+	}
+	if len(items) != 11 || len(results) != len(items) {
+		t.Fatalf("capacity batch items/results=%d/%d", len(items), len(results))
+	}
+
+	want := map[string]bool{
+		observability.TelemetryInstrumentDefenseClawRuntimeGoroutines:        false,
+		observability.TelemetryInstrumentDefenseClawRuntimeHeapAlloc:         false,
+		observability.TelemetryInstrumentDefenseClawRuntimeHeapObjects:       false,
+		observability.TelemetryInstrumentDefenseClawRuntimeFdInUse:           false,
+		observability.TelemetryInstrumentDefenseClawRuntimeGcPause:           false,
+		observability.TelemetryInstrumentDefenseClawProcessUptimeSeconds:     false,
+		observability.TelemetryInstrumentDefenseClawSqliteDBBytes:            false,
+		observability.TelemetryInstrumentDefenseClawSqliteWalBytes:           false,
+		observability.TelemetryInstrumentDefenseClawSqlitePageCount:          false,
+		observability.TelemetryInstrumentDefenseClawSqliteFreelistCount:      false,
+		observability.TelemetryInstrumentDefenseClawSqliteCheckpointDuration: false,
+	}
+	metrics := capture.metricSnapshot()
+	if len(metrics) != len(want) {
+		t.Fatalf("capacity metrics=%d want=%d", len(metrics), len(want))
+	}
+	for _, metric := range metrics {
+		name := metric.Descriptor().Name
+		if _, ok := want[name]; !ok {
+			t.Fatalf("unexpected capacity family %q", name)
+		}
+		want[name] = true
+		record := metric.CanonicalRecord()
+		if record.Bucket() != observability.BucketPlatformHealth ||
+			record.Source() != observability.SourceSystem ||
+			record.Provenance().Producer != sidecarCapacityV8Producer {
+			t.Fatalf("capacity metric %q identity=%s/%s provenance=%+v", name, record.Bucket(), record.Source(), record.Provenance())
+		}
+		if integer, ok := metric.Value().Int64(); ok && integer < 0 &&
+			name != observability.TelemetryInstrumentDefenseClawRuntimeFdInUse {
+			t.Fatalf("capacity metric %q negative integer=%d", name, integer)
+		}
+		if value, ok := metric.Value().Double(); ok && value < 0 {
+			t.Fatalf("capacity metric %q negative double=%f", name, value)
+		}
+	}
+	for name, seen := range want {
+		if !seen {
+			t.Errorf("capacity family %q not recorded", name)
+		}
+	}
+	return nil
+}
+
+func TestCapacityCollectionDisabledSkipsAllSnapshotWork(t *testing.T) {
+	disabled := false
+	runtime, capture := newProxyGeneratedTraceRuntimeWithPolicies(
+		t, "always_on", config.ObservabilityV8BucketPolicySource{},
+		map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
+			observability.BucketPlatformHealth: {
+				Collect: config.ObservabilityV8CollectSource{Metrics: &disabled},
+			},
+		},
+	)
+	// A nil store would make the SQLite snapshot fail if any generated builder
+	// ran. Successful admission-drop therefore proves collection precedes both
+	// SQLite and Go-runtime snapshot construction.
+	sidecar := &Sidecar{startedAt: time.Now().Add(-time.Minute)}
+	items := sidecar.capacityMetricBatch(t.Context(), time.Now().UTC())
+	results, err := runtime.RecordGeneratedMetricBatch(t.Context(), items)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != len(items) || len(capture.metricSnapshot()) != 0 {
+		t.Fatalf("disabled capacity results/exported=%d/%d", len(results), len(capture.metricSnapshot()))
+	}
+}
+
+func TestExporterHealthMetricsUseMonotonicFailureDeltasAndPerSignalSuccess(t *testing.T) {
+	runtime, capture := newProxyGeneratedTraceRuntime(t)
+	graph := runtime.Active()
+	if graph == nil {
+		t.Fatal("generated runtime has no active graph")
+	}
+	lastSuccess := time.Unix(1_700_000_000, 125_000_000).UTC()
+	wrapper := &capacityHealthRuntime{Runtime: runtime}
+	wrapper.snapshot = observabilityruntime.DestinationHealthSnapshot{
+		Generation: graph.Generation(), PlanDigest: graph.Digest(),
+		Destinations: []observabilityruntime.DestinationHealth{{
+			Name: "capture", Enabled: true, Signals: []observability.Signal{observability.SignalMetrics},
+			Sources: []delivery.HealthSnapshot{{
+				Destination: "capture", Generation: graph.Generation(), Signal: string(observability.SignalMetrics),
+				State: delivery.HealthDegraded, Reason: string(delivery.HealthReasonRetryable),
+				Counters: delivery.Counters{Failed: 2}, LastSuccess: lastSuccess,
+			}},
+		}},
+	}
+	sidecar := &Sidecar{}
+	observedAt := time.Now().UTC()
+	// The health snapshot is now fetched by the caller and shared across
+	// consumers, so the test fetches it explicitly before each call instead
+	// of relying on recordExporterHealthMetricsV8 to poll internally.
+	health1, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt, wrapper, health1)
+	health2, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(time.Second), wrapper, health2)
+	wrapper.snapshot.Destinations[0].Sources[0].Counters.Failed = 5
+	health3, err := wrapper.DestinationHealthSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar.recordExporterHealthMetricsV8(t.Context(), observedAt.Add(2*time.Second), wrapper, health3)
+
+	metrics := capture.metricSnapshot()
+	errors := generatedMetricByName(
+		metrics, observability.TelemetryInstrumentDefenseClawTelemetryExporterErrors,
+	)
+	if len(errors) != 2 {
+		t.Fatalf("exporter error observations=%d metrics=%v", len(errors), metrics)
+	}
+	for index, want := range []int64{2, 3} {
+		value, ok := errors[index].Value().Int64()
+		if !ok || value != want {
+			t.Fatalf("exporter error[%d] value=%d/%v want=%d", index, value, ok, want)
+		}
+		attributes := errors[index].Attributes()
+		if attributes["defenseclaw.metric.exporter"] != "capture" ||
+			attributes["defenseclaw.metric.reason"] != string(delivery.HealthReasonRetryable) ||
+			attributes["defenseclaw.telemetry.signal"] != "metrics" {
+			t.Fatalf("exporter error[%d] attributes=%v", index, attributes)
+		}
+	}
+	successes := generatedMetricByName(
+		metrics, observability.TelemetryInstrumentDefenseClawTelemetryExporterLastExportTs,
+	)
+	if len(successes) != 3 {
+		t.Fatalf("exporter last-success observations=%d", len(successes))
+	}
+	wantSuccess := float64(lastSuccess.UnixNano()) / float64(time.Second)
+	for index, metric := range successes {
+		value, ok := metric.Value().Double()
+		if !ok || value != wantSuccess {
+			t.Fatalf("last-success[%d] value=%f/%v want=%f", index, value, ok, wantSuccess)
+		}
+	}
+	if wrapper.snapshotCalls != 3 {
+		t.Fatalf("destination snapshots=%d want=3", wrapper.snapshotCalls)
+	}
+}
+
+// TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled replaces
+// the prior "gate precedes snapshot" test: the destination snapshot is now
+// fetched once by the caller and shared with the sibling circuit-health
+// log recorder (which is intentionally never gated by this flag), so this
+// function can no longer avoid the fetch itself. What it must still do is
+// stop before touching the snapshot or recording anything when the metric
+// family is disabled.
+func TestExporterHealthCollectionGateSkipsProcessingWhenMetricsDisabled(t *testing.T) {
+	disabled := false
+	runtime, capture := newProxyGeneratedTraceRuntimeWithPolicies(
+		t, "always_on", config.ObservabilityV8BucketPolicySource{},
+		map[observability.Bucket]config.ObservabilityV8BucketPolicySource{
+			observability.BucketPlatformHealth: {
+				Collect: config.ObservabilityV8CollectSource{Metrics: &disabled},
+			},
+		},
+	)
+	wrapper := &capacityHealthRuntime{Runtime: runtime}
+	(&Sidecar{}).recordExporterHealthMetricsV8(t.Context(), time.Now().UTC(), wrapper, wrapper.snapshot)
+	if wrapper.snapshotCalls != 0 {
+		t.Fatalf("disabled exporter-error metric family should return before consulting a destination snapshot, took %d", wrapper.snapshotCalls)
+	}
+	if len(capture.metricSnapshot()) != 0 {
+		t.Fatalf("disabled exporter-error metric family still recorded %d metrics", len(capture.metricSnapshot()))
+	}
+}

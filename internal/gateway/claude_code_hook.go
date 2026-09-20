@@ -25,6 +25,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
+	"github.com/defenseclaw/defenseclaw/internal/claudecodepath"
+	gatewayconnector "github.com/defenseclaw/defenseclaw/internal/gateway/connector"
 	"github.com/defenseclaw/defenseclaw/internal/gateway/notifier"
 	"github.com/defenseclaw/defenseclaw/internal/redaction"
 	"github.com/defenseclaw/defenseclaw/internal/scanner"
@@ -44,6 +47,8 @@ type claudeCodeHookRequest struct {
 	AgentType            string                 `json:"agent_type,omitempty"`
 	OldCWD               string                 `json:"old_cwd,omitempty"`
 	NewCWD               string                 `json:"new_cwd,omitempty"`
+	Directory            string                 `json:"directory,omitempty"`
+	WorktreePath         string                 `json:"worktree_path,omitempty"`
 	ToolName             string                 `json:"tool_name,omitempty"`
 	ToolUseID            string                 `json:"tool_use_id,omitempty"`
 	ToolInput            map[string]interface{} `json:"tool_input,omitempty"`
@@ -96,20 +101,24 @@ type claudeCodeHookResponse struct {
 	// redaction directive back through the unified dispatch so
 	// finalizeAgentHook can honor it on the hook_decision event +
 	// audit row. Never serialized on the hook response wire.
-	RedactionEnabled *bool `json:"-"`
+	RedactionEnabled *bool  `json:"-"`
+	SourceReason     string `json:"-"`
 }
 
 // Claude Code hook traffic flows through the unified pipeline at
 // handleAgentHook("claudecode"); the profile-runtime registry invokes
 // the connector-specific evaluator kept below. The pipeline's shared
 // concerns — audit envelope refresh, dispatch metric, dedup, trace
-// propagation, OTel emissions — live in exactly one place
+// propagation, and v8 observability emissions — live in exactly one place
 // (handleAgentHook) so per-connector handlers cannot drift apart on
 // any of those signals. The evaluator stamps the unified-pipeline
 // correlation keys (resp.EvaluationID / resp.RuleIDs) on its return
 // value so downstream tooling and the audit envelope receive them.
 
 func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHookRequest) claudeCodeHookResponse {
+	// Keep authenticated lifecycle state current even while inspection is
+	// disabled so a live same-session re-enable cannot lose active-file authority.
+	activeAgentContext := a.applyClaudeCodeActiveAgentContext(ctx, req)
 	mode := a.claudeCodeMode()
 	if a.scannerCfg != nil && !a.claudeCodeEnabled() {
 		return claudeCodeResponseFor(req, "allow", "allow", "NONE", "", nil, mode, false)
@@ -132,26 +141,64 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 			}
 		}
 	case "UserPromptSubmit", "UserPromptExpansion":
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodePromptContent(req), Direction: "prompt", Connector: "claudecode"})
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			claudeCodePromptContent(req), "prompt",
+		))
 		if req.HookEventName == "UserPromptExpansion" {
 			assetDecisions = append(assetDecisions, a.claudeCodePromptExpansionAssetDecisions(ctx, req)...)
 		}
-	case "PreToolUse", "PermissionRequest", "PermissionDenied":
-		verdict = a.inspectToolPolicy(&ToolInspectRequest{Tool: claudeCodeToolName(req), Args: claudeCodeToolArgs(req), Direction: "tool_call", Connector: "claudecode", MCPServerName: req.MCPServerName})
+	case "PreToolUse", "PermissionRequest":
+		toolName := claudeCodeToolName(req)
+		toolArgs := claudeCodeToolArgs(req)
+		actionTool, resourceIdentity := trustedToolActionFromContext(
+			ctx, "claudecode", toolName, toolName,
+		)
+		toolRequest := &ToolInspectRequest{
+			Tool:          toolName,
+			Args:          toolArgs,
+			Direction:     "tool_call",
+			Connector:     "claudecode",
+			MCPServerName: req.MCPServerName,
+		}
+		verdict = a.inspectTrustedToolPolicyCtx(ctx, toolRequest, trustedActionRequest{
+			Input: actionfacts.Input{
+				Tool:                                     actionTool,
+				Args:                                     toolArgs,
+				CWD:                                      req.CWD,
+				ActiveHome:                               trustedSameHostHome(),
+				ToolResourceIdentity:                     resourceIdentity,
+				CredentialLineageHMACKey:                 activeToolValueLineageProcessKey.material,
+				ActiveAgentFiles:                         activeAgentContext.files,
+				ActiveAgentFilesCaseInsensitive:          activeAgentContext.caseInsensitiveFiles,
+				ActiveAgentFilesCaseInsensitiveUncertain: activeAgentContext.caseInsensitiveUncertain,
+				ActiveAgentFilesUncertain:                activeAgentContext.uncertain,
+			},
+			LegacyText:         string(toolArgs),
+			Connector:          "claudecode",
+			EnforcementCapable: true,
+			record:             toolChainRecorderFromContext(ctx),
+		})
 		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
 		}
 		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
 			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
 		}
-	case "PostToolUse", "PostToolUseFailure", "PostToolBatch":
+	case "PostToolUse", "PostToolUseFailure", "PermissionDenied", "PostToolBatch":
+		verdict = a.inspectClaudeCodeToolResult(ctx, req, mode)
+		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
+		}
+		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
+			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
+		}
+	case "MessageDisplay":
+		// Anthropic sends the displayed assistant text incrementally in delta.
+		// DefenseClaw registers this event async, so findings are observation
+		// only and can never retract text already being displayed.
+		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: req.Delta, Direction: "response", Connector: "claudecode"})
+	case "StopFailure":
 		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeToolOutput(req), Direction: "tool_result", Connector: "claudecode"})
-		if decision, matched := a.claudeCodeMCPAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "mcp", decision: decision})
-		}
-		if decision, matched := a.claudeCodeSkillAssetDecision(ctx, req); matched {
-			assetDecisions = append(assetDecisions, runtimeAssetDecision{targetType: "skill", decision: decision})
-		}
 	case "Stop", "SubagentStop", "SessionEnd":
 		if !req.StopHookActive && a.scannerCfg != nil && a.scannerCfg.ConnectorHookConfig("claudecode").ScanOnStop {
 			verdict = a.scanClaudeCodeChangedFiles(ctx, req)
@@ -159,11 +206,16 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	case "InstructionsLoaded", "ConfigChange", "FileChanged":
 		verdict = a.scanClaudeCodeEventFile(ctx, req)
 		if verdict == nil {
-			verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
+			verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+				claudeCodeEventContent(req), "prompt",
+			))
 		}
-	case "TaskCreated", "TaskCompleted", "TeammateIdle",
+	case "SubagentStart", "CwdChanged", "DirectoryAdded", "WorktreeRemove",
+		"TaskCreated", "TaskCompleted", "TeammateIdle",
 		"PreCompact", "PostCompact", "Elicitation", "ElicitationResult", "Notification":
-		verdict = a.inspectMessageContent(ctx, &ToolInspectRequest{Tool: "message", Content: claudeCodeEventContent(req), Direction: "prompt", Connector: "claudecode"})
+		verdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequest(
+			claudeCodeEventContent(req), "prompt",
+		))
 	}
 
 	// Inject the cloud-controlled per-inspection redaction directive
@@ -175,7 +227,7 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 	rawActionBeforeAssets := rawAction
 	action := rawAction
 	wouldBlock := rawAction == "block" && mode != "action"
-	if rawAction == "block" && !claudeCodeCanEnforce(req.HookEventName) {
+	if rawAction == "block" && !claudeCodeCanEnforce(req) {
 		action = "allow"
 		wouldBlock = true
 	} else if mode != "action" && rawAction == "block" {
@@ -213,7 +265,10 @@ func (a *APIServer) evaluateClaudeCodeHook(ctx context.Context, req claudeCodeHo
 		a.dispatchClaudeCodeHookNotification(req, action, rawAction, verdict.Severity, verdict.Reason, wouldBlock, evalCtx,
 			sinkPolicyFor(ctx, verdict.RedactionEnabled))
 	}
-	resp := claudeCodeResponseFor(req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock)
+	resp := claudeCodeResponseFor(
+		req, action, rawAction, verdict.Severity, verdict.Reason, verdict.Findings, mode, wouldBlock,
+		sinkPolicyFor(ctx, verdict.RedactionEnabled),
+	)
 	// Stamp the unified-pipeline correlation keys so the agent-hook
 	// dispatch wrapper (claudeCodeResponseToAgentHookResponse) and
 	// the audit envelope (HookAuditEnvelope.EvaluationID / RuleIDs)
@@ -257,8 +312,9 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 	}
 	// Honor the cloud-controlled per-inspection redaction policy
 	// (all-sinks scope, managed_enterprise only) when a caller passes
-	// one; otherwise default to the historical ForSinkReason behavior.
-	safeReason := redaction.ReasonForSink(reason, notificationSinkPolicy(policy))
+	// one; otherwise keep compatibility redaction while allowing exact
+	// compiled-in rule metadata through for operator triage.
+	safeReason := notificationDisplayReason(reason, notificationSinkPolicy(policy))
 	base := notifier.BlockEvent{
 		Source:       notifier.SourceHook,
 		Target:       target,
@@ -300,7 +356,8 @@ func (a *APIServer) dispatchClaudeCodeHookNotification(req claudeCodeHookRequest
 // flag still wins for operators who run claudecode alongside a
 // different selected connector (e.g. test harnesses).
 func (a *APIServer) claudeCodeEnabled() bool {
-	if a.scannerCfg == nil {
+	cfg := a.runtimeConfigSnapshot()
+	if cfg == nil {
 		return false
 	}
 	// Per-connector explicit disable wins over every enable signal below:
@@ -309,38 +366,38 @@ func (a *APIServer) claudeCodeEnabled() bool {
 	// for re-enable). Defense-in-depth alongside the boot-loop teardown.
 	// EffectiveEnabled defaults to true ⇒ no-op for single-connector
 	// installs and any connector never explicitly disabled.
-	if a.scannerCfg.ManualConnectorConfigured("claudecode") && !a.scannerCfg.Guardrail.EffectiveEnabled("claudecode") {
+	if cfg.ManualConnectorConfigured("claudecode") && !cfg.Guardrail.EffectiveEnabled("claudecode") {
 		return false
 	}
-	hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	hookCfg := cfg.ConnectorHookConfig("claudecode")
 	if hookCfg.Enabled {
 		return true
 	}
-	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && a.scannerCfg.ApplicationProtection.EffectiveEnabled("claudecode") {
+	if a.health != nil && a.health.HasConnectorSource("claudecode", "automatic") && cfg.ApplicationProtection.EffectiveEnabled("claudecode") {
 		return true
 	}
 	// Multi-connector: membership in guardrail.connectors opts claudecode
 	// in even when it is not the singular primary (no-op for single).
-	if a.scannerCfg.Guardrail.HasConnector("claudecode") {
+	if cfg.Guardrail.HasConnector("claudecode") {
 		return true
 	}
-	return strings.EqualFold(strings.TrimSpace(a.scannerCfg.Guardrail.Connector), "claudecode")
+	return strings.EqualFold(strings.TrimSpace(cfg.Guardrail.Connector), "claudecode")
 }
 
 func (a *APIServer) claudeCodeMode() string {
 	mode := "observe"
-	if a.scannerCfg != nil {
-		hookCfg := a.scannerCfg.ConnectorHookConfig("claudecode")
+	if cfg := a.runtimeConfigSnapshot(); cfg != nil {
+		hookCfg := cfg.ConnectorHookConfig("claudecode")
 		mode = strings.TrimSpace(hookCfg.Mode)
 		if mode == "" || mode == "inherit" {
 			// Per-connector guardrail override wins over global mode.
-			mode = strings.TrimSpace(a.scannerCfg.EffectiveGuardrailModeForConnector("claudecode"))
+			mode = strings.TrimSpace(cfg.EffectiveGuardrailModeForConnector("claudecode"))
 		}
 	}
 	return normalizeAgentHookMode(mode)
 }
 
-func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool) claudeCodeHookResponse {
+func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severity, reason string, findings []string, mode string, wouldBlock bool, policy ...redaction.SinkPolicy) claudeCodeHookResponse {
 	if severity == "" {
 		severity = "NONE"
 	}
@@ -350,8 +407,13 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 	if rawAction == "" {
 		rawAction = action
 	}
-	safeReason := redaction.ReasonForAgent(reason)
-	additional := claudeCodeAdditionalContext(rawAction, severity, safeReason, wouldBlock)
+	safeReason := agentDisplayReason(reason, notificationSinkPolicy(policy))
+	// wouldBlock remains a shadow-telemetry signal for post-result events, but
+	// the connector cannot enforce those events. Do not describe an advisory
+	// result as something Claude would block in action mode.
+	additional := claudeCodeAdditionalContext(
+		rawAction, severity, safeReason, wouldBlock && claudeCodeCanEnforce(req),
+	)
 	resp := claudeCodeHookResponse{
 		Action:            action,
 		RawAction:         rawAction,
@@ -361,15 +423,23 @@ func claudeCodeResponseFor(req claudeCodeHookRequest, action, rawAction, severit
 		Mode:              mode,
 		WouldBlock:        wouldBlock,
 		AdditionalContext: additional,
+		SourceReason:      reason,
 	}
 	resp.ClaudeCodeOutput = claudeCodeOutput(req, action, rawAction, safeReason, additional)
 	return resp
 }
 
-func claudeCodeCanEnforce(event string) bool {
-	switch event {
-	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest", "PostToolUse",
-		"PostToolBatch", "TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
+func claudeCodeCanEnforce(req claudeCodeHookRequest) bool {
+	// Claude Code reports ConfigChange for managed policy updates too, but
+	// explicitly ignores blocking decisions for policy_settings. Treating that
+	// response as enforced would create false-positive block telemetry.
+	if req.HookEventName == "ConfigChange" && strings.EqualFold(strings.TrimSpace(req.Source), "policy_settings") {
+		return false
+	}
+
+	switch req.HookEventName {
+	case "UserPromptSubmit", "UserPromptExpansion", "PreToolUse", "PermissionRequest",
+		"TaskCreated", "TaskCompleted", "Stop", "SubagentStop", "TeammateIdle",
 		"ConfigChange", "PreCompact", "Elicitation", "ElicitationResult":
 		return true
 	default:
@@ -403,7 +473,10 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 				},
 			}}
 		case "TaskCreated", "TaskCompleted", "TeammateIdle":
-			return map[string]interface{}{"continue": false, "stopReason": reasonOrDefaultClaudeCode(reason)}
+			// These team/task events use exit 2 + stderr as event-specific
+			// feedback. Top-level continue:false stops the teammate entirely,
+			// which is not the documented denial behavior for these events.
+			return nil
 		case "Elicitation":
 			return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 				"hookEventName": "Elicitation",
@@ -420,8 +493,22 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 			return map[string]interface{}{"decision": "block", "reason": reasonOrDefaultClaudeCode(reason)}
 		}
 	}
+	watchRoot := strings.TrimSpace(req.NewCWD)
+	if watchRoot == "" {
+		watchRoot = req.CWD
+	}
+	if event == "SessionStart" {
+		output := map[string]interface{}{
+			"hookEventName": "SessionStart",
+			"watchPaths":    gatewayconnector.ClaudeCodeWatchPaths(watchRoot),
+		}
+		if additional != "" {
+			output["additionalContext"] = additional
+		}
+		return map[string]interface{}{"hookSpecificOutput": output}
+	}
 	if event == "CwdChanged" || event == "FileChanged" {
-		out := map[string]interface{}{"watchPaths": claudeCodeWatchPaths(req)}
+		out := map[string]interface{}{"watchPaths": gatewayconnector.ClaudeCodeWatchPaths(watchRoot)}
 		if additional != "" {
 			out["systemMessage"] = additional
 		}
@@ -431,8 +518,8 @@ func claudeCodeOutput(req claudeCodeHookRequest, action, rawAction, reason, addi
 		return nil
 	}
 	switch event {
-	case "SessionStart", "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
-		"PostToolBatch", "Notification", "SubagentStart", "SubagentStop":
+	case "UserPromptSubmit", "UserPromptExpansion", "PostToolUse", "PostToolUseFailure",
+		"PostToolBatch", "SubagentStart", "SubagentStop":
 		return map[string]interface{}{"hookSpecificOutput": map[string]interface{}{
 			"hookEventName":     event,
 			"additionalContext": additional,
@@ -448,14 +535,17 @@ func claudeCodeAdditionalContext(rawAction, severity, reason string, wouldBlock 
 	if rawAction == "allow" || rawAction == "" {
 		return ""
 	}
-	prefix := "DefenseClaw observed"
+	lead := "DefenseClaw observed"
+	finding := fmt.Sprintf("a %s Claude Code hook finding", severity)
 	if wouldBlock {
-		prefix = "DefenseClaw would block this in action mode"
+		// A full clause cannot take the article that follows "observed".
+		lead = "DefenseClaw would block this in action mode:"
+		finding = fmt.Sprintf("%s Claude Code hook finding", severity)
 	}
 	if reason == "" {
-		return fmt.Sprintf("%s a %s Claude Code hook finding.", prefix, severity)
+		return fmt.Sprintf("%s %s.", lead, finding)
 	}
-	return fmt.Sprintf("%s a %s Claude Code hook finding: %s", prefix, severity, reason)
+	return fmt.Sprintf("%s %s: %s", lead, finding, reason)
 }
 
 func reasonOrDefaultClaudeCode(reason string) string {
@@ -483,6 +573,113 @@ func claudeCodeToolArgs(req claudeCodeHookRequest) json.RawMessage {
 	return b
 }
 
+// claudeCodeContentInspectRequest applies the content boundary used by the
+// Codex hook path to Claude Code prompts, event payloads, and tool results.
+// These values are observations or returned bytes, not executable tool-call
+// arguments; command/path/C2 rules belong to inspectTrustedToolPolicyCtx,
+// where the typed tool invocation can be proven. Keeping the boundary here
+// prevents source snippets such as "rm -rf /" from becoming a CRITICAL
+// command finding on PostToolBatch while retaining trust, secret, and PII
+// detection on untrusted content.
+func claudeCodeContentInspectRequest(content, direction string) *ToolInspectRequest {
+	return claudeCodeContentInspectRequestWithScope(content, direction, ruleContentScopeUntrusted)
+}
+
+func claudeCodeContentInspectRequestWithScope(content, direction string, scope ruleContentScope) *ToolInspectRequest {
+	return &ToolInspectRequest{
+		Tool:         "message",
+		Content:      content,
+		Direction:    direction,
+		Connector:    "claudecode",
+		contentScope: scope,
+	}
+}
+
+// inspectClaudeCodeToolResult keeps Claude Code's result path aligned with
+// the Codex provenance boundary. Only a standalone PostToolUse response with
+// a typed tool name/input can enter the existing physical source proof. Batch,
+// failure, denial, and mixed payloads remain untrusted because their bytes
+// cannot be attributed to one verified source without guessing.
+func (a *APIServer) inspectClaudeCodeToolResult(
+	ctx context.Context,
+	req claudeCodeHookRequest,
+	mode string,
+) *ToolInspectVerdict {
+	content := claudeCodeToolOutput(req)
+	if req.HookEventName != "PostToolUse" || req.ToolResponse == nil ||
+		req.ToolCalls != nil || strings.TrimSpace(req.Error) != "" ||
+		strings.TrimSpace(req.ErrorDetails) != "" || strings.TrimSpace(req.ToolName) == "" {
+		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			content, "tool_result", ruleContentScopeUntrusted,
+		))
+	}
+
+	provenanceReq := codexHookRequest{
+		HookEventName: req.HookEventName,
+		CWD:           req.CWD,
+		ToolName:      req.ToolName,
+		ToolInput:     req.ToolInput,
+		ToolResponse:  req.ToolResponse,
+		MCPServerName: req.MCPServerName,
+		Payload:       req.Payload,
+	}
+	strictScope := codexToolResultContentScope(provenanceReq)
+	if mode == "action" || strictScope == ruleContentScopeSource {
+		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			content, "tool_result", strictScope,
+		))
+	}
+
+	switch codexObserveWorkspaceSourceProofForRequest(provenanceReq) {
+	case codexObserveSourceComplete:
+		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			content, "tool_result", ruleContentScopeSource,
+		))
+	case codexObserveSourceMixedStatus:
+		source, untrusted, ok := codexSplitAttributedSourceResult(req.ToolResponse, req.CWD)
+		return a.inspectClaudeCodeSegmentedToolResult(ctx, content, source, untrusted, ok)
+	case codexObserveSourceVerifiedDiff:
+		pathspecs, ok := codexObserveGitDiffPathspecsForRequest(provenanceReq)
+		if !ok {
+			return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+				content, "tool_result", ruleContentScopeUntrusted,
+			))
+		}
+		source, untrusted, ok := codexSplitVerifiedGitDiffResult(
+			req.ToolResponse, req.CWD, pathspecs,
+		)
+		return a.inspectClaudeCodeSegmentedToolResult(ctx, content, source, untrusted, ok)
+	default:
+		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			content, "tool_result", ruleContentScopeUntrusted,
+		))
+	}
+}
+
+func (a *APIServer) inspectClaudeCodeSegmentedToolResult(
+	ctx context.Context,
+	fallback, source, untrusted string,
+	ok bool,
+) *ToolInspectVerdict {
+	if !ok {
+		return a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			fallback, "tool_result", ruleContentScopeUntrusted,
+		))
+	}
+	var sourceVerdict, untrustedVerdict *ToolInspectVerdict
+	if source != "" {
+		sourceVerdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			source, "tool_result", ruleContentScopeSource,
+		))
+	}
+	if untrusted != "" {
+		untrustedVerdict = a.inspectMessageContent(ctx, claudeCodeContentInspectRequestWithScope(
+			untrusted, "tool_result", ruleContentScopeUntrusted,
+		))
+	}
+	return mergeCodexToolResultVerdicts(sourceVerdict, untrustedVerdict)
+}
+
 func claudeCodePromptContent(req claudeCodeHookRequest) string {
 	parts := []string{req.Prompt, req.CommandName, req.CommandArgs}
 	return strings.Join(nonEmptyStrings(parts...), "\n")
@@ -496,6 +693,7 @@ func claudeCodeToolOutput(req claudeCodeHookRequest) string {
 func claudeCodeEventContent(req claudeCodeHookRequest) string {
 	fields := []string{
 		req.Message,
+		req.Delta,
 		req.Title,
 		req.FilePath,
 		req.Source,
@@ -504,8 +702,12 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		req.MCPServerName,
 		req.ElicitationAction,
 		req.URL,
+		req.AgentID,
+		req.AgentType,
 		req.OldCWD,
 		req.NewCWD,
+		req.Directory,
+		req.WorktreePath,
 		req.LastAssistantMessage,
 		claudeCodePayloadString(req.Payload, "content"),
 		claudeCodePayloadString(req.Payload, "compact_summary"),
@@ -515,38 +717,6 @@ func claudeCodeEventContent(req claudeCodeHookRequest) string {
 		claudeCodePayloadString(req.Payload, "reason"),
 	}
 	return strings.Join(nonEmptyStrings(fields...), "\n")
-}
-
-func claudeCodeWatchPaths(req claudeCodeHookRequest) []string {
-	root := strings.TrimSpace(req.NewCWD)
-	if root == "" {
-		root = strings.TrimSpace(req.CWD)
-	}
-	if root == "" {
-		return []string{}
-	}
-	candidates := []string{
-		"CLAUDE.md",
-		".mcp.json",
-		".env",
-		".envrc",
-		"package.json",
-		"pyproject.toml",
-		"go.mod",
-		"Cargo.toml",
-		"requirements.txt",
-		filepath.Join(".claude", "settings.json"),
-		filepath.Join(".claude", "settings.local.json"),
-	}
-	out := make([]string, 0, len(candidates))
-	for _, p := range candidates {
-		if filepath.IsAbs(p) {
-			out = append(out, filepath.Clean(p))
-			continue
-		}
-		out = append(out, filepath.Join(root, p))
-	}
-	return out
 }
 
 func nonEmptyStrings(values ...string) []string {
@@ -560,18 +730,7 @@ func nonEmptyStrings(values ...string) []string {
 }
 
 func claudeCodeString(v interface{}) string {
-	switch t := v.(type) {
-	case string:
-		return t
-	case nil:
-		return ""
-	default:
-		b, err := json.Marshal(t)
-		if err != nil {
-			return ""
-		}
-		return string(b)
-	}
+	return structuredHookContentString(v)
 }
 
 func claudeCodePayloadString(payload map[string]interface{}, key string) string {
@@ -616,7 +775,7 @@ func (a *APIServer) scanClaudeCodeEventFile(ctx context.Context, req claudeCodeH
 	}
 	findings := make([]string, 0, len(result.Findings))
 	for _, f := range result.Findings {
-		findings = append(findings, f.ID)
+		findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 		if len(findings) >= 20 {
 			break
 		}
@@ -659,7 +818,7 @@ func (a *APIServer) scanClaudeCodeChangedFiles(ctx context.Context, req claudeCo
 			maxSeverity = result.MaxSeverity()
 		}
 		for _, f := range result.Findings {
-			findings = append(findings, f.ID)
+			findings = append(findings, firstNonEmpty(f.RuleID, f.ID))
 			if len(findings) >= 20 {
 				break
 			}
@@ -765,28 +924,48 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		"mcp":     {},
 		"agent":   {},
 		"command": {},
+		"memory":  {},
 		"config":  {},
 	}
-	home, err := os.UserHomeDir()
-	if err == nil {
-		claudeHome := filepath.Join(home, ".claude")
-		targets["skill"] = append(targets["skill"], childDirs(filepath.Join(claudeHome, "skills"))...)
-		targets["plugin"] = append(targets["plugin"], childDirs(filepath.Join(claudeHome, "plugins"))...)
-		targets["agent"] = append(targets["agent"], childDirs(filepath.Join(claudeHome, "agents"))...)
-		targets["command"] = append(targets["command"], childDirs(filepath.Join(claudeHome, "commands"))...)
-		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(claudeHome, "settings.json"))...)
-		targets["config"] = append(targets["config"], existingFiles(filepath.Join(claudeHome, "settings.json"), filepath.Join(claudeHome, "rules"), filepath.Join(home, ".claude.json"))...)
-		targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
+	claudeHome := gatewayconnector.ClaudeCodeConfigDir()
+	userSkills := filepath.Join(claudeHome, "skills")
+	targets["skill"] = append(targets["skill"], claudePlainSkillDirs(userSkills)...)
+	userCommands := claudeCommandFiles(filepath.Join(claudeHome, "commands"))
+	targets["skill"] = append(targets["skill"], userCommands...)
+	// Marketplace cache presence does not prove the active version: Claude
+	// retains orphaned versions for 14 days. Do not turn stale cache copies
+	// into protected HookRuntime evidence. The host semantic inventory owns
+	// marketplace installed/version/enable attribution.
+	targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(userSkills)...)
+	targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(filepath.Join(claudeHome, "agents"))...)
+	targets["command"] = append(targets["command"], userCommands...)
+	targets["mcp"] = append(targets["mcp"], existingFiles(gatewayconnector.ClaudeCodeMCPStatePath())...)
+	targets["config"] = append(targets["config"], existingFiles(
+		filepath.Join(claudeHome, "settings.json"),
+		filepath.Join(claudeHome, "CLAUDE.md"),
+		filepath.Join(claudeHome, "rules"),
+	)...)
+	targets["config"] = append(targets["config"], childDirs(filepath.Join(claudeHome, "rules"))...)
+	memory := claudecodepath.ResolveAutoMemory(claudeHome, cwd, nil)
+	targets["memory"] = append(targets["memory"], existingFiles(memory.Path)...)
+	targets["memory"] = append(targets["memory"], claudecodepath.AutoMemoryFiles(memory)...)
+	for _, workspaceSkills := range gatewayconnector.ClaudeCodeProjectSkillDirs(cwd) {
+		targets["skill"] = append(targets["skill"], claudePlainSkillDirs(workspaceSkills)...)
+		targets["plugin"] = append(targets["plugin"], claudeSkillsPluginDirs(workspaceSkills)...)
+	}
+	for _, projectAgents := range gatewayconnector.ClaudeCodeProjectAgentDirs(cwd) {
+		targets["agent"] = append(targets["agent"], claudecodepath.AgentFiles(projectAgents)...)
 	}
 	for _, root := range workspaceCodexRoots(cwd) {
 		claudeDir := filepath.Join(root, ".claude")
-		targets["skill"] = append(targets["skill"], childDirs(filepath.Join(claudeDir, "skills"))...)
-		targets["plugin"] = append(targets["plugin"], childDirs(filepath.Join(claudeDir, "plugins"))...)
-		targets["agent"] = append(targets["agent"], childDirs(filepath.Join(claudeDir, "agents"))...)
-		targets["command"] = append(targets["command"], childDirs(filepath.Join(claudeDir, "commands"))...)
-		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(root, ".mcp.json"), filepath.Join(claudeDir, "settings.json"), filepath.Join(claudeDir, "settings.local.json"))...)
+		projectCommands := claudeCommandFiles(filepath.Join(claudeDir, "commands"))
+		targets["skill"] = append(targets["skill"], projectCommands...)
+		targets["command"] = append(targets["command"], projectCommands...)
+		targets["mcp"] = append(targets["mcp"], existingFiles(filepath.Join(root, ".mcp.json"))...)
 		targets["config"] = append(targets["config"], existingFiles(
 			filepath.Join(root, "CLAUDE.md"),
+			filepath.Join(root, "CLAUDE.local.md"),
+			filepath.Join(claudeDir, "CLAUDE.md"),
 			filepath.Join(claudeDir, "settings.json"),
 			filepath.Join(claudeDir, "settings.local.json"),
 			filepath.Join(claudeDir, "rules"),
@@ -797,6 +976,50 @@ func claudeCodeComponentTargets(cwd string) map[string][]string {
 		targets[k] = uniqueExistingPaths(paths)
 	}
 	return targets
+}
+
+func claudePluginManifestPath(root string) string {
+	return filepath.Join(root, ".claude-plugin", "plugin.json")
+}
+
+func claudeSkillsPluginDirs(root string) []string {
+	var plugins []string
+	for _, candidate := range claudecodepath.SkillDirs(root) {
+		if info, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil &&
+			info.Mode().IsRegular() {
+			plugins = append(plugins, candidate)
+		}
+	}
+	return plugins
+}
+
+func claudePlainSkillDirs(root string) []string {
+	var skills []string
+	for _, candidate := range claudecodepath.SkillDirs(root) {
+		if _, err := os.Lstat(claudePluginManifestPath(candidate)); err == nil {
+			continue
+		}
+		skills = append(skills, candidate)
+	}
+	return skills
+}
+
+func claudeCommandFiles(root string) []string {
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		return nil
+	}
+	commands := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.EqualFold(filepath.Ext(entry.Name()), ".md") {
+			continue
+		}
+		path := filepath.Join(root, entry.Name())
+		if info, err := os.Lstat(path); err == nil && info.Mode().IsRegular() {
+			commands = append(commands, path)
+		}
+	}
+	return commands
 }
 
 func (a *APIServer) scanClaudeCodeComponent(ctx context.Context, component, target string) bool {

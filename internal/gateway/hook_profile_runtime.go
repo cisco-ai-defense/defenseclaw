@@ -71,10 +71,10 @@ func defaultHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	}
 }
 
-func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
+func codexHookProfileRuntime(profile connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
-		RememberRawEvents: func(a *APIServer, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
-			return a.rememberCodexRawHookEvents(decodeCodexRequestFromBytes(rawBody, payload))
+		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
+			return a.rememberCodexRawHookEvents(decodeCodexRequestFromBytes(rawBody, payload), req.SemanticEventID)
 		},
 		EmitLLMEvent: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}, rawEventIDs []string) {
 			a.emitCodexHookLLMEvent(ctx, decodeCodexRequestFromBytes(rawBody, payload), rawEventIDs, rawBody)
@@ -82,15 +82,15 @@ func codexHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 		Evaluate: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) agentHookResponse {
 			cxReq := decodeCodexRequestFromBytes(rawBody, payload)
 			enrichCodexHookSpan(ctx, cxReq)
-			return codexResponseToAgentHookResponse(a.evaluateCodexHook(ctx, cxReq))
+			return codexResponseToAgentHookResponse(a.evaluateCodexHookForProfile(ctx, cxReq, profile))
 		},
 	}
 }
 
 func claudeCodeHookProfileRuntime(_ connector.HookProfile) hookProfileRuntime {
 	return hookProfileRuntime{
-		RememberRawEvents: func(a *APIServer, _ agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
-			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestFromBytes(rawBody, payload))
+		RememberRawEvents: func(a *APIServer, req agentHookRequest, rawBody []byte, payload map[string]interface{}) []string {
+			return a.rememberClaudeCodeRawHookEvents(decodeClaudeCodeRequestFromBytes(rawBody, payload), req.SemanticEventID)
 		},
 		EmitLLMEvent: func(a *APIServer, ctx context.Context, _ agentHookRequest, rawBody []byte, payload map[string]interface{}, rawEventIDs []string) {
 			a.emitClaudeCodeHookLLMEvent(ctx, decodeClaudeCodeRequestFromBytes(rawBody, payload), rawEventIDs, rawBody)
@@ -139,6 +139,7 @@ func claudeCodeResponseToAgentHookResponse(resp claudeCodeHookResponse) agentHoo
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
+		SourceReason:      resp.SourceReason,
 	}
 }
 
@@ -156,5 +157,6 @@ func codexResponseToAgentHookResponse(resp codexHookResponse) agentHookResponse 
 		EvaluationID:      resp.EvaluationID,
 		RuleIDs:           resp.RuleIDs,
 		RedactionEnabled:  resp.RedactionEnabled,
+		SourceReason:      resp.SourceReason,
 	}
 }

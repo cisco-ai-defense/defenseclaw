@@ -192,7 +192,10 @@ func TestLoadRulePackWithOverlaysAppliesAfterEachConnectorBase(t *testing.T) {
 
 func TestLoadRulePackWithEmptyOverlayPreservesBase(t *testing.T) {
 	overlay := writeOverlay(t, "", "")
-	base := LoadRulePack("")
+	base, err := LoadRulePack("")
+	if err != nil {
+		t.Fatal(err)
+	}
 	rp, err := LoadRulePackWithOverlays("", []string{overlay})
 	if err != nil {
 		t.Fatal(err)

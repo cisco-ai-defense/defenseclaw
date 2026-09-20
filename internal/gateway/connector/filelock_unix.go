@@ -30,6 +30,10 @@ import (
 // on success. Stale lock files older than staleLockAge are removed before
 // attempting acquisition.
 func withFileLock(path string, fn func() error) error {
+	return withFileLockMode(path, false, fn)
+}
+
+func withFileLockMode(path string, _ bool, fn func() error) error {
 	lockPath := path + ".lock"
 	const staleLockAge = 60 * time.Second
 

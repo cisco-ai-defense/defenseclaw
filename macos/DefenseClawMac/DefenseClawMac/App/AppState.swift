@@ -29,7 +29,7 @@ enum MenuBarState {
 enum PanelID: String, CaseIterable, Identifiable {
     case overview, alerts, logs, audit, activity
     case skills, mcps, plugins, tools
-    case inventory, aiDiscovery, registries
+    case inventory, aiDiscovery, aiRuntime, registries
     case setup
 
     var id: String { rawValue }
@@ -47,6 +47,7 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .tools: "Tools"
         case .inventory: "Inventory"
         case .aiDiscovery: "AI Discovery"
+        case .aiRuntime: "Runtime"
         case .registries: "Registries"
         case .setup: "Setup"
         }
@@ -65,10 +66,18 @@ enum PanelID: String, CaseIterable, Identifiable {
         case .tools: "wrench.and.screwdriver"
         case .inventory: "shippingbox"
         case .aiDiscovery: "sparkle.magnifyingglass"
+        case .aiRuntime: "waveform.path.ecg"
         case .registries: "books.vertical"
         case .setup: "gearshape.2"
         }
     }
+}
+
+enum AppSettingsTab: Hashable {
+    case general
+    case monitoring
+    case notifications
+    case connection
 }
 
 enum AlertPanelRequest: Equatable {
@@ -97,13 +106,35 @@ struct LogPanelRequest: Equatable {
 @MainActor
 final class AppState {
     // Data layer singletons
-    let configStore = ConfigStore()
-    let gateway = GatewayClient()
-    let audit = AuditStore()
-    let stream = EventStreamReader()
+    let configStore: ConfigStore
+    let gateway: GatewayClient
+    private(set) var audit: AuditStore
+    private(set) var stream: EventStreamReader
     let cli: CLIRunner
     let activity: CommandActivityStore
     let updater = UpdateChecker()
+    private(set) var installationContext: InstallationContext
+    /// Changes before any path-owning actor is rebound. View-local async
+    /// loaders capture this value and discard results from the old install.
+    @ObservationIgnored private(set) var installationGeneration = 0
+    private var installationBindInProgress = false
+    @ObservationIgnored private var pendingInstallationBind: InstallationContext?
+    @ObservationIgnored private var installationBindWaiters: [CheckedContinuation<Void, Never>] = []
+    @ObservationIgnored private var runtimeManagedConfigPaths: Set<String> = []
+
+    var installationMutationsAllowed: Bool { installationContext.permitsMutation }
+    var installationReadOnlyReason: String? { installationContext.accessMode.reason }
+    var installationContextSwitchAllowed: Bool {
+        !installationBindInProgress
+            && !updateOperationInProgress
+            && !runtimeVersionCheckInProgress
+            && !scanInFlight
+            && !diagnoseRunning
+            && scannerFixInFlight.isEmpty
+            && connectorSetupInFlight.isEmpty
+            && !enforcementInventoryInProgress
+            && !activity.entries.contains(where: { $0.status == .running })
+    }
 
     // Self-update state (this Mac app)
     var availableUpdate: ReleaseInfo?
@@ -116,6 +147,7 @@ final class AppState {
 
     // DefenseClaw runtime (CLI + gateway) update state
     var installedRuntimeVersion: String?
+    var runtimeSetupCommands: Set<String>?
     var runtimeVersionCheckInProgress = false
     var runtimeVersionError: String?
     var runtimeReleaseChecked = false
@@ -171,13 +203,18 @@ final class AppState {
     /// backing the scanner probe. Runs at the top of the first pulse, so
     /// panel-triggered pulses can't race ahead of start() and briefly show
     /// fixable scanners as "missing".
-    private func resolveProbePaths(force: Bool = false) async {
+    private func resolveProbePaths(force: Bool = false, generation expectedGeneration: Int? = nil) async {
+        let generation = expectedGeneration ?? installationGeneration
+        guard installationSnapshotIsCurrent(generation) else { return }
         if probeResolved && !force { return }
-        probeCLIPath = await cli.locateBinary()
+        let locatedCLI = await cli.locateBinary()
+        guard installationSnapshotIsCurrent(generation) else { return }
         var found: Set<String> = []
         for name in ScannerProbe.externalScanners where !ScannerProbe.binaryInstalled(name) {
             if await cli.locateTool(name) != nil { found.insert(name) }
+            guard installationSnapshotIsCurrent(generation) else { return }
         }
+        probeCLIPath = locatedCLI
         shellResolvedScanners = found
         probeResolved = true
     }
@@ -196,6 +233,7 @@ final class AppState {
     var overviewEnforcementMetrics = OverviewEnforcementMetrics()
     /// Last `alerts acknowledge` failure, surfaced in the popover/panel.
     var ackError: String?
+    var ackInProgress = false
     var scanInFlight = false
 
     // UI state
@@ -223,6 +261,7 @@ final class AppState {
     var auditPresetRequest: String?
     var logPanelRequest: LogPanelRequest?
     var commandPalettePresented = false
+    var selectedSettingsTab: AppSettingsTab = .general
 
     // Settings (mirrored via @AppStorage in views; defaults here)
     @ObservationIgnored @AppStorage(SettingsKeys.pulseInterval) var pulseInterval: Double = 5
@@ -236,8 +275,20 @@ final class AppState {
     private var wasReachable: Bool?
     @ObservationIgnored private var lastConfigSignature = ""
 
-    init() {
-        let runner = CLIRunner()
+    init(installationContext: InstallationContext = .resolve()) {
+        self.installationContext = installationContext
+        configStore = ConfigStore(context: installationContext)
+        gateway = GatewayClient(
+            mutationsAllowed: installationContext.permitsMutation,
+            mutationDenialReason: installationContext.accessMode.reason ?? "This installation is read only."
+        )
+        audit = AuditStore(url: installationContext.auditDBURL)
+        stream = EventStreamReader(
+            url: installationContext.gatewayJSONLURL,
+            gatewayLogURL: installationContext.gatewayLogURL,
+            watchdogLogURL: installationContext.watchdogLogURL
+        )
+        let runner = CLIRunner(context: installationContext)
         cli = runner
         activity = CommandActivityStore(runner: runner)
     }
@@ -256,12 +307,192 @@ final class AppState {
 
     // MARK: - Lifecycle
 
+    /// Persist an app-only config source for Finder-launched sessions, where
+    /// shell environment overrides are normally unavailable. Environment
+    /// variables still outrank this preference in InstallationContext.
+    func applyInstallationConfigOverride(_ rawPath: String) {
+        guard installationContextSwitchAllowed else {
+            notify(
+                title: "DefenseClaw",
+                body: "Wait for the active DefenseClaw operation to finish before switching installations.",
+                id: "context-switch-busy-\(Date().timeIntervalSince1970)"
+            )
+            return
+        }
+        let value = rawPath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if value.isEmpty {
+            UserDefaults.standard.removeObject(forKey: InstallationContext.configPathOverrideKey)
+        } else {
+            UserDefaults.standard.set(value, forKey: InstallationContext.configPathOverrideKey)
+        }
+        Task {
+            await bindSelectedInstallation()
+            await pulse()
+        }
+    }
+
+    /// Atomically rebind every path-owning actor. A context revision prevents
+    /// an in-flight pulse against the previous audit/log actors from
+    /// publishing stale results after the switch.
+    private func selectedInstallationContext() -> InstallationContext {
+        let selected = InstallationContext.resolve()
+        guard runtimeManagedConfigPaths.contains(selected.configURL.path) else { return selected }
+        return selected.reducingToInvalidReadOnly(
+            "The running gateway reports a managed enterprise control plane, which conflicts with this writable installation selection."
+        )
+    }
+
+    private func bindSelectedInstallation(resolved requested: InstallationContext? = nil) async {
+        let initialTarget = requested ?? selectedInstallationContext()
+        if installationBindInProgress {
+            // Last request wins, but every caller waits until the serialized
+            // sequence is fully settled before continuing with a pulse/load.
+            pendingInstallationBind = initialTarget
+            await withCheckedContinuation { continuation in
+                installationBindWaiters.append(continuation)
+            }
+            return
+        }
+
+        installationBindInProgress = true
+        var target = initialTarget
+        var didRebind = false
+        while true {
+            didRebind = await performInstallationBind(to: target) || didRebind
+            guard let pending = pendingInstallationBind else { break }
+            pendingInstallationBind = nil
+            target = pending
+        }
+        installationBindInProgress = false
+
+        if didRebind {
+            NotificationCenter.default.post(name: .dcRefreshPanel, object: nil)
+        }
+        let waiters = installationBindWaiters
+        installationBindWaiters.removeAll()
+        waiters.forEach { $0.resume() }
+    }
+
+    /// Performs one serialized bind. The publicly visible context and its
+    /// audit/log actors change only after the runner, config store, gateway,
+    /// and parsed config all point at the same installation.
+    private func performInstallationBind(to resolved: InstallationContext) async -> Bool {
+        guard resolved != installationContext else {
+            let generation = installationGeneration
+            let cfg = await configStore.reload()
+            guard generation == installationGeneration else { return false }
+            let present = await configStore.installPresent
+            guard generation == installationGeneration else { return false }
+            await gateway.update(config: cfg)
+            guard generation == installationGeneration else { return false }
+            config = cfg
+            installDetected = present
+            return false
+        }
+
+        // The start increment invalidates work launched before the bind. The
+        // completion increment invalidates any loader launched while the old
+        // public actors were intentionally retained during preparation.
+        installationGeneration += 1
+        let generation = installationGeneration
+        let pathsChanged = !resolved.hasSamePaths(as: installationContext)
+        let previousAudit = audit
+        let nextAudit = pathsChanged ? AuditStore(url: resolved.auditDBURL) : previousAudit
+        let nextStream = pathsChanged
+            ? EventStreamReader(
+                url: resolved.gatewayJSONLURL,
+                gatewayLogURL: resolved.gatewayLogURL,
+                watchdogLogURL: resolved.watchdogLogURL
+            )
+            : stream
+
+        await cli.rebind(to: resolved)
+        await gateway.update(installationContext: resolved)
+        await configStore.rebind(to: resolved)
+        let cfg = await configStore.reload()
+        let present = await configStore.installPresent
+        await gateway.update(config: cfg)
+        if pathsChanged {
+            await previousAudit.close()
+        }
+        guard generation == installationGeneration else { return false }
+
+        if pathsChanged {
+            resetInstallationScopedState()
+            audit = nextAudit
+            stream = nextStream
+        }
+        installationContext = resolved
+        config = cfg
+        installDetected = present
+        installationGeneration += 1
+        return true
+    }
+
+    private func installationSnapshotIsCurrent(_ generation: Int) -> Bool {
+        !installationBindInProgress && generation == installationGeneration
+    }
+
+    /// No state derived from one config/data root may survive a path switch.
+    /// App preferences, navigation, self-update state, and Activity history
+    /// intentionally remain process-wide.
+    private func resetInstallationScopedState() {
+        installedRuntimeVersion = nil
+        runtimeSetupCommands = nil
+        runtimeVersionError = nil
+        runtimeReleaseChecked = false
+        availableRuntimeUpdate = nil
+        runtimeUpgradeState = .idle
+        runtimeInstallState = .idle
+        runtimeInstallRunID = nil
+        firstRunDismissed = false
+        runtimeBannerDismissed = false
+        runtimeUpgradeLogTail = ""
+        runtimeUpgradeLog = ""
+        runtimeUpdateCheckFailed = false
+        lastRuntimeUpdateCheckTime = 0
+
+        health = HealthSnapshot()
+        scanners = []
+        scannerFixError = nil
+        scannerFixInFlight = []
+        probeCLIPath = nil
+        shellResolvedScanners = []
+        probeResolved = false
+        gatewayReachable = false
+        lastGatewayError = nil
+        config = DefenseClawConfig()
+        installDetected = false
+        aiSnapshot = AIUsageSnapshot()
+        aiFetchEverSucceeded = false
+        connectorSetupInFlight = []
+        connectorSetupError = nil
+
+        unackedAlerts = []
+        dismissedIDs = []
+        overviewEnforcementMetrics = OverviewEnforcementMetrics()
+        ackError = nil
+        scanInFlight = false
+        seenAlertHighWater = 0
+
+        connectorFilter = ""
+        connectorStatsCache = [:]
+        connectorStatsAllTimeCache = [:]
+        doctorCache = nil
+        silentBypassCount = 0
+        sessionTotalScans = 0
+        alertPanelRequest = nil
+        auditPresetRequest = nil
+        logPanelRequest = nil
+        wasReachable = nil
+        lastConfigSignature = ""
+        enforcementInventory = [:]
+        enforcementInventoryRequested = false
+    }
+
     func start() {
         Task {
-            let cfg = await configStore.reload()
-            config = cfg
-            installDetected = await configStore.installPresent
-            await gateway.update(config: cfg)
+            await bindSelectedInstallation()
             startPulse()
             // Local runtime detection is independent of the throttled GitHub
             // release lookup so every launch can report the installed CLI.
@@ -287,26 +518,60 @@ final class AppState {
     }
 
     func pulse() async {
+        guard !installationBindInProgress else { return }
+        let selected = selectedInstallationContext()
+        if selected != installationContext {
+            guard selected.hasSamePaths(as: installationContext)
+                    || installationContextSwitchAllowed
+            else { return }
+            await bindSelectedInstallation(resolved: selected)
+            return
+        }
+        let generation = installationGeneration
+        let activeAudit = audit
+        let activeStream = stream
         // Re-resolve config + gateway token when config.yaml/.env changed on
         // disk (token rotation, setup commands, the TUI editing config) —
         // /health is unauthenticated, so a stale token otherwise only
         // surfaces as 401s on the authed endpoints until app relaunch.
-        let signature = ConfigStore.diskSignature
+        let signature = installationContext.diskSignature
         if signature != lastConfigSignature {
-            lastConfigSignature = signature
+            let rebound = selectedInstallationContext()
+            if rebound != installationContext {
+                guard rebound.hasSamePaths(as: installationContext)
+                        || installationContextSwitchAllowed
+                else { return }
+                await bindSelectedInstallation(resolved: rebound)
+                return
+            }
             let cfg = await configStore.reload()
-            config = cfg
+            guard installationSnapshotIsCurrent(generation) else { return }
             await gateway.update(config: cfg)
+            guard installationSnapshotIsCurrent(generation) else { return }
+            config = cfg
+            lastConfigSignature = signature
         }
-        await resolveProbePaths() // no-op after the first pulse
+        await resolveProbePaths(generation: generation) // no-op after the first pulse
+        guard installationSnapshotIsCurrent(generation) else { return }
         do {
             var snap = try await gateway.health()
+            guard installationSnapshotIsCurrent(generation) else { return }
+            if installationContext.permitsMutation,
+               snap.subsystems.contains(where: { $0.name == "managed" }) {
+                runtimeManagedConfigPaths.insert(installationContext.configURL.path)
+                await bindSelectedInstallation(resolved: selectedInstallationContext())
+                return
+            }
             // Enrich connector rows: mode/rule pack from config, and
             // audit-derived activity (hook connectors deliver calls
             // out-of-band, so /health counters can sit at zero).
-            let stats = await audit.connectorStats()
-            connectorStatsCache = stats
-            connectorStatsAllTimeCache = await audit.connectorStatsAllTime()
+            let stats = await activeAudit.connectorStats()
+            guard installationSnapshotIsCurrent(generation) else { return }
+            let allTimeStats = await activeAudit.connectorStatsAllTime()
+            guard installationSnapshotIsCurrent(generation) else { return }
+            let usage = try? await gateway.aiUsage()
+            guard installationSnapshotIsCurrent(generation) else { return }
+
             for i in snap.connectors.indices {
                 let name = snap.connectors[i].name
                 snap.connectors[i].mode = connectorValue(config.connectorModes, for: name)
@@ -319,8 +584,10 @@ final class AppState {
                     snap.connectors[i].lastActivity = s.lastActivity
                 }
             }
+            connectorStatsCache = stats
+            connectorStatsAllTimeCache = allTimeStats
             health = snap
-            if let usage = try? await gateway.aiUsage() {
+            if let usage {
                 aiSnapshot = usage
                 aiFetchEverSucceeded = true
             }
@@ -339,6 +606,7 @@ final class AppState {
             gatewayReachable = true
             lastGatewayError = nil
         } catch let err as GatewayError {
+            guard installationSnapshotIsCurrent(generation) else { return }
             if gatewayReachable, notifyGatewayOffline, case .offline = err {
                 notify(title: "DefenseClaw gateway offline",
                        body: "Lost contact with the gateway on port \(config.gatewayPort).", id: "gw-offline-\(Date().timeIntervalSince1970)")
@@ -346,8 +614,10 @@ final class AppState {
             gatewayReachable = false
             lastGatewayError = err
         } catch {
+            guard installationSnapshotIsCurrent(generation) else { return }
             gatewayReachable = false
         }
+        guard installationSnapshotIsCurrent(generation) else { return }
         wasReachable = gatewayReachable
 
         // Scanner statuses don't depend on the gateway (binaries on PATH,
@@ -355,7 +625,7 @@ final class AppState {
         // useful. guardrailState falls back to the last-known subsystem.
         let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
         // Doctor cache: keep last-good on parse failure (TUI semantics).
-        doctorCache = DoctorCache.load() ?? doctorCache
+        doctorCache = DoctorCache.load(dataDirectory: installationContext.dataDirectory) ?? doctorCache
         scanners = ScannerProbe.statuses(
             config: config,
             guardrailState: guardrailState,
@@ -370,30 +640,44 @@ final class AppState {
         }
         // Session-scoped Total scans since the earliest connector session
         // start; all-time when no session window has ever been observed.
-        sessionTotalScans = await audit.countScanResultsSince(sessionStart)
+        let scanCount = await activeAudit.countScanResultsSince(sessionStart)
+        guard installationSnapshotIsCurrent(generation) else { return }
+        sessionTotalScans = scanCount
 
         // Tail the JSONL stream and refresh the alert set.
-        _ = await stream.poll()
+        _ = await activeStream.poll()
+        guard installationSnapshotIsCurrent(generation) else { return }
         await refreshAlerts()
+        guard installationSnapshotIsCurrent(generation) else { return }
         await checkForUpdates() // no-op unless 6h have passed
     }
 
     func refreshAlerts() async {
-        guard !alertRefreshInProgress else { return }
+        guard !alertRefreshInProgress, !installationBindInProgress else { return }
         alertRefreshInProgress = true
         defer { alertRefreshInProgress = false }
+        let generation = installationGeneration
+        let activeAudit = audit
+        let activeStream = stream
         // Parity with the TUI's flat_rows: audit alert queue (severity-bearing
         // rows from list_alerts) + one row per scan block grouped by scan_id
         // from gateway.jsonl + egress rows. Nested findings stay inside their
         // block (the chips never count them).
-        let queue = await audit.alertQueueEvents(limit: 500)
-        let blocks = await stream.scanBlocks
-        let egress = await stream.egress
+        let queue = await activeAudit.alertQueueEvents(limit: 500)
+        guard installationSnapshotIsCurrent(generation) else { return }
+        let blocks = await activeStream.scanBlocks
+        guard installationSnapshotIsCurrent(generation) else { return }
+        let egress = await activeStream.egress
+        guard installationSnapshotIsCurrent(generation) else { return }
+        let hookCalls = await activeAudit.overviewHookCallCount()
+        guard installationSnapshotIsCurrent(generation) else { return }
+        let blockCount = await activeAudit.overviewBlockCount()
+        guard installationSnapshotIsCurrent(generation) else { return }
 
         // count_recent_silent_bypass: allow-decision LLM-shaped bypasses in
         // the last 300s (passthrough+looks_like_llm, or the shape branch).
         let bypassCutoff = Date().addingTimeInterval(-300)
-        silentBypassCount = egress.filter {
+        let nextSilentBypassCount = egress.filter {
             let decision = $0.decision.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             let branch = $0.branch.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
             return $0.timestampParsed && $0.timestamp >= bypassCutoff
@@ -411,30 +695,34 @@ final class AppState {
 
         let fresh = rows.filter { !dismissedIDs.contains($0.id) }
 
-        // Notify on rows newer than the persisted high-water mark.
+        // Determine notifications before the single publication block below.
         let highWater = Date(timeIntervalSince1970: seenAlertHighWater)
         var newest = highWater
+        var rowsToNotify: [AlertRow] = []
         for row in fresh where row.timestamp > highWater {
             newest = max(newest, row.timestamp)
             let wantNotify = (row.severity == .critical && notifyCritical) || (row.severity == .high && notifyHigh)
-            if wantNotify {
-                notify(
-                    title: "\(row.severity.rawValue): \(row.action)",
-                    body: "Target: \(row.target)", // target + severity only — never payload contents
-                    id: row.id
-                )
-            }
+            if wantNotify { rowsToNotify.append(row) }
         }
-        if newest > highWater { seenAlertHighWater = newest.timeIntervalSince1970 }
         // Gather every count before publishing so Overview, the sidebar, Alerts,
         // and the menu bar advance as one coherent security snapshot.
         let nextMetrics = OverviewEnforcementMetrics(
-            hookCalls: await audit.overviewHookCallCount(),
-            blocks: await audit.overviewBlockCount(),
+            hookCalls: hookCalls,
+            blocks: blockCount,
             findings: fresh.filter { $0.severity > .info }.count,
             updatedAt: Date()
         )
 
+        guard installationSnapshotIsCurrent(generation) else { return }
+        silentBypassCount = nextSilentBypassCount
+        for row in rowsToNotify {
+            notify(
+                title: "\(row.severity.rawValue): \(row.action)",
+                body: "Target: \(row.target)", // target + severity only — never payload contents
+                id: row.id
+            )
+        }
+        if newest > highWater { seenAlertHighWater = newest.timeIntervalSince1970 }
         // Publish only on real row changes so Table does not re-diff mid-gesture.
         // These adjacent assignments contain no suspension point, preventing a
         // frame where the badge and the detailed alert list disagree.
@@ -454,12 +742,19 @@ final class AppState {
         arguments: [String],
         standardInput: String? = nil,
         environment: [String: String] = [:],
+        mutation: Bool = true,
         category: String = "other",
         origin: String,
         successEffects: [String] = [],
         suggestedNextAction: String = "",
         refreshOnSuccess: Bool = false
     ) async -> CLIResult {
+        guard !(mutation && installationBindInProgress) else {
+            return CLIResult(
+                exitCode: 75,
+                output: "Operation refused by the Mac app: wait for the installation switch to finish."
+            )
+        }
         let result = await activity.run(
             id: runID,
             title: title,
@@ -467,6 +762,7 @@ final class AppState {
             arguments: arguments,
             standardInput: standardInput,
             environment: environment,
+            mutation: mutation,
             category: category,
             origin: origin,
             successEffects: successEffects,
@@ -488,9 +784,12 @@ final class AppState {
             selectedPanel = .setup
             return
         }
+        guard installationMutationsAllowed, !installationBindInProgress else { return }
         guard connectorSetupInFlight.insert(normalized).inserted else { return }
+        let generation = installationGeneration
         connectorSetupError = nil
         Task {
+            defer { connectorSetupInFlight.remove(normalized) }
             let commandName = ConnectorOnboarding.setupCommandName(normalized)
             let result = await runCommand(
                 title: "Add \(friendlyConnectorName(normalized)) connector",
@@ -503,10 +802,13 @@ final class AppState {
                 ],
                 suggestedNextAction: "Resume the agent so it emits a fresh hook event."
             )
+            guard installationSnapshotIsCurrent(generation) else { return }
             if result.succeeded {
                 let updated = await configStore.reload()
-                config = updated
+                guard installationSnapshotIsCurrent(generation) else { return }
                 await gateway.update(config: updated)
+                guard installationSnapshotIsCurrent(generation) else { return }
+                config = updated
                 await pulse()
             } else {
                 let detail = result.output
@@ -515,7 +817,6 @@ final class AppState {
                     .map(String.init) ?? "exit \(result.exitCode)"
                 connectorSetupError = "Could not add \(friendlyConnectorName(normalized)): \(detail)"
             }
-            connectorSetupInFlight.remove(normalized)
         }
     }
 
@@ -523,49 +824,65 @@ final class AppState {
         connectorSetupInFlight.contains(ConnectorOnboarding.normalizedConnector(name))
     }
 
-    /// Mirrors the TUI exactly: `defenseclaw alerts acknowledge --severity <S>`
-    /// downgrades that whole severity class to ACK in the audit DB. Audit rows
-    /// then drop out of the queue on refresh by themselves. Scan blocks and
-    /// egress rows are NOT suppressed — they come from the immutable
-    /// gateway.jsonl and the TUI re-shows them on every reload; hiding them
-    /// locally made Findings drift to zero against the TUI. Use Dismiss for a
-    /// view-local hide (also TUI parity: cleared on next app launch).
+    /// Runtime 0.8.9 keeps severity selectors and confirms broad mutations
+    /// interactively. The invocation helper supplies that confirmation over
+    /// stdin while remaining compatible with older runtimes that ignore it.
+    /// Audit rows drop from the queue via the acknowledgement projection;
+    /// synthetic stream rows remain a local hide because they have no protected
+    /// audit disposition.
     func acknowledge(_ rows: [AlertRow]) async {
+        guard !rows.isEmpty, !ackInProgress else { return }
+        ackInProgress = true
+        defer { ackInProgress = false }
+
         ackError = nil
         var severities = Set<Severity>()
+        var localRows: [AlertRow] = []
         for row in rows {
             if case .audit = row {
                 severities.insert(row.severity)
             } else {
-                // Scan blocks / egress rows have no DB-side ack (they live in
-                // gateway.jsonl). An explicit Ack is still a user request to
-                // clear them, so hide them view-locally — the TUI's
-                // "Dismiss all" does the same local clear. Passive refreshes
-                // never suppress them (Findings parity).
-                dismissedIDs.insert(row.id)
+                localRows.append(row)
             }
         }
-        for severity in severities {
+        var failures: [String] = []
+        for severity in severities.sorted(by: >) {
+            let invocation = AlertDispositionCommand.acknowledge(severity: severity.rawValue)
             let result = await runCommand(
                 title: "Acknowledge \(severity.rawValue) alerts",
-                arguments: ["alerts", "acknowledge", "--severity", severity.rawValue],
+                arguments: invocation.arguments,
+                standardInput: invocation.standardInput,
                 category: "alerts",
                 origin: "Alerts",
                 successEffects: ["\(severity.rawValue) alerts acknowledged"]
             )
             if !result.succeeded {
-                ackError = "alerts acknowledge \(severity.rawValue) failed (exit \(result.exitCode))"
+                let detail = result.output
+                    .split(separator: "\n")
+                    .last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty })
+                    .map { String($0.prefix(120)) }
+                failures.append(
+                    "\(severity.rawValue) failed (exit \(result.exitCode))"
+                        + (detail.map { ": \($0)" } ?? "")
+                )
             }
+        }
+        if failures.isEmpty {
+            for row in localRows { dismissedIDs.insert(row.id) }
+        } else {
+            ackError = "alerts acknowledge " + failures.joined(separator: "; ")
         }
         await refreshAlerts()
     }
 
-    /// `defenseclaw alerts dismiss --severity <S|all>` — same DB semantics as the TUI.
+    /// Severity-wide dismissal with the same cross-runtime confirmation bridge.
     func dismissViaCLI(severity: Severity?) async {
         ackError = nil
+        let invocation = AlertDispositionCommand.dismiss(severity: severity?.rawValue)
         let result = await runCommand(
             title: "Dismiss alerts",
-            arguments: ["alerts", "dismiss", "--severity", severity?.rawValue ?? "all"],
+            arguments: invocation.arguments,
+            standardInput: invocation.standardInput,
             category: "alerts",
             origin: "Alerts",
             successEffects: ["Alert queue updated"]
@@ -681,19 +998,29 @@ final class AppState {
     /// calls this when opened, and startup calls it even when release checks
     /// are still inside their persisted throttle window.
     func refreshInstalledRuntimeVersion() async {
-        guard !runtimeVersionCheckInProgress else { return }
+        guard !runtimeVersionCheckInProgress, !installationBindInProgress else { return }
+        let generation = installationGeneration
         runtimeVersionCheckInProgress = true
         defer { runtimeVersionCheckInProgress = false }
 
-        guard await cli.locateBinary() != nil else {
+        let locatedBinary = await cli.locateBinary()
+        guard installationSnapshotIsCurrent(generation) else { return }
+        guard locatedBinary != nil else {
             installedRuntimeVersion = nil
+            runtimeSetupCommands = nil
             runtimeVersionError = "DefenseClaw CLI not found. Set its path in Connection."
             return
         }
 
-        let result = await cli.run(arguments: ["--version"])
+        let result = await cli.run(arguments: ["--version"], mutation: false)
+        guard installationSnapshotIsCurrent(generation) else { return }
         if let version = UpdateChecker.parseVersion(result.output) {
             installedRuntimeVersion = version
+            let setupHelp = await cli.run(arguments: ["setup", "--help"], mutation: false)
+            guard installationSnapshotIsCurrent(generation) else { return }
+            runtimeSetupCommands = setupHelp.succeeded
+                ? CommandRegistry.setupCommands(from: setupHelp.output)
+                : nil
             runtimeVersionError = nil
             // A detected, working CLI supersedes an earlier bundled-install
             // failure (e.g. the user installed via the shell script instead);
@@ -702,6 +1029,7 @@ final class AppState {
             if case .failed = runtimeInstallState { runtimeInstallState = .idle }
         } else {
             installedRuntimeVersion = nil
+            runtimeSetupCommands = nil
             runtimeVersionError = result.succeeded
                 ? "Could not read the installed runtime version."
                 : "Runtime version check failed (exit \(result.exitCode))."
@@ -803,7 +1131,7 @@ final class AppState {
             releaseTag: runtimeUpdate.tag
         ) else {
             let failure = """
-            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://github.com/cisco-ai-defense/defenseclaw/blob/main/docs/CLI.md#upgrade.
+            The available release identifier is not canonical, so no copy/paste command was produced. No installed files or services were changed. Follow the authenticated release-asset instructions at https://cisco-ai-defense.github.io/defenseclaw/docs/get-started/upgrade/.
             """
             runtimeUpgradeLogTail = ""
             runtimeUpgradeLog = failure
@@ -817,6 +1145,37 @@ final class AppState {
         runtimeUpgradeLog = guidance
         runtimeUpgradeState = .actionRequired(guidance: guidance, command: resolverCommand)
         return false
+    }
+
+    /// Targets the installation that produced the warning. The installed CLI
+    /// authenticates the release-owned resolver before replacing any audit
+    /// files; the app only prepares the explicit operator command.
+    func auditStoreRecoveryCommand(
+        expectedGeneration: Int,
+        expectedBinaryPath: String?
+    ) async -> String? {
+        guard installationSnapshotIsCurrent(expectedGeneration) else { return nil }
+        guard let expectedBinaryPath,
+              await cli.locateBinary() == expectedBinaryPath else { return nil }
+        let versionResult = await cli.run(
+            binary: expectedBinaryPath,
+            arguments: ["--version"],
+            mutation: false
+        )
+        guard installationSnapshotIsCurrent(expectedGeneration),
+              await cli.locateBinary() == expectedBinaryPath,
+              versionResult.succeeded,
+              let installedVersion = UpdateChecker.parseVersion(versionResult.output) else {
+            return nil
+        }
+        return RuntimeAuditRecoveryCommand.command(for: RuntimeAuditRecoveryTarget(
+            homeRoot: installationContext.homeRoot,
+            configURL: installationContext.configURL,
+            venvURL: installationContext.venvURL,
+            runtimeCLIURL: URL(fileURLWithPath: expectedBinaryPath, isDirectory: false),
+            installedVersion: installedVersion,
+            permitsMutation: installationContext.permitsMutation
+        ))
     }
 
     /// Download, install over the current bundle, and restart the app.
@@ -995,7 +1354,15 @@ final class AppState {
         # saved   \(iso.string(from: Date()))
 
         """
-        let target = ConfigStore.dataDirectory.appendingPathComponent("last-run.log")
+        guard installationMutationsAllowed else {
+            notify(
+                title: "DefenseClaw",
+                body: installationReadOnlyReason ?? "This installation is read only.",
+                id: "export-denied-\(Date().timeIntervalSince1970)"
+            )
+            return
+        }
+        let target = installationContext.dataDirectory.appendingPathComponent("last-run.log")
         do {
             try SecureFileWriter.write(header + entry.output + "\n", to: target)
             notify(title: "DefenseClaw", body: "Wrote last-run.log → \(target.path)", id: "export-\(Date().timeIntervalSince1970)")
@@ -1008,11 +1375,13 @@ final class AppState {
     /// silently (no panel switch, no Activity entry), report a one-line
     /// summary, and reload the doctor cache it rewrites.
     func runBackgroundDiagnose() {
-        guard !diagnoseRunning else {
+        guard !diagnoseRunning, !installationBindInProgress else {
             notify(title: "DefenseClaw", body: "Diagnose already running — waiting for the current probe to finish.",
                    id: "diag-\(Date().timeIntervalSince1970)")
             return
         }
+        let generation = installationGeneration
+        let dataDirectory = installationContext.dataDirectory
         diagnoseRunning = true
         notify(title: "DefenseClaw", body: "Running defenseclaw doctor…", id: "diag-start-\(Date().timeIntervalSince1970)")
         Task {
@@ -1022,10 +1391,11 @@ final class AppState {
                 try? await Task.sleep(for: .seconds(60))
                 if !Task.isCancelled { await cli.cancel(runID: runID) }
             }
-            let result = await cli.run(arguments: ["doctor"], runID: runID)
+            let result = await cli.run(arguments: ["doctor"], mutation: true, runID: runID)
             watchdog.cancel()
             diagnoseRunning = false
-            doctorCache = DoctorCache.load() ?? doctorCache
+            guard installationSnapshotIsCurrent(generation) else { return }
+            doctorCache = DoctorCache.load(dataDirectory: dataDirectory) ?? doctorCache
             let lines = result.output.split(separator: "\n").map(String.init).filter { !$0.isEmpty }
             let summary = Self.diagnoseSummaryLine(lines)
             if result.succeeded {
@@ -1156,7 +1526,7 @@ final class AppState {
             notices.append(.init(level: .warn, message: "LLM guardrail not configured - set it up in Setup → Guardrail"))
         }
         if !skillScannerAvailable {
-            notices.append(.init(level: .warn, message: "skill-scanner not on PATH - run: pip install skill-scanner"))
+            notices.append(.init(level: .warn, message: "skill-scanner unavailable - repair the DefenseClaw installation"))
         }
         if silentBypassCount > 0 {
             notices.append(.init(level: .warn, message: "\(silentBypassCount) silent LLM bypass event(s) in the last 5m - see Alerts -> egress"))
@@ -1210,7 +1580,7 @@ final class AppState {
             return "\(name) connector has seen 0 hook events after \(formatted) - normal until Claude Code emits a hook event; verify Claude Code hooks if this persists"
         case "omnigent":
             return "\(name) connector has seen 0 policy events after \(formatted) - normal until OmniGent emits a supported policy callback; verify OmniGent policy setup if this persists"
-        case "hermes", "cursor", "windsurf", "geminicli", "copilot", "openhands", "antigravity", "opencode":
+        case "hermes", "cursor", "devin", "geminicli", "copilot", "openhands", "antigravity", "opencode", "amp":
             return "\(name) connector has seen 0 hook events after \(formatted) - verify connector hook setup if this persists"
         default:
             return "\(name) connector has seen 0 requests after \(formatted) - verify your agent is dialing the gateway port (gateway.port)"
@@ -1432,7 +1802,8 @@ final class AppState {
             return .init(label: "Agent", value: name)
         }()
 
-        let redaction = config.redactionEnabled ? "ON (redacted)" : "OFF (RAW)"
+        let redactionProfile = config.redactionDefaultProfile.isEmpty ? "unset" : config.redactionDefaultProfile
+        let redaction = "default \(redactionProfile)"
         let approval = config.hiltEnabled ? "ON (min \(config.hiltMinSeverity))" : "OFF"
 
         var rows: [ConfigurationRow] = [
@@ -1470,7 +1841,8 @@ final class AppState {
         // false) outranks the global flag, exactly like connector_is_disabled.
         let guardrail = (connectorIsDisabled(name) || !config.guardrailEnabled)
             ? "disabled" : "enabled"
-        let redaction = config.redactionEnabled ? "ON (global redacted)" : "OFF (global RAW)"
+        let redactionProfile = config.redactionDefaultProfile.isEmpty ? "unset" : config.redactionDefaultProfile
+        let redaction = "default \(redactionProfile) (global)"
         let approval = config.hiltEnabled ? "ON (global min \(config.hiltMinSeverity))" : "OFF (global)"
 
         // Exactly the TUI's rows: 8 fixed + optional Environment. LLM/AI
@@ -1594,16 +1966,30 @@ final class AppState {
     /// ("scan pending" in the UI).
     var enforcementInventory: [String: ConnectorScanMetrics] = [:]
     @ObservationIgnored private var enforcementInventoryRequested = false
+    private var enforcementInventoryInProgress = false
 
     /// One-shot per app session, multi-connector only — dispatches the same
     /// per-connector aibom scans the Inventory panel runs and caches the
     /// coverage counts. Renders keep calling this idempotently.
     func requestEnforcementInventory() {
-        guard !enforcementInventoryRequested, activeConnectorNames.count > 1 else { return }
+        guard installationMutationsAllowed,
+              !installationBindInProgress,
+              !enforcementInventoryRequested,
+              activeConnectorNames.count > 1
+        else { return }
+        let generation = installationGeneration
+        let connectorNames = activeConnectorNames
         enforcementInventoryRequested = true
+        enforcementInventoryInProgress = true
         Task {
-            for name in activeConnectorNames {
-                let result = await cli.run(arguments: ["aibom", "scan", "--json", "--connector", name])
+            defer { enforcementInventoryInProgress = false }
+            for name in connectorNames {
+                guard installationSnapshotIsCurrent(generation) else { return }
+                let result = await cli.run(
+                    arguments: ["aibom", "scan", "--json", "--connector", name],
+                    mutation: true
+                )
+                guard installationSnapshotIsCurrent(generation) else { return }
                 guard result.succeeded,
                       let parsed = InventoryOutputParser.parse(result.output),
                       let document = parsed.documents.first
@@ -1650,8 +2036,8 @@ final class AppState {
     /// Every agent DefenseClaw knows how to hook — the catalog-scan and
     /// Connectors-table fallback roster.
     static let knownConnectors = ["openclaw", "zeptoclaw", "codex", "claudecode", "hermes",
-                                  "cursor", "windsurf", "geminicli", "copilot", "openhands",
-                                  "antigravity", "opencode", "omnigent"]
+                                  "cursor", "devin", "copilot", "openhands",
+                                  "antigravity", "opencode", "amp", "omnigent"]
 
     func configuredConnectors() -> [String] {
         let fromHealth = health.connectors.map(\.name)
@@ -1662,9 +2048,13 @@ final class AppState {
 
     func reloadConfig() {
         Task {
-            let cfg = await configStore.reload()
-            config = cfg
-            await gateway.update(config: cfg)
+            let selected = selectedInstallationContext()
+            if selected != installationContext,
+               !selected.hasSamePaths(as: installationContext),
+               !installationContextSwitchAllowed {
+                return
+            }
+            await bindSelectedInstallation(resolved: selected)
             await resolveProbePaths(force: true) // path override may have changed
             await pulse()
         }
@@ -1678,8 +2068,10 @@ final class AppState {
     /// each mutation runs as a recorded /bin/ln step so the Activity pane
     /// shows exactly what changed on disk.
     func fixScanner(_ status: ScannerStatus) {
+        guard installationMutationsAllowed, !installationBindInProgress else { return }
         guard let source = status.fixSource else { return }
         guard scannerFixInFlight.insert(status.name).inserted else { return }
+        let generation = installationGeneration
         scannerFixError = nil
         Task {
             defer { scannerFixInFlight.remove(status.name) }
@@ -1699,6 +2091,7 @@ final class AppState {
                     category: "setup",
                     origin: "Scanners Fix"
                 )
+                guard installationSnapshotIsCurrent(generation) else { return }
                 guard mkdir.succeeded else {
                     scannerFixError = "\(status.name): could not create ~/.local/bin (exit \(mkdir.exitCode))."
                     return
@@ -1712,12 +2105,14 @@ final class AppState {
                         origin: "Scanners Fix",
                         successEffects: ["\(link.target) linked into ~/.local/bin"]
                     )
+                    guard installationSnapshotIsCurrent(generation) else { return }
                     guard result.succeeded else {
                         scannerFixError = "\(status.name): linking \(link.target) failed (exit \(result.exitCode))."
                         return
                     }
                 }
             }
+            guard installationSnapshotIsCurrent(generation) else { return }
             let guardrailState = health.subsystems.first { $0.name == "guardrail" }?.state
             scanners = ScannerProbe.statuses(
                 config: config,

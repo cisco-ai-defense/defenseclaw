@@ -27,7 +27,7 @@ import (
 )
 
 func TestHILTApprovalManagerResolveFromMessage(t *testing.T) {
-	m := NewHILTApprovalManager(nil, nil, nil)
+	m := NewHILTApprovalManager(nil)
 	pending := &pendingHILTApproval{
 		id:        "hilt-test",
 		sessionID: "sess-1",
@@ -52,7 +52,7 @@ func TestHILTApprovalManagerResolveFromMessage(t *testing.T) {
 }
 
 func TestHILTApprovalManagerDefaultSessionIDRequiresSingleActiveSession(t *testing.T) {
-	m := NewHILTApprovalManager(nil, nil, nil)
+	m := NewHILTApprovalManager(nil)
 	if got := m.defaultSessionID(); got != "" {
 		t.Fatalf("defaultSessionID() = %q, want empty with no sessions", got)
 	}
@@ -72,7 +72,7 @@ func TestHILTApprovalManagerRequestUsesSingleActiveSessionFallback(t *testing.T)
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcRecordingLoop(received))
 	client := connectToMockGW(t, srv)
-	m := NewHILTApprovalManager(client, nil, nil)
+	m := NewHILTApprovalManager(client)
 	m.TrackSession("session-1")
 
 	done := make(chan string, 1)
@@ -108,7 +108,7 @@ func TestHILTApprovalManagerRequestRetriesActiveSessionWhenProvidedSessionFails(
 	received := make(chan receivedRequest, 5)
 	srv := startMockGW(t, rpcFailingSessionSendLoop(received, "run-session-id"))
 	client := connectToMockGW(t, srv)
-	m := NewHILTApprovalManager(client, nil, nil)
+	m := NewHILTApprovalManager(client)
 	m.TrackSession("agent:main:main")
 
 	done := make(chan string, 1)

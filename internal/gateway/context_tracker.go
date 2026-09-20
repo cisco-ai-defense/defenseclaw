@@ -18,6 +18,7 @@ package gateway
 
 import (
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -31,15 +32,17 @@ const (
 
 // contextMessage represents a single turn stored in the context tracker.
 type contextMessage struct {
-	Role      string
-	Content   string
-	Timestamp time.Time
+	Role          string
+	Content       string
+	Timestamp     time.Time
+	OccurrenceKey string
 }
 
 // SessionContext holds the bounded conversation buffer for a single session.
 type SessionContext struct {
-	Messages []contextMessage
-	LastSeen time.Time
+	Messages                 []contextMessage
+	LastSeen                 time.Time
+	RepeatedInjectionAlerted bool
 }
 
 // ContextTracker maintains per-session conversation buffers for multi-turn
@@ -94,8 +97,30 @@ func (ct *ContextTracker) SetTTL(ttl time.Duration) {
 
 // Record adds a message to the session's conversation buffer.
 func (ct *ContextTracker) Record(sessionKey, role, content string) {
+	ct.record(sessionKey, role, content, "")
+}
+
+// RecordOccurrence adds one observed stream message to the session buffer and
+// reports whether it was new. Message IDs are authoritative occurrence keys;
+// sequence numbers provide a stable fallback for older envelopes without an
+// ID. Envelopes with neither identity remain recordable because content-based
+// deduplication would collapse legitimate repeated user turns.
+func (ct *ContextTracker) RecordOccurrence(
+	sessionKey, role, content, messageID string,
+	messageSeq int,
+) bool {
+	key := ""
+	if messageID != "" {
+		key = "id:" + messageID
+	} else if messageSeq > 0 {
+		key = "seq:" + strconv.Itoa(messageSeq)
+	}
+	return ct.record(sessionKey, role, content, key)
+}
+
+func (ct *ContextTracker) record(sessionKey, role, content, occurrenceKey string) bool {
 	if sessionKey == "" || content == "" {
-		return
+		return false
 	}
 
 	ct.mu.Lock()
@@ -108,11 +133,19 @@ func (ct *ContextTracker) Record(sessionKey, role, content string) {
 		sc = &SessionContext{}
 		ct.sessions[sessionKey] = sc
 	}
+	if occurrenceKey != "" {
+		for _, existing := range sc.Messages {
+			if existing.OccurrenceKey == occurrenceKey {
+				return false
+			}
+		}
+	}
 
 	sc.Messages = append(sc.Messages, contextMessage{
-		Role:      role,
-		Content:   content,
-		Timestamp: now,
+		Role:          role,
+		Content:       content,
+		Timestamp:     now,
+		OccurrenceKey: occurrenceKey,
 	})
 	sc.LastSeen = now
 
@@ -129,6 +162,7 @@ func (ct *ContextTracker) Record(sessionKey, role, content string) {
 	if len(ct.sessions) > ct.maxSessions {
 		ct.pruneOldestLocked()
 	}
+	return true
 }
 
 // RecentMessages returns the last N messages for a session as ChatMessages
@@ -154,16 +188,24 @@ func (ct *ContextTracker) RecentMessages(sessionKey string, n int) []ChatMessage
 	return msgs
 }
 
-// HasRepeatedInjection checks whether injection-like patterns appear in
-// multiple recent user turns, indicating a multi-turn attack.
-// Uses the globally active pattern set (populated via ApplyRulePackOverrides
-// at startup), so rule pack customizations are honored automatically.
+// HasRepeatedInjection reports the transition into a repeated-injection state.
+// It returns true at most once for a retained session so later benign turns do
+// not replay the same HIGH alert indefinitely. Session eviction naturally
+// resets the latch.
+//
+// The contextual trust-exploit rules are authoritative here. The legacy local
+// substring floor was intentionally removed because phrases such as "pretend
+// you are a compiler" and "ignore prior test output" caused alert fatigue.
 func (ct *ContextTracker) HasRepeatedInjection(sessionKey string, threshold int) bool {
-	ct.mu.RLock()
-	defer ct.mu.RUnlock()
+	if threshold <= 0 {
+		return false
+	}
+
+	ct.mu.Lock()
+	defer ct.mu.Unlock()
 
 	sc, ok := ct.sessions[sessionKey]
-	if !ok {
+	if !ok || sc.RepeatedInjectionAlerted {
 		return false
 	}
 
@@ -172,11 +214,21 @@ func (ct *ContextTracker) HasRepeatedInjection(sessionKey string, threshold int)
 		if m.Role != "user" {
 			continue
 		}
-		if scanLocalPatterns("prompt", m.Content).Severity != "NONE" {
+		if contextMessageHasTrustExploit(m.Content) {
 			count++
+			if count >= threshold {
+				sc.RepeatedInjectionAlerted = true
+				return true
+			}
 		}
 	}
-	return count >= threshold
+	return false
+}
+
+func contextMessageHasTrustExploit(content string) bool {
+	return len(scanContentRuleCategoryForConnector(
+		"", content, "", ruleContentScopeUntrusted, "trust-exploit",
+	)) > 0
 }
 
 // SessionCount returns the number of tracked sessions.

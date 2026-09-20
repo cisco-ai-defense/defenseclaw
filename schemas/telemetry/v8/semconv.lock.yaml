@@ -1,0 +1,42 @@
+schema_version: 1
+dependencies:
+- id: otel_core
+  repository: https://github.com/open-telemetry/semantic-conventions
+  version: v1.42.0
+  profile_id: otel-semconv-v1.42.0
+  revision: ae3a98640194ed405c4c797281502e4d3bd258b3
+  snapshot:
+    path: schemas/telemetry/v8/upstream/otel-core-v1.42.0.normalized.json
+    format: defenseclaw-selected-semconv-v1
+    sha256: a6dfce2bddf98c3ad09050910231f57f517cffc6a7749206bb48f2e3388c0152
+- id: otel_genai
+  repository: https://github.com/open-telemetry/semantic-conventions-genai
+  version: b028dceecdad117461a785c3af35315e7184e813
+  profile_id: otel-genai-b028dceecdad117461a785c3af35315e7184e813
+  revision: b028dceecdad117461a785c3af35315e7184e813
+  snapshot:
+    path: schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813.normalized.json
+    format: defenseclaw-selected-semconv-v1
+    sha256: 39174c8710fa4c953527813107eef0794e653c6b5a78f6468f2665344e25fa4b
+  structural_inputs:
+  - upstream_path: model/gen-ai/gen-ai-input-messages.json
+    path: schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/model/gen-ai/gen-ai-input-messages.json
+    sha256: 034fcd8c87f1e013f3a5a5018503210e2bee4d2499c361823b96e906d40a50ad
+  - upstream_path: model/gen-ai/gen-ai-output-messages.json
+    path: schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/model/gen-ai/gen-ai-output-messages.json
+    sha256: a825a6c0cc1b7b22fdbfb9488d8dc3a318be3897ef6d3dbae01a10297bb6e569
+  - upstream_path: model/gen-ai/gen-ai-tool-call-arguments.json
+    path: schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/model/gen-ai/gen-ai-tool-call-arguments.json
+    sha256: 73607a8e8d9e84393475ef460108c59dbb9e1d2ddc0d0177fce6f735a62367ea
+  - upstream_path: model/gen-ai/gen-ai-tool-call-result.json
+    path: schemas/telemetry/v8/upstream/otel-genai-b028dceecdad117461a785c3af35315e7184e813/model/gen-ai/gen-ai-tool-call-result.json
+    sha256: 44eb4a93b05eea7da14489f1d253814c6429772d1fe869f8f6fc1749d7593412
+- id: openinference
+  repository: https://github.com/Arize-ai/openinference
+  version: 0.1.30
+  profile_id: openinference-semantic-conventions-v0.1.30
+  revision: 789d41974c08a9a13147977f28ef4142a07e2106
+  snapshot:
+    path: schemas/telemetry/v8/upstream/openinference-v0.1.30.normalized.json
+    format: defenseclaw-selected-semconv-v1
+    sha256: 70d1f586f819c7485ebbda1801ac26ada4d11f60c40adfd463c78d744923dbf1

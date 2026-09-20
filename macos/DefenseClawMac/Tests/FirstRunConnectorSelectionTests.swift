@@ -19,11 +19,28 @@ import Foundation
 @main
 struct FirstRunConnectorSelectionTests {
     static func main() {
+        onboardingChoicesExcludeProxyConnectors()
         firstDiscoveryPreselectsEverything()
         refreshPreservesExplicitChoices()
         refreshPreselectsOnlyNewConnectors()
         refreshDropsMissingAndUnregisteredActions()
         print("FirstRunConnectorSelectionTests passed")
+    }
+
+    private static func onboardingChoicesExcludeProxyConnectors() {
+        let choices = ConnectorDiscoverySelection.onboardingConnectors
+        expect(!choices.contains("openclaw"), "OpenClaw is absent from first-run choices")
+        expect(!choices.contains("zeptoclaw"), "ZeptoClaw is absent from first-run choices")
+        expect(choices.contains("codex") && choices.contains("omnigent"),
+               "hook connector choices remain available")
+
+        let selection = reconcile(
+            previouslyDetected: [],
+            detected: ["openclaw", "codex", "zeptoclaw"],
+            registered: [],
+            action: []
+        )
+        expect(selection.registered == ["codex"], "proxy discoveries cannot enter first-run selection")
     }
 
     private static func firstDiscoveryPreselectsEverything() {

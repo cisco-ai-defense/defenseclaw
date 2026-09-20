@@ -141,6 +141,13 @@ class RegistriesPanelModel:
             self.data_dir = _config_data_dir(config)
         self.refresh()
 
+    def set_data_dir(self, data_dir: str | Path | None) -> None:
+        """Rebind an app-owned model after the authoritative config moves."""
+
+        self._explicit_data_dir = str(data_dir) if data_dir is not None else None
+        self.data_dir = self._explicit_data_dir or _config_data_dir(self.config)
+        self.refresh()
+
     def refresh(self) -> None:
         """Reload source config and registry cache indexes."""
 
@@ -359,13 +366,28 @@ class RegistriesPanelModel:
         return tuple(rows)
 
     def _registry_required(self, asset_type: str) -> bool:
-        """Read ``asset_policy.<type>.registry_required`` from the cached config.
+        """Return whether every active connector effectively requires it.
 
         Tolerant of a missing/partial config (None → False) so the require
         toggle still produces a sensible ``--enabled`` intent on a fresh
-        install where the asset-policy block hasn't been materialized yet.
+        install where the asset-policy block hasn't been materialized yet. A
+        mixed roster returns False, so the next broad toggle enables and
+        reconciles every active connector instead of trusting only the global
+        default while an opposite override remains live.
         """
         asset_policy = _get_attr(self.config, "asset_policy", "AssetPolicy", default=None)
+        active_connectors = getattr(self.config, "active_connectors", None)
+        effective_policy = getattr(asset_policy, "effective_asset_type_policy", None)
+        if callable(active_connectors) and callable(effective_policy):
+            try:
+                connectors = tuple(active_connectors())
+                if connectors:
+                    return all(
+                        bool(effective_policy(connector, asset_type).registry_required)
+                        for connector in connectors
+                    )
+            except (AttributeError, TypeError, ValueError):
+                pass
         target = _get_attr(asset_policy, asset_type, asset_type.capitalize(), default=None)
         return bool(_get_attr(target, "registry_required", "RegistryRequired", default=False))
 

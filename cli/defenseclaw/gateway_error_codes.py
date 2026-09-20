@@ -136,6 +136,10 @@ SUBSYSTEM_TELEMETRY: Final[str]       = "telemetry"
 SUBSYSTEM_CORRELATION: Final[str]     = "correlation"
 SUBSYSTEM_STREAM: Final[str]          = "stream"
 SUBSYSTEM_CISCO_INSPECT: Final[str]   = "cisco-inspect"
+# Managed Cisco AI Defense telemetry log-exporter path; paired with
+# ErrCodeExportFailed. Distinct from generic "telemetry" so operators
+# can alert specifically on managed-sink breakage.
+SUBSYSTEM_CISCO_AID_EXPORT: Final[str] = "cisco-aid-export"
 SUBSYSTEM_OPENSHELL: Final[str]       = "openshell"
 SUBSYSTEM_WEBHOOK: Final[str]         = "webhook"
 SUBSYSTEM_QUARANTINE: Final[str]      = "quarantine"
@@ -163,6 +167,7 @@ ALL_SUBSYSTEMS: Final[tuple[str, ...]] = (
     SUBSYSTEM_CORRELATION,
     SUBSYSTEM_STREAM,
     SUBSYSTEM_CISCO_INSPECT,
+    SUBSYSTEM_CISCO_AID_EXPORT,
     SUBSYSTEM_OPENSHELL,
     SUBSYSTEM_WEBHOOK,
     SUBSYSTEM_QUARANTINE,

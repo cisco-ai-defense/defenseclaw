@@ -26,10 +26,11 @@ run starts clean instead of crashing the TUI.
 from __future__ import annotations
 
 import json
-import os
 from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
+
+from defenseclaw.file_permissions import atomic_write_private_bytes, reject_reparse_path
 
 PALETTE_MRU_LIMIT = 5
 STATE_FILENAME = "tui-state.json"
@@ -168,6 +169,11 @@ class TUIStateStore:
     def persistent(self) -> bool:
         return self._path is not None
 
+    def set_data_dir(self, data_dir: Path | str | None) -> None:
+        """Move future state writes to ``data_dir`` without losing session state."""
+
+        self._path = _state_path_for(data_dir)
+
     def load(self) -> TUIState:
         """Return the persisted state, defaulting on missing/corrupt input."""
 
@@ -175,6 +181,7 @@ class TUIStateStore:
             self._state = TUIState()
             return self._state
         try:
+            reject_reparse_path(self._path)
             raw = self._path.read_text(encoding="utf-8")
         except FileNotFoundError:
             self._state = TUIState()
@@ -185,7 +192,7 @@ class TUIStateStore:
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
-            self._quarantine_corrupt()
+            self._quarantine_corrupt(raw)
             self._state = TUIState()
             return self._state
         self._state = TUIState.from_dict(payload)
@@ -204,24 +211,11 @@ class TUIStateStore:
         self._state = target
         if self._path is None:
             return False
-        parent = self._path.parent
-        try:
-            parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        except OSError:
-            return False
-        tmp = self._path.with_suffix(self._path.suffix + ".tmp")
         try:
             body = json.dumps(target.to_dict(), indent=2, sort_keys=True)
-            with open(tmp, "w", encoding="utf-8") as fh:
-                fh.write(body)
-            os.chmod(tmp, 0o600)
-            os.replace(tmp, self._path)
+            atomic_write_private_bytes(self._path, body.encode("utf-8"))
             return True
         except OSError:
-            try:
-                tmp.unlink()
-            except OSError:
-                pass
             return False
 
     def record_command(self, tui_name: str) -> TUIState:
@@ -318,12 +312,14 @@ class TUIStateStore:
         except ValueError:
             return None
 
-    def _quarantine_corrupt(self) -> None:
-        """Best-effort rename of a corrupt state file out of the way."""
+    def _quarantine_corrupt(self, raw: str) -> None:
+        """Write corrupt state to a private ``.bak``, then remove the original."""
 
         if self._path is None:
             return
         try:
-            self._path.replace(self._path.with_suffix(self._path.suffix + ".bak"))
+            backup = self._path.with_suffix(self._path.suffix + ".bak")
+            atomic_write_private_bytes(backup, raw.encode("utf-8"))
+            self._path.unlink()
         except OSError:
             pass

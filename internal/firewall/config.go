@@ -202,8 +202,10 @@ func DefaultFirewallConfig() *FirewallConfig {
 				"registry.npmjs.org",
 				"pypi.org",
 				"files.pythonhosted.org",
-				// Cisco AI Defense inspect endpoint (OpenClaw plugin).
-				"us.api.inspect.aidefense.security.cisco.com",
+				// Cisco AI Defense inspect endpoint (OpenClaw plugin). A
+				// deployment on another region or on preview merges its own
+				// host through MergeAIDefenseEndpoint.
+				AIDefenseAllowlistHost(""),
 			},
 			IPs:   []string{},
 			Ports: []int{443, 80},

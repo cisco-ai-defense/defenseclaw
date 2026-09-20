@@ -32,8 +32,13 @@ Package the local-mode app before starting either profile:
 bash splunk/package_local_mode_app.sh
 ```
 
-Or use the public entrypoint, which does that automatically:
+Or use the low-level entrypoint, which packages the app automatically. It
+requires an explicit environment file; the checked-in example is suitable for
+developer/CI use only:
 
 ```bash
-bin/splunk-claw-bridge up
+bin/splunk-claw-bridge up --env-file env/.env.example
 ```
+
+Operator setup is documented in the
+[published Splunk guide](https://cisco-ai-defense.github.io/defenseclaw/docs/observability/splunk/).

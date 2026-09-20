@@ -25,6 +25,19 @@
 
 set -euo pipefail
 
+readonly MACOS_SYSCTL_BIN="/usr/sbin/sysctl"
+
+macos_hardware_machine() {
+    local machine="$1"
+    if [[ "${machine}" == "x86_64" || "${machine}" == "amd64" ]] \
+        && [[ -x "${MACOS_SYSCTL_BIN}" && ! -L "${MACOS_SYSCTL_BIN}" ]] \
+        && [[ "$("${MACOS_SYSCTL_BIN}" -in sysctl.proc_translated 2>/dev/null || true)" == "1" ]]; then
+        printf '%s\n' "arm64"
+        return 0
+    fi
+    printf '%s\n' "${machine}"
+}
+
 if [[ $# -lt 1 || $# -gt 2 ]]; then
     echo "usage: $0 VERSION [OUTPUT_DIR]" >&2
     exit 64
@@ -38,6 +51,10 @@ OUT_DIR="${2:-dist}"
 }
 [[ "$(uname -s)" == "Darwin" ]] || {
     echo "macOS app releases must be built on macOS" >&2
+    exit 1
+}
+[[ "$(macos_hardware_machine "$(uname -m)")" == "arm64" ]] || {
+    echo "Intel macOS is unsupported; macOS app releases require Apple Silicon (arm64)" >&2
     exit 1
 }
 
@@ -285,6 +302,9 @@ cp "${WHEEL}" "${PAYLOAD}/$(basename "${WHEEL}")"
 cp "${OVERRIDES}" "${PAYLOAD}/overrides.txt"
 cp "${UPGRADE_MANIFEST}" "${PAYLOAD}/upgrade-manifest.json"
 cp "${RUNTIME_ATTESTATION}" "${PAYLOAD}/runtime-candidate-checksums.txt"
+cp "${ROOT}/LICENSE" "${PAYLOAD}/LICENSE"
+cp "${ROOT}/NOTICE" "${PAYLOAD}/NOTICE"
+cp "${ROOT}/THIRD_PARTY_LICENSES.txt" "${PAYLOAD}/THIRD_PARTY_LICENSES.txt"
 
 codesign "${sign_args[@]}" --identifier com.cisco.defenseclaw.gateway \
     "${PAYLOAD}/defenseclaw-gateway"
@@ -404,9 +424,20 @@ echo "Creating unified drag-to-Applications DMG"
 }
 ln -s /Applications "${UNIFIED_STAGE}/Applications"
 TEMP_DMG="${WORK}/DefenseClawMac-${VERSION}-macos-arm64.dmg"
+# hdiutil's automatic -srcfolder sizing can leave too little filesystem
+# headroom for the final copy. Size the image from the staged bytes with 20%
+# growth room plus 64 MiB for filesystem metadata and copy variance.
+DMG_SOURCE_KIB="$(du -sk "${UNIFIED_STAGE}" | awk '{print $1}')"
+[[ "${DMG_SOURCE_KIB}" =~ ^[0-9]+$ ]] || {
+    echo "could not determine unified DMG staging size" >&2
+    exit 1
+}
+DMG_SIZE_KIB=$((DMG_SOURCE_KIB + DMG_SOURCE_KIB / 5 + 65536))
+echo "Unified DMG source: ${DMG_SOURCE_KIB} KiB; capacity: ${DMG_SIZE_KIB} KiB"
 hdiutil create \
     -volname DefenseClawMac \
     -srcfolder "${UNIFIED_STAGE}" \
+    -size "${DMG_SIZE_KIB}k" \
     -ov -format UDZO \
     "${TEMP_DMG}"
 

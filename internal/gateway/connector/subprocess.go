@@ -17,8 +17,12 @@
 package connector
 
 import (
+	"bytes"
 	"embed"
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -45,38 +49,64 @@ var shimBinaries = []string{"curl", "wget", "ssh", "nc", "pip", "npm"}
 type templateData struct {
 	APIAddr       string
 	APIToken      string // gateway bearer token; empty when unconfigured (loopback-allow)
-	FailMode      string // "closed" (default, response-layer fails block) or "open" (response-layer fails allow with a stderr warning); transport failures (gateway unreachable / 5xx) always fail open in the hooks unless DEFENSECLAW_STRICT_AVAILABILITY=1
+	TokenFileJS   string // absolute token path, escaped for a JavaScript double-quoted string
+	FailMode      string // "closed" blocks response/transport failures; "open" allows with a warning; strict availability always blocks
 	Managed       bool
 	TokenFile     string
 	ScopedToken   bool
 	ConnectorName string
+	HookBinaryPS  string // absolute launcher path, escaped for a PowerShell single-quoted literal
+	HookTimeoutMS int    // Default native PowerShell adapter child timeout; zero for templates that do not use it
+	// Cursor's 30-second host contract must also cover the stable launcher's
+	// custody verification and the adapter's bounded child cleanup.
+	CursorHookTimeoutMS int
+	// Copilot has the same 30-second command-hook envelope and needs an
+	// explicit byte-stream adapter for the GUI-subsystem launcher on Windows.
+	CopilotHookTimeoutMS int
 }
 
-// defaultHookFailMode is the fail mode injected into the response-
-// layer ({{.FailMode}}) of every hook when the caller doesn't supply
-// an explicit override. It governs ONLY response-layer failures —
-// 4xx, malformed JSON, missing action — where the gateway answered
-// but the answer was wrong (typically misconfiguration). Transport-
-// layer failures (curl exit non-zero, 5xx) are handled by each
-// hook's fail_unreachable helper in _hardening.sh and ALWAYS fail
-// open unless the operator opts into strict availability via
-// DEFENSECLAW_STRICT_AVAILABILITY=1.
+// defaultHookFailMode is injected into every hook when the caller does not
+// supply an explicit override. It governs malformed/incomplete responses,
+// authorization failures, and transport failures consistently. Strict
+// availability remains an unconditional force-closed override.
 //
-// "closed" is the safer default: a response-layer failure (4xx,
-// malformed JSON, missing action) means the gateway answered but the
-// verdict is untrustworthy, so the hook BLOCKS the tool/prompt rather
-// than forwarding an uninspected action. Operators who would rather
+// "closed" is the safer default: an absent or untrustworthy verdict BLOCKS
+// rather than forwarding an uninspected action. Operators who would rather
 // accept an observability gap than a hard block during a DefenseClaw
 // outage can flip this to "open" via DEFENSECLAW_FAIL_MODE=open at
 // runtime, or through the per-connector setup flow (which also
 // persists to guardrail.hook_fail_mode in config.yaml).
 const defaultHookFailMode = "closed"
 
+// windowsHookAdapterTimeoutMS matches the existing 10-second connector request
+// budget for adapters that do not have a larger documented host contract.
+const windowsHookAdapterTimeoutMS = 10_000
+
+// cursorWindowsHookAdapterTimeoutMS reserves the existing bounded kill/drain
+// window from Cursor's exact 30-second command-hook contract.
+// The remaining child budget covers both stable-launcher custody verification
+// and the full hook's own bounded gateway request; those stages are serial and
+// therefore cannot share the old 10-second request-only deadline.
+const (
+	cursorWindowsHookContractTimeoutMS  = 30_000
+	cursorWindowsHookCleanupBudgetMS    = 5_000
+	cursorWindowsHookAdapterTimeoutMS   = cursorWindowsHookContractTimeoutMS - cursorWindowsHookCleanupBudgetMS
+	copilotWindowsHookContractTimeoutMS = 30_000
+	copilotWindowsHookCleanupBudgetMS   = 5_000
+	copilotWindowsHookAdapterTimeoutMS  = copilotWindowsHookContractTimeoutMS - copilotWindowsHookCleanupBudgetMS
+)
+
+// cursorAdapterTimeoutMS matches the existing 10-second Cursor shell-hook
+// request budget while staying inside Cursor's 30-second command-hook timeout.
+// Keeping the adapter bound shorter than the vendor timeout gives it time to
+// terminate the launcher and emit the configured fail-open/fail-closed JSON.
+const cursorAdapterTimeoutMS = 10_000
+
 // normalizeHookFailMode coerces a caller-supplied string to one of
 // the two values the hook scripts understand. Anything other than
 // "open" (case-sensitive — the env var contract is documented as
 // lowercase) collapses to "closed" so a typo never accidentally puts
-// the agent into fail-OPEN mode at the response-layer boundary
+// the agent into fail-OPEN mode at the hook failure boundary
 // (CodeGuard rule codeguard-0-authorization-access-control: deny by
 // default).
 func normalizeHookFailMode(mode string) string {
@@ -202,6 +232,7 @@ var connectorHookScripts = map[string][]string{
 	"codex":       {"codex-hook.sh"},
 	"copilot":     {"copilot-hook.sh"},
 	"cursor":      {"cursor-hook.sh"},
+	"devin":       {"devin-hook.sh"},
 	"geminicli":   {"geminicli-hook.sh"},
 	"hermes":      {"hermes-hook.sh"},
 	"openhands":   {"openhands-hook.sh"},
@@ -329,25 +360,33 @@ func bytesIndex(hay []byte, needle string) int {
 // `# defenseclaw-managed-hook vN` marker is the explicit signal to roll
 // forward.
 func writeHookHelpers(hookDir string) error {
+	return writeHookHelpersForMode(hookDir, false)
+}
+
+func writeHookHelpersForMode(hookDir string, managedEnterprise bool) error {
+	writeFile := hookRuntimeFileWriter(managedEnterprise)
 	for _, name := range hookHelperScripts {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
 			return fmt.Errorf("read hook helper %s: %w", name, err)
 		}
 		helperPath := filepath.Join(hookDir, name)
-		if existing, err := os.ReadFile(helperPath); err == nil {
-			diskV := parseHookSchemaVersion(existing)
-			embedV := parseHookSchemaVersion(content)
-			if diskV > 0 && embedV > 0 && diskV > embedV {
-				// Newer-on-disk wins. Skip silently so a
-				// repeat-setup with an older binary doesn't
-				// noisily report "downgraded" when the
-				// operator's intent was to keep the newer
-				// helper installed by a more recent build.
-				continue
+		if !managedEnterprise {
+			existing, err := os.ReadFile(helperPath)
+			if err == nil {
+				diskV := parseHookSchemaVersion(existing)
+				embedV := parseHookSchemaVersion(content)
+				if diskV > 0 && embedV > 0 && diskV > embedV {
+					// Newer-on-disk wins. Skip silently so a
+					// repeat-setup with an older binary doesn't
+					// noisily report "downgraded" when the
+					// operator's intent was to keep the newer
+					// helper installed by a more recent build.
+					continue
+				}
 			}
 		}
-		if err := atomicWriteFile(helperPath, content, 0o600); err != nil {
+		if err := writeFile(helperPath, content, 0o600); err != nil {
 			return fmt.Errorf("write hook helper %s: %w", name, err)
 		}
 	}
@@ -389,9 +428,9 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 	}
 
 	// Never bake the real token into template output — scripts read
-	// the .token file or the env var at runtime. FailMode defaults
-	// to "open" so a fresh setup never bricks the agent on a
-	// gateway outage; see defaultHookFailMode for rationale.
+	// the .token file or the env var at runtime. This legacy all-script
+	// writer uses the product-wide default; connector-aware setup uses
+	// resolveHookFailMode so Cursor can apply its action/observe boundary.
 	data := templateData{APIAddr: apiAddr, APIToken: "", FailMode: defaultHookFailMode, TokenFile: ".token"}
 
 	for _, name := range hookScripts {
@@ -411,7 +450,7 @@ func WriteHookScriptsWithToken(hookDir, apiAddr, token string) error {
 		}
 	}
 
-	if err := writeHookConfigSidecar(hookDir, apiAddr, defaultHookFailMode); err != nil {
+	if err := writeHookConfigSidecar(hookDir, apiAddr, "", defaultHookFailMode, false); err != nil {
 		return err
 	}
 
@@ -449,52 +488,100 @@ func writeHookScriptsCommonWithOptions(hookDir, apiAddr, token, failMode string,
 	if scopedToken {
 		tokenScope = connectorName
 	}
-	tokenFile, err := writeHookTokenFiles(hookDir, tokenScope, token)
+	writeFile := hookRuntimeFileWriter(managed)
+	tokenFile, err := writeHookTokenFilesUsing(hookDir, tokenScope, token, writeFile)
 	if err != nil {
 		return err
 	}
 
-	if err := writeHookHelpers(hookDir); err != nil {
+	if err := writeHookHelpersForMode(hookDir, managed); err != nil {
 		return err
 	}
 
-	data := templateData{
-		APIAddr:       apiAddr,
-		APIToken:      "",
-		FailMode:      normalizeHookFailMode(failMode),
-		Managed:       managed,
-		TokenFile:     tokenFile,
-		ScopedToken:   scopedToken,
-		ConnectorName: strings.ToLower(strings.TrimSpace(connectorName)),
+	connectorData := templateData{
+		APIAddr:              apiAddr,
+		APIToken:             "",
+		FailMode:             normalizeHookFailMode(failMode),
+		Managed:              managed,
+		TokenFile:            tokenFile,
+		ScopedToken:          scopedToken,
+		ConnectorName:        strings.ToLower(strings.TrimSpace(connectorName)),
+		HookBinaryPS:         strings.ReplaceAll(defenseclawHookBinary(), "'", "''"),
+		HookTimeoutMS:        windowsHookAdapterTimeoutMS,
+		CursorHookTimeoutMS:  cursorWindowsHookAdapterTimeoutMS,
+		CopilotHookTimeoutMS: copilotWindowsHookAdapterTimeoutMS,
 	}
-
-	scripts := hookScriptNamesFromExtras(extras)
-
-	for _, name := range scripts {
+	// The inspect-* family has one physical copy per data directory.  Its
+	// bytes must therefore depend only on install-wide inputs; connector mode,
+	// identity and scoped credential selection happen at invocation time.  The
+	// connector-owned lifecycle scripts retain the selected connector data.
+	sharedData := templateData{APIAddr: apiAddr, Managed: managed}
+	renderAndWrite := func(name string, renderData templateData) error {
 		content, err := hookFS.ReadFile("hooks/" + name)
 		if err != nil {
 			return fmt.Errorf("read hook template %s: %w", name, err)
 		}
-		rendered, err := renderTemplate(string(content), data)
+		rendered, err := renderTemplate(string(content), renderData)
 		if err != nil {
 			return fmt.Errorf("render hook %s: %w", name, err)
 		}
 		hookPath := filepath.Join(hookDir, name)
-		if err := atomicWriteFile(hookPath, []byte(rendered), 0o700); err != nil {
+		if err := writeFile(hookPath, []byte(rendered), 0o700); err != nil {
 			return fmt.Errorf("write hook %s: %w", name, err)
 		}
+		return nil
 	}
-	if err := writeHookConfigSidecar(hookDir, apiAddr, normalizeHookFailMode(failMode)); err != nil {
+	for _, name := range genericHookScripts {
+		if err := renderAndWrite(name, sharedData); err != nil {
+			return err
+		}
+	}
+	scripts := hookScriptNamesFromExtras(extras)
+	for _, name := range scripts[len(genericHookScripts):] {
+		if err := renderAndWrite(name, connectorData); err != nil {
+			return err
+		}
+	}
+	if err := writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		connectorName,
+		normalizeHookFailMode(failMode),
+		managed,
+		writeFile,
+	); err != nil {
 		return err
 	}
 	return nil
 }
 
-func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
+// hookRuntimeFileWriter selects the final-descriptor publication primitive for
+// managed Windows runtime files. Generic atomicWriteFile intentionally uses an
+// owner-only two-ACE private descriptor; the managed runtime contract instead
+// requires the target, SYSTEM, Administrators, and OWNER RIGHTS four-ACE DACL.
+// Publishing through WriteManagedTargetRuntimeFile also makes an identical
+// canonical write a true no-op, avoiding an observable ACL/identity transition
+// during normal Guardian reconciliation.
+func hookRuntimeFileWriter(managedEnterprise bool) func(string, []byte, os.FileMode) error {
+	if managedEnterprise && runtime.GOOS == "windows" {
+		return func(path string, data []byte, _ os.FileMode) error {
+			return WriteManagedTargetRuntimeFile(path, data)
+		}
+	}
+	return atomicWriteFile
+}
+
+// writeHookTokenFilesUsing is the writer-injectable form used by managed-mode
+// callers so token files can be published with the platform's exact managed
+// runtime descriptor rather than atomicWriteFile's generic private contract.
+func writeHookTokenFilesUsing(
+	hookDir, connectorName, token string,
+	writeFile func(string, []byte, os.FileMode) error,
+) (string, error) {
 	legacyPath := filepath.Join(hookDir, ".token")
 	if strings.TrimSpace(connectorName) == "" {
 		tokenContent := fmt.Sprintf("DEFENSECLAW_GATEWAY_TOKEN=%q\n", token)
-		if err := atomicWriteFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
+		if err := writeFile(legacyPath, []byte(tokenContent), 0o600); err != nil {
 			return "", fmt.Errorf("write hook token file: %w", err)
 		}
 		return filepath.Base(legacyPath), nil
@@ -514,35 +601,640 @@ func writeHookTokenFiles(hookDir, connectorName, token string) (string, error) {
 	if strings.ContainsAny(token, "\r\n") {
 		return "", fmt.Errorf("write connector-scoped hook token file: token contains a line break")
 	}
-	if err := atomicWriteFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
+	if err := writeFile(scopedPath, []byte(token+"\n"), 0o600); err != nil {
 		return "", fmt.Errorf("write connector-scoped hook token file: %w", err)
 	}
 	return filepath.Base(scopedPath), nil
 }
 
-// hookConfigSidecarName is the file the native Go hook entrypoint reads on
-// Windows for the gateway address + fail mode. It lets the agent hook command
-// stay free of per-install flags (so its trust-hash / match string is stable),
-// while still conveying the operator's enforcement choice and a non-default
-// API port. The Bash hooks (Unix) bake these values into the script and ignore
-// this file.
+// hookConfigSidecarName is the shared connector-aware runtime state read by
+// the native Windows hook and the generic Unix inspect scripts. It lets hook
+// commands stay free of per-install flags while preserving mixed fail modes.
 const hookConfigSidecarName = ".hookcfg"
 
-// writeHookConfigSidecar persists the gateway address and fail mode the native
-// Go hook entrypoint resolves at runtime. It is only written on Windows, where
-// the native entrypoint replaces the Bash hooks; Unix keeps the .sh hooks
-// unchanged and never reads this file.
-func writeHookConfigSidecar(hookDir, apiAddr, failMode string) error {
-	if runtime.GOOS != "windows" {
-		return nil
+// Hook runtime records are generated from a handful of scalar fields. A
+// generous 64-KiB ceiling avoids changing legitimate unmanaged installations
+// while ensuring a target-owned sparse/huge sidecar is rejected from metadata
+// before the guardian allocates for it.
+const hookRuntimeSidecarMaxBytes int64 = 64 << 10
+
+type hookConfigSidecar struct {
+	Version     int               `json:"version"`
+	GatewayAddr string            `json:"gateway_addr"`
+	FailModes   map[string]string `json:"fail_modes,omitempty"`
+	Managed     bool              `json:"managed_enterprise,omitempty"`
+	// LegacyMode is migration-only fallback for connectors that do not yet
+	// have a map entry. Connector entries always win, so it cannot collapse a
+	// mixed-mode runtime and becomes inert after every peer is refreshed.
+	LegacyMode string `json:"legacy_fail_mode,omitempty"`
+}
+
+// writeHookConfigSidecar persists the gateway address and connector fail mode
+// resolved at runtime. Connector entries always win; the legacy fallback is
+// written only for unscoped callers and cannot collapse mixed connector state.
+func writeHookConfigSidecar(hookDir, apiAddr, connectorName, failMode string, managed bool) error {
+	return writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		connectorName,
+		failMode,
+		managed,
+		hookRuntimeFileWriter(managed),
+	)
+}
+
+// ReconcileManagedNativeHookRuntime writes only DefenseClaw's connector-scoped
+// native runtime. It deliberately does not invoke the connector Setup method,
+// so Windows machine-policy connectors never read or modify the agent's
+// user-level configuration file.
+//
+// On Windows these writes use the target-aware managed-runtime publisher, so
+// both the staging inode and the published name have the exact final DACL.
+// Other platforms retain the existing private atomic writer.
+func ReconcileManagedNativeHookRuntime(
+	dataDir, apiAddr, connectorName, token string,
+) error {
+	name := normalizeConnectorName(connectorName)
+	if name != "codex" && name != "claudecode" && name != "cursor" {
+		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
 	}
-	body := fmt.Sprintf("DEFENSECLAW_GATEWAY_ADDR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
-		apiAddr, normalizeHookFailMode(failMode))
-	path := filepath.Join(hookDir, hookConfigSidecarName)
-	if err := atomicWriteFile(path, []byte(body), 0o600); err != nil {
-		return fmt.Errorf("write hook config sidecar: %w", err)
+	hookDir := filepath.Join(dataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("create managed native hook directory: %w", err)
+	}
+	writeFile := hookRuntimeFileWriter(true)
+	if _, err := writeHookTokenFilesUsing(hookDir, name, token, writeFile); err != nil {
+		return err
+	}
+	return writeHookConfigSidecarUsing(
+		hookDir,
+		apiAddr,
+		name,
+		"closed",
+		true,
+		writeFile,
+	)
+}
+
+// ValidateManagedNativeHookRuntime requires the v2 managed marker, protected
+// endpoint agreement, connector closed mode, flat record, and scoped token.
+func ValidateManagedNativeHookRuntime(
+	dataDir, apiAddr, connectorName string,
+) error {
+	name := normalizeConnectorName(connectorName)
+	if name != "codex" && name != "claudecode" && name != "cursor" {
+		return fmt.Errorf("unsupported managed native hook connector %q", connectorName)
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	body, _, err := readStableHookRuntimeSidecar(
+		filepath.Join(hookDir, hookConfigSidecarName),
+		"managed hook config sidecar",
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("read managed hook config sidecar: %w", err)
+	}
+	var state hookConfigSidecar
+	if err := decodeManagedHookConfigSidecar(body, &state); err != nil {
+		return fmt.Errorf("parse managed hook config sidecar: %w", err)
+	}
+	if state.Version != 2 || !state.Managed {
+		return fmt.Errorf(
+			"managed hook config has version=%d managed_enterprise=%t, want version=2 managed_enterprise=true",
+			state.Version,
+			state.Managed,
+		)
+	}
+	if strings.TrimSpace(state.GatewayAddr) != strings.TrimSpace(apiAddr) {
+		return fmt.Errorf(
+			"managed hook gateway address %q does not match protected address %q",
+			state.GatewayAddr,
+			apiAddr,
+		)
+	}
+	if state.FailModes[name] != "closed" {
+		return fmt.Errorf(
+			"managed hook connector %s fail mode %q, want %q",
+			name,
+			state.FailModes[name],
+			"closed",
+		)
+	}
+	flat, _, err := readStableHookRuntimeSidecar(
+		filepath.Join(hookDir, hookConfigSidecarName+"."+name),
+		"managed connector runtime sidecar",
+		false,
+	)
+	if err != nil {
+		return fmt.Errorf("read managed connector runtime sidecar: %w", err)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+		return fmt.Errorf("managed shell runtime connector %q, want %q", got, name)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != "closed" {
+		return fmt.Errorf("managed shell runtime fail mode %q, want %q", got, "closed")
+	}
+	tokenPath, err := HookTokenFilePath(hookDir, name)
+	if err != nil {
+		return err
+	}
+	if _, err := os.Stat(tokenPath); err != nil {
+		return fmt.Errorf("inspect managed connector token: %w", err)
 	}
 	return nil
+}
+
+type hookRuntimeFileSnapshot struct {
+	path    string
+	existed bool
+	data    []byte
+}
+
+func snapshotHookRuntimeFile(path string) (hookRuntimeFileSnapshot, error) {
+	snapshot := hookRuntimeFileSnapshot{path: path}
+	data, err := os.ReadFile(path)
+	if os.IsNotExist(err) {
+		return snapshot, nil
+	}
+	if err != nil {
+		return snapshot, err
+	}
+	snapshot.existed = true
+	snapshot.data = data
+	return snapshot, nil
+}
+
+func snapshotHookRuntimeFileForMode(
+	path string,
+	managedEnterprise bool,
+) (hookRuntimeFileSnapshot, error) {
+	if !managedEnterprise {
+		return snapshotHookRuntimeFile(path)
+	}
+	snapshot := hookRuntimeFileSnapshot{path: path}
+	data, exists, err := readStableManagedRuntimeFile(
+		path,
+		"managed hook runtime snapshot",
+		true,
+		hookRuntimeSidecarMaxBytes,
+	)
+	if err != nil {
+		return snapshot, err
+	}
+	if !exists {
+		return snapshot, nil
+	}
+	snapshot.existed = true
+	snapshot.data = data
+	return snapshot, nil
+}
+
+func restoreHookRuntimeFilesUsing(
+	snapshots []hookRuntimeFileSnapshot,
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
+	var failures []string
+	for i := len(snapshots) - 1; i >= 0; i-- {
+		snapshot := snapshots[i]
+		if snapshot.existed {
+			if err := writeFile(snapshot.path, snapshot.data, 0o600); err != nil {
+				failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+			}
+			continue
+		}
+		if err := os.Remove(snapshot.path); err != nil && !os.IsNotExist(err) {
+			failures = append(failures, fmt.Sprintf("%s: %v", snapshot.path, err))
+		}
+	}
+	if len(failures) > 0 {
+		return fmt.Errorf("restore hook runtime files: %s", strings.Join(failures, "; "))
+	}
+	return nil
+}
+
+// carryableHookConfigSidecar returns the peer state a rewrite should preserve,
+// accepting the v2 map form and the legacy scalar form.
+func carryableHookConfigSidecar(data []byte) (hookConfigSidecar, error) {
+	var prior hookConfigSidecar
+	if err := json.Unmarshal(data, &prior); err != nil {
+		legacyMode := legacyHookConfigValue(data, "DEFENSECLAW_FAIL_MODE")
+		if legacyMode != "open" && legacyMode != "closed" {
+			return hookConfigSidecar{}, fmt.Errorf("parse hook config sidecar: %w", err)
+		}
+		return hookConfigSidecar{LegacyMode: legacyMode}, nil
+	}
+	if prior.Version != 2 {
+		return hookConfigSidecar{}, fmt.Errorf("unsupported hook config sidecar version %d", prior.Version)
+	}
+	return prior, nil
+}
+
+func writeHookConfigSidecarUsing(
+	hookDir, apiAddr, connectorName, failMode string,
+	managed bool,
+	writeFile func(string, []byte, os.FileMode) error,
+) error {
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	return withFileLockMode(path, managed, func() error {
+		name := normalizeConnectorName(connectorName)
+		runtimeName := name
+		if runtimeName == "" {
+			runtimeName = "legacy"
+		}
+		flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+runtimeName)
+		jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managed)
+		if err != nil {
+			return fmt.Errorf("read hook config sidecar: %w", err)
+		}
+		flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managed)
+		if err != nil {
+			return fmt.Errorf("read shell hook runtime sidecar: %w", err)
+		}
+		snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
+
+		state := hookConfigSidecar{Version: 2, GatewayAddr: apiAddr, FailModes: map[string]string{}, Managed: managed}
+		if jsonSnapshot.existed {
+			prior, err := carryableHookConfigSidecar(jsonSnapshot.data)
+			// A managed sidecar is guardian-owned and every connector reconciles
+			// on its own schedule, so unreadable content is replaced outright and
+			// at most one peer entry waits for its own pass. An unmanaged sidecar
+			// is the operator's only record of peer fail modes, so it is kept and
+			// the write refused instead.
+			if err != nil && !managed {
+				return err
+			}
+			if err == nil {
+				if prior.FailModes != nil {
+					state.FailModes = prior.FailModes
+				}
+				state.LegacyMode = prior.LegacyMode
+			}
+		}
+		if name != "" {
+			state.FailModes[name] = normalizeHookFailMode(failMode)
+		} else {
+			state.LegacyMode = normalizeHookFailMode(failMode)
+		}
+		body, err := json.MarshalIndent(state, "", "  ")
+		if err != nil {
+			return fmt.Errorf("marshal hook config sidecar: %w", err)
+		}
+		body = append(body, '\n')
+		if err := writeFile(path, body, 0o600); err != nil {
+			return fmt.Errorf("write hook config sidecar: %w", err)
+		}
+		// Shell hooks need a parser-independent connector record because jq and
+		// python3 are not guaranteed on the hardened macOS/Linux PATH.  One flat
+		// file per connector preserves mixed modes; an unscoped legacy record is
+		// a fallback only and never overrides a connector file.
+		runtimeBody := fmt.Sprintf(
+			"DEFENSECLAW_CONNECTOR=%s\nDEFENSECLAW_FAIL_MODE=%s\n",
+			name,
+			normalizeHookFailMode(failMode),
+		)
+		if err := writeFile(flatPath, []byte(runtimeBody), 0o600); err != nil {
+			if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
+				return fmt.Errorf("write shell hook runtime sidecar: %v (%v)", err, restoreErr)
+			}
+			return fmt.Errorf("write shell hook runtime sidecar: %w", err)
+		}
+		return nil
+	})
+}
+
+// clearHookConfigSidecarEntry removes only one connector's runtime selection.
+// The shared JSON state and every peer's flat record remain intact. Runtime
+// state is cleared before its contract entry, so a teardown can never leave a
+// removed connector selectable by the shared Unix hooks.
+func clearHookConfigSidecarEntry(hookDir, connectorName string) error {
+	name := normalizeConnectorName(connectorName)
+	if strings.TrimSpace(hookDir) == "" || name == "" {
+		return nil
+	}
+	if _, err := os.Stat(hookDir); os.IsNotExist(err) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect hook runtime directory: %w", err)
+	}
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	return withFileLock(path, func() error {
+		_, err := clearHookConfigSidecarEntryLocked(hookDir, name, false)
+		return err
+	})
+}
+
+func clearHookConfigSidecarEntryLocked(
+	hookDir, name string,
+	managedEnterprise bool,
+) ([]hookRuntimeFileSnapshot, error) {
+	writeFile := hookRuntimeFileWriter(managedEnterprise)
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
+	jsonSnapshot, err := snapshotHookRuntimeFileForMode(path, managedEnterprise)
+	if err != nil {
+		return nil, fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	flatSnapshot, err := snapshotHookRuntimeFileForMode(flatPath, managedEnterprise)
+	if err != nil {
+		return nil, fmt.Errorf("read shell hook runtime sidecar: %w", err)
+	}
+	snapshots := []hookRuntimeFileSnapshot{jsonSnapshot, flatSnapshot}
+	if jsonSnapshot.existed {
+		var state hookConfigSidecar
+		if err := json.Unmarshal(jsonSnapshot.data, &state); err != nil {
+			// A legacy scalar sidecar has no connector entry to remove and
+			// remains available for unmigrated callers. Unknown malformed JSON
+			// is not overwritten because that could destroy peer state.
+			legacyMode := legacyHookConfigValue(jsonSnapshot.data, "DEFENSECLAW_FAIL_MODE")
+			if legacyMode != "open" && legacyMode != "closed" {
+				return nil, fmt.Errorf("parse hook config sidecar: %w", err)
+			}
+		} else {
+			if state.Version != 2 {
+				return nil, fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
+			}
+			if _, ok := state.FailModes[name]; ok {
+				delete(state.FailModes, name)
+				body, err := json.MarshalIndent(state, "", "  ")
+				if err != nil {
+					return nil, fmt.Errorf("marshal hook config sidecar: %w", err)
+				}
+				body = append(body, '\n')
+				if err := writeFile(path, body, 0o600); err != nil {
+					return nil, fmt.Errorf("write hook config sidecar: %w", err)
+				}
+			}
+		}
+	}
+	if err := os.Remove(flatPath); err != nil && !os.IsNotExist(err) {
+		if restoreErr := restoreHookRuntimeFilesUsing(snapshots, writeFile); restoreErr != nil {
+			return nil, fmt.Errorf("remove shell hook runtime sidecar: %v (%v)", err, restoreErr)
+		}
+		return nil, fmt.Errorf("remove shell hook runtime sidecar: %w", err)
+	}
+	return snapshots, nil
+}
+
+// validateHookRuntimeStateForContract closes the reconcile/teardown race: a
+// contract entry is committed only while its connector-aware JSON and flat
+// runtime records still agree. Absence of the shared sidecar is tolerated for
+// legacy/direct lock writers that do not install hooks; once the sidecar
+// exists, a missing or stale selected entry is an error.
+func validateHookRuntimeStateForContract(
+	dataDir, connectorName, failMode string,
+	managedEnterprise bool,
+) error {
+	name := normalizeConnectorName(connectorName)
+	if strings.TrimSpace(dataDir) == "" || name == "" {
+		return nil
+	}
+	if name != "claudecode" && name != "codex" && name != "cursor" {
+		return nil
+	}
+	hookDir := filepath.Join(dataDir, "hooks")
+	path := filepath.Join(hookDir, hookConfigSidecarName)
+	var (
+		body   []byte
+		exists bool
+		err    error
+	)
+	if managedEnterprise {
+		body, exists, err = readStableHookRuntimeSidecar(
+			path,
+			"hook config sidecar",
+			true,
+		)
+	} else {
+		// Preserve the pre-enterprise unmanaged contract exactly: follow the
+		// operator's path and let json.Unmarshal handle the complete file.
+		body, err = os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		exists = err == nil
+	}
+	if err != nil {
+		return fmt.Errorf("read hook config sidecar: %w", err)
+	}
+	if !exists {
+		return nil
+	}
+	var state hookConfigSidecar
+	if managedEnterprise {
+		if err := decodeManagedHookConfigSidecar(body, &state); err != nil {
+			return fmt.Errorf("parse managed hook config sidecar: %w", err)
+		}
+		if !state.Managed {
+			return errors.New("managed hook config sidecar is missing managed_enterprise=true")
+		}
+	} else if err := json.Unmarshal(body, &state); err != nil {
+		return fmt.Errorf("parse hook config sidecar: %w", err)
+	}
+	if state.Version != 2 {
+		return fmt.Errorf("unsupported hook config sidecar version %d", state.Version)
+	}
+	want := normalizeHookFailMode(failMode)
+	if got := state.FailModes[name]; got != want {
+		return fmt.Errorf("connector %s JSON fail mode %q, want %q", name, got, want)
+	}
+	flatPath := filepath.Join(hookDir, hookConfigSidecarName+"."+name)
+	var flat []byte
+	if managedEnterprise {
+		flat, _, err = readStableHookRuntimeSidecar(
+			flatPath,
+			"connector shell runtime sidecar",
+			false,
+		)
+	} else {
+		flat, err = os.ReadFile(flatPath)
+	}
+	if err != nil {
+		return fmt.Errorf("read connector shell runtime sidecar: %w", err)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_CONNECTOR"); got != name {
+		return fmt.Errorf("shell runtime connector %q, want %q", got, name)
+	}
+	if got := legacyHookConfigValue(flat, "DEFENSECLAW_FAIL_MODE"); got != want {
+		return fmt.Errorf("connector %s shell fail mode %q, want %q", name, got, want)
+	}
+	return nil
+}
+
+func decodeManagedHookConfigSidecar(data []byte, state *hookConfigSidecar) error {
+	if state == nil {
+		return errors.New("managed hook config destination is nil")
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(state); err != nil {
+		return err
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("managed hook config contains trailing JSON")
+		}
+		return err
+	}
+	return nil
+}
+
+// readStableHookRuntimeSidecar bounds allocation from file metadata, rejects
+// links and non-regular objects, pins the opened file identity, and performs
+// two identical bounded reads. The second read closes same-inode rewrite and
+// truncate races that an lstat/open/lstat sequence alone would miss.
+func readStableHookRuntimeSidecar(
+	path, label string,
+	allowMissing bool,
+) ([]byte, bool, error) {
+	return readStableManagedRuntimeFile(
+		path,
+		label,
+		allowMissing,
+		hookRuntimeSidecarMaxBytes,
+	)
+}
+
+// ReadManagedHookRuntimeFile reads an already-authorized target-owned runtime
+// leaf through an identity-pinned, no-reparse, single-link handle. Callers
+// provide a format-specific allocation ceiling; trust in the owning directory
+// and DACL remains the caller's responsibility.
+func ReadManagedHookRuntimeFile(path, label string, maxBytes int64) ([]byte, error) {
+	data, _, err := readStableManagedRuntimeFile(path, label, false, maxBytes)
+	return data, err
+}
+
+func readStableManagedRuntimeFile(
+	path, label string,
+	allowMissing bool,
+	maxBytes int64,
+) ([]byte, bool, error) {
+	return readStableManagedRuntimeFileForOwner(
+		path,
+		label,
+		allowMissing,
+		maxBytes,
+		"",
+	)
+}
+
+func readStableManagedRuntimeFileForOwner(
+	path, label string,
+	allowMissing bool,
+	maxBytes int64,
+	expectedOwnerSID string,
+) ([]byte, bool, error) {
+	if maxBytes <= 0 {
+		return nil, false, fmt.Errorf("%s has an invalid read limit", label)
+	}
+	expected, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) && allowMissing {
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	if expected.Mode()&os.ModeSymlink != 0 || !expected.Mode().IsRegular() {
+		return nil, false, fmt.Errorf("%s is not a regular non-link file", label)
+	}
+	if expected.Size() < 0 || expected.Size() > maxBytes {
+		return nil, false, fmt.Errorf(
+			"%s exceeds %d-byte limit",
+			label,
+			maxBytes,
+		)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if opened.Mode()&os.ModeSymlink != 0 || !opened.Mode().IsRegular() ||
+		!os.SameFile(expected, opened) {
+		return nil, false, fmt.Errorf("%s changed identity before open", label)
+	}
+	if err := validateHookRuntimeOpenedFile(file, label); err != nil {
+		return nil, false, err
+	}
+	if err := validateManagedSharedHookOpenedFile(file, expectedOwnerSID); err != nil {
+		return nil, false, err
+	}
+	readOnce := func() ([]byte, error) {
+		data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > maxBytes {
+			return nil, fmt.Errorf(
+				"%s exceeds %d-byte limit",
+				label,
+				maxBytes,
+			)
+		}
+		return data, nil
+	}
+	first, err := readOnce()
+	if err != nil {
+		return nil, false, err
+	}
+	between, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return nil, false, err
+	}
+	second, err := readOnce()
+	if err != nil {
+		return nil, false, err
+	}
+	after, err := file.Stat()
+	if err != nil {
+		return nil, false, err
+	}
+	current, err := os.Lstat(path)
+	if err != nil {
+		return nil, false, fmt.Errorf("%s changed after open: %w", label, err)
+	}
+	if current.Mode()&os.ModeSymlink != 0 || !current.Mode().IsRegular() ||
+		!os.SameFile(opened, current) ||
+		opened.Size() != int64(len(first)) ||
+		between.Size() != opened.Size() ||
+		after.Size() != opened.Size() ||
+		!between.ModTime().Equal(opened.ModTime()) ||
+		!after.ModTime().Equal(opened.ModTime()) ||
+		!bytes.Equal(first, second) {
+		return nil, false, fmt.Errorf("%s changed during bounded read", label)
+	}
+	return first, true, nil
+}
+
+// ValidateHookRuntimeState performs the read-only connector-aware sidecar
+// consistency check used when committing hook contracts. Enterprise guardian
+// status/verify paths use the same parser so they cannot report a runtime as
+// healthy when the JSON and flat sidecars disagree.
+func ValidateHookRuntimeState(dataDir, connectorName, failMode string) error {
+	return validateHookRuntimeStateForContract(dataDir, connectorName, failMode, false)
+}
+
+// ValidateManagedHookRuntimeState applies strict single-link identity and
+// exact-schema parsing for enterprise guardian status and verification.
+func ValidateManagedHookRuntimeState(dataDir, connectorName, failMode string) error {
+	return validateHookRuntimeStateForContract(dataDir, connectorName, failMode, true)
+}
+
+func legacyHookConfigValue(data []byte, wanted string) string {
+	for _, line := range strings.Split(string(data), "\n") {
+		key, value, ok := strings.Cut(strings.TrimSpace(line), "=")
+		if ok && strings.TrimSpace(strings.TrimPrefix(key, "export ")) == wanted {
+			return strings.Trim(strings.TrimSpace(value), `"'`)
+		}
+	}
+	return ""
 }
 
 func hookScriptNamesForConnector(opts SetupOpts, c Connector) []string {
@@ -603,30 +1295,33 @@ func WriteHookScriptsForConnectorObject(hookDir, apiAddr, token string, c Connec
 }
 
 // WriteHookScriptsForConnectorObjectWithOpts is the setup-time variant that
-// has access to connector setup flags AND the operator's
-// chosen response-layer fail mode (opts.HookFailMode).
+// has access to connector setup flags AND the operator's chosen hook failure
+// mode (opts.HookFailMode).
 //
-// Resolution order for the response-layer FailMode template var
+// Resolution order for the FailMode template var
 // (see templateData.FailMode and defaultHookFailMode for the
 // contract):
 //
-//  1. An EXPLICIT operator value in opts.HookFailMode — either
-//     "open" or "closed" — always wins. The operator answered
+//  1. Cursor observe mode always resolves to "open"; host failClosed and
+//     adapter transport failures must not enforce outside action mode.
+//  2. Otherwise, an EXPLICIT operator value in opts.HookFailMode — either
+//     "open" or "closed" — wins. The operator answered
 //     `defenseclaw setup guardrail`'s fail-mode prompt (or used
 //     `defenseclaw guardrail fail-mode <value>`); silently
 //     overriding their answer would violate the operator-defined
 //     fail-mode contract documented in
 //     “GuardrailConfig.HookFailMode“.
-//  2. EMPTY/unset opts.HookFailMode uses defaultHookFailMode ("closed").
-//  3. Hook-only connectors may use explicit "closed" only when their
+//  3. EMPTY/unset opts.HookFailMode uses the connector default. Cursor uses
+//     "open" to match the vendor's documented command-hook default; other
+//     connectors use defaultHookFailMode ("closed").
+//  4. Hook-only connectors may use explicit "closed" only when their
 //     documented hook surface supports fail-closed behavior. Unsupported
 //     connectors stay fail-open and rely on their config writer to omit
 //     vendor fail-closed fields.
 //
-// Transport-layer failures (gateway unreachable / 5xx) are NOT
-// governed by FailMode — they always allow unless the operator opts
-// in via DEFENSECLAW_STRICT_AVAILABILITY=1, regardless of which
-// connector or HookFailMode value.
+// Transport-layer failures (gateway unreachable / timeout / 5xx) follow
+// FailMode too. DEFENSECLAW_STRICT_AVAILABILITY=1 remains an unconditional
+// force-closed override.
 func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, c Connector) error {
 	var extras []string
 	if owner, ok := c.(HookScriptOwner); ok {
@@ -651,13 +1346,25 @@ func WriteHookScriptsForConnectorObjectWithOpts(hookDir string, opts SetupOpts, 
 	return writeHookScriptsCommonWithOptions(hookDir, opts.APIAddr, hookToken, failMode, extras, opts.ManagedEnterprise, c.Name(), scopedToken)
 }
 
-// resolveHookFailMode picks the response-layer fail mode for a hook
-// render given the operator's setup opts and the connector identity.
-// The explicit string in opts.HookFailMode always wins; an empty
-// value falls back to the connector-default and is upgraded to
-// "closed" when the operator has set the matching enforcement flag
-// for codex / claudecode (avarice F-0681).
+// resolveHookFailMode picks the delivery/response fail mode for a hook render
+// given the operator's setup opts and the connector identity.
+// The explicit string in opts.HookFailMode normally wins; Cursor first applies
+// its observe/action boundary because observe is never allowed to block.
+// An empty value falls back to the connector-default and is upgraded to
+// "closed" when the operator has set the matching enforcement flag for
+// codex / claudecode (avarice F-0681).
 func resolveHookFailMode(opts SetupOpts, c Connector) string {
+	if c != nil && c.Name() == "cursor" {
+		// Cursor mode owns its availability posture: action registrations are
+		// fail-closed and observe registrations are fail-open. This prevents a
+		// global setting inherited from another connector from making observe
+		// blocking or action silently nonblocking.
+		if strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "action") ||
+			strings.EqualFold(strings.TrimSpace(opts.GuardrailMode), "enforce") {
+			return "closed"
+		}
+		return "open"
+	}
 	if strings.TrimSpace(opts.HookFailMode) != "" {
 		return normalizeHookFailMode(opts.HookFailMode)
 	}
@@ -875,6 +1582,29 @@ func writeDisabledHookTombstone(opts SetupOpts, scriptName, vendorLabel string) 
 		"# " + vendorLabel + " connector was torn down. Existing host processes may\n" +
 		"# keep this hook path cached until restart, so exit successfully\n" +
 		"# without forwarding stale payloads.\n" +
+		"exit 0\n"
+	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
+}
+
+// writeDisabledPowerShellHookTombstone is the native Windows equivalent used
+// by connector adapters cached by long-running desktop hosts. It emits no
+// protocol output and succeeds, so teardown cannot leave a stale adapter
+// forwarding payloads to a connector that is no longer active.
+func writeDisabledPowerShellHookTombstone(opts SetupOpts, scriptName, vendorLabel string) error {
+	if strings.TrimSpace(scriptName) == "" {
+		return fmt.Errorf("PowerShell tombstone: empty scriptName")
+	}
+	hookDir := filepath.Join(opts.DataDir, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		return fmt.Errorf("ensure hook dir: %w", err)
+	}
+	if vendorLabel == "" {
+		vendorLabel = "DefenseClaw connector"
+	}
+	body := "# DefenseClaw native Windows hook adapter\n" +
+		"# defenseclaw-managed-hook v0 (disabled tombstone)\n" +
+		"# " + vendorLabel + " connector was torn down; cached host processes\n" +
+		"# must succeed without forwarding stale payloads.\n" +
 		"exit 0\n"
 	return atomicWriteFile(filepath.Join(hookDir, scriptName), []byte(body), 0o700)
 }

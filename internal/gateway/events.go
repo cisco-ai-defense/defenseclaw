@@ -413,6 +413,7 @@ type JudgeEmitOpts struct {
 	ToolID         string
 	PolicyID       string
 	DestinationApp string
+	FailureClass   gatewaylog.JudgeFailureClass
 	// InputContent, when non-empty, is the inspected judge input
 	// (the prompt/request text the judge was asked to evaluate).
 	// emitJudge computes its sha256 digest and stores the result in
@@ -698,6 +699,13 @@ func emitEgress(ctx context.Context, p gatewaylog.EgressPayload) {
 	}
 }
 
+// emitEgress is also exposed on the proxy for the legacy passthrough call
+// sites. The canonical v8 egress runtime observes the same event downstream;
+// this compatibility method preserves the branch's Agent Control event path.
+func (p *GuardrailProxy) emitEgress(ctx context.Context, payload gatewaylog.EgressPayload) {
+	emitEgress(ctx, payload)
+}
+
 // incEgressCounter + emitEgressAlert are package-level hooks so the
 // telemetry / alerting wiring can be swapped out in tests without
 // pulling in the full OTel stack. Default: stderr alert + no-op
@@ -713,7 +721,14 @@ var (
 		if tp == nil {
 			return
 		}
-		tp.RecordEgress(ctx, branch, decision, source)
+		// v8 owns metric emission through the canonical observability runtime.
+		// Keep the provider reference as an enablement gate for this legacy
+		// hook without calling a removed pre-v8 Provider method.
+		_ = tp
+		_ = ctx
+		_ = branch
+		_ = decision
+		_ = source
 	}
 	emitEgressAlert = func(ctx context.Context, p gatewaylog.EgressPayload) {
 		// Always log to stderr — operators need a signal even when

@@ -20,12 +20,16 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -33,12 +37,13 @@ import (
 // stubRT is an injectable http.RoundTripper returning a canned response (or a
 // transport error) and capturing the outbound request for assertions.
 type stubRT struct {
-	status   int
-	body     string
-	err      error
-	gotReq   *http.Request
-	gotBody  []byte
-	requests int
+	status    int
+	body      string
+	err       error
+	gotReq    *http.Request
+	gotBody   []byte
+	requests  int
+	onRequest func(*stubRT, *http.Request) (*http.Response, error)
 }
 
 func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -47,6 +52,9 @@ func (s *stubRT) RoundTrip(req *http.Request) (*http.Response, error) {
 		s.gotBody, _ = io.ReadAll(req.Body)
 	}
 	s.gotReq = req
+	if s.onRequest != nil {
+		return s.onRequest(s, req)
+	}
 	if s.err != nil {
 		return nil, s.err
 	}
@@ -66,6 +74,16 @@ type runResult struct {
 
 // run executes a hook against a stub gateway with a temp Home + .token file.
 func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runResult {
+	return runWithContext(t, context.Background(), connector, rt, mutate)
+}
+
+func runWithContext(
+	t *testing.T,
+	ctx context.Context,
+	connector string,
+	rt *stubRT,
+	mutate func(*Options),
+) runResult {
 	t.Helper()
 	home := t.TempDir()
 	hookDir := filepath.Join(home, "hooks")
@@ -84,16 +102,32 @@ func run(t *testing.T, connector string, rt *stubRT, mutate func(*Options)) runR
 		FailMode:   "open",
 		Home:       home,
 		HookDir:    hookDir,
-		Stdin:      strings.NewReader(`{"event":"x"}`),
 		Stdout:     &out,
 		Stderr:     &errb,
 		HTTPClient: &http.Client{Transport: rt},
 		Now:        func() time.Time { return time.Unix(0, 0).UTC() },
 	}
+	if connector == "codex" {
+		opts.HookContractID = "codex-hooks-v4"
+	} else if connector == "copilot" {
+		// Copilot's official registration binds the exact camelCase event
+		// out-of-band because stdin does not carry an event discriminator.
+		opts.Event = "preToolUse"
+	}
 	if mutate != nil {
 		mutate(&opts)
 	}
-	code := Run(context.Background(), opts)
+	if opts.Stdin == nil {
+		if connector == "codex" {
+			opts.Stdin = strings.NewReader(fmt.Sprintf(
+				`{"hook_event_name":%q}`,
+				opts.Event,
+			))
+		} else {
+			opts.Stdin = strings.NewReader(`{"event":"x"}`)
+		}
+	}
+	code := Run(ctx, opts)
 	return runResult{stdout: out.String(), stderr: errb.String(), code: code, rt: rt}
 }
 
@@ -119,6 +153,175 @@ func TestRunPrefersConnectorScopedToken(t *testing.T) {
 	}
 }
 
+func TestRunUsesAuthenticatedManagedTokenSnapshotWithoutRereadingSidecars(t *testing.T) {
+	for _, tc := range []struct {
+		name          string
+		mutateSidecar func(*testing.T, string)
+	}{
+		{
+			name: "changed",
+			mutateSidecar: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.WriteFile(path, []byte("replacement-generation-token\n"), 0o600); err != nil {
+					t.Fatalf("replace scoped token: %v", err)
+				}
+			},
+		},
+		{
+			name: "disappeared",
+			mutateSidecar: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatalf("remove scoped token: %v", err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			const snapshotToken = "authenticated-generation-token"
+			result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+				scopedPath := filepath.Join(opts.HookDir, ".hook-codex.token")
+				if err := os.WriteFile(scopedPath, []byte("prior-generation-token\n"), 0o600); err != nil {
+					t.Fatalf("write scoped token: %v", err)
+				}
+				tc.mutateSidecar(t, scopedPath)
+				opts.Token = "untrusted-generic-token"
+				opts.ManagedEnterprise = true
+				token := snapshotToken
+				opts.AuthenticatedManagedToken = &token
+			})
+			if result.code != 0 {
+				t.Fatalf("Run code = %d, want 0; stderr=%s", result.code, result.stderr)
+			}
+			if got := result.rt.gotReq.Header.Get("Authorization"); got != "Bearer "+snapshotToken {
+				t.Fatalf("Authorization = %q, want authenticated snapshot token", got)
+			}
+		})
+	}
+}
+
+func TestRunAuthenticatedManagedTokenSnapshotEmptyFailsClosedWithoutFallback(t *testing.T) {
+	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		path := filepath.Join(opts.HookDir, ".hook-codex.token")
+		if err := os.WriteFile(path, []byte("valid-but-different-generation-token\n"), 0o600); err != nil {
+			t.Fatalf("write scoped token: %v", err)
+		}
+		opts.ManagedEnterprise = true
+		opts.FailMode = "open"
+		empty := "  "
+		opts.AuthenticatedManagedToken = &empty
+	})
+	if result.code != 0 {
+		t.Fatalf("Run code = %d, want structured fail-closed exit 0; stderr=%s", result.code, result.stderr)
+	}
+	wantStdout := `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}` + "\n"
+	if result.stdout != wantStdout {
+		t.Fatalf("stdout = %q, want structured fail-closed output %q", result.stdout, wantStdout)
+	}
+	if result.rt.requests != 0 {
+		t.Fatalf("gateway requests = %d, want 0", result.rt.requests)
+	}
+	if !strings.Contains(result.stderr, "authenticated managed runtime token is empty") {
+		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", result.stderr)
+	}
+}
+
+// TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot mirrors the Run
+// snapshot coverage above for the RunCodexNotify branch introduced at
+// hookexec.go lines 305-326. A non-empty snapshot token must reach the
+// request, and an empty snapshot token must send no request at all and
+// return the best-effort success code (0).
+func TestRunCodexNotifyUsesAuthenticatedManagedTokenSnapshot(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	// A prior-generation sidecar exists on disk. The snapshot branch must
+	// use the snapshot token (not this sidecar) when ManagedEnterprise +
+	// AuthenticatedManagedToken are both present.
+	scopedPath := filepath.Join(hookDir, ".hook-codex.token")
+	if err := os.WriteFile(scopedPath, []byte("prior-generation-token\n"), 0o600); err != nil {
+		t.Fatalf("write scoped token: %v", err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	const snapshotToken = "authenticated-notify-snapshot-token"
+	tok := snapshotToken
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   "127.0.0.1:8787",
+		Home:                      home,
+		HookDir:                   hookDir,
+		Token:                     "untrusted-generic-token",
+		ManagedEnterprise:         true,
+		AuthenticatedManagedToken: &tok,
+		HTTPClient:                &http.Client{Transport: rt},
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("RunCodexNotify code = %d, want 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("expected the snapshot branch to issue a request")
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer "+snapshotToken {
+		t.Fatalf("Authorization = %q, want snapshot token", got)
+	}
+}
+
+// TestRunCodexNotifyRejectsEmptyAuthenticatedManagedTokenSnapshot proves
+// the RunCodexNotify snapshot branch never falls back to another
+// generation's token sidecar when the snapshot token is empty, and stays
+// best-effort by returning 0 without issuing any request.
+func TestRunCodexNotifyRejectsEmptyAuthenticatedManagedTokenSnapshot(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".hook-codex.token"),
+		[]byte("valid-but-different-generation-token\n"), 0o600); err != nil {
+		t.Fatalf("write scoped token: %v", err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	stderr := &bytes.Buffer{}
+	empty := "  "
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   "127.0.0.1:8787",
+		Home:                      home,
+		HookDir:                   hookDir,
+		ManagedEnterprise:         true,
+		AuthenticatedManagedToken: &empty,
+		HTTPClient:                &http.Client{Transport: rt},
+		Stderr:                    stderr,
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("RunCodexNotify code = %d, want best-effort 0", code)
+	}
+	if rt.requests != 0 {
+		t.Fatalf("gateway requests = %d, want 0 when snapshot token empty", rt.requests)
+	}
+	if !strings.Contains(stderr.String(), "authenticated managed runtime token is empty") {
+		t.Fatalf("stderr = %q, want authenticated-snapshot diagnostic", stderr.String())
+	}
+}
+
+func TestAuthenticatedManagedTokenFieldIsIgnoredOutsideManagedMode(t *testing.T) {
+	const snapshotToken = "must-not-apply-outside-managed-mode"
+	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+		path := filepath.Join(opts.HookDir, ".hook-codex.token")
+		if err := os.WriteFile(path, []byte("unmanaged-scoped-token\n"), 0o600); err != nil {
+			t.Fatalf("write scoped token: %v", err)
+		}
+		token := snapshotToken
+		opts.AuthenticatedManagedToken = &token
+	})
+	if result.code != 0 {
+		t.Fatalf("Run code = %d, want 0; stderr=%s", result.code, result.stderr)
+	}
+	if got := result.rt.gotReq.Header.Get("Authorization"); got != "Bearer unmanaged-scoped-token" {
+		t.Fatalf("Authorization = %q, want unchanged unmanaged token resolution", got)
+	}
+}
+
 func TestMalformedLegacyTokenIsNotAcceptedAsRaw(t *testing.T) {
 	result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
 		if err := os.WriteFile(filepath.Join(opts.HookDir, ".token"), []byte("malformed-legacy-token\n"), 0o600); err != nil {
@@ -130,6 +333,87 @@ func TestMalformedLegacyTokenIsNotAcceptedAsRaw(t *testing.T) {
 	}
 	if got := result.rt.gotReq.Header.Get("Authorization"); got != "" {
 		t.Fatalf("Authorization = %q, want malformed legacy token rejected", got)
+	}
+}
+
+func TestClaudeCodeSuppressesCursorCompatibilityImport(t *testing.T) {
+	const (
+		cursorPayload = `{"hook_event_name":"preToolUse","cursor_version":"3.10.17","session_id":"cursor-session","tool_name":"Shell"}`
+		claudePayload = `{"hook_event_name":"PreToolUse","session_id":"claude-session","tool_name":"Bash"}`
+		liveScript    = "#!/bin/bash\n# defenseclaw-managed-hook v6\nexit 0\n"
+		tombstone     = "#!/bin/sh\n# defenseclaw-managed-hook v0 (disabled tombstone)\nexit 0\n"
+	)
+
+	tests := []struct {
+		name              string
+		payload           string
+		cursorScript      string
+		cursorToken       bool
+		removeClaudeToken bool
+		strict            bool
+		wantRequests      int
+	}{
+		{
+			name:              "live Cursor bridge suppresses before missing Claude token",
+			payload:           cursorPayload,
+			cursorScript:      liveScript,
+			cursorToken:       true,
+			removeClaudeToken: true,
+			strict:            true,
+			wantRequests:      0,
+		},
+		{
+			name:         "Cursor tombstone does not suppress",
+			payload:      cursorPayload,
+			cursorScript: tombstone,
+			cursorToken:  true,
+			wantRequests: 1,
+		},
+		{
+			name:         "missing Cursor token does not suppress",
+			payload:      cursorPayload,
+			cursorScript: liveScript,
+			wantRequests: 1,
+		},
+		{
+			name:         "genuine Claude payload does not suppress",
+			payload:      claudePayload,
+			cursorScript: liveScript,
+			cursorToken:  true,
+			wantRequests: 1,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(t, "claudecode", ok(`{"action":"allow"}`), func(opts *Options) {
+				opts.Stdin = strings.NewReader(tc.payload)
+				opts.StrictAvailability = tc.strict
+				if tc.removeClaudeToken {
+					if err := os.Remove(filepath.Join(opts.HookDir, ".token")); err != nil {
+						t.Fatalf("remove Claude token: %v", err)
+					}
+				}
+				if tc.cursorToken {
+					if err := os.WriteFile(filepath.Join(opts.HookDir, ".hook-cursor.token"), []byte("cursor-token\n"), 0o600); err != nil {
+						t.Fatalf("write Cursor token: %v", err)
+					}
+				}
+				if err := os.WriteFile(filepath.Join(opts.HookDir, "cursor-hook.sh"), []byte(tc.cursorScript), 0o700); err != nil {
+					t.Fatalf("write Cursor hook: %v", err)
+				}
+			})
+
+			if result.code != 0 {
+				t.Fatalf("Run code = %d, want 0; stderr=%q", result.code, result.stderr)
+			}
+			if result.rt.requests != tc.wantRequests {
+				t.Fatalf("gateway requests = %d, want %d", result.rt.requests, tc.wantRequests)
+			}
+			if result.stdout != "" || result.stderr != "" {
+				t.Fatalf("unexpected hook output: stdout=%q stderr=%q", result.stdout, result.stderr)
+			}
+		})
 	}
 }
 
@@ -165,11 +449,38 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   2,
 		},
 		{
+			name:       "claudecode TaskCreated block uses exit 2 feedback",
+			connector:  "claudecode",
+			respBody:   `{"action":"block","reason":"TaskCreated denied","hook_event_name":"TaskCreated"}`,
+			wantStderr: "TaskCreated denied",
+			wantCode:   2,
+		},
+		{
+			name:       "claudecode TaskCompleted block uses exit 2 feedback",
+			connector:  "claudecode",
+			respBody:   `{"action":"block","reason":"TaskCompleted denied","hook_event_name":"TaskCompleted"}`,
+			wantStderr: "TaskCompleted denied",
+			wantCode:   2,
+		},
+		{
+			name:       "claudecode TeammateIdle block uses exit 2 feedback",
+			connector:  "claudecode",
+			respBody:   `{"action":"block","reason":"TeammateIdle feedback","hook_event_name":"TeammateIdle"}`,
+			wantStderr: "TeammateIdle feedback",
+			wantCode:   2,
+		},
+		{
 			name:       "claudecode block without output or reason uses default",
 			connector:  "claudecode",
 			respBody:   `{"action":"block"}`,
 			wantStderr: "Blocked by DefenseClaw Claude Code policy.",
 			wantCode:   2,
+		},
+		{
+			name:      "codex allow",
+			connector: "codex",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
 		},
 		{
 			name:       "codex block with output exits 0",
@@ -179,24 +490,45 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:   0,
 		},
 		{
-			name:       "codex block without output emits inline json exit 0",
+			name:       "codex block without output emits PreToolUse decision exit 0",
 			connector:  "codex",
 			respBody:   `{"action":"block","reason":"matched: secret"}`,
-			wantStdout: `{"decision":"block","reason":"matched: secret"}` + "\n",
+			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"matched: secret"}}` + "\n",
 			wantCode:   0,
 		},
 		{
-			name:       "codex block without output or reason uses default exit 0",
+			name:       "codex block without output or reason uses PreToolUse default exit 0",
 			connector:  "codex",
 			respBody:   `{"action":"block"}`,
-			wantStdout: `{"decision":"block","reason":"Blocked by DefenseClaw Codex policy."}` + "\n",
+			wantStdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Blocked by DefenseClaw Codex policy."}}` + "\n",
+			wantCode:   0,
+		},
+		{
+			name:       "cursor allow echoes hook_output exit 0",
+			connector:  "cursor",
+			respBody:   `{"hook_output":{"permission":"allow"}}`,
+			wantStdout: `{"permission":"allow"}` + "\n",
+			wantCode:   0,
+		},
+		{
+			name:       "cursor allow without hook_output emits valid json",
+			connector:  "cursor",
+			respBody:   `{"action":"allow"}`,
+			wantStdout: cursorFallbackOutput("PreToolUse", false, "") + "\n",
 			wantCode:   0,
 		},
 		{
 			name:       "cursor echoes hook_output exit 0",
 			connector:  "cursor",
-			respBody:   `{"hook_output":{"continue":true,"permission":"deny","user_message":"no"}}`,
-			wantStdout: `{"continue":true,"permission":"deny","user_message":"no"}` + "\n",
+			respBody:   `{"hook_output":{"permission":"deny","user_message":"no","agent_message":"no"}}`,
+			wantStdout: `{"permission":"deny","user_message":"no","agent_message":"no"}` + "\n",
+			wantCode:   0,
+		},
+		{
+			name:       "copilot allow echoes hook_output exit 0",
+			connector:  "copilot",
+			respBody:   `{"hook_output":{"permissionDecision":"allow"}}`,
+			wantStdout: `{"permissionDecision":"allow"}` + "\n",
 			wantCode:   0,
 		},
 		{
@@ -204,6 +536,19 @@ func TestDecisionGolden(t *testing.T) {
 			connector:  "copilot",
 			respBody:   `{"hook_output":{"permissionDecision":"deny"}}`,
 			wantStdout: `{"permissionDecision":"deny"}` + "\n",
+			wantCode:   0,
+		},
+		{
+			name:      "geminicli allow with no hook_output exit 0",
+			connector: "geminicli",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
+		},
+		{
+			name:       "geminicli echoes hook_output deny exit 0",
+			connector:  "geminicli",
+			respBody:   `{"action":"block","hook_output":{"decision":"deny","reason":"no"}}`,
+			wantStdout: `{"decision":"deny","reason":"no"}` + "\n",
 			wantCode:   0,
 		},
 		{
@@ -234,16 +579,44 @@ func TestDecisionGolden(t *testing.T) {
 			wantCode:  0,
 		},
 		{
+			name:       "amp block writes stderr exit 2 no stdout",
+			connector:  "amp",
+			respBody:   `{"action":"block","reason":"nope"}`,
+			wantStderr: "nope",
+			wantCode:   2,
+		},
+		{
+			name:      "amp allow exit 0",
+			connector: "amp",
+			respBody:  `{"action":"allow"}`,
+			wantCode:  0,
+		},
+		{
 			name:      "hermes allow with no hook_output exit 0",
 			connector: "hermes",
 			respBody:  `{"action":"allow"}`,
 			wantCode:  0,
 		},
 		{
-			name:      "antigravity allow with no hook_output exit 0",
-			connector: "antigravity",
-			respBody:  `{"action":"allow"}`,
-			wantCode:  0,
+			name:       "hermes block without resolved event fails open",
+			connector:  "hermes",
+			respBody:   `{"action":"block","hook_output":{"decision":"block","reason":"no"}}`,
+			wantStderr: "unsupported or contradictory",
+			wantCode:   0,
+		},
+		{
+			name:       "hermes context without resolved event fails open",
+			connector:  "hermes",
+			respBody:   `{"action":"alert","hook_output":{"context":"DefenseClaw policy context"}}`,
+			wantStderr: "unsupported or contradictory",
+			wantCode:   0,
+		},
+		{
+			name:       "antigravity allow with no hook_output emits documented allow",
+			connector:  "antigravity",
+			respBody:   `{"action":"allow"}`,
+			wantStdout: `{"decision":"allow"}` + "\n",
+			wantCode:   0,
 		},
 		{
 			name:       "antigravity echoes hook_output deny exit 0",
@@ -269,6 +642,148 @@ func TestDecisionGolden(t *testing.T) {
 				}
 			} else if !strings.Contains(r.stderr, tt.wantStderr) {
 				t.Errorf("stderr = %q, want substring %q", r.stderr, tt.wantStderr)
+			}
+		})
+	}
+}
+
+func TestAlertRemainsAdvisoryUnderClosedFailMode(t *testing.T) {
+	for _, connector := range []string{
+		"amp",
+		"antigravity",
+		"claudecode",
+		"codex",
+		"copilot",
+		"cursor",
+		"devin",
+		"geminicli",
+		"openhands",
+		"windsurf",
+	} {
+		t.Run(connector, func(t *testing.T) {
+			result := run(t, connector, ok(`{"action":"alert","reason":"advisory finding"}`), func(opts *Options) {
+				opts.FailMode = "closed"
+			})
+			if result.code != 0 {
+				t.Fatalf("alert exit code = %d, want advisory success 0; stderr=%q", result.code, result.stderr)
+			}
+			if result.stderr != "" {
+				t.Fatalf("alert stderr = %q, want empty", result.stderr)
+			}
+		})
+	}
+}
+
+func TestHermesJSONStdinAndValidOutputShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		event      string
+		response   string
+		wantStdout string
+	}{
+		{
+			name:       "block",
+			event:      "pre_tool_call",
+			response:   `{"action":"block","hook_output":{"decision":"block","reason":"blocked by test policy"}}`,
+			wantStdout: `{"decision":"block","reason":"blocked by test policy"}` + "\n",
+		},
+		{
+			name:       "context",
+			event:      "pre_llm_call",
+			response:   `{"action":"alert","hook_output":{"context":"test policy context"}}`,
+			wantStdout: `{"context":"test policy context"}` + "\n",
+		},
+		{
+			name:       "bounded verification continue",
+			event:      "pre_verify",
+			response:   `{"action":"continue","hook_output":{"action":"continue","message":"run focused verification"}}`,
+			wantStdout: `{"action":"continue","message":"run focused verification"}` + "\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := fmt.Sprintf(
+				`{"event":%q,"session_id":"hermes-session","extra":{"tool_name":"terminal","tool_input":{"command":"Get-ChildItem \"C:\\Program Files\""}}}`,
+				tc.event,
+			)
+			rt := ok(tc.response)
+			result := run(t, "hermes", rt, func(opts *Options) {
+				opts.Event = ""
+				opts.Stdin = strings.NewReader(input)
+			})
+			if result.code != 0 || result.stdout != tc.wantStdout || result.stderr != "" {
+				t.Fatalf(
+					"Hermes %s output = (code=%d stdout=%q stderr=%q), want code=0 stdout=%q",
+					tc.event,
+					result.code,
+					result.stdout,
+					result.stderr,
+					tc.wantStdout,
+				)
+			}
+			if got := string(rt.gotBody); got != input {
+				t.Fatalf("Hermes %s JSON stdin = %q, want %q", tc.event, got, input)
+			}
+		})
+	}
+}
+
+func TestHermesMalformedOrMismatchedGatewayOutputFailsOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		event    string
+		response string
+	}{
+		{
+			name:     "missing top-level action",
+			event:    "pre_tool_call",
+			response: `{"hook_output":{"decision":"block","reason":"no"}}`,
+		},
+		{
+			name:     "allow contradicts block output",
+			event:    "pre_tool_call",
+			response: `{"action":"allow","hook_output":{"decision":"block","reason":"no"}}`,
+		},
+		{
+			name:     "block output on audit-only event",
+			event:    "post_tool_call",
+			response: `{"action":"block","hook_output":{"decision":"block","reason":"no"}}`,
+		},
+		{
+			name:     "block output has undocumented extra field",
+			event:    "pre_tool_call",
+			response: `{"action":"block","hook_output":{"decision":"block","reason":"no","systemMessage":"deny"}}`,
+		},
+		{
+			name:     "empty context",
+			event:    "pre_llm_call",
+			response: `{"action":"alert","hook_output":{"context":"  "}}`,
+		},
+		{
+			name:     "block action cannot synthesize bounded continue",
+			event:    "pre_verify",
+			response: `{"action":"block","hook_output":{"action":"continue","message":"retry"}}`,
+		},
+		{
+			name:     "non-object hook output",
+			event:    "pre_tool_call",
+			response: `{"action":"block","hook_output":"block"}`,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			input := fmt.Sprintf(`{"event":%q}`, tc.event)
+			result := run(t, "hermes", ok(tc.response), func(opts *Options) {
+				opts.Event = ""
+				opts.Stdin = strings.NewReader(input)
+				opts.FailMode = "closed"
+				opts.StrictAvailability = true
+			})
+			if result.code != 0 || result.stdout != "" {
+				t.Fatalf(
+					"Hermes mismatch synthesized enforcement: code=%d stdout=%q stderr=%q",
+					result.code,
+					result.stdout,
+					result.stderr,
+				)
 			}
 		})
 	}
@@ -323,19 +838,23 @@ func TestOversizedPayload(t *testing.T) {
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times on oversized payload, want 0", rt.requests)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
 	})
 
 	cases := map[string]struct {
 		stdout string
 		code   int
 	}{
+		"amp":        {stdout: "", code: 2},
 		"claudecode": {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
-		"codex":      {stdout: `{"decision":"block","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
+		"codex":      {stdout: `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook payload too large"}}` + "\n", code: 0},
 		"openhands":  {stdout: `{"decision":"deny","reason":"DefenseClaw hook payload too large"}` + "\n", code: 2},
-		"cursor":     {stdout: cursorDeny("DefenseClaw hook payload too large") + "\n", code: 2},
-		"copilot":    {stdout: "", code: 2},
+		"cursor":     {stdout: cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook payload too large") + "\n", code: 2},
+		"copilot":    {stdout: "", code: 0},
 		"geminicli":  {stdout: "", code: 2},
-		"hermes":     {stdout: "", code: 2},
+		"hermes":     {stdout: "", code: 0},
 		"windsurf":   {stdout: "", code: 2},
 	}
 	for connector, want := range cases {
@@ -366,6 +885,19 @@ func TestUnreachable(t *testing.T) {
 		if !strings.Contains(r.stderr, "allowing claude-code tool") {
 			t.Errorf("stderr = %q, want allow notice", r.stderr)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{err: errors.New("dial tcp: refused")}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		}
 	})
 
 	t.Run("strict availability fails closed", func(t *testing.T) {
@@ -384,10 +916,139 @@ func TestUnreachable(t *testing.T) {
 		r := run(t, "codex", &stubRT{status: 503, body: "boom"}, func(o *Options) {
 			o.StrictAvailability = true
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0 for structured Codex deny", r.code)
+		}
+		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
+			t.Errorf("stdout = %q", r.stdout)
 		}
 	})
+}
+
+func TestConnectionRefusedColdStartsAndRetriesExactlyOnce(t *testing.T) {
+	rt := &stubRT{}
+	rt.onRequest = func(state *stubRT, _ *http.Request) (*http.Response, error) {
+		if state.requests == 1 {
+			return nil, syscall.ECONNREFUSED
+		}
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"action":"allow"}`)),
+			Header:     make(http.Header),
+		}, nil
+	}
+	recoveries := 0
+	r := run(t, "codex", rt, func(opts *Options) {
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 0 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("cold-start retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartNeverRetriesMoreThanOnce(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	recoveries := 0
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			recoveries++
+			return nil
+		}
+	})
+	if r.code != 2 || recoveries != 1 || rt.requests != 2 {
+		t.Fatalf("bounded retry result code=%d recoveries=%d requests=%d stderr=%q", r.code, recoveries, rt.requests, r.stderr)
+	}
+}
+
+func TestForeignOrResponsiveListenerNeverTriggersColdStart(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		status int
+	}{
+		{name: "foreign-auth", status: http.StatusUnauthorized},
+		{name: "responsive-server-error", status: http.StatusServiceUnavailable},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			rt := &stubRT{status: test.status, body: "foreign"}
+			recoveries := 0
+			r := run(t, "codex", rt, func(opts *Options) {
+				opts.GatewayRecovery = func(context.Context, error) error {
+					recoveries++
+					return nil
+				}
+			})
+			if r.code != 0 || recoveries != 0 || rt.requests != 1 {
+				t.Fatalf("foreign listener result code=%d recoveries=%d requests=%d", r.code, recoveries, rt.requests)
+			}
+		})
+	}
+}
+
+func TestColdStartFailurePreservesFailClosedPolicy(t *testing.T) {
+	rt := &stubRT{err: syscall.ECONNREFUSED}
+	r := run(t, "claudecode", rt, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(context.Context, error) error {
+			return errors.New("foreign process owns gateway state")
+		}
+	})
+	if r.code != 2 || rt.requests != 1 {
+		t.Fatalf("failed cold start code=%d requests=%d stderr=%q", r.code, rt.requests, r.stderr)
+	}
+}
+
+func TestColdStartWaitRespectsOverallHookDeadline(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	r := runWithContext(t, ctx, "claudecode", &stubRT{err: syscall.ECONNREFUSED}, func(opts *Options) {
+		opts.FailMode = "closed"
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			<-ctx.Done()
+			return ctx.Err()
+		}
+	})
+	if elapsed := time.Since(started); elapsed > 500*time.Millisecond {
+		t.Fatalf("hook exceeded bounded deadline: %s", elapsed)
+	}
+	if r.code != 2 {
+		t.Fatalf("deadline fail-closed code=%d stderr=%q", r.code, r.stderr)
+	}
+}
+
+func TestDefaultTransportColdStartReceivesRegisteredHookDeadline(t *testing.T) {
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := listener.Addr().String()
+	if err := listener.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var remaining time.Duration
+	r := run(t, "claudecode", &stubRT{}, func(opts *Options) {
+		opts.Event = "MessageDisplay"
+		opts.APIAddr = addr
+		opts.HTTPClient = nil
+		opts.GatewayRecovery = func(ctx context.Context, _ error) error {
+			deadline, ok := ctx.Deadline()
+			if !ok {
+				return errors.New("cold-start context has no registered hook deadline")
+			}
+			remaining = time.Until(deadline)
+			return errors.New("test stops before gateway start")
+		}
+	})
+	if r.code != 0 {
+		t.Fatalf("MessageDisplay fail-open code=%d stderr=%q", r.code, r.stderr)
+	}
+	if remaining <= 0 || remaining > hookRequestTimeout("claudecode", "MessageDisplay") {
+		t.Fatalf("cold-start deadline remaining=%s, want within registered request budget", remaining)
+	}
 }
 
 // --- Response-layer failure (4xx / bad JSON): honors FAIL_MODE ---
@@ -397,6 +1058,19 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "claudecode", &stubRT{status: 401, body: "unauthorized"}, nil)
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor response failure fail open emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, nil)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
 		}
 	})
 
@@ -408,7 +1082,7 @@ func TestResponseFailure(t *testing.T) {
 		if r.code != 0 {
 			t.Fatalf("code = %d, want 0", r.code)
 		}
-		if r.stdout != cursorDeny("DefenseClaw hook failed closed")+"\n" {
+		if r.stdout != cursorFallbackOutput("PreToolUse", true, "DefenseClaw hook failed closed")+"\n" {
 			t.Errorf("stdout = %q", r.stdout)
 		}
 		if !strings.Contains(r.stderr, "possible token drift") {
@@ -423,13 +1097,92 @@ func TestResponseFailure(t *testing.T) {
 		r := run(t, "codex", ok("this is not json"), func(o *Options) {
 			o.FailMode = "closed"
 		})
-		if r.code != 2 {
-			t.Fatalf("code = %d, want 2", r.code)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0 for structured Codex deny", r.code)
+		}
+		if r.stdout != `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"DefenseClaw hook failed closed"}}`+"\n" {
+			t.Errorf("stdout = %q", r.stdout)
 		}
 		if !strings.Contains(r.stderr, "invalid JSON response") {
 			t.Errorf("stderr = %q, want invalid JSON", r.stderr)
 		}
 	})
+}
+
+func TestMixedConnectorEffectiveFailModeResponseMatrix(t *testing.T) {
+	failures := []struct {
+		name string
+		rt   func() *stubRT
+	}{
+		{name: "malformed json", rt: func() *stubRT { return ok("not-json") }},
+		{name: "incomplete response", rt: func() *stubRT { return ok(`{"reason":"missing action"}`) }},
+		{name: "invalid action", rt: func() *stubRT { return ok(`{"action":"unexpected"}`) }},
+		{name: "unauthorized", rt: func() *stubRT { return &stubRT{status: 401, body: "unauthorized"} }},
+		{name: "server failure", rt: func() *stubRT { return &stubRT{status: 503, body: "unavailable"} }},
+		{name: "connection failure", rt: func() *stubRT { return &stubRT{err: errors.New("connection refused")} }},
+		{name: "timeout", rt: func() *stubRT { return &stubRT{err: context.DeadlineExceeded} }},
+	}
+	connectors := []struct {
+		name string
+		mode string
+		code int
+	}{
+		{name: "claudecode", mode: "closed", code: 2},
+		{name: "codex", mode: "open", code: 0},
+	}
+	for _, failure := range failures {
+		for _, connector := range connectors {
+			t.Run(failure.name+"/"+connector.name, func(t *testing.T) {
+				r := run(t, connector.name, failure.rt(), func(o *Options) { o.FailMode = connector.mode })
+				if r.code != connector.code {
+					t.Fatalf("code = %d, want %d; stderr=%q", r.code, connector.code, r.stderr)
+				}
+			})
+		}
+	}
+}
+
+func TestHermesFailuresAlwaysFailOpen(t *testing.T) {
+	type failureCase struct {
+		name   string
+		rt     *stubRT
+		mutate func(*Options)
+	}
+	cases := []failureCase{
+		{name: "auth", rt: &stubRT{status: 401, body: "unauthorized"}},
+		{name: "network", rt: &stubRT{err: errors.New("connection refused")}},
+		{name: "timeout", rt: &stubRT{err: context.DeadlineExceeded}},
+		{name: "server", rt: &stubRT{status: 503, body: "unavailable"}},
+		{name: "malformed", rt: ok("not-json")},
+		{name: "oversized", rt: ok(`{"action":"allow"}`), mutate: func(o *Options) {
+			o.MaxBody = 2
+			o.Stdin = strings.NewReader(`{"event":"pre_tool_call"}`)
+		}},
+		{name: "missing-token", rt: ok(`{"action":"allow"}`), mutate: func(o *Options) {
+			o.Token = ""
+			o.HookDir = filepath.Join(o.Home, "no-token")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(t, "hermes", tc.rt, func(o *Options) {
+				o.FailMode = "closed"
+				o.StrictAvailability = true
+				o.ManagedEnterprise = true
+				if tc.mutate != nil {
+					tc.mutate(o)
+				}
+			})
+			if result.code != 0 || result.stdout != "" {
+				t.Fatalf(
+					"Hermes failure synthesized enforcement: code=%d stdout=%q stderr=%q",
+					result.code,
+					result.stdout,
+					result.stderr,
+				)
+			}
+		})
+	}
 }
 
 // --- Missing token ---
@@ -449,6 +1202,19 @@ func TestMissingToken(t *testing.T) {
 		if rt.requests != 0 {
 			t.Fatalf("gateway called %d times, want 0", rt.requests)
 		}
+		if r.stdout != "" {
+			t.Errorf("stdout = %q, want empty for non-Cursor fail-open", r.stdout)
+		}
+	})
+
+	t.Run("cursor default emits valid allow json", func(t *testing.T) {
+		r := run(t, "cursor", ok(`{"action":"allow"}`), noToken)
+		if r.code != 0 {
+			t.Fatalf("code = %d, want 0", r.code)
+		}
+		if r.stdout != cursorFallbackOutput("PreToolUse", false, "")+"\n" {
+			t.Errorf("stdout = %q, want Cursor allow JSON", r.stdout)
+		}
 	})
 
 	t.Run("strict availability blocks", func(t *testing.T) {
@@ -461,6 +1227,16 @@ func TestMissingToken(t *testing.T) {
 		}
 		if !strings.Contains(r.stderr, "missing gateway token") {
 			t.Errorf("stderr = %q", r.stderr)
+		}
+	})
+
+	t.Run("closed fail mode blocks", func(t *testing.T) {
+		r := run(t, "claudecode", ok(`{"action":"allow"}`), func(o *Options) {
+			noToken(o)
+			o.FailMode = "closed"
+		})
+		if r.code != 2 {
+			t.Fatalf("code = %d, want 2", r.code)
 		}
 	})
 }
@@ -499,6 +1275,497 @@ func TestRequestWiring(t *testing.T) {
 	}
 }
 
+func TestNativeConnectorEndpointMatrix(t *testing.T) {
+	tests := map[string]string{
+		"amp":         "/api/v1/amp/hook",
+		"codex":       "/api/v1/codex/hook",
+		"claudecode":  "/api/v1/claude-code/hook",
+		"cursor":      "/api/v1/cursor/hook",
+		"windsurf":    "/api/v1/windsurf/hook",
+		"geminicli":   "/api/v1/geminicli/hook",
+		"copilot":     "/api/v1/copilot/hook",
+		"antigravity": "/api/v1/antigravity/hook",
+		"hermes":      "/api/v1/hermes/hook",
+	}
+	for connector, endpoint := range tests {
+		t.Run(connector, func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			r := run(t, connector, rt, func(opts *Options) {
+				if connector == "copilot" {
+					opts.Event = "preToolUse"
+					opts.Stdin = strings.NewReader(`{"sessionId":"s","timestamp":1,"cwd":"C:\\work","toolName":"powershell","toolArgs":{"command":"Get-ChildItem"}}`)
+				}
+			})
+			if r.code != 0 {
+				t.Fatalf("allow exit = %d, want 0", r.code)
+			}
+			if rt.gotReq == nil {
+				t.Fatal("no request captured")
+			}
+			if got := rt.gotReq.URL.Path; got != endpoint {
+				t.Errorf("endpoint = %q, want %q", got, endpoint)
+			}
+			if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer tkn" {
+				t.Errorf("authorization = %q", got)
+			}
+			wantBody := `{"event":"x"}`
+			if connector == "codex" {
+				wantBody = `{"hook_event_name":"PreToolUse"}`
+			} else if connector == "copilot" {
+				wantBody = `{"sessionId":"s","timestamp":1,"cwd":"C:\\work","toolName":"powershell","toolArgs":{"command":"Get-ChildItem"}}`
+			}
+			if got := string(rt.gotBody); got != wantBody {
+				t.Errorf("JSON stdin body = %q, want %q", got, wantBody)
+			}
+			if connector == "antigravity" {
+				if got := rt.gotReq.Header.Get("X-DefenseClaw-Antigravity-Event"); got != "PreToolUse" {
+					t.Errorf("Antigravity event header = %q", got)
+				}
+			}
+			if connector == "copilot" {
+				if got := rt.gotReq.Header.Get("X-DefenseClaw-Copilot-Event"); got != "preToolUse" {
+					t.Errorf("Copilot event header = %q", got)
+				}
+				if strings.Contains(string(rt.gotBody), "hook_event_name") {
+					t.Errorf("Copilot bridge rewrote official body: %s", rt.gotBody)
+				}
+			}
+		})
+	}
+}
+
+func TestCopilotEventBindingRequiresReviewedExactEvent(t *testing.T) {
+	for _, event := range []string{"PreToolUse", "futureEvent", ""} {
+		t.Run(fmt.Sprintf("event_%s", event), func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			result := run(t, "copilot", rt, func(opts *Options) {
+				opts.Event = event
+				opts.FailMode = "closed"
+				opts.StrictAvailability = true
+				opts.ManagedEnterprise = true
+			})
+			if rt.requests != 0 || rt.gotReq != nil {
+				t.Fatalf("unreviewed event %q reached the gateway", event)
+			}
+			if result.code != 0 || result.stdout != "" {
+				t.Fatalf(
+					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+					event, result.code, result.stdout, result.stderr,
+				)
+			}
+		})
+	}
+}
+
+func TestAntigravityEventBindingRequiresReviewedExactEvent(t *testing.T) {
+	for _, event := range []string{"pretooluse", "futureEvent", ""} {
+		t.Run(fmt.Sprintf("event_%s", event), func(t *testing.T) {
+			rt := ok(`{"action":"allow"}`)
+			result := run(t, "antigravity", rt, func(opts *Options) {
+				opts.Event = event
+				opts.FailMode = "closed"
+				opts.StrictAvailability = true
+				opts.ManagedEnterprise = true
+				opts.Stdin = strings.NewReader(`{"hook_event_name":"PreToolUse","event":"PreToolUse"}`)
+			})
+			if rt.requests != 0 || rt.gotReq != nil {
+				t.Fatalf("unreviewed event %q reached the gateway", event)
+			}
+			if result.code != 0 || strings.Contains(result.stdout, `"deny"`) {
+				t.Fatalf(
+					"unreviewed event %q synthesized enforcement: code=%d stdout=%q stderr=%q",
+					event, result.code, result.stdout, result.stderr,
+				)
+			}
+		})
+	}
+}
+
+func TestCopilotFailuresAlwaysFailOpen(t *testing.T) {
+	type failureCase struct {
+		name   string
+		rt     *stubRT
+		mutate func(*Options)
+	}
+	cases := []failureCase{
+		{name: "auth", rt: &stubRT{status: 401, body: "unauthorized"}},
+		{name: "network", rt: &stubRT{err: errors.New("connection refused")}},
+		{name: "timeout", rt: &stubRT{err: context.DeadlineExceeded}},
+		{name: "server", rt: &stubRT{status: 503, body: "unavailable"}},
+		{name: "malformed", rt: ok("not-json")},
+		{name: "oversized", rt: ok(`{"action":"allow"}`), mutate: func(o *Options) {
+			o.MaxBody = 2
+			o.Stdin = strings.NewReader(`{"sessionId":"s"}`)
+		}},
+		{name: "missing-token", rt: ok(`{"action":"allow"}`), mutate: func(o *Options) {
+			o.Token = ""
+			o.HookDir = filepath.Join(o.Home, "no-token")
+		}},
+		{name: "unavailable-home", rt: ok(`{"action":"allow"}`), mutate: func(o *Options) {
+			o.Home = filepath.Join(t.TempDir(), "missing")
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			result := run(t, "copilot", tc.rt, func(o *Options) {
+				o.Event = "preToolUse"
+				o.FailMode = "closed"
+				o.StrictAvailability = true
+				o.ManagedEnterprise = true
+				if tc.mutate != nil {
+					tc.mutate(o)
+				}
+			})
+			if result.code != 0 || result.stdout != "" {
+				t.Fatalf(
+					"Copilot failure synthesized enforcement: code=%d stdout=%q stderr=%q",
+					result.code, result.stdout, result.stderr,
+				)
+			}
+		})
+	}
+}
+
+func TestAntigravityFailureFallbacksUseDocumentedEventOutput(t *testing.T) {
+	cases := []struct {
+		event  string
+		closed bool
+		want   string
+	}{
+		{"PreToolUse", false, `{"decision":"allow"}` + "\n"},
+		{"PreToolUse", true, `{"decision":"deny","reason":"DefenseClaw policy service is unavailable."}` + "\n"},
+		{"PostToolUse", true, "{}\n"},
+		{"PreInvocation", true, "{}\n"},
+		{"PostInvocation", true, "{}\n"},
+		{"Stop", true, `{"decision":"allow"}` + "\n"},
+	}
+	for _, tc := range cases {
+		t.Run(fmt.Sprintf("%s_closed_%v", tc.event, tc.closed), func(t *testing.T) {
+			result := run(t, "antigravity", &stubRT{err: errors.New("offline")}, func(opts *Options) {
+				opts.Event = tc.event
+				if tc.closed {
+					opts.FailMode = "closed"
+				}
+			})
+			if result.code != 0 || result.stdout != tc.want {
+				t.Fatalf("code=%d stdout=%q want %q", result.code, result.stdout, tc.want)
+			}
+		})
+	}
+}
+
+func TestCursorFallbackOutputsUseDocumentedEventSchemas(t *testing.T) {
+	allowCases := map[string]string{
+		"sessionStart":         `{}`,
+		"sessionEnd":           `{}`,
+		"preToolUse":           `{"permission":"allow"}`,
+		"postToolUse":          `{}`,
+		"postToolUseFailure":   `{}`,
+		"subagentStart":        `{"permission":"allow"}`,
+		"subagentStop":         `{}`,
+		"beforeShellExecution": `{"permission":"allow"}`,
+		"afterShellExecution":  `{}`,
+		"beforeMCPExecution":   `{"permission":"allow"}`,
+		"afterMCPExecution":    `{}`,
+		"beforeReadFile":       `{"permission":"allow"}`,
+		"afterFileEdit":        `{}`,
+		"beforeTabFileRead":    `{"permission":"allow"}`,
+		"afterTabFileEdit":     `{}`,
+		"beforeSubmitPrompt":   `{"continue":true}`,
+		"preCompact":           `{}`,
+		"stop":                 `{}`,
+		"afterAgentResponse":   `{}`,
+		"afterAgentThought":    `{}`,
+		"workspaceOpen":        `{}`,
+	}
+	for event, want := range allowCases {
+		t.Run("allow/"+event, func(t *testing.T) {
+			if got := cursorFallbackOutput(event, false, ""); got != want {
+				t.Fatalf("cursorFallbackOutput(%q, allow) = %s, want %s", event, got, want)
+			}
+		})
+	}
+
+	const reason = "policy unavailable"
+	closedCases := map[string]string{
+		"preToolUse":           `{"permission":"deny","user_message":"policy unavailable","agent_message":"policy unavailable"}`,
+		"subagentStart":        `{"permission":"deny","user_message":"policy unavailable"}`,
+		"beforeShellExecution": `{"permission":"deny","user_message":"policy unavailable","agent_message":"policy unavailable"}`,
+		"beforeMCPExecution":   `{"permission":"deny","user_message":"policy unavailable","agent_message":"policy unavailable"}`,
+		"beforeReadFile":       `{"permission":"deny","user_message":"policy unavailable"}`,
+		"beforeTabFileRead":    `{"permission":"deny"}`,
+		"beforeSubmitPrompt":   `{"continue":false,"user_message":"policy unavailable"}`,
+	}
+	for event, want := range closedCases {
+		t.Run("closed/"+event, func(t *testing.T) {
+			if got := cursorFallbackOutput(event, true, reason); got != want {
+				t.Fatalf("cursorFallbackOutput(%q, closed) = %s, want %s", event, got, want)
+			}
+		})
+	}
+}
+
+func TestCursorResponseClosedUsesEventNativeDeny(t *testing.T) {
+	cases := map[string]string{
+		"preToolUse":         `{"permission":"deny","user_message":"DefenseClaw hook failed closed","agent_message":"DefenseClaw hook failed closed"}` + "\n",
+		"subagentStart":      `{"permission":"deny","user_message":"DefenseClaw hook failed closed"}` + "\n",
+		"beforeTabFileRead":  `{"permission":"deny"}` + "\n",
+		"beforeSubmitPrompt": `{"continue":false,"user_message":"DefenseClaw hook failed closed"}` + "\n",
+	}
+	for event, want := range cases {
+		t.Run(event, func(t *testing.T) {
+			result := run(t, "cursor", &stubRT{status: 401, body: "unauthorized"}, func(opts *Options) {
+				opts.Event = event
+				opts.FailMode = "closed"
+			})
+			if result.code != 0 {
+				t.Fatalf("code=%d, want structured deny with exit 0", result.code)
+			}
+			if result.stdout != want {
+				t.Fatalf("stdout=%q, want %q", result.stdout, want)
+			}
+		})
+	}
+}
+
+func TestCursorGatewayActionFallbackUsesEventNativeOutput(t *testing.T) {
+	cases := []struct {
+		event    string
+		response string
+		want     string
+	}{
+		{
+			event:    "preToolUse",
+			response: `{"action":"block","reason":"policy denied"}`,
+			want:     `{"permission":"deny","user_message":"policy denied","agent_message":"policy denied"}` + "\n",
+		},
+		{
+			event:    "subagentStop",
+			response: `{"action":"block","reason":"review child result"}`,
+			want:     `{"followup_message":"review child result"}` + "\n",
+		},
+		{
+			event:    "beforeShellExecution",
+			response: `{"action":"confirm","reason":"approve command"}`,
+			want:     `{"permission":"ask","user_message":"approve command","agent_message":"approve command"}` + "\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.event, func(t *testing.T) {
+			result := run(t, "cursor", ok(tc.response), func(opts *Options) {
+				opts.Event = tc.event
+			})
+			if result.code != 0 || result.stdout != tc.want {
+				t.Fatalf("code=%d stdout=%q, want exit 0 and %q", result.code, result.stdout, tc.want)
+			}
+		})
+	}
+}
+
+func TestCodexNotifyRequestWiring(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=\"notify-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rt := ok(`{"status":"ok"}`)
+	payload := []byte(`{"type":"agent-turn-complete","last-assistant-message":"done"}`)
+	traceParent := "00-0af7651916cd43dd8448eb211c80319c-" +
+		"b7ad6b7169203331-01"
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:     "127.0.0.1:8787",
+		Home:        home,
+		HookDir:     hookDir,
+		HTTPClient:  &http.Client{Transport: rt},
+		TraceParent: traceParent,
+	}, payload)
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("no request captured")
+	}
+	if got := rt.gotReq.URL.String(); got != "http://127.0.0.1:8787/api/v1/codex/notify" {
+		t.Errorf("url = %s", got)
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer notify-token" {
+		t.Errorf("authorization = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("X-DefenseClaw-Client"); got != "codex-notify/1.0" {
+		t.Errorf("client header = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("x-defenseclaw-source"); got != "codex-notify" {
+		t.Errorf("source header = %q", got)
+	}
+	if got := rt.gotReq.Header.Get("traceparent"); got != traceParent {
+		t.Errorf("traceparent = %q, want %q", got, traceParent)
+	}
+	if !bytes.Equal(rt.gotBody, payload) {
+		t.Errorf("body = %q, want %q", rt.gotBody, payload)
+	}
+
+	// Notify remains telemetry-only: a gateway failure must never fail the
+	// Codex process or turn a completed turn into an agent error.
+	failing := &stubRT{err: errors.New("offline")}
+	if got := RunCodexNotify(context.Background(), Options{
+		APIAddr: "127.0.0.1:8787", Home: home, HookDir: hookDir,
+		HTTPClient: &http.Client{Transport: failing},
+	}, payload); got != 0 {
+		t.Fatalf("transport failure exit = %d, want 0", got)
+	}
+}
+
+func TestCodexNotifyManagedEnterpriseRejectsUnverifiedPeer(t *testing.T) {
+	// Managed_enterprise peer verification is Windows-only: it uses the
+	// Windows SCM to resolve "what PID owns this exact registered service
+	// name" and refuses the connection when the owning PID does not match
+	// the SCM-registered DefenseClawGateway. macOS and Linux have no
+	// equivalent primitive on TCP loopback (LOCAL_PEERCRED is UDS-only),
+	// so the non-Windows managedEnterpriseHTTPClient sibling returns a
+	// plain loopback client — the invariants come from a different
+	// mechanism (launchd/systemd bind + trust check on the gateway
+	// binary path). That was the T1.1 code-review fix in 8d6c59f6;
+	// without it every Codex/Claude managed_enterprise hook call was
+	// failing closed on macOS with enterprise_managed_gateway_peer_unverified.
+	//
+	// This test's assertion — that the fake httptest peer is refused —
+	// only holds on Windows. Skip elsewhere; the actual verification
+	// path is exercised by managed_transport_windows_test.go.
+	if runtime.GOOS != "windows" {
+		t.Skip("managed_enterprise peer verification is Windows-only (SCM-based); see managed_transport_windows_test.go")
+	}
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	stderr := &bytes.Buffer{}
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	requests := make(chan *http.Request, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		requests <- req
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:                   strings.TrimPrefix(server.URL, "http://"),
+		Home:                      home,
+		HookDir:                   hookDir,
+		Token:                     "managed-notify-token",
+		ManagedEnterprise:         true,
+		ManagedGatewayServiceName: "DefenseClawGateway",
+		Stderr:                    stderr,
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	select {
+	case req := <-requests:
+		t.Fatalf("managed notify reached unverified peer with authorization %q", req.Header.Get("Authorization"))
+	default:
+	}
+	if got := strings.TrimSpace(stderr.String()); got != managedGatewayPeerUnverifiedReason {
+		t.Fatalf("managed notify error = %q, want %q", got, managedGatewayPeerUnverifiedReason)
+	}
+}
+
+func TestCodexNotifyGuardBranchesDoNotSendRequests(t *testing.T) {
+	validHome := t.TempDir()
+	disabledHome := t.TempDir()
+	if err := os.WriteFile(filepath.Join(disabledHome, ".disabled"), nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	emptyHookDir := t.TempDir()
+
+	tests := []struct {
+		name    string
+		home    string
+		hookDir string
+		token   string
+		maxBody int64
+		payload []byte
+	}{
+		{
+			name: "missing home", home: filepath.Join(t.TempDir(), "missing"),
+			hookDir: emptyHookDir, token: "token", payload: []byte(`{}`),
+		},
+		{
+			name: "disabled", home: disabledHome,
+			hookDir: emptyHookDir, token: "token", payload: []byte(`{}`),
+		},
+		{
+			name: "empty payload", home: validHome,
+			hookDir: emptyHookDir, token: "token", payload: nil,
+		},
+		{
+			name: "oversized payload", home: validHome,
+			hookDir: emptyHookDir, token: "token", maxBody: 1, payload: []byte(`{}`),
+		},
+		{
+			name: "missing token", home: validHome,
+			hookDir: emptyHookDir, payload: []byte(`{}`),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rt := ok(`{"status":"ok"}`)
+			code := RunCodexNotify(context.Background(), Options{
+				APIAddr:    "127.0.0.1:8787",
+				Home:       tt.home,
+				HookDir:    tt.hookDir,
+				Token:      tt.token,
+				MaxBody:    tt.maxBody,
+				HTTPClient: &http.Client{Transport: rt},
+			}, tt.payload)
+			if code != 0 {
+				t.Fatalf("exit code = %d, want 0", code)
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+		})
+	}
+}
+
+func TestCodexNotifyPrefersScopedTokenSidecar(t *testing.T) {
+	home := t.TempDir()
+	hookDir := filepath.Join(home, "hooks")
+	if err := os.MkdirAll(hookDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".token"),
+		[]byte("DEFENSECLAW_GATEWAY_TOKEN=\"generic-token\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(hookDir, ".hook-codex.token"),
+		[]byte("scoped-token\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	rt := ok(`{"status":"ok"}`)
+	code := RunCodexNotify(context.Background(), Options{
+		APIAddr:    "127.0.0.1:8787",
+		Home:       home,
+		HookDir:    hookDir,
+		Token:      "environment-token",
+		HTTPClient: &http.Client{Transport: rt},
+	}, []byte(`{"type":"agent-turn-complete"}`))
+	if code != 0 {
+		t.Fatalf("exit code = %d, want best-effort 0", code)
+	}
+	if rt.gotReq == nil {
+		t.Fatal("no request captured")
+	}
+	if got := rt.gotReq.Header.Get("Authorization"); got != "Bearer scoped-token" {
+		t.Errorf("authorization = %q, want scoped token", got)
+	}
+}
+
 func TestEnvTokenTakesPrecedence(t *testing.T) {
 	rt := ok(`{"action":"allow"}`)
 	run(t, "codex", rt, func(o *Options) { o.Token = "env-wins" })
@@ -517,24 +1784,185 @@ func TestInvalidTraceparentDropped(t *testing.T) {
 
 // --- DEFENSECLAW_HOME guard ---
 
-func TestDisabledHomeIsNoop(t *testing.T) {
-	rt := ok(`{"action":"block","reason":"x"}`)
-	home := t.TempDir()
-	if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
-		t.Fatal(err)
+func TestNonCursorDisabledOrMissingHomeIsNoop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			rt := ok(`{"action":"block","reason":"x"}`)
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
+				HookDir: filepath.Join(home, "hooks"), Token: "t",
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+				HTTPClient: &http.Client{Transport: rt},
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if rt.requests != 0 {
+				t.Fatalf("gateway called %d times, want 0", rt.requests)
+			}
+			if out.String() != "" {
+				t.Fatalf("stdout = %q, want empty for non-Cursor no-op", out.String())
+			}
+		})
 	}
+}
+
+func TestStrictAvailabilityBlocksDisabledOrMissingHome(t *testing.T) {
+	tests := []struct {
+		name string
+		home func(*testing.T) string
+	}{
+		{name: "missing", home: func(t *testing.T) string { return filepath.Join(t.TempDir(), "missing") }},
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var stdout, stderr bytes.Buffer
+			code := Run(context.Background(), Options{
+				Connector:          "claudecode",
+				Home:               tt.home(t),
+				StrictAvailability: true,
+				Stdout:             &stdout,
+				Stderr:             &stderr,
+			})
+			if code != blockExit || !strings.Contains(stderr.String(), "availability") {
+				t.Fatalf("strict unavailable home = (code=%d, stdout=%q, stderr=%q)", code, stdout.String(), stderr.String())
+			}
+		})
+	}
+}
+
+func TestManagedEnterpriseMissingOrDisabledHomeFailsClosed(t *testing.T) {
+	for _, connectorName := range []string{"claudecode", "codex"} {
+		for _, tc := range []struct {
+			name       string
+			home       func(t *testing.T) string
+			diagnostic string
+		}{
+			{name: "disabled", home: func(t *testing.T) string {
+				home := t.TempDir()
+				if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+					t.Fatal(err)
+				}
+				return home
+			}, diagnostic: "enterprise_managed_runtime_disable_sentinel_forbidden"},
+			{name: "missing", home: func(t *testing.T) string {
+				return filepath.Join(t.TempDir(), "missing")
+			}, diagnostic: "enterprise_managed_runtime_home_missing"},
+		} {
+			t.Run(connectorName+"/"+tc.name, func(t *testing.T) {
+				rt := ok(`{"action":"allow"}`)
+				var out, errb bytes.Buffer
+				home := tc.home(t)
+				code := Run(context.Background(), Options{
+					Connector:          connectorName,
+					APIAddr:            "127.0.0.1:1",
+					Home:               home,
+					HookDir:            filepath.Join(home, "hooks"),
+					Token:              "target-readable-token",
+					FailMode:           "open",
+					ManagedEnterprise:  true,
+					StrictAvailability: false,
+					Stdin:              strings.NewReader("{}"),
+					Stdout:             &out,
+					Stderr:             &errb,
+					HTTPClient:         &http.Client{Transport: rt},
+				})
+				if code != blockExit {
+					t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
+				}
+				if rt.requests != 0 {
+					t.Fatalf("gateway called %d times, want 0", rt.requests)
+				}
+				if !strings.Contains(errb.String(), tc.diagnostic) {
+					t.Fatalf("stderr = %q, want stable diagnostic %q", errb.String(), tc.diagnostic)
+				}
+			})
+		}
+	}
+}
+
+func TestManagedEnterpriseResolverFailureBlocksBeforeRuntimeOrGateway(t *testing.T) {
+	rt := ok(`{"action":"allow"}`)
 	var out, errb bytes.Buffer
+	home := t.TempDir()
 	code := Run(context.Background(), Options{
-		Connector: "claudecode", APIAddr: "127.0.0.1:1", Home: home,
-		HookDir: filepath.Join(home, "hooks"), Token: "t",
-		Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
-		HTTPClient: &http.Client{Transport: rt},
+		Connector:             "codex",
+		APIAddr:               "127.0.0.1:1",
+		Home:                  home,
+		HookDir:               filepath.Join(home, "hooks"),
+		Token:                 "target-readable-token",
+		FailMode:              "open",
+		ManagedEnterprise:     true,
+		ManagedRuntimeFailure: "enterprise_managed_sid_unregistered",
+		Stdin:                 strings.NewReader("{}"),
+		Stdout:                &out,
+		Stderr:                &errb,
+		HTTPClient:            &http.Client{Transport: rt},
 	})
-	if code != 0 {
-		t.Fatalf("code = %d, want 0 when .disabled present", code)
+	if code != blockExit {
+		t.Fatalf("code = %d, want fail-closed %d; stdout=%q stderr=%q", code, blockExit, out.String(), errb.String())
 	}
 	if rt.requests != 0 {
-		t.Fatalf("gateway called %d times despite .disabled", rt.requests)
+		t.Fatalf("gateway called %d times, want 0", rt.requests)
+	}
+	if !strings.Contains(errb.String(), "enterprise_managed_sid_unregistered") {
+		t.Fatalf("stderr = %q, want stable unregistered-SID diagnostic", errb.String())
+	}
+}
+
+func TestCursorDisabledOrMissingHomeEmitsAllowJSON(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		home func(t *testing.T) string
+	}{
+		{name: "disabled", home: func(t *testing.T) string {
+			home := t.TempDir()
+			if err := os.WriteFile(filepath.Join(home, ".disabled"), nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			return home
+		}},
+		{name: "missing", home: func(t *testing.T) string {
+			return filepath.Join(t.TempDir(), "missing")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out, errb bytes.Buffer
+			home := tc.home(t)
+			code := Run(context.Background(), Options{
+				Connector: "cursor", Home: home, HookDir: filepath.Join(home, "hooks"),
+				Stdin: strings.NewReader("{}"), Stdout: &out, Stderr: &errb,
+			})
+			if code != 0 {
+				t.Fatalf("code = %d, want 0", code)
+			}
+			if out.String() != cursorFallbackOutput("", false, "")+"\n" {
+				t.Fatalf("stdout = %q, want Cursor allow JSON", out.String())
+			}
+		})
 	}
 }
 
@@ -567,9 +1995,35 @@ func TestReadTokenFile(t *testing.T) {
 	}
 }
 
+func TestReadTokenFileManagedRejectsOversizedSparseFileWithoutChangingUnmanagedMode(t *testing.T) {
+	path := filepath.Join(t.TempDir(), ".hook-codex.token")
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY, 0o600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(managedHookTokenMaxBytes + 1); err != nil {
+		_ = file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := readTokenFileForMode(path, true, true); got != "" {
+		t.Fatalf("managed oversized token returned %d bytes, want fail-closed empty token", len(got))
+	}
+	if got := readTokenFile(path, true); int64(len(got)) != managedHookTokenMaxBytes+1 {
+		t.Fatalf(
+			"unmanaged token behavior changed: length=%d want=%d",
+			len(got),
+			managedHookTokenMaxBytes+1,
+		)
+	}
+}
+
 func TestSupportedConnectorsSorted(t *testing.T) {
 	got := SupportedConnectors()
-	want := []string{"antigravity", "claudecode", "codex", "copilot", "cursor", "geminicli", "hermes", "openhands", "windsurf"}
+	want := []string{"amp", "antigravity", "claudecode", "codex", "copilot", "cursor", "devin", "geminicli", "hermes", "openhands"}
 	if len(got) != len(want) {
 		t.Fatalf("got %v, want %v", got, want)
 	}
@@ -577,6 +2031,357 @@ func TestSupportedConnectorsSorted(t *testing.T) {
 		if got[i] != want[i] {
 			t.Fatalf("got %v, want %v", got, want)
 		}
+	}
+}
+
+func TestClaudeCodeRequestTimeoutUsesPayloadEventBudget(t *testing.T) {
+	for _, tc := range []struct {
+		event string
+		want  time.Duration
+	}{
+		{event: "MessageDisplay", want: 9 * time.Second},
+		{event: "PreToolUse", want: 29 * time.Second},
+		{event: "SessionEnd", want: 59 * time.Second},
+		{event: "PostToolBatch", want: 89 * time.Second},
+		{event: "Stop", want: 89 * time.Second},
+		{event: "SubagentStop", want: 89 * time.Second},
+	} {
+		t.Run(tc.event, func(t *testing.T) {
+			payload := []byte(fmt.Sprintf(`{"hook_event_name":%q}`, tc.event))
+			event := resolveHookEvent("", payload)
+			if event != tc.event {
+				t.Fatalf("resolved event=%q, want %q", event, tc.event)
+			}
+			if got := hookRequestTimeout("claudecode", event); got != tc.want {
+				t.Fatalf("request timeout=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResolveHookEventPrefersExplicitFlagAndRejectsMalformedPayload(t *testing.T) {
+	if got := resolveHookEvent("PreToolUse", []byte(`{"hook_event_name":"Stop"}`)); got != "PreToolUse" {
+		t.Fatalf("explicit event was not preserved: %q", got)
+	}
+	if got := resolveHookEvent("", []byte(`{"hook_event_name":`)); got != "" {
+		t.Fatalf("malformed payload event=%q, want empty", got)
+	}
+	if got := resolveHookEvent("", []byte(`{"event":"pre_tool_call"}`)); got != "pre_tool_call" {
+		t.Fatalf("Hermes payload event=%q, want pre_tool_call", got)
+	}
+	if got := resolveHookEvent("", []byte(`{"hook_event_name":"Stop","event":"pre_tool_call"}`)); got != "" {
+		t.Fatalf("contradictory payload event=%q, want empty", got)
+	}
+	if got := hookRequestTimeout("claudecode", ""); got != 9*time.Second {
+		t.Fatalf("missing Claude event timeout=%s, want shortest safe budget 9s", got)
+	}
+	if got := hookRequestTimeout("claudecode", "FutureEvent"); got != 29*time.Second {
+		t.Fatalf("future Claude event timeout=%s, want ordinary budget 29s", got)
+	}
+	if got := hookRequestTimeout("codex", "Stop"); got != 10*time.Second {
+		t.Fatalf("non-Claude timeout=%s, want 10s", got)
+	}
+	if got := hookRequestTimeout("codex", "SessionEnd"); got != 2*time.Second {
+		t.Fatalf("Codex SessionEnd timeout=%s, want 2s", got)
+	}
+}
+
+func TestCodexSessionEndDeadlineAppliesToInjectedTransport(t *testing.T) {
+	var remaining time.Duration
+	rt := &stubRT{onRequest: func(_ *stubRT, req *http.Request) (*http.Response, error) {
+		deadline, ok := req.Context().Deadline()
+		if !ok {
+			return nil, errors.New("request context has no deadline")
+		}
+		remaining = time.Until(deadline)
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(strings.NewReader(`{"action":"allow"}`)),
+			Header:     make(http.Header),
+		}, nil
+	}}
+	result := run(t, "codex", rt, func(opts *Options) {
+		opts.Event = "SessionEnd"
+	})
+	if result.code != 0 {
+		t.Fatalf("SessionEnd code=%d stderr=%q", result.code, result.stderr)
+	}
+	if remaining <= 0 || remaining > 2*time.Second {
+		t.Fatalf("SessionEnd request deadline remaining=%s, want within 2s budget", remaining)
+	}
+}
+
+func TestCodexSessionEndDeadlineCancelsBlockingTransport(t *testing.T) {
+	cancelled := false
+	rt := &stubRT{onRequest: func(_ *stubRT, req *http.Request) (*http.Response, error) {
+		<-req.Context().Done()
+		cancelled = true
+		return nil, req.Context().Err()
+	}}
+	started := time.Now()
+	result := run(t, "codex", rt, func(opts *Options) {
+		opts.Event = "SessionEnd"
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
+	})
+	elapsed := time.Since(started)
+	if !cancelled {
+		t.Fatal("SessionEnd blocking transport was not cancelled")
+	}
+	if elapsed < time.Second || elapsed > 3*time.Second {
+		t.Fatalf("SessionEnd cancellation elapsed=%s, want internal cancellation before 3s host maximum", elapsed)
+	}
+	if result.code != 0 || result.stdout != "" {
+		t.Fatalf("SessionEnd cancellation synthesized control: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestCodexFailClosedUsesEventSpecificControlSchema(t *testing.T) {
+	tests := []struct {
+		event      string
+		wantStdout string
+	}{
+		{
+			event:      "SessionStart",
+			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+		},
+		{
+			event:      "PreCompact",
+			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+		},
+		{
+			event:      "PostCompact",
+			wantStdout: `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n",
+		},
+		{
+			event:      "SubagentStop",
+			wantStdout: `{"decision":"block","reason":"DefenseClaw hook failed closed"}` + "\n",
+		},
+		{
+			event:      "SessionEnd",
+			wantStdout: "",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.event, func(t *testing.T) {
+			result := run(t, "codex", &stubRT{err: context.DeadlineExceeded}, func(opts *Options) {
+				opts.Event = test.event
+				opts.HookContractID = "codex-hooks-v4"
+				opts.FailMode = "closed"
+				opts.StrictAvailability = true
+			})
+			if result.code != 0 {
+				t.Fatalf("%s code=%d stderr=%q", test.event, result.code, result.stderr)
+			}
+			if result.stdout != test.wantStdout {
+				t.Fatalf("%s stdout=%q want %q", test.event, result.stdout, test.wantStdout)
+			}
+		})
+	}
+}
+
+func TestCodexV3GenericFailClosedUsesLifecycleControl(t *testing.T) {
+	result := run(t, "codex", &stubRT{err: context.DeadlineExceeded}, func(opts *Options) {
+		opts.Event = "SessionStart"
+		opts.HookContractID = "codex-hooks-v3-generic"
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
+	})
+	wantStdout := `{"continue":false,"stopReason":"DefenseClaw hook failed closed"}` + "\n"
+	if result.code != 0 || result.stdout != wantStdout {
+		t.Fatalf("code=%d stdout=%q want %q stderr=%q", result.code, result.stdout, wantStdout, result.stderr)
+	}
+}
+
+func TestCodexLegacyAndInvalidContractsDoNotBackfillLifecycleControls(t *testing.T) {
+	tests := []struct {
+		name       string
+		event      string
+		contractID string
+	}{
+		{name: "v1 SessionStart", event: "SessionStart", contractID: "codex-hooks-v1"},
+		{name: "v2 PreCompact", event: "PreCompact", contractID: "codex-hooks-v2"},
+		{name: "v2 PostCompact", event: "PostCompact", contractID: "codex-hooks-v2"},
+		{name: "missing contract", event: "SubagentStop"},
+		{name: "invalid contract", event: "SubagentStop", contractID: "codex-hooks-v999"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			result := run(t, "codex", &stubRT{err: context.DeadlineExceeded}, func(opts *Options) {
+				opts.Event = test.event
+				opts.HookContractID = test.contractID
+				opts.FailMode = "closed"
+				opts.StrictAvailability = true
+			})
+			if result.code != blockExit || result.stdout != "" {
+				t.Fatalf(
+					"legacy/invalid lifecycle fallback synthesized control: code=%d stdout=%q stderr=%q",
+					result.code,
+					result.stdout,
+					result.stderr,
+				)
+			}
+		})
+	}
+}
+
+func TestCodexGatewayControlIsDiscardedOutsideBoundContract(t *testing.T) {
+	for _, contractID := range []string{"codex-hooks-v1", "codex-hooks-v2", "", "codex-hooks-v999"} {
+		t.Run(contractID, func(t *testing.T) {
+			result := run(t, "codex", ok(`{
+				"action":"block",
+				"reason":"must not backfill",
+				"codex_output":{"continue":false,"stopReason":"must not backfill"}
+			}`), func(opts *Options) {
+				opts.Event = "PreCompact"
+				opts.HookContractID = contractID
+			})
+			if result.code != 0 || result.stdout != "" {
+				t.Fatalf("unsupported gateway control leaked: code=%d stdout=%q", result.code, result.stdout)
+			}
+		})
+	}
+}
+
+func TestCodexSessionEndDiscardsGatewayControlOutput(t *testing.T) {
+	result := run(t, "codex", ok(`{
+		"action":"block",
+		"reason":"must not steer teardown",
+		"codex_output":{"decision":"block","reason":"must not steer teardown"}
+	}`), func(opts *Options) {
+		opts.Event = "SessionEnd"
+		opts.FailMode = "closed"
+		opts.StrictAvailability = true
+	})
+	if result.code != 0 || result.stdout != "" {
+		t.Fatalf("SessionEnd synthesized control: code=%d stdout=%q stderr=%q", result.code, result.stdout, result.stderr)
+	}
+}
+
+func TestCodexInvocationBindingMatrix(t *testing.T) {
+	contracts := map[string][]string{
+		"codex-hooks-v1": {
+			"SessionStart", "UserPromptSubmit", "PreToolUse",
+			"PermissionRequest", "PostToolUse", "Stop",
+		},
+		"codex-hooks-v2": {
+			"SessionStart", "UserPromptSubmit", "PreToolUse",
+			"PermissionRequest", "PostToolUse", "PreCompact",
+			"PostCompact", "Stop",
+		},
+		"codex-hooks-v3": {
+			"SessionStart", "UserPromptSubmit", "PreToolUse",
+			"PermissionRequest", "PostToolUse", "SubagentStart",
+			"SubagentStop", "PreCompact", "PostCompact", "Stop",
+		},
+		"codex-hooks-v3-generic": {
+			"SessionStart", "UserPromptSubmit", "PreToolUse",
+			"PermissionRequest", "PostToolUse", "SubagentStart",
+			"SubagentStop", "PreCompact", "PostCompact", "Stop",
+		},
+		"codex-hooks-v4": {
+			"SessionStart", "UserPromptSubmit", "PreToolUse",
+			"PermissionRequest", "PostToolUse", "SubagentStart",
+			"SubagentStop", "PreCompact", "PostCompact", "Stop",
+			"SessionEnd",
+		},
+	}
+	for contractID, events := range contracts {
+		for _, event := range events {
+			for _, failMode := range []string{"open", "closed"} {
+				name := contractID + "/" + event + "/" + failMode
+				t.Run(name, func(t *testing.T) {
+					result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+						opts.Event = event
+						opts.HookContractID = contractID
+						opts.FailMode = failMode
+					})
+					if result.code != 0 || result.rt.requests != 1 {
+						t.Fatalf(
+							"valid binding code=%d requests=%d stderr=%q",
+							result.code,
+							result.rt.requests,
+							result.stderr,
+						)
+					}
+					if got := result.rt.gotReq.Header.Get(codexBoundEventHeader); got != event {
+						t.Fatalf("bound event header=%q want %q", got, event)
+					}
+					if got := result.rt.gotReq.Header.Get(codexBoundContractHeader); got != contractID {
+						t.Fatalf("bound contract header=%q want %q", got, contractID)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodexRejectsStdinEventMismatchBeforeGateway(t *testing.T) {
+	contracts := map[string][]string{
+		"codex-hooks-v1": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "Stop"},
+		"codex-hooks-v2": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "PreCompact", "PostCompact", "Stop"},
+		"codex-hooks-v3": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Stop"},
+		"codex-hooks-v4": {"SessionStart", "UserPromptSubmit", "PreToolUse", "PermissionRequest", "PostToolUse", "SubagentStart", "SubagentStop", "PreCompact", "PostCompact", "Stop", "SessionEnd"},
+	}
+	for contractID, events := range contracts {
+		for _, event := range events {
+			for _, failMode := range []string{"open", "closed"} {
+				name := contractID + "/" + event + "/" + failMode
+				t.Run(name, func(t *testing.T) {
+					stdinEvent := "SessionEnd"
+					if event == stdinEvent {
+						stdinEvent = "PreToolUse"
+					}
+					result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+						opts.Event = event
+						opts.HookContractID = contractID
+						opts.FailMode = failMode
+						opts.Stdin = strings.NewReader(fmt.Sprintf(
+							`{"hook_event_name":%q}`,
+							stdinEvent,
+						))
+					})
+					if result.rt.requests != 0 {
+						t.Fatalf("mismatched invocation contacted gateway %d time(s)", result.rt.requests)
+					}
+					if !strings.Contains(result.stderr, "does not match installer-bound event") {
+						t.Fatalf("mismatch stderr=%q", result.stderr)
+					}
+				})
+			}
+		}
+	}
+}
+
+func TestCodexRejectsImpossibleContractEventBeforeGateway(t *testing.T) {
+	tests := []struct {
+		contractID string
+		event      string
+	}{
+		{"", "PreToolUse"},
+		{"codex-hooks-v999", "PreToolUse"},
+		{"codex-hooks-v1", "PreCompact"},
+		{"codex-hooks-v2", "SubagentStop"},
+		{"codex-hooks-v3", "SessionEnd"},
+		{"codex-hooks-v3-generic", "SessionEnd"},
+	}
+	for _, test := range tests {
+		t.Run(test.contractID+"/"+test.event, func(t *testing.T) {
+			result := run(t, "codex", ok(`{"action":"allow"}`), func(opts *Options) {
+				opts.Event = test.event
+				opts.HookContractID = test.contractID
+			})
+			if result.rt.requests != 0 {
+				t.Fatalf("impossible binding contacted gateway %d time(s)", result.rt.requests)
+			}
+		})
+	}
+}
+
+func TestDefaultHTTPClientUsesSuppliedTotalTimeout(t *testing.T) {
+	client := defaultHTTPClient(89 * time.Second)
+	if client.Timeout != 89*time.Second {
+		t.Fatalf("client timeout=%s, want 89s", client.Timeout)
 	}
 }
 
@@ -600,7 +2405,7 @@ func TestDefaultHTTPClientDoesNotFollowRedirects(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	resp, err := defaultHTTPClient().Get(redirector.URL)
+	resp, err := defaultHTTPClient(10 * time.Second).Get(redirector.URL)
 	if err != nil {
 		t.Fatalf("Get returned error (redirect should not be followed, not error): %v", err)
 	}

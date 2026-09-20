@@ -13,16 +13,13 @@ import (
 )
 
 func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
-	store, err := audit.NewStore(filepath.Join(t.TempDir(), "judge.db"))
+	store, err := audit.NewJudgeBodyStore(filepath.Join(t.TempDir(), "judge_bodies.db"))
 	if err != nil {
-		t.Fatalf("NewStore: %v", err)
+		t.Fatalf("NewJudgeBodyStore: %v", err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if err := store.Init(); err != nil {
-		t.Fatalf("Init: %v", err)
-	}
 
-	js := NewJudgeStoreFromAudit(store)
+	js := NewJudgeStoreFromBodyStore(store, nil, 0)
 	t.Cleanup(func() { _ = js.Shutdown(t.Context()) })
 	ctx := ContextWithRequestID(
 		ContextWithSessionID(
@@ -57,6 +54,7 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 		// row's InputHash genuinely identifies the input.
 		InputHash: "sha256:e9f4a4f5c0b8e0a2cb8a4f3a76b8e0a2cb8a4f3a76b8e0a2cb8a4f3a76b8e0a2",
 	}
+	wantInputHash := p.InputHash
 	if err := js.PersistJudgeEvent(ctx, gatewaylog.DirectionPrompt, p, "my_tool", "tid-1", "pol-1", "app:x"); err != nil {
 		t.Fatalf("PersistJudgeEvent: %v", err)
 	}
@@ -93,7 +91,7 @@ func TestJudgeStore_PersistJudgeEventV7Columns(t *testing.T) {
 	if r.PolicyID != "pol-1" || r.DestinationApp != "app:x" || r.ToolName != "my_tool" || r.ToolID != "tid-1" {
 		t.Fatalf("tool/policy: %+v", r)
 	}
-	if r.InputHash == "" || r.Raw == "" {
+	if r.InputHash != wantInputHash || r.Raw == "" {
 		t.Fatalf("expected raw+input_hash: %+v", r)
 	}
 }

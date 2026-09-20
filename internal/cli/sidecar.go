@@ -26,11 +26,22 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"github.com/defenseclaw/defenseclaw/internal/config"
+	"github.com/defenseclaw/defenseclaw/internal/enterprisehooks/guardianstate"
 	"github.com/defenseclaw/defenseclaw/internal/gateway"
 	"github.com/defenseclaw/defenseclaw/internal/ipc"
+	"github.com/defenseclaw/defenseclaw/internal/managed"
 	"github.com/defenseclaw/defenseclaw/internal/sandbox"
 	"github.com/defenseclaw/defenseclaw/internal/version"
 )
+
+// configurationPollInterval is how often the sidecar re-reads the
+// guardian's out-of-band state file. Spec 003 tolerates a lag up to
+// one interval between a guardian-side transition and the health
+// surface reflecting it; 5s is short enough for a Secure Client UI to
+// update in near-real-time without burning IO on non-managed
+// deployments (the poller is only started under managed_enterprise).
+const configurationPollInterval = 5 * time.Second
 
 var (
 	sidecarToken string
@@ -52,24 +63,19 @@ func init() {
 	rootCmd.Flags().IntVar(&sidecarPort, "port", 0, "Gateway port (default: from config)")
 }
 
-func runSidecar(_ *cobra.Command, _ []string) error {
+func runSidecar(cmd *cobra.Command, _ []string) error {
 	if sidecarToken != "" {
 		fmt.Fprintln(os.Stderr,
 			"[sidecar] WARNING: --token is deprecated and will be removed in a future release. "+
 				"Secrets on argv are visible to any local user via ps(1) / /proc/<pid>/cmdline. "+
 				"Set DEFENSECLAW_GATEWAY_TOKEN (or gateway.token in config) instead.")
-		cfg.Gateway.Token = sidecarToken
 	}
+	materializeSidecarGatewayToken(&cfg.Gateway, sidecarToken)
 	if sidecarHost != "" {
 		cfg.Gateway.Host = sidecarHost
 	}
 	if sidecarPort > 0 {
 		cfg.Gateway.Port = sidecarPort
-	}
-
-	// Resolve token from env var if not set directly (via flag or config).
-	if cfg.Gateway.Token == "" {
-		cfg.Gateway.Token = cfg.Gateway.ResolvedToken()
 	}
 
 	shell := sandbox.NewWithFallback(cfg.OpenShell.Binary, cfg.OpenShell.PolicyDir, cfg.PolicyDir)
@@ -101,9 +107,30 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 	}
 	fmt.Println()
 
-	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell, otelProvider)
+	sc, err := gateway.NewSidecar(cfg, auditStore, auditLog, shell)
 	if err != nil {
 		return fmt.Errorf("sidecar: init: %w", err)
+	}
+
+	// Spec 003 (docs/specs/003-windows-deferred-config/) health-surface
+	// wiring. Only under managed_enterprise: mark the daemon-side of
+	// the collapsing rule loaded (we reached this point AFTER
+	// loadGatewayConfigV8 succeeded — either directly or via the wait
+	// loop in rootPersistentPreRunE), wire the sidecar's guardian
+	// state reader against the well-known .state file path, and start
+	// a periodic RefreshConfiguration ticker so a guardian-side
+	// transition surfaces without a daemon-side event.
+	//
+	// Non-managed-enterprise deployments (OSS / SaaS / DP / CP) never
+	// call SetDaemonConfigLoaded, so their health snapshot omits the
+	// top-level "configuration" block entirely — byte-for-byte
+	// backward compatible with today.
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		sc.Health().SetDaemonConfigLoaded(true)
+		statePath := guardianstate.PathForDataDir(cfg.DataDir)
+		sc.Health().SetGuardianStateReader(func() string {
+			return guardianstate.ReadState(statePath)
+		})
 	}
 
 	// Local UDS gRPC server for external consumers. Only constructed
@@ -130,8 +157,21 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 		}
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
+	// Use Cobra's caller-owned context so a native Windows SCM stop can
+	// request the same graceful shutdown path as SIGTERM. Interactive and
+	// ordinary daemon invocations still receive a background parent context.
+	parentCtx := cmd.Context()
+	if parentCtx == nil {
+		parentCtx = context.Background()
+	}
+	ctx, cancel := context.WithCancel(parentCtx)
 	defer cancel()
+	if err := bootstrapConfiguredObservabilityRuntime(ctx, cfg, activeObservabilityV8Startup, sc); err != nil {
+		return err
+	}
+	if err := sc.EmitPostBootstrapPlatformHealth(); err != nil {
+		return fmt.Errorf("sidecar: post-bootstrap platform health: %w", err)
+	}
 
 	// Always capture the common shutdown signals so we can cancel ctx
 	// cleanly. Previously this function also installed wide signal
@@ -170,6 +210,27 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			return
 		}
 	}()
+
+	// Spec 003 periodic guardian-state poller. Only under
+	// managed_enterprise (SetDaemonConfigLoaded was called only in
+	// that branch above; RefreshConfiguration is a cheap no-op when
+	// SidecarHealth's configuration pointer is still nil, so this
+	// goroutine is safe to always start but we gate it anyway to
+	// keep the goroutine off entirely under non-managed deployments).
+	if managed.IsManagedEnterprise(cfg.DeploymentMode) {
+		go func() {
+			tick := time.NewTicker(configurationPollInterval)
+			defer tick.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-tick.C:
+					sc.Health().RefreshConfiguration()
+				}
+			}
+		}()
+	}
 
 	if diag {
 		// Heartbeat ticker + return diagnostics are only emitted when
@@ -212,6 +273,52 @@ func runSidecar(_ *cobra.Command, _ []string) error {
 			os.Getpid())
 	}
 	return runErr
+}
+
+func materializeSidecarGatewayToken(gatewayConfig *config.GatewayConfig, explicit string) {
+	if explicit != "" {
+		gatewayConfig.Token = explicit
+		return
+	}
+	// Materialize the documented custom env -> canonical env -> legacy env ->
+	// inline-config ladder before the API server captures its authentication
+	// token. Daemon readiness uses the same ResolvedToken contract; resolving
+	// only when Token was empty let a stale inline token disagree with a newer
+	// environment token and made a healthy sidecar answer its parent with 401.
+	gatewayConfig.Token = gatewayConfig.ResolvedToken()
+}
+
+type observabilityRuntimeBootstrapper interface {
+	BootstrapObservabilityRuntime(context.Context, string, []byte) (bool, error)
+}
+
+// bootstrapConfiguredObservabilityRuntime is the single CLI activation gate
+// between Sidecar construction and serving. A Config without the validated v8
+// source snapshot is rejected, as is a bootstrap that reports a no-op: the target
+// runtime must never fall through to legacy exporters or serve partially bound.
+func bootstrapConfiguredObservabilityRuntime(
+	ctx context.Context,
+	c *config.Config,
+	startup *observabilityV8Startup,
+	bootstrapper observabilityRuntimeBootstrapper,
+) error {
+	if c == nil {
+		return fmt.Errorf("sidecar: observability bootstrap: config is unavailable")
+	}
+	if c.ConfigVersion != 8 {
+		return fmt.Errorf("sidecar: observability bootstrap requires schema v8; run 'defenseclaw upgrade' first")
+	}
+	if ctx == nil || startup == nil || strings.TrimSpace(startup.sourceName) == "" || len(startup.raw) == 0 || bootstrapper == nil {
+		return fmt.Errorf("sidecar: observability v8 bootstrap state is incomplete")
+	}
+	bound, err := bootstrapper.BootstrapObservabilityRuntime(ctx, startup.sourceName, startup.raw)
+	if err != nil {
+		return fmt.Errorf("sidecar: observability v8 bootstrap: %w", err)
+	}
+	if !bound {
+		return fmt.Errorf("sidecar: observability v8 bootstrap did not bind a runtime")
+	}
+	return nil
 }
 
 // sidecarDiagEnabled reports whether DEFENSECLAW_SIDECAR_DIAG is set to a

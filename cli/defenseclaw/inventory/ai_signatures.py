@@ -101,6 +101,15 @@ class AISignature:
     config_paths: tuple[str, ...] = ()
     extension_ids: tuple[str, ...] = ()
     mcp_paths: tuple[str, ...] = ()
+    # SkillPaths / RulePaths / PluginPaths are directory globs whose
+    # per-user existence + non-emptiness produce SignalSkill / SignalRule /
+    # SignalPlugin signals. Semantics mirror mcp_paths (path-based
+    # detection, no content scan). Kept in sync with the Go dataclass
+    # in internal/inventory/ai_catalog.go — the packaged JSON on both
+    # sides is byte-identical per test_packaged_catalog_matches_go_catalog.
+    skill_paths: tuple[str, ...] = ()
+    rule_paths: tuple[str, ...] = ()
+    plugin_paths: tuple[str, ...] = ()
     package_names: tuple[str, ...] = ()
     env_var_names: tuple[str, ...] = ()
     domain_patterns: tuple[str, ...] = ()
@@ -266,6 +275,9 @@ def _signature_from_raw(raw: Any, *, source: str) -> AISignature:
         config_paths=_tuple(raw.get("config_paths", [])),
         extension_ids=_tuple(raw.get("extension_ids", [])),
         mcp_paths=_tuple(raw.get("mcp_paths", [])),
+        skill_paths=_tuple(raw.get("skill_paths", [])),
+        rule_paths=_tuple(raw.get("rule_paths", [])),
+        plugin_paths=_tuple(raw.get("plugin_paths", [])),
         package_names=_tuple(raw.get("package_names", [])),
         env_var_names=_tuple(raw.get("env_var_names", [])),
         domain_patterns=_tuple(raw.get("domain_patterns", [])),
@@ -323,6 +335,9 @@ def _validate_signature(sig: AISignature) -> None:
         "config_paths",
         "extension_ids",
         "mcp_paths",
+        "skill_paths",
+        "rule_paths",
+        "plugin_paths",
         "package_names",
         "env_var_names",
         "domain_patterns",
