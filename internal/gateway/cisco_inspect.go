@@ -384,12 +384,8 @@ func NewCiscoInspectClient(cfg *config.CiscoAIDefenseConfig, dotenvPath string) 
 	}
 
 	var rules []map[string]string
-	if len(cfg.EnabledRules) > 0 {
-		for _, r := range cfg.EnabledRules {
-			rules = append(rules, map[string]string{"rule_name": r})
-		}
-	} else {
-		rules = defaultEnabledRules
+	for _, r := range cfg.EnabledRules {
+		rules = append(rules, map[string]string{"rule_name": r})
 	}
 
 	return &CiscoInspectClient{
