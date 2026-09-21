@@ -160,3 +160,31 @@ scope.
 
 The report explains the datasets, labeling contract, metrics, profile behavior,
 detector changes, limitations, and complete replication procedure.
+
+## System One architecture benchmark
+
+The opt-in System One lane compares deterministic guardrails, Jev, OpenJev,
+Von, and the production-path Gemma judge without changing runtime policy. It
+uses a governed `1,000 -> 10,000 -> 100,000` funnel: broad development
+screening, family-disjoint validation and culling, then a frozen final scale
+run. Exact-proof, contextual-trajectory, benign-only, protected three-way, and
+diagnostic truth remain separate scoring lenses.
+
+Run the non-network tests with:
+
+```bash
+make system-one-benchmark-test
+```
+
+The checked-in protocol is under `benchmarks/system_one/`. Before a paid run,
+`benchmark_inventory_system_one_sources.py` produces a value-free source
+catalog and exact stage quotas. `benchmark_prepare_system_one.py` creates
+family-disjoint stage corpora, `benchmark_run_system_one.py` runs the typed
+System One contract, and `benchmark_score_system_one.py` writes quality,
+calibration, latency, cost, Pareto, and machine-readable culling evidence.
+
+Prediction artifacts contain IDs, typed probabilities, confidence, routes,
+durations, token counts, and hashes only. They omit state, prompts, provider
+responses, rationales, credentials, and evidence values. Restricted source
+payloads remain referenced by immutable revision and digest instead of being
+copied into the experiment archive.

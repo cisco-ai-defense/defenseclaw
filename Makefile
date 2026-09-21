@@ -97,7 +97,7 @@ endef
         build install cli-install dev-install pycli dev-pycli gateway gateway-cross gateway-run start gateway-install \
         plugin plugin-install amp-plugin-typecheck maybe-openclaw-plugin-install extensions test cli-test cli-test-cov cli-test-snap tui-test gateway-test go-test-cov \
         packaging-macos-test packaging-macos-bundle packaging-windows-managed-gateway-zip packaging-windows-enterprise-installer packaging-windows-avc-buildkit packaging-managed-windows-bundle packaging-windows-managed-bundle macos-app-license-check macos-app-upstream-check macos-app-build macos-app-test macos-app-release macos-app-release-verify \
-        security-suite-test security-suite-eval contextual-judge-test \
+        security-suite-test security-suite-eval contextual-judge-test system-one-benchmark-test \
         connector-matrix-test go-connector-matrix-test py-connector-matrix-test \
         test-verbose test-file lint py-lint go-lint go-mod-no-toolchain repro-flags-parity assemble-parity ts-test rego-test clean \
         check check-audit-actions check-error-codes check-schemas telemetry-generate telemetry-check generate-guardrail-catalog check-guardrail-catalog check-grafana-dashboards check-observability-v8-hard-cut check-v7 check-provider-coverage check-llm-catalog check-version-sync check-upgrade-manifest \
@@ -961,6 +961,13 @@ contextual-judge-test:
 		benchmarks.scripts.test_benchmark_prepare_contextual_judge \
 		benchmarks.scripts.test_benchmark_add_terminalbench_context \
 		benchmarks.scripts.test_benchmark_score_contextual_judge
+
+system-one-benchmark-test:
+	$(VENV_BIN)/python -m unittest \
+		benchmarks.scripts.test_benchmark_inventory_system_one_sources \
+		benchmarks.scripts.test_benchmark_prepare_system_one \
+		benchmarks.scripts.test_benchmark_run_system_one \
+		benchmarks.scripts.test_benchmark_score_system_one
 
 go-test-cov: sync-openclaw-extension
 	go test -race -count=1 -timeout $(GO_TEST_TIMEOUT) -coverprofile=coverage.out ./...

@@ -1,0 +1,19 @@
+{
+  "schema_version": "1",
+  "common_max_bytes": 12288,
+  "variants": {
+    "C0": {"intent": false, "prior_events": 0, "representation": "structured"},
+    "C1": {"intent": true, "prior_events": 0, "representation": "structured"},
+    "C2": {"intent": true, "prior_events": 1, "representation": "structured"},
+    "C3": {"intent": true, "prior_events": 3, "representation": "structured"},
+    "C7": {"intent": true, "prior_events": 7, "representation": "production_text"},
+    "CR": {"intent": true, "prior_events": 7, "selected_prior_events": 3, "selection": "deterministic_relevance", "representation": "structured"},
+    "CS": {"intent": true, "prior_events": 7, "representation": "structured"},
+    "CF": {"intent": true, "prior_events": 64, "representation": "structured", "diagnostic": true},
+    "CA": {"intent": true, "prior_events": 7, "representation": "actionfacts", "diagnostic": true},
+    "CD": {"intent": true, "prior_events": 3, "representation": "data_minimized", "diagnostic": true}
+  },
+  "production_bounds": {"intent_bytes": 2048, "prior_event_bytes": 1024, "current_event_bytes": 3072, "max_prior_events": 7},
+  "trusted_sources": ["authenticated_session_user_intent", "observed_prior_tool_call", "current_tool_call", "authoritative_prior_outcome", "runtime_actionfacts"],
+  "forbidden_sources": ["future_event", "benchmark_truth", "model_reasoning", "untrusted_prompt_as_policy"]
+}

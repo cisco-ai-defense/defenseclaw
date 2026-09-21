@@ -1,0 +1,44 @@
+{
+  "schema_version": "1",
+  "seed": 741983,
+  "models": {
+    "jev": {"id": "jev-1.13.0", "endpoint": "https://api.typesafe.ai/v1/systemone", "input_usd_per_million_tokens": 0.042},
+    "openjev": {"id": "openjev", "revision": "5ec9e5fd2f80a6fff386779b1e5ac7e389971889", "endpoint": "http://127.0.0.1:3000/v1/systemone"},
+    "von": {"id": "von-1.0", "revision": "f6b268ff47b449b688a8052dfb3c37c9518b18f1", "endpoint": "http://127.0.0.1:3100/v1/systemone"},
+    "llm": {"id": "bedrock/google.gemma-4-26b-a4b"}
+  },
+  "stages": {
+    "s1-n1000": {"target_cases": 1000, "split_policy": "development_only", "max_candidates": 6, "incremental_usd_cap": 18},
+    "s2-n10000": {"target_cases": 10000, "development_cases": 8000, "validation_cases": 2000, "max_candidates": 3},
+    "s3-n100000": {"target_cases": 100000, "split_policy": "frozen_final", "max_candidates": 3}
+  },
+  "truth_grades": {
+    "A": "independently_authoritative_exact_or_outcome_backed",
+    "B": "authoritative_complete_trajectory_contextual",
+    "C": "source_or_model_adjudicated_diagnostic",
+    "D": "independently_usable_benign_only",
+    "E": "unknown_out_of_scope_or_review_required"
+  },
+  "operating_points": ["safety_max", "balanced", "low_cost_latency"],
+  "routing": {
+    "preserve_deterministic": true,
+    "failure_route": "llm",
+    "model_only_block_is_recommendation": true,
+    "balanced_min_llm_reduction": 0.25,
+    "balanced_max_unsafe_recall_regression": 0.01
+  },
+  "budgets": {
+    "s1_jev_usd": 5,
+    "s1_bedrock_usd": 5,
+    "s1_gpu_hours": 3,
+    "s1_total_incremental_usd": 18
+  },
+  "protected_datasets": ["MurrayTom/ToolSafe/TS-Bench"],
+  "never_tune_splits": ["test"],
+  "artifact_policy": {
+    "value_free_predictions": true,
+    "raw_provider_responses": false,
+    "credentials": false,
+    "private_hf_repo": "Vineethsain/defenseclaw-system-one-evaluations-v1"
+  }
+}

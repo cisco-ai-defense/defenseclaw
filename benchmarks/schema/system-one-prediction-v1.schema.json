@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://defenseclaw.dev/schemas/system-one-prediction-v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "case_id", "model", "model_revision", "context_variant", "instruction_variant", "question_variant", "event_index", "detected", "action", "confidence", "probabilities", "duration_ms", "input_tokens", "request_sha256"],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "run_id": {"type": "string", "minLength": 1, "maxLength": 160, "pattern": "^[A-Za-z0-9][A-Za-z0-9._:/-]*$"},
+    "case_id": {"type": "string", "minLength": 1, "maxLength": 240},
+    "event_index": {"type": "integer", "minimum": 0, "maximum": 4095},
+    "model": {"type": "string", "minLength": 1, "maxLength": 120},
+    "model_revision": {"type": "string", "minLength": 1, "maxLength": 160},
+    "context_variant": {"enum": ["C0", "C1", "C2", "C3", "C7", "CR", "CS", "CF", "CA", "CD"]},
+    "instruction_variant": {"enum": ["I0", "I1", "I2", "I3"]},
+    "question_variant": {"enum": ["Q0", "Q1", "Q2", "Q3"]},
+    "detected": {"type": "boolean"},
+    "action": {"enum": ["allow", "confirm", "block", "error"]},
+    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+    "probabilities": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": "number", "minimum": 0, "maximum": 1}},
+    "answers": {"type": "object", "maxProperties": 64, "additionalProperties": {"type": ["string", "number", "boolean", "null"]}},
+    "duration_ms": {"type": "number", "minimum": 0},
+    "input_tokens": {"type": "integer", "minimum": 0},
+    "output_tokens": {"type": "integer", "minimum": 0},
+    "context_bytes": {"type": "integer", "minimum": 0, "maximum": 65536},
+    "context_events": {"type": "integer", "minimum": 0, "maximum": 64},
+    "truncated": {"type": "boolean"},
+    "route": {"enum": ["system_one", "deterministic", "llm", "error"]},
+    "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "context_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "error_code": {"type": "string", "maxLength": 120, "pattern": "^[A-Za-z0-9._:/-]*$"}
+  }
+}
