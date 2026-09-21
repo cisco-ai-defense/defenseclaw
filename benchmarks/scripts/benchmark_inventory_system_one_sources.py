@@ -43,13 +43,39 @@ def read_jsonl(path: Path):
             yield row
 
 
-def family_id(row: dict[str, Any]) -> str:
+def family_authority(row: dict[str, Any]) -> tuple[str, str]:
+    """Return (authority, family) naming which field supplied the family identity.
+
+    ``split_group``, ``trajectory_id``, and ``original_id`` are dataset-provided family
+    authorities. A fall back to the case ID makes every row its own family, which silently
+    defeats family-level stage isolation, so callers can reject it.
+    """
     strata = row.get("strata") if isinstance(row.get("strata"), dict) else {}
     source = row.get("source") if isinstance(row.get("source"), dict) else {}
-    for value in (strata.get("split_group"), strata.get("trajectory_id"), source.get("original_id"), row.get("id")):
+    for authority, value in (
+        ("split_group", strata.get("split_group")),
+        ("trajectory_id", strata.get("trajectory_id")),
+        ("original_id", source.get("original_id")),
+    ):
         if isinstance(value, str) and value:
-            return value
-    return "missing"
+            return authority, value
+    case_id = row.get("id")
+    if isinstance(case_id, str) and case_id:
+        return "case_id", case_id
+    return "missing", "missing"
+
+
+AUTHORITATIVE_FAMILY_SOURCES = ("split_group", "trajectory_id", "original_id")
+
+
+def family_id(row: dict[str, Any], require_authority: bool = False) -> str:
+    authority, family = family_authority(row)
+    if require_authority and authority not in AUTHORITATIVE_FAMILY_SOURCES:
+        raise ValueError(
+            f"case {row.get('id')!r} has no dataset family authority "
+            f"(need one of {', '.join(AUTHORITATIVE_FAMILY_SOURCES)}); got {authority}"
+        )
+    return family
 
 
 def truth_grade(row: dict[str, Any]) -> str:
@@ -100,7 +126,9 @@ def inspect_cases(path: Path) -> dict[str, Any]:
         dataset = str(source.get("dataset", "missing"))
         datasets[dataset] += 1
         source_revisions[dataset].add(str(source.get("revision", "missing")))
-        families.add(family_id(row))
+        authority, family = family_authority(row)
+        families.add(family)
+        counts[f"family_authority:{authority}"] += 1
         grade = truth_grade(row)
         split = str(row.get("split", "missing"))
         surface = str(row.get("surface", "missing"))

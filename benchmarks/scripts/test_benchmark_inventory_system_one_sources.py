@@ -81,6 +81,37 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(catalog["totals"]["grade_surface:D:action"], 1)
             self.assertNotIn("payload", json.dumps(catalog))
 
+    def test_family_authority_names_its_source_and_can_be_required(self) -> None:
+        authoritative = case("a", "D", "group-1")
+        self.assertEqual(inventory.family_authority(authoritative), ("split_group", "group-1"))
+        self.assertEqual(inventory.family_id(authoritative, True), "group-1")
+
+        trajectory = case("b", "D")
+        del trajectory["strata"]["split_group"]
+        trajectory["strata"]["trajectory_id"] = "traj-9"
+        self.assertEqual(inventory.family_authority(trajectory), ("trajectory_id", "traj-9"))
+
+        fallback = case("c", "D")
+        fallback["strata"] = {}
+        fallback["source"] = {"dataset": "fixture", "revision": "r1"}
+        self.assertEqual(inventory.family_authority(fallback), ("case_id", "c"))
+        self.assertEqual(inventory.family_id(fallback), "c")
+        with self.assertRaisesRegex(ValueError, "no dataset family authority"):
+            inventory.family_id(fallback, True)
+
+    def test_catalog_counts_family_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.jsonl"
+            fallback = case("c", "D")
+            fallback["strata"] = {}
+            fallback["source"] = {"dataset": "fixture", "revision": "r1"}
+            path.write_text(
+                json.dumps(case("a", "D", "group-1")) + "\n" + json.dumps(fallback) + "\n", encoding="utf-8"
+            )
+            catalog = inventory.build_catalog([path], [])
+            self.assertEqual(catalog["totals"]["family_authority:split_group"], 1)
+            self.assertEqual(catalog["totals"]["family_authority:case_id"], 1)
+
     def test_duplicate_json_keys_fail(self) -> None:
         with self.assertRaisesRegex(ValueError, "duplicate JSON key"):
             json.loads('{"a":1,"a":2}', object_pairs_hook=inventory.strict_object)

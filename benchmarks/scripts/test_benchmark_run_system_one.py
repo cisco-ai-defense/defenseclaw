@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
+import types
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest import mock
+
+from jsonschema import Draft202012Validator
 
 from benchmarks.scripts import benchmark_run_system_one as runner
 
@@ -119,9 +124,10 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("provided", json.dumps(record))
         self.assertEqual(post.call_count, 1)
 
-    def test_resume_prefix_validates_ordered_request_identity(self) -> None:
-        job = (0, "C0", "I0", "Q0", {}, {}, {})
-        record = {
+    def resume_row(self, **overrides: Any) -> dict[str, Any]:
+        state: dict[str, Any] = {"current_tool_call": "echo"}
+        questions: dict[str, Any] = {"disposition": {"type": "choice"}}
+        row = {
             "case_id": "case",
             "event_index": 0,
             "context_variant": "C0",
@@ -130,13 +136,106 @@ class RunnerTests(unittest.TestCase):
             "run_id": "run",
             "model": "model",
             "input_tokens": 2,
+            "request_sha256": hashlib.sha256(
+                runner.canonical_request("model", state, questions).encode()
+            ).hexdigest(),
         }
+        row.update(overrides)
+        return row
+
+    def resume_jobs(self) -> list[tuple[str, tuple[Any, ...]]]:
+        state: dict[str, Any] = {"current_tool_call": "echo"}
+        questions: dict[str, Any] = {"disposition": {"type": "choice"}}
+        return [("case", (0, "C0", "I0", "Q0", state, {}, questions))]
+
+    def test_resume_prefix_validates_ordered_request_identity(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "predictions.jsonl"
-            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
-            self.assertEqual(runner.resume_prefix(path, [("case", job)], "run", "model"), [record])
+            path.write_text(json.dumps(self.resume_row()) + "\n", encoding="utf-8")
+            self.assertEqual(
+                runner.validate_resume_prefix(path, iter(self.resume_jobs()), "run", "model", 1),
+                (1, 1, 2),
+            )
+            mismatched = [("other", self.resume_jobs()[0][1])]
             with self.assertRaisesRegex(ValueError, "request plan"):
-                runner.resume_prefix(path, [("other", job)], "run", "model")
+                runner.validate_resume_prefix(path, iter(mismatched), "run", "model", 1)
+
+    def test_resume_rejects_a_tampered_request_hash(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "predictions.jsonl"
+            path.write_text(json.dumps(self.resume_row(request_sha256="0" * 64)) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "request hash"):
+                runner.validate_resume_prefix(path, iter(self.resume_jobs()), "run", "model", 1)
+
+    def test_resume_rejects_a_row_violating_the_prediction_schema(self) -> None:
+        schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "required": ["action"],
+        }
+        validator = Draft202012Validator(schema)
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "predictions.jsonl"
+            path.write_text(json.dumps(self.resume_row()) + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "prediction schema"):
+                runner.validate_resume_prefix(path, iter(self.resume_jobs()), "run", "model", 1, validator)
+
+    def test_resume_drops_the_trailing_error_run_when_retrying_errors(self) -> None:
+        jobs = self.resume_jobs()
+        second = ("case", (1, "C0", "I0", "Q0", jobs[0][1][4], {}, jobs[0][1][6]))
+        rows = [self.resume_row(), self.resume_row(event_index=1, error_code="provider_or_parse_failure")]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "predictions.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+            validated, keep, tokens = runner.validate_resume_prefix(
+                path, iter(jobs + [second]), "run", "model", 2, None, True
+            )
+            self.assertEqual((validated, keep, tokens), (2, 1, 2))
+            runner.truncate_jsonl_atomic(path, keep)
+            self.assertEqual(path.read_text(encoding="utf-8").count("\n"), 1)
+
+    def test_budget_latches_when_measured_usage_exceeds_the_cap(self) -> None:
+        budget = runner.Budget(10, 100, 1, 0.042)
+        budget.reserve(1)
+        budget.record_actual(101)
+        self.assertTrue(budget.actual_exceeded)
+        with self.assertRaisesRegex(RuntimeError, "actual provider budget exceeded"):
+            budget.reserve(1)
+
+    def test_string_instruction_format_flattens_policy_for_von(self) -> None:
+        config = {
+            "instruction_variants": {"I3": {"policy": " compact policy "}},
+            "question_variants": {"Q0": {"disposition": {"type": "choice", "instructions": " decide now "}}},
+        }
+        structured = runner.build_questions(config, "I3", "Q0")
+        self.assertEqual(
+            structured["disposition"]["instructions"],
+            {"policy": " compact policy ", "decision": " decide now "},
+        )
+        flattened = runner.build_questions(config, "I3", "Q0", "string")
+        self.assertEqual(flattened["disposition"]["instructions"], "compact policy\n\ndecide now")
+        with self.assertRaisesRegex(ValueError, "unknown instruction format"):
+            runner.build_questions(config, "I3", "Q0", "yaml")
+
+    def test_job_production_streams_without_materializing_requests(self) -> None:
+        case = {
+            "id": "case-1",
+            "payload": {"content": "intent", "events": [{"tool_name": "shell", "command": "a"}, {"command": "b"}]},
+        }
+        questions = {
+            "instruction_variants": {"I0": {"policy": "p"}},
+            "question_variants": {"Q0": {"disposition": {"type": "choice", "instructions": "d"}}},
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cases.jsonl"
+            path.write_text(json.dumps(case) + "\n", encoding="utf-8")
+            producer = (path, ["C0", "C7"], ["I0"], ["Q0"], self.contexts, questions)
+            cases, requests_total, projected_bytes = runner.plan_counts(*producer)
+            self.assertEqual((cases, requests_total), (1, 4))
+            self.assertGreater(projected_bytes, 0)
+            streamed = runner.iter_jobs(*producer)
+            self.assertTrue(isinstance(streamed, types.GeneratorType))
+            self.assertEqual(len(list(streamed)), requests_total)
 
 
 if __name__ == "__main__":

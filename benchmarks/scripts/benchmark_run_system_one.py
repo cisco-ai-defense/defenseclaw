@@ -15,6 +15,7 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import requests
+from jsonschema import Draft202012Validator
 
 try:
     from benchmark_inventory_system_one_sources import read_jsonl, sha256_file
@@ -23,6 +24,7 @@ except ModuleNotFoundError:
 
 ALLOWED_ENDPOINTS = {("https", "api.typesafe.ai"), ("http", "127.0.0.1"), ("http", "localhost")}
 ACTION_RANK = {"allow": 0, "confirm": 1, "block": 2, "error": 3}
+INSTRUCTION_FORMATS = ("structured", "string")
 SECURITY_TERMS = (
     "/etc/shadow",
     "sudoers",
@@ -277,11 +279,24 @@ def build_state(
     }
 
 
-def build_questions(question_config: dict[str, Any], instruction_id: str, question_id: str) -> dict[str, Any]:
+def build_questions(
+    question_config: dict[str, Any],
+    instruction_id: str,
+    question_id: str,
+    instruction_format: str = "structured",
+) -> dict[str, Any]:
+    if instruction_format not in INSTRUCTION_FORMATS:
+        raise ValueError(f"unknown instruction format {instruction_format!r}")
     policy = question_config["instruction_variants"][instruction_id]["policy"]
     questions = json.loads(json.dumps(question_config["question_variants"][question_id]))
     for question in questions.values():
-        question["instructions"] = {"policy": policy, "decision": question["instructions"]}
+        decision = question["instructions"]
+        if instruction_format == "string":
+            # Von types Choice/Noul/Score instructions as a plain string and rejects a nested
+            # object, so the same policy and decision text is flattened into one field.
+            question["instructions"] = f"{str(policy).strip()}\n\n{str(decision).strip()}"
+        else:
+            question["instructions"] = {"policy": policy, "decision": decision}
     return questions
 
 
@@ -359,6 +374,16 @@ def derive_action(question_id: str, answers: dict[str, Any], probabilities: dict
     return ("confirm", any_signal) if any_signal >= 0.5 else ("allow", 1 - any_signal)
 
 
+def canonical_request(model: str, state: Any, questions: dict[str, Any]) -> str:
+    """Single source of truth for the wire body, so request hashes stay reproducible on resume."""
+    return json.dumps(
+        {"model": model, "state": state, "questions": questions},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
 class Budget:
     def __init__(
         self,
@@ -376,10 +401,13 @@ class Budget:
         self.calls = starting_calls
         self.tokens = starting_tokens
         self.actual_tokens = starting_tokens
+        self.actual_exceeded = False
         self.lock = threading.Lock()
 
     def reserve(self, estimated_tokens: int) -> None:
         with self.lock:
+            if self.actual_exceeded:
+                raise RuntimeError("actual provider budget exceeded")
             next_calls = self.calls + 1
             next_tokens = self.tokens + estimated_tokens
             next_cost = next_tokens * self.rate / 1_000_000
@@ -391,6 +419,11 @@ class Budget:
     def record_actual(self, tokens: int) -> None:
         with self.lock:
             self.actual_tokens += tokens
+            actual_cost = self.actual_tokens * self.rate / 1_000_000
+            if self.actual_tokens > self.max_tokens or actual_cost > self.max_usd:
+                # Reserved estimates can undercount real usage, so the measured ceiling latches
+                # and stops every later reservation instead of silently overspending.
+                self.actual_exceeded = True
 
 
 def evaluate(
@@ -411,8 +444,7 @@ def evaluate(
     retries: int,
     budget: Budget,
 ) -> dict[str, Any]:
-    request_body = {"model": model, "state": state, "questions": questions}
-    canonical = json.dumps(request_body, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    canonical = canonical_request(model, state, questions)
     headers = {"Content-Type": "application/json"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
@@ -513,6 +545,7 @@ def case_jobs(
     questions: list[str],
     context_config: dict[str, Any],
     question_config: dict[str, Any],
+    instruction_format: str = "structured",
 ):
     payload = case.get("payload") if isinstance(case.get("payload"), dict) else {}
     intent = str(payload.get("content") or "")
@@ -531,9 +564,48 @@ def case_jobs(
                         question_id,
                         state,
                         state_meta,
-                        build_questions(question_config, instruction_id, question_id),
+                        build_questions(question_config, instruction_id, question_id, instruction_format),
                     )
         prior.append(current)
+
+
+def iter_jobs(
+    cases_path: Path,
+    contexts: list[str],
+    instructions: list[str],
+    questions: list[str],
+    context_config: dict[str, Any],
+    question_config: dict[str, Any],
+    instruction_format: str = "structured",
+):
+    """Stream (case_id, job) pairs so no stage holds every request in memory."""
+    for case in read_jsonl(cases_path):
+        case_id = str(case["id"])
+        for job in case_jobs(
+            case, contexts, instructions, questions, context_config, question_config, instruction_format
+        ):
+            yield case_id, job
+
+
+def plan_counts(
+    cases_path: Path,
+    contexts: list[str],
+    instructions: list[str],
+    questions: list[str],
+    context_config: dict[str, Any],
+    question_config: dict[str, Any],
+    instruction_format: str = "structured",
+) -> tuple[int, int, int]:
+    """Count cases, requests, and projected context bytes without retaining any job."""
+    cases = requests_total = projected_bytes = 0
+    for case in read_jsonl(cases_path):
+        cases += 1
+        for job in case_jobs(
+            case, contexts, instructions, questions, context_config, question_config, instruction_format
+        ):
+            requests_total += 1
+            projected_bytes += int(job[5]["bytes"])
+    return cases, requests_total, projected_bytes
 
 
 def job_identity(case_id: str, job: tuple[Any, ...]) -> tuple[str, int, str, str, str]:
@@ -550,26 +622,67 @@ def record_identity(record: dict[str, Any]) -> tuple[str, int, str, str, str]:
     )
 
 
-def resume_prefix(path: Path, jobs: list[tuple[str, tuple[Any, ...]]], run_id: str, model: str) -> list[dict[str, Any]]:
+def validate_resume_prefix(
+    path: Path,
+    job_iter,
+    run_id: str,
+    model: str,
+    total_requests: int,
+    validator: Draft202012Validator | None = None,
+    retry_errors: bool = False,
+) -> tuple[int, int, int]:
+    """Validate an existing prefix row by row.
+
+    Every row must match the ordered request plan, the prediction schema, and a request hash
+    recomputed from the rebuilt request body. Returns (validated, keep, keep_tokens) where
+    ``keep`` drops the trailing error run when ``retry_errors`` is set.
+    """
     if not path.exists():
-        return []
-    rows = list(read_jsonl(path))
-    if len(rows) > len(jobs):
-        raise ValueError("resume output has more rows than planned requests")
-    for index, row in enumerate(rows):
+        return 0, 0, 0
+    validated = keep = keep_tokens = 0
+    dropping = False
+    for index, row in enumerate(read_jsonl(path), 1):
+        if validated >= total_requests:
+            raise ValueError("resume output has more rows than planned requests")
+        case_id, job = next(job_iter)
         if row.get("run_id") != run_id or row.get("model") != model:
-            raise ValueError(f"resume row {index + 1} has a different run or model")
-        if record_identity(row) != job_identity(*jobs[index]):
-            raise ValueError(f"resume row {index + 1} does not match the request plan")
-    return rows
+            raise ValueError(f"resume row {index} has a different run or model")
+        if record_identity(row) != job_identity(case_id, job):
+            raise ValueError(f"resume row {index} does not match the request plan")
+        if validator is not None:
+            error = next(validator.iter_errors(row), None)
+            if error is not None:
+                location = ".".join(str(part) for part in error.absolute_path) or "root"
+                raise ValueError(f"resume row {index} violates the prediction schema at {location}: {error.validator}")
+        expected = hashlib.sha256(canonical_request(model, job[4], job[6]).encode()).hexdigest()
+        if str(row.get("request_sha256", "")) != expected:
+            raise ValueError(f"resume row {index} request hash does not match the rebuilt request")
+        validated += 1
+        if retry_errors and (dropping or row.get("error_code")):
+            dropping = True
+            continue
+        keep += 1
+        keep_tokens += int(row.get("input_tokens", 0))
+    return validated, keep, keep_tokens
 
 
-def write_rows_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+def skip_jobs(job_iter, count: int) -> None:
+    for _ in range(count):
+        next(job_iter)
+
+
+def truncate_jsonl_atomic(path: Path, keep: int) -> None:
     temporary = path.with_suffix(path.suffix + ".tmp")
-    with temporary.open("w", encoding="utf-8") as handle:
+    with path.open(encoding="utf-8") as source, temporary.open("w", encoding="utf-8") as handle:
         os.chmod(temporary, 0o600)
-        for row in rows:
-            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        written = 0
+        for line in source:
+            if not line.strip():
+                continue
+            if written >= keep:
+                break
+            handle.write(line if line.endswith("\n") else line + "\n")
+            written += 1
         handle.flush()
         os.fsync(handle.fileno())
     os.replace(temporary, path)
@@ -593,6 +706,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--context", action="append", required=True)
     parser.add_argument("--instruction", action="append", required=True)
     parser.add_argument("--question", action="append", required=True)
+    parser.add_argument("--instruction-format", choices=INSTRUCTION_FORMATS, default="structured")
+    parser.add_argument(
+        "--prediction-schema",
+        type=Path,
+        default=Path("benchmarks/schema/system-one-prediction-v1.schema.json"),
+    )
     parser.add_argument("--endpoint", required=True)
     parser.add_argument("--model", required=True)
     parser.add_argument("--model-revision", required=True)
@@ -628,15 +747,19 @@ def main() -> int:
     for value in args.question:
         if value not in question_config["question_variants"]:
             raise ValueError(f"unknown question {value}")
-    cases = list(read_jsonl(args.cases))
-    jobs = []
-    for case in cases:
-        for job in case_jobs(case, args.context, args.instruction, args.question, context_config, question_config):
-            jobs.append((str(case["id"]), job))
-    projected_bytes = sum(meta[5]["bytes"] for _, meta in jobs)
+    producer = (
+        args.cases,
+        args.context,
+        args.instruction,
+        args.question,
+        context_config,
+        question_config,
+        args.instruction_format,
+    )
+    case_count, total_requests, projected_bytes = plan_counts(*producer)
     projection = {
-        "cases": len(cases),
-        "requests": len(jobs),
+        "cases": case_count,
+        "requests": total_requests,
         "projected_input_tokens_floor": projected_bytes // 4,
         "projected_usd_floor": round(projected_bytes / 4 * args.input_usd_per_million / 1_000_000, 8),
     }
@@ -660,43 +783,58 @@ def main() -> int:
         "contexts": args.context,
         "instructions": args.instruction,
         "questions": args.question,
-        "requests": len(jobs),
+        "instruction_format": args.instruction_format,
+        "requests": total_requests,
     }
     if args.resume:
         if not plan_path.exists() or load_json(plan_path) != run_plan:
             raise ValueError("resume plan does not match current inputs and configuration")
     else:
         write_json_atomic(plan_path, run_plan)
-    prior = resume_prefix(args.output, jobs, args.run_id, args.model) if args.resume else []
-    if args.resume_retry_errors:
-        successful = []
-        for row in prior:
-            if row.get("error_code"):
-                break
-            successful.append(row)
-        if len(successful) != len(prior):
-            write_rows_atomic(args.output, successful)
-            prior = successful
-    prior_tokens = sum(int(row.get("input_tokens", 0)) for row in prior)
+    prediction_validator = None
+    if args.prediction_schema.exists():
+        prediction_schema = json.loads(args.prediction_schema.read_text(encoding="utf-8"))
+        Draft202012Validator.check_schema(prediction_schema)
+        prediction_validator = Draft202012Validator(prediction_schema)
+    job_iter = iter_jobs(*producer)
+    prior_count = prior_tokens = 0
+    if args.resume:
+        validated, prior_count, prior_tokens = validate_resume_prefix(
+            args.output,
+            job_iter,
+            args.run_id,
+            args.model,
+            total_requests,
+            prediction_validator,
+            args.resume_retry_errors,
+        )
+        if prior_count != validated:
+            truncate_jsonl_atomic(args.output, prior_count)
+            job_iter = iter_jobs(*producer)
+            skip_jobs(job_iter, prior_count)
     budget = Budget(
         args.max_calls,
         args.max_input_tokens,
         args.max_usd,
         args.input_usd_per_million,
-        starting_calls=len(prior),
+        starting_calls=prior_count,
         starting_tokens=prior_tokens,
     )
-    open_mode = "a" if prior else "w"
-    next_index = len(prior)
-    next_submit = next_index
+    open_mode = "a" if prior_count else "w"
+    next_index = prior_count
+    submitted = prior_count
     pending: dict[int, dict[str, Any]] = {}
     with args.output.open(open_mode, encoding="utf-8") as handle:
         os.chmod(args.output, 0o600)
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {}
 
-            def submit(index: int) -> None:
-                case_id, job = jobs[index]
+            def submit_next() -> bool:
+                nonlocal submitted
+                try:
+                    case_id, job = next(job_iter)
+                except StopIteration:
+                    return False
                 event_index, context_id, instruction_id, question_id, state, state_meta, question_body = job
                 future = executor.submit(
                     evaluate,
@@ -717,12 +855,13 @@ def main() -> int:
                     args.retries,
                     budget,
                 )
-                futures[future] = index
+                futures[future] = submitted
+                submitted += 1
+                return True
 
             window = max(args.concurrency, args.concurrency * 2)
-            while next_submit < len(jobs) and len(futures) < window:
-                submit(next_submit)
-                next_submit += 1
+            while len(futures) < window and submit_next():
+                pass
             while futures:
                 done, _ = wait(futures, return_when=FIRST_COMPLETED)
                 for future in done:
@@ -733,14 +872,19 @@ def main() -> int:
                     if next_index % 100 == 0:
                         handle.flush()
                     if next_index % 1000 == 0:
-                        print(json.dumps({"completed": next_index, "requests": len(jobs)}, sort_keys=True), flush=True)
-                while next_submit < len(jobs) and len(futures) < window:
-                    submit(next_submit)
-                    next_submit += 1
+                        progress = {"completed": next_index, "requests": total_requests}
+                        print(json.dumps(progress, sort_keys=True), flush=True)
+                while len(futures) < window and submit_next():
+                    pass
         handle.flush()
         os.fsync(handle.fileno())
-    if next_index != len(jobs):
-        raise RuntimeError(f"completed {next_index} of {len(jobs)} requests")
+    if next_index != total_requests:
+        raise RuntimeError(f"completed {next_index} of {total_requests} requests")
+    if budget.actual_exceeded:
+        raise RuntimeError(
+            f"measured provider usage exceeded the cap: {budget.actual_tokens} input tokens, "
+            f"${budget.actual_tokens * args.input_usd_per_million / 1_000_000:.8f}"
+        )
     metadata = {
         "schema_version": "1",
         "run_id": args.run_id,
@@ -748,8 +892,8 @@ def main() -> int:
         "model_revision": args.model_revision,
         "cases_sha256": sha256_file(args.cases),
         "prediction_sha256": sha256_file(args.output),
-        "cases": len(cases),
-        "requests": len(jobs),
+        "cases": case_count,
+        "requests": total_requests,
         "attempted_provider_calls": budget.calls,
         "reserved_input_tokens": budget.tokens,
         "actual_input_tokens": budget.actual_tokens,
@@ -757,6 +901,7 @@ def main() -> int:
         "contexts": args.context,
         "instructions": args.instruction,
         "questions": args.question,
+        "instruction_format": args.instruction_format,
         "run_plan_sha256": sha256_file(plan_path),
         "complete": True,
     }

@@ -22,6 +22,32 @@ class PrepareTests(unittest.TestCase):
         )
         self.assertEqual([row["id"] for row in selected], [row["id"] for row in selected_again])
 
+    def test_overlapping_quota_allocation_is_independent_of_argument_order(self) -> None:
+        rows = [case("a", "A", "f1"), case("b", "D", "f2"), case("c", "D", "f3")]
+        specific = ("A", "action", "development")
+        wildcard = ("any", "any", "any")
+        first, _ = prepare.select_rows(rows, {wildcard: 2, specific: 1}, 7, set(), set(), set(), False)
+        second, _ = prepare.select_rows(rows, {specific: 1, wildcard: 2}, 7, set(), set(), set(), False)
+        self.assertEqual([row["id"] for row in first], [row["id"] for row in second])
+        self.assertEqual(len(first), 3)
+
+    def test_quota_specificity_orders_specific_keys_first(self) -> None:
+        keys = [("any", "any", "any"), ("A", "action", "development"), ("A", "any", "development")]
+        self.assertEqual(
+            sorted(keys, key=prepare.quota_specificity),
+            [("A", "action", "development"), ("A", "any", "development"), ("any", "any", "any")],
+        )
+
+    def test_family_authority_can_be_required_for_selection(self) -> None:
+        fallback = case("a", "D")
+        fallback["strata"] = {}
+        fallback["source"] = {"dataset": "fixture", "revision": "r1"}
+        quota = {("D", "action", "development"): 1}
+        selected, _ = prepare.select_rows([fallback], quota, 7, set(), set(), set(), False)
+        self.assertEqual(len(selected), 1)
+        with self.assertRaisesRegex(ValueError, "no dataset family authority"):
+            prepare.select_rows([fallback], quota, 7, set(), set(), set(), False, True)
+
     def test_protected_and_test_rows_are_excluded(self) -> None:
         protected = case("protected", "D", "p")
         protected["source"]["dataset"] = "protected"

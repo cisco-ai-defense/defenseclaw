@@ -8,9 +8,16 @@ from pathlib import Path
 from typing import Any
 
 try:
-    from benchmark_inventory_system_one_sources import family_id, read_jsonl, sha256_file, truth_grade
+    from benchmark_inventory_system_one_sources import (
+        family_authority,
+        family_id,
+        read_jsonl,
+        sha256_file,
+        truth_grade,
+    )
 except ModuleNotFoundError:
     from benchmarks.scripts.benchmark_inventory_system_one_sources import (
+        family_authority,
         family_id,
         read_jsonl,
         sha256_file,
@@ -38,6 +45,11 @@ def parse_quota(value: str) -> tuple[tuple[str, str, str], int]:
     return (grade, surface, split), count
 
 
+def quota_specificity(key: tuple[str, str, str]) -> tuple[int, tuple[str, str, str]]:
+    """Rank a quota key: fewer wildcards means more specific, so it allocates first."""
+    return sum(part == "any" for part in key), key
+
+
 def row_keys(row: dict[str, Any]) -> set[tuple[str, str, str]]:
     grade = truth_grade(row)
     surface = str(row.get("surface", "missing"))
@@ -61,11 +73,12 @@ def select_rows(
     excluded_families: set[str],
     forbidden_datasets: set[str],
     allow_test: bool,
+    require_family_authority: bool = False,
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
     buckets: dict[tuple[str, str, str], list[dict[str, Any]]] = defaultdict(list)
     for row in rows:
         case_id = str(row.get("id", ""))
-        family = family_id(row)
+        family = family_id(row, require_family_authority)
         source = row.get("source") if isinstance(row.get("source"), dict) else {}
         dataset = str(source.get("dataset", ""))
         if not case_id or case_id in excluded_ids or family in excluded_families or dataset in forbidden_datasets:
@@ -78,13 +91,16 @@ def select_rows(
     selected_ids: set[str] = set()
     selected_families: set[str] = set()
     available: dict[str, int] = {}
-    for key, count in quotas.items():
+    # Overlapping quotas compete for the same rows, so allocate the most specific quota first and
+    # break ties lexicographically. Allocation order is then independent of command-line order.
+    for key in sorted(quotas, key=quota_specificity):
+        count = quotas[key]
         candidates = sorted(buckets.get(key, []), key=lambda item: stable_rank(seed, str(item.get("id", ""))))
         available[":".join(key)] = len(candidates)
         chosen = 0
         for row in candidates:
             case_id = str(row["id"])
-            family = family_id(row)
+            family = family_id(row, require_family_authority)
             if case_id in selected_ids or family in selected_families:
                 continue
             selected.append(row)
@@ -129,6 +145,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--quota", action="append", required=True)
     parser.add_argument("--forbid-dataset", action="append", default=[])
     parser.add_argument("--allow-test", action="store_true")
+    parser.add_argument("--require-family-authority", action="store_true")
     parser.add_argument("--seed", type=int, default=741983)
     parser.add_argument("--stage", required=True)
     parser.add_argument("--output", type=Path, required=True)
@@ -147,7 +164,14 @@ def main() -> int:
     rows = load_rows(args.input)
     excluded_ids, excluded_families = load_exclusions(args.exclude)
     selected, available = select_rows(
-        rows, quotas, args.seed, excluded_ids, excluded_families, set(args.forbid_dataset), args.allow_test
+        rows,
+        quotas,
+        args.seed,
+        excluded_ids,
+        excluded_families,
+        set(args.forbid_dataset),
+        args.allow_test,
+        args.require_family_authority,
     )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8") as handle:
@@ -168,6 +192,11 @@ def main() -> int:
         "output_sha256": sha256_file(args.output),
         "forbidden_datasets": sorted(set(args.forbid_dataset)),
         "test_allowed": args.allow_test,
+        "family_authority_required": args.require_family_authority,
+        "family_authority_counts": dict(
+            sorted(Counter(family_authority(row)[0] for row in selected).items())
+        ),
+        "complete": True,
     }
     manifest_path = args.manifest or args.output.with_suffix(".manifest.json")
     manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
