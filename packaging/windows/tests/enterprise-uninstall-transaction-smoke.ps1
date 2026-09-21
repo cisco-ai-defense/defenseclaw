@@ -352,6 +352,9 @@ targets:
                 GatewayPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-gateway.exe'
                 )
+                ACPPath = (
+                    Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-acp.exe'
+                )
                 BrokerPath = (
                     Microsoft.PowerShell.Management\Join-Path $binDirectory 'defenseclaw-cmid-broker.exe'
                 )
@@ -1876,6 +1879,7 @@ targets:
                     # correctly reject the retry before it opens a transaction.
                     foreach ($path in @(
                         $Layout.GatewayPath,
+                        $Layout.ACPPath,
                         $Layout.HookPath,
                         $Layout.CLIPath,
                         $Layout.ConfigPath,
@@ -3569,6 +3573,7 @@ targets:
             $sources = @{
                 broker = 'fresh-broker'
                 gateway = 'fresh-gateway'
+                acp = 'fresh-acp'
                 hook = 'fresh-hook'
                 sensor_helper = 'fresh-sensor-helper'
                 installer = 'fresh-installer'
@@ -4121,6 +4126,7 @@ targets:
             $sources = @{
                 broker = 'new-broker'
                 gateway = 'new-gateway'
+                acp = 'new-acp'
                 hook = 'new-hook'
                 sensor_helper = 'new-sensor-helper'
                 installer = 'new-installer'
@@ -4240,6 +4246,7 @@ targets:
             $sources = @{
                 broker = 'activation-broker'
                 gateway = 'activation-gateway'
+                acp = 'activation-acp'
                 hook = 'activation-hook'
                 sensor_helper = 'activation-sensor-helper'
                 installer = 'activation-installer'
@@ -4524,6 +4531,7 @@ targets:
 '@
             foreach ($entry in @(
                 @($layout.GatewayPath, 'legacy-gateway'),
+                @($layout.ACPPath, 'legacy-acp'),
                 @($layout.BrokerPath, 'legacy-broker'),
                 @($layout.HookPath, 'legacy-hook'),
                 @($layout.InstallerPath, 'legacy-installer'),
@@ -4584,6 +4592,7 @@ targets:
             $sources = @{
                 broker = 'replacement-broker'
                 gateway = $gatewaySource
+                acp = 'replacement-acp'
                 hook = 'replacement-hook'
                 sensor_helper = 'replacement-sensor-helper'
                 installer = 'replacement-installer'

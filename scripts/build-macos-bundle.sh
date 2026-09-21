@@ -150,13 +150,22 @@ build_arch() {
   GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 go "${go_args[@]}"
 }
 
+build_acp_guard() {
+  local arch="$1" out="$2"
+  echo "==> building ACP guard (darwin/${arch})"
+  GOOS=darwin GOARCH="${arch}" CGO_ENABLED=0 go build \
+    -ldflags "${LDFLAGS}" -o "${out}" ./cmd/defenseclaw-acp
+}
+
 # The shipped artifact file is named "defenseclaw" (not "defenseclaw-gateway").
 # install.sh discovers it bundle-locally under this name and installs it to the
 # runtime path .../bin/defenseclaw-gateway, which stays the canonical daemon
 # name everywhere else (launchd, systemd, watchdog, process detection).
 cd "${REPO_ROOT}"
 build_arch arm64 "${BUNDLE_DIR}/defenseclaw"
+build_acp_guard arm64 "${BUNDLE_DIR}/defenseclaw-acp"
 chmod 0755 "${BUNDLE_DIR}/defenseclaw"
+chmod 0755 "${BUNDLE_DIR}/defenseclaw-acp"
 
 # ---- copy installer scripts + plist -------------------------------------
 

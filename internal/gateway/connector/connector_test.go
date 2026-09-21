@@ -354,7 +354,7 @@ func TestIsLoopback(t *testing.T) {
 
 func TestRegistry_DefaultContainsAllBuiltins(t *testing.T) {
 	r := NewDefaultRegistry()
-	active := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp"}
+	active := []string{"openclaw", "zeptoclaw", "claudecode", "codex", "hermes", "cursor", "devin", "copilot", "openhands", "antigravity", "opencode", "omnigent", "amp", "kiro"}
 	for _, name := range active {
 		if _, ok := r.Get(name); !ok {
 			t.Errorf("default registry missing %q", name)
@@ -7398,8 +7398,8 @@ func containsAuthBearer(curlArgs, token string) bool {
 
 func TestHookScripts_ReturnsList(t *testing.T) {
 	scripts := HookScripts()
-	if len(scripts) != 14 {
-		t.Errorf("HookScripts() returned %d scripts, want 14", len(scripts))
+	if len(scripts) != 15 {
+		t.Errorf("HookScripts() returned %d scripts, want 15", len(scripts))
 	}
 }
 
@@ -7927,8 +7927,8 @@ func TestDiscoverPlugins_EmptyDir(t *testing.T) {
 		t.Fatalf("DiscoverPlugins on empty dir: %v", err)
 	}
 	// Should still have only built-in connectors
-	if r.Len() != 14 {
-		t.Errorf("expected 14 built-in connectors, got %d", r.Len())
+	if r.Len() != 15 {
+		t.Errorf("expected 15 built-in connectors, got %d", r.Len())
 	}
 }
 

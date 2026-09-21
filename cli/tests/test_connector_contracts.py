@@ -42,6 +42,7 @@ from defenseclaw.connector_contracts import (
     resolve_connector_contract,
 )
 from defenseclaw.connector_paths import KNOWN_CONNECTORS
+from defenseclaw.platform_support import ACP_ONLY_CONNECTORS
 
 from tests.helpers import cleanup_app, make_app_context
 
@@ -67,7 +68,7 @@ class TestConnectorContractManifest(unittest.TestCase):
         self.assertEqual(HOOK_CONTRACT_MANIFEST["schema_version"], 2)
         self.assertEqual(
             set(HOOK_CONTRACT_MANIFEST["connectors"]),
-            set(KNOWN_CONNECTORS),
+            set(KNOWN_CONNECTORS) | set(ACP_ONLY_CONNECTORS),
         )
 
     def test_live_e2e_pretool_goldens_follow_exact_default_contract(self) -> None:
@@ -113,6 +114,13 @@ class TestConnectorContractManifest(unittest.TestCase):
             compat = resolve_connector_contract(connector, "9.9.9")
             self.assertEqual(compat.status, STATUS_NOT_GATED)
             self.assertTrue(compat.supported)
+
+    def test_kiro_is_not_hook_gated(self) -> None:
+        compat = resolve_connector_contract("kiro", "kiro-cli 2.22.0")
+        self.assertEqual(compat.status, STATUS_NOT_GATED)
+        self.assertTrue(compat.supported)
+        self.assertIsNone(compat.contract)
+        self.assertIn("no hook contract gate", compat.reason)
 
     def test_openclaw_transport_advisory_starts_at_2026_6_8(self) -> None:
         self.assertFalse(openclaw_needs_interception_advisory("2026.4.15"))

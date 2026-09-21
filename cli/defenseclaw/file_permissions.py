@@ -1456,6 +1456,7 @@ def windows_acl_custody_write_error(
     *,
     allow_current_user: bool,
     require_current_user_owner: bool = False,
+    ancestor_replace_only: bool = False,
 ) -> str | None:
     """Return why a path is outside trusted Windows write custody.
 
@@ -1501,8 +1502,16 @@ def windows_acl_custody_write_error(
     if trust_current_user:
         trusted_writers.add(current_sid)
     write_mask = 0x10000000 | 0x40000000 | 0x000D0156
+    ancestor_replace_mask = 0x10000000 | 0x40000000 | 0x00010000 | 0x00040000 | 0x00080000 | 0x40
     for permissions, access_mode, inheritance, sid in entries:
-        if access_mode not in (1, 2) or not permissions & write_mask:
+        if access_mode not in (1, 2):
+            continue
+        effective_write_mask = write_mask
+        if ancestor_replace_only and inheritance & 0x08:
+            continue  # INHERIT_ONLY_ACE does not apply to this directory.
+        if ancestor_replace_only and sid != "S-1-1-0":
+            effective_write_mask = ancestor_replace_mask
+        if not permissions & effective_write_mask:
             continue
         if sid in trusted_writers:
             continue

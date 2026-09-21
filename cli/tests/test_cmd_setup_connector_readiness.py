@@ -99,6 +99,21 @@ def test_contract_lock_accepts_exact_eleven(connector: str, tmp_path: Path) -> N
     assert connector_lock_contract_invariant(connector, _entry(connector, tmp_path)) == ""
 
 
+def test_contract_lock_accepts_kiro_not_gated_without_hook_paths() -> None:
+    assert (
+        connector_lock_contract_invariant(
+            "kiro",
+            {
+                "connector": "kiro",
+                "raw_agent_version": "kiro-cli 2.22.0",
+                "compatibility_status": "not-gated",
+                "hook_fail_mode": "open",
+            },
+        )
+        == ""
+    )
+
+
 @pytest.mark.parametrize("connector", ("antigravity",))
 def test_contract_lock_accepts_go_omitted_unversioned_fields(connector: str, tmp_path: Path) -> None:
     entry = _entry(connector, tmp_path)
@@ -191,7 +206,11 @@ def test_opencode_protected_executable_requires_exact_sst_location(monkeypatch, 
 
 def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path) -> None:
     cfg = _config(tmp_path)
-    assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) == set(TEN_CONNECTORS)
+    assert set(TEN_CONNECTORS) <= set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS)
+    assert set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS) - set(TEN_CONNECTORS) == {
+        "kiro",
+        "openhands",
+    }
     config_paths: dict[str, str] = {}
     runtime_paths: dict[str, list[str]] = {}
     for connector in TEN_CONNECTORS:
@@ -243,7 +262,7 @@ def test_real_doctor_dispatch_exercises_exact_eleven(monkeypatch, tmp_path: Path
         lambda *_args: SimpleNamespace(errors=(), disable_all_hooks=False),
     )
 
-    expected_labels = set(cmd_doctor._SETUP_READINESS_PRIMARY_LABELS.values())
+    expected_labels = {cmd_doctor._SETUP_READINESS_PRIMARY_LABELS[name] for name in TEN_CONNECTORS}
     observed_labels: set[str] = set()
     for connector in TEN_CONNECTORS:
         result = cmd_doctor._DoctorResult(passive=True, quiet=True)
@@ -700,3 +719,231 @@ def test_runtime_state_accepts_omitted_empty_active_roster() -> None:
     assert cmd_setup._connector_runtime_state_sets(
         {"version": 3, "names": None, "inactive_names": ["cursor"]}
     ) is None
+
+
+def test_wait_targets_keep_the_complete_desired_roster(tmp_path: Path) -> None:
+    (tmp_path / "active_connector.json").write_text(
+        json.dumps(
+            {
+                "version": 3,
+                "names": ["amp", "codex", "openhands"],
+                "inactive_names": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    assert cmd_setup._hook_runtime_wait_targets(
+        ["amp", "claudecode", "codex", "kiro", "openhands", "opencode"],
+        str(tmp_path),
+        "kiro",
+    ) == ["amp", "claudecode", "codex", "kiro", "opencode", "openhands"]
+
+
+def test_snapshot_accepts_superset_active_roster(tmp_path: Path) -> None:
+    lock = {
+        "version": 2,
+        "connectors": {
+            "amp": _entry("amp", tmp_path),
+            "codex": _entry("codex", tmp_path),
+            "kiro": {
+                "connector": "kiro",
+                "raw_agent_version": "kiro-cli 2.22.0",
+                "compatibility_status": "not-gated",
+                "hook_fail_mode": "open",
+            },
+        },
+    }
+    state = {
+        "version": 3,
+        "names": ["amp", "codex", "kiro"],
+        "inactive_names": ["claudecode", "opencode"],
+    }
+    assert cmd_setup._connector_runtime_snapshot_ready(
+        state,
+        2,
+        lock,
+        2,
+        expected={"amp", "codex", "kiro"},
+        previous_state_marker=1,
+        previous_lock_marker=1,
+    )
+    missing = cmd_setup._connector_runtime_snapshot_failure(
+        state,
+        2,
+        lock,
+        2,
+        expected={"amp", "claudecode", "codex", "kiro"},
+        previous_state_marker=1,
+        previous_lock_marker=1,
+    )
+    assert not missing
+    assert (missing.connector, missing.invariant) == ("claudecode", "roster")
+
+
+def test_kiro_setup_readiness_accepts_installed_native_hooks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    cfg = _config(tmp_path)
+    hook_path = tmp_path / "kiro-hooks" / "defenseclaw.json"
+    hook_path.parent.mkdir(parents=True)
+    hook_path.write_text(
+        '{"version":"v1","hooks":[{"name":"defenseclaw-pre-tool","trigger":"PreToolUse"}]}\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "hook_contract_lock.json").write_text(
+        json.dumps(
+            {
+                "version": 2,
+                "connectors": {
+                    "kiro": {
+                        "connector": "kiro",
+                        "compatibility_status": "not-gated",
+                        "hook_fail_mode": "open",
+                        "locations": {"hook_config_paths": [str(hook_path)]},
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _patch_registration_ready(monkeypatch, {"hook_fail_mode": "open"})
+    monkeypatch.setattr(
+        fail_mode,
+        "connector_fail_mode_report",
+        lambda *_args, **_kwargs: {"configured": "open", "desired": "open", "effective": "open"},
+    )
+
+    readiness = cmd_doctor.connector_setup_readiness(cfg, "kiro")
+
+    assert readiness
+    assert (readiness.connector, readiness.invariant) == ("kiro", "ready")
+
+
+class TestLockContractFailureDetail:
+    """An agent that updates past its last reviewed hook contract is not a
+    corrupt lock. The gate reported both as "protected lock contract is
+    invalid", which sent the operator looking for tampering instead of at the
+    version they had just upgraded -- and because the gate covers the whole
+    desired roster, the message surfaced while setting up an unrelated
+    connector.
+    """
+
+    def test_ungated_version_names_the_version_and_the_fix(self) -> None:
+        entry = {
+            "connector": "devin",
+            "raw_agent_version": "9999.1.1",
+            "normalized_agent_version": "9999.1.1",
+            "compatibility_status": "unknown",
+            "compatibility_reason": "no hook contract matches normalized agent version",
+            "hook_fail_mode": "open",
+        }
+        invariant = connector_lock_contract_invariant("devin", entry)
+        assert invariant, "precondition: an ungated version must fail the invariant"
+        detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
+        assert "9999.1.1" in detail
+        assert "no reviewed hook contract" in detail
+        assert "hook_contracts.json" in detail or "active roster" in detail
+        assert "invalid" not in detail
+
+    def test_malformed_entry_still_reads_as_invalid(self) -> None:
+        # A lock whose recorded connector does not match, or whose fields are
+        # nonsense, is a genuine integrity failure and must keep saying so.
+        for entry in ({"connector": "cursor"}, {"connector": "devin", "compatibility_status": "bogus"}, None):
+            invariant = connector_lock_contract_invariant("devin", entry)
+            assert invariant, f"precondition: {entry!r} must fail the invariant"
+            detail = cmd_setup._lock_contract_failure_detail("devin", entry, invariant)
+            assert detail == f"protected lock {invariant} is invalid"
+
+    def test_supported_version_is_not_reached(self) -> None:
+        # Sanity: a connector whose version resolves to a real contract does
+        # not fail the invariant at all, so no detail is produced.
+        compatibility = resolve_connector_contract("codex", "0.125.0")
+        if not (compatibility.contract and compatibility.supported):
+            pytest.skip("codex 0.125.0 is no longer covered by a pinned contract")
+
+
+class TestUnconvergeablePeersAreSkipped:
+    """A peer that cannot converge must not block the connector being set up.
+
+    The readiness gate covers the whole desired roster. One agent that has
+    moved past its last reviewed hook contract used to fail -- or hang --
+    every `defenseclaw setup <other connector>` run, and the non-convergence
+    rollback then deleted that other connector's freshly written hook files.
+    """
+
+    def _lock(self, tmp_path: Path, entries: dict) -> str:
+        path = tmp_path / "hook_contract_lock.json"
+        path.write_text(json.dumps({"version": 2, "connectors": entries}), encoding="utf-8")
+        return str(path)
+
+    def _ungated_entry(self, connector: str) -> dict:
+        return {
+            "connector": connector,
+            "raw_agent_version": "9999.1.1",
+            "normalized_agent_version": "9999.1.1",
+            "compatibility_status": "unknown",
+            "hook_fail_mode": "open",
+        }
+
+    def test_peer_with_no_contract_is_skipped(self, tmp_path: Path) -> None:
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro"}
+        assert tolerated == frozenset({"devin"})
+
+    def test_the_setup_target_is_never_skipped(self, tmp_path: Path) -> None:
+        # If the connector being configured cannot converge, that is a real
+        # failure. Skipping it would report success for an unenforced agent.
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"devin"}, required={"devin"}
+        )
+        assert keep == {"devin"}
+        assert tolerated == frozenset()
+
+    def test_unpublished_peer_is_still_waited_for(self, tmp_path: Path) -> None:
+        # An absent entry is ordinary startup timing, not a permanent failure.
+        lock = self._lock(tmp_path, {})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro", "devin"}
+        assert tolerated == frozenset()
+
+    def test_unreadable_lock_does_not_tolerate_anything(self, tmp_path: Path) -> None:
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            str(tmp_path / "missing.json"), {"kiro", "devin"}, required={"kiro"}
+        )
+        assert keep == {"kiro", "devin"}
+        assert tolerated == frozenset()
+
+    def test_skipped_peer_keeps_its_lock_entry_without_failing_the_gate(self) -> None:
+        # The skipped peer's recorded authority is deliberately left in place;
+        # the coverage check must not then read it as an unexpected peer.
+        kiro = {
+            "connector": "kiro",
+            "compatibility_status": "not-gated",
+            "hook_fail_mode": "open",
+        }
+        lock = {"version": 2, "connectors": {"kiro": kiro, "devin": self._ungated_entry("devin")}}
+        assert cmd_setup._hook_contract_lock_entry_covers("kiro", kiro), "precondition: kiro entry is valid"
+        assert not cmd_setup._hook_contract_lock_covers(lock, {"kiro"}, set())
+        assert cmd_setup._hook_contract_lock_covers(
+            lock, {"kiro"}, set(), frozenset({"devin"})
+        )
+
+    def test_departed_peer_left_in_the_lock_is_also_skipped(self, tmp_path: Path) -> None:
+        # `guardrail disable --connector devin` drops devin from the roster
+        # but its lock entry survives until teardown reclaims it. Without
+        # this, disabling the broken connector turned an expected-peer
+        # failure into an unexpected-peer failure and still blocked setup.
+        lock = self._lock(tmp_path, {"devin": self._ungated_entry("devin")})
+        keep, tolerated = cmd_setup._partition_unconvergeable_peers(
+            lock, {"kiro"}, required={"kiro"}
+        )
+        assert keep == {"kiro"}
+        assert tolerated == frozenset({"devin"})

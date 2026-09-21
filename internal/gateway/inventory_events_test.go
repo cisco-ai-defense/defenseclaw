@@ -1316,6 +1316,7 @@ func TestEndpointConnectorComponentsWindowsExactNativeRoster(t *testing.T) {
 		"cursor",
 		"devin",
 		"hermes",
+		"kiro",
 		"omnigent",
 		"opencode",
 	}

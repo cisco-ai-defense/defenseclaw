@@ -181,7 +181,7 @@ class _WindowsProcessWaiter:
 @click.option(
     "--binaries",
     is_flag=True,
-    help="Additionally remove the defenseclaw + defenseclaw-gateway binaries from ~/.local/bin.",
+    help="Additionally remove DefenseClaw CLI, gateway, ACP guard, and helper binaries from ~/.local/bin.",
 )
 @click.option(
     "--keep-openclaw",
@@ -457,12 +457,14 @@ def _owned_binary_targets(platform_name: str) -> tuple[str, tuple[str, ...]]:
         names = (
             "defenseclaw.cmd",
             "defenseclaw-gateway.exe",
+            "defenseclaw-acp.exe",
             "defenseclaw-hook.exe",
         )
     else:
         install_root = os.path.abspath(os.path.expanduser("~/.local/bin"))
         names = (
             "defenseclaw-gateway",
+            "defenseclaw-acp",
             "defenseclaw",
             "skill-scanner",
             "skill-scanner-api",
@@ -802,10 +804,16 @@ def _validate_plan(plan: UninstallPlan) -> None:
         if plan.platform_name == "win32":
             _validate_windows_ancestor_chain(plan.install_root, "binary install root")
         allowed_names = (
-            {"defenseclaw.cmd", "defenseclaw-gateway.exe", "defenseclaw-hook.exe"}
+            {
+                "defenseclaw.cmd",
+                "defenseclaw-gateway.exe",
+                "defenseclaw-acp.exe",
+                "defenseclaw-hook.exe",
+            }
             if plan.platform_name == "win32"
             else {
                 "defenseclaw-gateway",
+                "defenseclaw-acp",
                 "defenseclaw",
                 "skill-scanner",
                 "skill-scanner-api",

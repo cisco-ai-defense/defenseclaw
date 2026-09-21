@@ -71,6 +71,7 @@ class TestCheckSchemasResourceEnum(unittest.TestCase):
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
                 # Sentinel set by telemetry/resource.go when more than one
                 # connector is active (multi-connector install). Not a
                 # connector name — see buildResource / WU4.

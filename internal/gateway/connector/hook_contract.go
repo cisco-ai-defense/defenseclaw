@@ -101,6 +101,13 @@ var proxyConnectorsWithoutHookGate = map[string]bool{
 	"zeptoclaw": true,
 }
 
+// catalogedOnlyConnectorsWithoutHookGate are regular connectors whose hook
+// contract is not version-gated. Empty hook contracts must not fail
+// action-mode setup as "unknown". Kiro still installs native hooks.
+var catalogedOnlyConnectorsWithoutHookGate = map[string]bool{
+	"kiro": true,
+}
+
 var copilotLegacyHookEvents = []string{
 	"sessionStart",
 	"sessionEnd",
@@ -1069,6 +1076,16 @@ func resolveHookContractForOS(connectorName, rawVersion, goos string) HookContra
 			NormalizedVersion: NormalizeAgentVersion(name, raw),
 			Status:            HookCompatibilityNotGated,
 			Reason:            "proxy/chat connector; no hook contract gate",
+		}
+	}
+	if catalogedOnlyConnectorsWithoutHookGate[name] {
+		raw := strings.TrimSpace(rawVersion)
+		return HookContractResolution{
+			Connector:         name,
+			RawVersion:        raw,
+			NormalizedVersion: NormalizeAgentVersion(name, raw),
+			Status:            HookCompatibilityNotGated,
+			Reason:            "connector has no hook contract gate",
 		}
 	}
 	contracts := hookContractsForOS(name, goos)

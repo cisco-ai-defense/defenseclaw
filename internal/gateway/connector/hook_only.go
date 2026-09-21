@@ -835,6 +835,7 @@ func openhandsNativeOTLPSpecForOS(opts SetupOpts, goos string) *NativeOTLPSpec {
 func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 	caps := ConnectorCapabilities{
 		LLMTrafficMode: LLMTrafficModeForConnector(c.name),
+		ACP:            ACPAgentCapabilityForConnector(c.name),
 		Hooks:          c.capability(opts),
 		CodeGuard: CodeGuardCapability{
 			Supported:    false,
@@ -1095,7 +1096,7 @@ func (c *hookOnlyConnector) Capabilities(opts SetupOpts) ConnectorCapabilities {
 			RequiresOptIn:  true,
 			Notes: []string{
 				"Devin CLI v3000.3 and later prefers dedicated mcp_config.json files; embedded MCP entries in config.json remain discovery-only for backward compatibility.",
-				"Cloud Devin, proxy, ACP, team-managed, and dynamically registered MCP sources are outside this native local connector.",
+				"Cloud Devin, proxy, team-managed, and dynamically registered MCP sources are outside this native local connector; devin acp is mediated separately by the shared ACP guard.",
 			},
 		}
 		caps.Skills = SurfaceCapability{
@@ -6337,7 +6338,23 @@ func containsHookScript(raw interface{}, hookScripts ...string) bool {
 			}
 		}
 		if hooks, ok := v["hooks"]; ok {
-			return containsHookScript(hooks, hookScripts...)
+			if containsHookScript(hooks, hookScripts...) {
+				return true
+			}
+		}
+		// Event-keyed hook blocks -- Kiro CLI 2.x writes
+		// {"hooks": {"preToolUse": [{...}], ...}} -- put the entries one map
+		// level below "hooks". Walking only the "hooks" value stopped at that
+		// map, whose own keys are event names rather than "command", so a
+		// correctly registered agent config read as unregistered. Recurse
+		// through the remaining values so any nesting depth is reachable.
+		for key, value := range v {
+			if key == "hooks" {
+				continue
+			}
+			if containsHookScript(value, hookScripts...) {
+				return true
+			}
 		}
 	}
 	return false

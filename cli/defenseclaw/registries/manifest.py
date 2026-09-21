@@ -84,6 +84,7 @@ KNOWN_CONNECTORS = {
     "opencode",
     "amp",
     "omnigent",
+    "kiro",
 }
 KNOWN_TYPES = {"skill", "mcp"}
 

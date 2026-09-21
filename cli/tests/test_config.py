@@ -40,6 +40,7 @@ from defenseclaw.config import (
     CiscoAIDefenseConfig,
     ClawConfig,
     Config,
+    ConfigVersionError,
     GatewayConfig,
     GatewayConfigReloadConfig,
     GatewayWatchdogConfig,
@@ -59,6 +60,7 @@ from defenseclaw.config import (
     WebhookConfig,
     _dedup,
     _expand,
+    _merge_acp,
     _merge_cisco_ai_defense,
     _merge_gateway_watchdog,
     _merge_gateway_watcher,
@@ -89,6 +91,10 @@ class TestHelpers(unittest.TestCase):
     def test_expand_non_tilde(self):
         self.assertEqual(_expand("/abs/path"), "/abs/path")
         self.assertEqual(_expand("relative"), "relative")
+
+    def test_merge_acp_rejects_non_mapping_profiles(self):
+        with self.assertRaisesRegex(ConfigVersionError, "acp.profiles must be a mapping"):
+            _merge_acp({"profiles": ["not-a-profile"]})
 
     def test_dedup_preserves_order(self):
         self.assertEqual(_dedup(["a", "b", "a", "c", "b"]), ["a", "b", "c"])

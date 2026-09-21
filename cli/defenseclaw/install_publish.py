@@ -1331,6 +1331,86 @@ def _ensure_retirement_intent(
     return True
 
 
+def _parse_completed_entry_retirement(
+    custody_fd: int,
+    name: str,
+) -> tuple[str, ObjectIdentity] | None:
+    if not name.startswith("intent-") or not name.endswith(".json"):
+        return None
+    raw = _read_regular_at(custody_fd, name, missing_ok=True)
+    if raw is None:
+        return None
+    try:
+        document = json.loads(raw)
+        if set(document) != {"canonical", "identity", "kind", "schema_version"}:
+            return None
+        canonical = document["canonical"]
+        identity = tuple(document["identity"])
+        kind = document["kind"]
+        if (
+            document["schema_version"] != 1
+            or not isinstance(canonical, str)
+            or kind != "entry"
+            or len(identity) not in {2, 4}
+            or any(not isinstance(value, int) or value <= 0 for value in identity[:3])
+            or (len(identity) == 4 and not 0 <= identity[3] < 1_000_000_000)
+        ):
+            return None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+    intent, retired = _retirement_names(canonical, identity, kind)
+    if intent != name:
+        return None
+    retired_info = _entry_stat(custody_fd, retired)
+    if retired_info is None or not _kind_matches(retired_info, "entry"):
+        return None
+    if not _entry_claim_matches(custody_fd, retired, identity):
+        return None
+    return retired, identity
+
+
+def _reclaim_completed_entry_slots(custody_fd: int, *, needed: int) -> None:
+    """Free completed regular-file retirements so a later exact unlink can proceed.
+
+    Incomplete journal entries, foreign names, and the custody marker stay
+    untouched. Source-install rebuilds share one bounded bin custody across
+    gateway and ACP publication; without reclaim, a long-lived checkout cannot
+    replace either binary once the bound is reached.
+    """
+
+    if needed <= 0:
+        return
+    while True:
+        with os.scandir(custody_fd) as entries:
+            names = [entry.name for entry in entries]
+        if len(names) + needed <= MAX_CUSTODY_ENTRIES:
+            return
+        candidates: list[tuple[int, str, str, ObjectIdentity]] = []
+        for name in names:
+            parsed = _parse_completed_entry_retirement(custody_fd, name)
+            if parsed is None:
+                continue
+            retired, identity = parsed
+            intent_info = _entry_stat(custody_fd, name)
+            mtime = 0 if intent_info is None else intent_info.st_mtime_ns
+            candidates.append((mtime, name, retired, identity))
+        if not candidates:
+            return
+        _mtime, intent, retired, identity = min(candidates, key=lambda item: item[0:2])
+        if not _entry_claim_matches(custody_fd, retired, identity):
+            return
+        os.unlink(retired, dir_fd=custody_fd)
+        if _entry_stat(custody_fd, retired) is not None:
+            raise PublishError("retirement custody changed during reclaim")
+        if _read_regular_at(custody_fd, intent, missing_ok=True) is None:
+            os.fsync(custody_fd)
+            continue
+        os.unlink(intent, dir_fd=custody_fd)
+        if _entry_stat(custody_fd, intent) is not None:
+            raise PublishError("retirement custody changed during reclaim")
+        os.fsync(custody_fd)
+
+
 def _bind_custody_fd(descriptor: int, *, create: bool, label: str) -> None:
     metadata = os.fstat(descriptor)
     if metadata.st_uid != os.geteuid() or metadata.st_mode & 0o077:
@@ -2139,12 +2219,15 @@ def unlink_exact(
     expected: ObjectIdentity,
     *,
     custody_root: Path | None = None,
+    reclaim_completed: bool = False,
 ) -> bool:
     """Durably retire only the exact claimed object and preserve replacements."""
 
     parent_fd = _open_directory(destination.parent, create=False)
     custody_fd = _open_custody_root(custody_root or _default_custody_root(destination), create=True)
     try:
+        if reclaim_completed:
+            _reclaim_completed_entry_slots(custody_fd, needed=2)
         return _unlink_exact_at(
             parent_fd,
             destination.name,
@@ -2283,7 +2366,12 @@ def publish_regular(
                     os.close(stage_fd)
                 if not succeeded and linked_fresh:
                     try:
-                        unlink_exact(destination, stage_claim, custody_root=retirement_root)
+                        unlink_exact(
+                            destination,
+                            stage_claim,
+                            custody_root=retirement_root,
+                            reclaim_completed=True,
+                        )
                     except (OSError, PublishError):
                         pass
                 if not retain_stage:
@@ -2295,6 +2383,7 @@ def publish_regular(
                             destination.parent / stage,
                             current_stage,
                             custody_root=retirement_root,
+                            reclaim_completed=True,
                         ):
                             raise PublishError(f"source-install staging changed and was preserved: {destination}")
         finally:

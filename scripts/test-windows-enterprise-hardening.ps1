@@ -56,6 +56,9 @@ param(
     [string]$GatewayBinary,
 
     [Parameter(Mandatory)]
+    [string]$ACPBinary,
+
+    [Parameter(Mandatory)]
     [string]$HookBinary,
 
     [Parameter(Mandatory)]
@@ -85,6 +88,8 @@ param(
     [string]$UpgradeBrokerBinary = '',
 
     [string]$UpgradeGatewayBinary = '',
+
+    [string]$UpgradeACPBinary = '',
 
     [string]$UpgradeHookBinary = '',
 
@@ -4753,6 +4758,10 @@ function Initialize-ProtectedCertificationSources {
         $script:OriginalGatewaySource `
         'sources\defenseclaw-gateway.exe' `
         'stage-gateway'
+    $script:ACPSource = Copy-CertificationSourceToProtectedStaging `
+        $script:OriginalACPSource `
+        'sources\defenseclaw-acp.exe' `
+        'stage-acp'
     $script:HookSource = Copy-CertificationSourceToProtectedStaging `
         $script:OriginalHookSource `
         'sources\defenseclaw-hook.exe' `
@@ -4796,6 +4805,7 @@ function Initialize-ProtectedCertificationSources {
             path = $script:ProviderLibrarySource
         },
         [pscustomobject]@{ name = 'gateway'; path = $script:GatewaySource },
+        [pscustomobject]@{ name = 'acp'; path = $script:ACPSource },
         [pscustomobject]@{ name = 'hook'; path = $script:HookSource },
         [pscustomobject]@{ name = 'sensor_helper'; path = $script:SensorHelperSource },
         [pscustomobject]@{ name = 'cli'; path = $script:CLISource },
@@ -4820,20 +4830,23 @@ function Initialize-ProtectedCertificationSources {
 
     $script:UpgradeBrokerSource = ''
     $script:UpgradeGatewaySource = ''
+    $script:UpgradeACPSource = ''
     $script:UpgradeHookSource = ''
     $script:UpgradeSensorHelperSource = ''
     $script:UpgradeCLISource = ''
     if (-not [string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+        -not [string]::IsNullOrWhiteSpace($UpgradeACPBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
         -not [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
         if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+            [string]::IsNullOrWhiteSpace($UpgradeACPBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
             [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
-            throw 'upgrade certification requires all five upgrade binaries'
+            throw 'upgrade certification requires all six upgrade binaries'
         }
         $script:UpgradeBrokerSource = Copy-CertificationSourceToProtectedStaging `
             $UpgradeBrokerBinary `
@@ -4843,6 +4856,10 @@ function Initialize-ProtectedCertificationSources {
             $UpgradeGatewayBinary `
             'upgrade-sources\defenseclaw-gateway.exe' `
             'stage-upgrade-gateway'
+        $script:UpgradeACPSource = Copy-CertificationSourceToProtectedStaging `
+            $UpgradeACPBinary `
+            'upgrade-sources\defenseclaw-acp.exe' `
+            'stage-upgrade-acp'
         $script:UpgradeHookSource = Copy-CertificationSourceToProtectedStaging `
             $UpgradeHookBinary `
             'upgrade-sources\defenseclaw-hook.exe' `
@@ -4858,6 +4875,7 @@ function Initialize-ProtectedCertificationSources {
         foreach ($entry in @(
             [pscustomobject]@{ name = 'upgrade_broker'; path = $script:UpgradeBrokerSource },
             [pscustomobject]@{ name = 'upgrade_gateway'; path = $script:UpgradeGatewaySource },
+            [pscustomobject]@{ name = 'upgrade_acp'; path = $script:UpgradeACPSource },
             [pscustomobject]@{ name = 'upgrade_hook'; path = $script:UpgradeHookSource },
             [pscustomobject]@{ name = 'upgrade_sensor_helper'; path = $script:UpgradeSensorHelperSource },
             [pscustomobject]@{ name = 'upgrade_cli'; path = $script:UpgradeCLISource }
@@ -4867,7 +4885,7 @@ function Initialize-ProtectedCertificationSources {
             }
         }
     }
-    return 'installer, module, broker, gateway, hook, sensor helper, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging; the signed vendor provider library remains pinned to its authenticated Secure Client path'
+    return 'installer, module, broker, gateway, ACP guard, hook, sensor helper, lifecycle CLI, normal-mode Python CLI, and optional upgrade binaries are byte-stable in administrator-protected staging; the signed vendor provider library remains pinned to its authenticated Secure Client path'
 }
 
 function Get-AgentBinaryTrustIdentity(
@@ -6323,6 +6341,7 @@ function Get-DeploymentDigests {
     $paths = [ordered]@{
         broker = Join-Path $script:InstallRoot 'bin\defenseclaw-cmid-broker.exe'
         gateway = Join-Path $script:InstallRoot 'bin\defenseclaw-gateway.exe'
+        acp = Join-Path $script:InstallRoot 'bin\defenseclaw-acp.exe'
         hook = Join-Path $script:InstallRoot 'bin\defenseclaw-hook.exe'
         sensor_helper = Join-Path $script:InstallRoot 'bin\defenseclaw-sensor-helper.exe'
         cli = Join-Path $script:InstallRoot 'bin\defenseclaw.exe'
@@ -10184,6 +10203,7 @@ function Test-CodexSharedDirectoryCreationRollback {
         -BrokerSource $script:BrokerSource `
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
+        -ACPSource $script:ACPSource `
         -HookSource $script:HookSource `
         -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
@@ -10276,6 +10296,7 @@ function Test-CodexSharedDirectoriesSurviveFailedInstall {
         -BrokerSource $script:BrokerSource `
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
+        -ACPSource $script:ACPSource `
         -HookSource $script:HookSource `
         -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
@@ -10325,6 +10346,7 @@ function Test-UnsafeCodexSharedDirectoryFailsClosed {
             -BrokerSource $script:BrokerSource `
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
+            -ACPSource $script:ACPSource `
             -HookSource $script:HookSource `
             -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
@@ -10394,6 +10416,7 @@ function Test-ReparseCodexSharedDirectoryFailsClosed {
             -BrokerSource $script:BrokerSource `
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
+            -ACPSource $script:ACPSource `
             -HookSource $script:HookSource `
             -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
@@ -11577,6 +11600,7 @@ function Get-InstallerArguments(
     [string]$BrokerSource,
     [string]$ProviderLibrarySource,
     [string]$GatewaySource,
+    [string]$ACPSource,
     [string]$HookSource,
     [string]$SensorHelperSource,
     [string]$CLISource,
@@ -11605,6 +11629,7 @@ function Get-InstallerArguments(
             @('BrokerBinary', $BrokerSource),
             @('ProviderLibrary', $ProviderLibrarySource),
             @('GatewayBinary', $GatewaySource),
+            @('ACPBinary', $ACPSource),
             @('HookBinary', $HookSource),
             @('SensorHelperBinary', $SensorHelperSource)
         )) {
@@ -11628,6 +11653,10 @@ function Get-InstallerArguments(
     if (-not [string]::IsNullOrWhiteSpace($GatewaySource)) {
         $arguments.Add('-GatewayBinary')
         $arguments.Add((ConvertTo-CanonicalPath $GatewaySource))
+    }
+    if (-not [string]::IsNullOrWhiteSpace($ACPSource)) {
+        $arguments.Add('-ACPBinary')
+        $arguments.Add((ConvertTo-CanonicalPath $ACPSource))
     }
     if (-not [string]::IsNullOrWhiteSpace($HookSource)) {
         $arguments.Add('-HookBinary')
@@ -11699,6 +11728,7 @@ function Get-EnterpriseLifecycleCLIArguments(
     [string]$InstallerPath,
     [string]$BrokerSource = '',
     [string]$GatewaySource = '',
+    [string]$ACPSource = '',
     [string]$HookSource = '',
     [string]$SensorHelperSource = '',
     [string]$CLISource = '',
@@ -11729,6 +11759,7 @@ function Get-EnterpriseLifecycleCLIArguments(
         foreach ($required in @(
             @('--broker-binary', $BrokerSource),
             @('--gateway-binary', $GatewaySource),
+            @('--acp-binary', $ACPSource),
             @('--hook-binary', $HookSource),
             @('--sensor-helper-binary', $SensorHelperSource)
         )) {
@@ -11740,6 +11771,7 @@ function Get-EnterpriseLifecycleCLIArguments(
     foreach ($source in @(
         @('--broker-binary', $BrokerSource),
         @('--gateway-binary', $GatewaySource),
+        @('--acp-binary', $ACPSource),
         @('--hook-binary', $HookSource),
         @('--sensor-helper-binary', $SensorHelperSource),
         @('--cli-binary', $CLISource)
@@ -11829,6 +11861,7 @@ function Test-AllowUnsignedHarnessContract {
             -BrokerSource $script:BrokerSource `
             -ProviderLibrarySource $script:ProviderLibrarySource `
             -GatewaySource $script:GatewaySource `
+            -ACPSource $script:ACPSource `
             -HookSource $script:HookSource `
             -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `
@@ -11841,6 +11874,7 @@ function Test-AllowUnsignedHarnessContract {
             -BrokerSource '' `
             -ProviderLibrarySource '' `
             -GatewaySource '' `
+            -ACPSource '' `
             -HookSource '' `
             -SensorHelperSource '' `
             -CLISource '' `
@@ -12151,6 +12185,7 @@ function Invoke-EnterpriseInstaller {
         [string]$BrokerSource = '',
         [string]$ProviderLibrarySource = '',
         [string]$GatewaySource = '',
+        [string]$ACPSource = '',
         [string]$HookSource = '',
         [string]$SensorHelperSource = '',
         [string]$CLISource = '',
@@ -12173,6 +12208,7 @@ function Invoke-EnterpriseInstaller {
         -BrokerSource $BrokerSource `
         -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
+        -ACPSource $ACPSource `
         -HookSource $HookSource `
         -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
@@ -12202,6 +12238,7 @@ function Invoke-EnterpriseInstallerJSON {
         [string]$BrokerSource = '',
         [string]$ProviderLibrarySource = '',
         [string]$GatewaySource = '',
+        [string]$ACPSource = '',
         [string]$HookSource = '',
         [string]$SensorHelperSource = '',
         [string]$CLISource = '',
@@ -12223,6 +12260,7 @@ function Invoke-EnterpriseInstallerJSON {
         -BrokerSource $BrokerSource `
         -ProviderLibrarySource $ProviderLibrarySource `
         -GatewaySource $GatewaySource `
+        -ACPSource $ACPSource `
         -HookSource $HookSource `
         -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
@@ -13643,6 +13681,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
     [string]$InstallerPath,
     [string]$BrokerSource = '',
     [string]$GatewaySource = '',
+    [string]$ACPSource = '',
     [string]$HookSource = '',
     [string]$SensorHelperSource = '',
     [string]$CLISource = '',
@@ -13658,6 +13697,7 @@ function Invoke-PublicEnterpriseLifecycleCLIJSON(
         -InstallerPath $InstallerPath `
         -BrokerSource $BrokerSource `
         -GatewaySource $GatewaySource `
+        -ACPSource $ACPSource `
         -HookSource $HookSource `
         -SensorHelperSource $SensorHelperSource `
         -CLISource $CLISource `
@@ -17144,6 +17184,7 @@ function Test-FailedUpgradePreservesTransaction {
         -BrokerSource $script:BrokerSource `
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
+        -ACPSource $script:ACPSource `
         -HookSource $missing `
         -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
@@ -17183,6 +17224,7 @@ function Test-PostSnapshotActivationFailureRollsBack {
         -BrokerSource $script:BrokerSource `
         -ProviderLibrarySource $script:ProviderLibrarySource `
         -GatewaySource $script:GatewaySource `
+        -ACPSource $script:ACPSource `
         -HookSource $script:HookSource `
         -SensorHelperSource $script:SensorHelperSource `
         -CLISource $script:CLISource `
@@ -17271,11 +17313,12 @@ function Test-PublicLifecycleInspectionAndReconcile {
 function Test-UpgradeTransaction {
     if ([string]::IsNullOrWhiteSpace($script:UpgradeBrokerSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeGatewaySource) -or
+        [string]::IsNullOrWhiteSpace($script:UpgradeACPSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeHookSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeSensorHelperSource) -or
         [string]::IsNullOrWhiteSpace($script:UpgradeCLISource)) {
         throw (
-            'full execution requires all five -Upgrade*Binary inputs from ' +
+            'full execution requires all six -Upgrade*Binary inputs from ' +
             'a separately version-stamped build'
         )
     }
@@ -17283,13 +17326,14 @@ function Test-UpgradeTransaction {
     $expected = [ordered]@{
         broker = [string]$script:SourceDigests['upgrade_broker']
         gateway = [string]$script:SourceDigests['upgrade_gateway']
+        acp = [string]$script:SourceDigests['upgrade_acp']
         hook = [string]$script:SourceDigests['upgrade_hook']
         sensor_helper = [string]$script:SourceDigests['upgrade_sensor_helper']
         cli = [string]$script:SourceDigests['upgrade_cli']
     }
     $expectedConfigSHA256 = Get-FileDigest $script:ConfigSource
     $expectedManifestSHA256 = Get-FileDigest $script:ManifestSource
-    foreach ($name in @('broker', 'gateway', 'hook', 'sensor_helper', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'cli')) {
         if ([string]::Equals(
             [string]$before.$name,
             [string]$expected[$name],
@@ -17310,6 +17354,7 @@ function Test-UpgradeTransaction {
         -InstallerPath $installedInstaller `
         -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
+        -ACPSource $script:UpgradeACPSource `
         -HookSource $script:UpgradeHookSource `
         -SensorHelperSource $script:UpgradeSensorHelperSource `
         -CLISource $script:UpgradeCLISource `
@@ -17372,7 +17417,7 @@ function Test-UpgradeTransaction {
     }
     $serviceContract = Assert-ServiceContract
     $after = Get-DeploymentDigests
-    foreach ($name in @('broker', 'gateway', 'hook', 'sensor_helper', 'cli')) {
+    foreach ($name in @('broker', 'gateway', 'acp', 'hook', 'sensor_helper', 'cli')) {
         if (-not [string]::Equals(
             [string]$after.$name,
             [string]$expected[$name],
@@ -17422,6 +17467,7 @@ function Test-UpgradeTransaction {
             after = $after
             exact_gateway_sha256 = $true
             exact_broker_sha256 = $true
+            exact_acp_sha256 = $true
             exact_hook_sha256 = $true
             exact_sensor_helper_sha256 = $true
             exact_cli_sha256 = $true
@@ -18165,6 +18211,7 @@ function Test-PublicDefaultUninstallAndReinstall {
         -InstallerPath $script:Installer `
         -BrokerSource $script:UpgradeBrokerSource `
         -GatewaySource $script:UpgradeGatewaySource `
+        -ACPSource $script:UpgradeACPSource `
         -HookSource $script:UpgradeHookSource `
         -SensorHelperSource $script:UpgradeSensorHelperSource `
         -CLISource $script:UpgradeCLISource `
@@ -20403,6 +20450,7 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             provider_library_sha256 =
                 [string]$script:SourceDigests['provider_library']
             gateway_sha256 = [string]$script:SourceDigests['gateway']
+            acp_sha256 = [string]$script:SourceDigests['acp']
             hook_sha256 = [string]$script:SourceDigests['hook']
             sensor_helper_sha256 = [string]$script:SourceDigests['sensor_helper']
             cli_sha256 = [string]$script:SourceDigests['cli']
@@ -20418,6 +20466,7 @@ function Write-FinalEvidence([string]$Status, [string]$Failure) {
             rejected_claude_sha256 = [string]$script:SourceDigests['rejected_claude']
             upgrade_broker_sha256 = [string]$script:SourceDigests['upgrade_broker']
             upgrade_gateway_sha256 = [string]$script:SourceDigests['upgrade_gateway']
+            upgrade_acp_sha256 = [string]$script:SourceDigests['upgrade_acp']
             upgrade_hook_sha256 = [string]$script:SourceDigests['upgrade_hook']
             upgrade_sensor_helper_sha256 =
                 [string]$script:SourceDigests['upgrade_sensor_helper']
@@ -20536,6 +20585,7 @@ $script:Installer = ConvertTo-CanonicalPath $resolvedInstallerPath
 $script:OriginalBrokerSource = ConvertTo-CanonicalPath $BrokerBinary
 $script:OriginalProviderLibrarySource = ConvertTo-CanonicalPath $ProviderLibrary
 $script:OriginalGatewaySource = ConvertTo-CanonicalPath $GatewayBinary
+$script:OriginalACPSource = ConvertTo-CanonicalPath $ACPBinary
 $script:OriginalHookSource = ConvertTo-CanonicalPath $HookBinary
 $script:OriginalSensorHelperSource = ConvertTo-CanonicalPath $SensorHelperBinary
 $script:OriginalCLISource = ConvertTo-CanonicalPath $CLIBinary
@@ -20578,6 +20628,7 @@ $script:OriginalModuleSource = ConvertTo-CanonicalPath (
 $script:BrokerSource = $script:OriginalBrokerSource
 $script:ProviderLibrarySource = $script:OriginalProviderLibrarySource
 $script:GatewaySource = $script:OriginalGatewaySource
+$script:ACPSource = $script:OriginalACPSource
 $script:HookSource = $script:OriginalHookSource
 $script:SensorHelperSource = $script:OriginalSensorHelperSource
 $script:CLISource = $script:OriginalCLISource
@@ -20586,6 +20637,7 @@ $script:NormalModeCLILauncherSource =
 $script:NormalModeCLIWheelSource = $script:OriginalNormalModeCLIWheel
 $script:UpgradeBrokerSource = ''
 $script:UpgradeGatewaySource = ''
+$script:UpgradeACPSource = ''
 $script:UpgradeHookSource = ''
 $script:UpgradeSensorHelperSource = ''
 $script:UpgradeCLISource = ''
@@ -20596,6 +20648,7 @@ foreach ($required in @(
     [pscustomobject]@{ Path = $script:OriginalBrokerSource; Label = 'credential broker binary' },
     [pscustomobject]@{ Path = $script:OriginalProviderLibrarySource; Label = 'managed credential provider library' },
     [pscustomobject]@{ Path = $script:GatewaySource; Label = 'gateway binary' },
+    [pscustomobject]@{ Path = $script:ACPSource; Label = 'ACP guard binary' },
     [pscustomobject]@{ Path = $script:HookSource; Label = 'hook binary' },
     [pscustomobject]@{ Path = $script:SensorHelperSource; Label = 'sensor helper binary' },
     [pscustomobject]@{ Path = $script:CLISource; Label = 'CLI binary' },
@@ -20627,6 +20680,7 @@ $script:SourceDigests = [ordered]@{
     broker = Get-FileDigest $script:OriginalBrokerSource
     provider_library = Get-FileDigest $script:OriginalProviderLibrarySource
     gateway = Get-FileDigest $script:OriginalGatewaySource
+    acp = Get-FileDigest $script:OriginalACPSource
     hook = Get-FileDigest $script:OriginalHookSource
     sensor_helper = Get-FileDigest $script:OriginalSensorHelperSource
     cli = Get-FileDigest $script:OriginalCLISource
@@ -20661,6 +20715,11 @@ $script:SourceDigests = [ordered]@{
         ''
     } else {
         Get-FileDigest (ConvertTo-CanonicalPath $UpgradeGatewayBinary)
+    }
+    upgrade_acp = if ([string]::IsNullOrWhiteSpace($UpgradeACPBinary)) {
+        ''
+    } else {
+        Get-FileDigest (ConvertTo-CanonicalPath $UpgradeACPBinary)
     }
     upgrade_hook = if ([string]::IsNullOrWhiteSpace($UpgradeHookBinary)) {
         ''
@@ -20838,6 +20897,7 @@ $plan = [ordered]@{
     broker_source = $script:BrokerSource
     provider_library_source = $script:ProviderLibrarySource
     gateway_source = $script:GatewaySource
+    acp_source = $script:ACPSource
     hook_source = $script:HookSource
     sensor_helper_source = $script:SensorHelperSource
     cli_source = $script:CLISource
@@ -20932,12 +20992,13 @@ if (-not $DisposableHost) {
 }
 if ([string]::IsNullOrWhiteSpace($UpgradeBrokerBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeGatewayBinary) -or
+    [string]::IsNullOrWhiteSpace($UpgradeACPBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeHookBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeSensorHelperBinary) -or
     [string]::IsNullOrWhiteSpace($UpgradeCLIBinary)) {
     throw (
         'full execution requires -UpgradeBrokerBinary, -UpgradeGatewayBinary, ' +
-        '-UpgradeHookBinary, -UpgradeSensorHelperBinary, and ' +
+        '-UpgradeACPBinary, -UpgradeHookBinary, -UpgradeSensorHelperBinary, and ' +
         '-UpgradeCLIBinary from a separately ' +
         'version-stamped build'
     )
@@ -21207,6 +21268,7 @@ targets:
             -InstallerPath $script:Installer `
             -BrokerSource $script:BrokerSource `
             -GatewaySource $script:GatewaySource `
+            -ACPSource $script:ACPSource `
             -HookSource $script:HookSource `
             -SensorHelperSource $script:SensorHelperSource `
             -CLISource $script:CLISource `

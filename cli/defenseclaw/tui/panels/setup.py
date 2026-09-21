@@ -21,6 +21,7 @@ from enum import IntEnum
 from typing import Any, Literal
 
 from defenseclaw import config as dc_config
+from defenseclaw.acp_catalog import ACP_AGENT_IDS, ACP_CLIENT_IDS
 from defenseclaw.connector_contracts import normalize_connector
 from defenseclaw.notification_capabilities import desktop_notification_capability
 from defenseclaw.observability.v8_config import (
@@ -139,6 +140,7 @@ class SetupWizard(IntEnum):
     TRUSTED_PATHS = 18
     GUARDRAIL_ACTIONS = 19
     REDACTION = 20
+    ACP_GUARD = 21
 
 
 WIZARD_NAMES: tuple[str, ...] = (
@@ -163,6 +165,7 @@ WIZARD_NAMES: tuple[str, ...] = (
     "Trusted Paths",
     "Guardrail Actions",
     "Redaction Policy",
+    "ACP Guard",
 )
 
 WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
@@ -197,6 +200,7 @@ WIZARD_COMMANDS: dict[SetupWizard, tuple[str, ...]] = {
     SetupWizard.TRUSTED_PATHS: ("setup", "trusted-paths", "list"),
     SetupWizard.GUARDRAIL_ACTIONS: ("guardrail", "status"),
     SetupWizard.REDACTION: ("setup", "redaction"),
+    SetupWizard.ACP_GUARD: ("acp", "setup"),
 }
 
 NOTIFICATION_ROUTING_SLOTS: tuple[tuple[str, str, str], ...] = (
@@ -231,6 +235,7 @@ WIZARD_DESCRIPTIONS: tuple[str, ...] = (
     "Manage trusted connector-binary discovery prefixes.",
     "Run connector-scoped guardrail status and policy quick actions.",
     "Inspect or change canonical v8 bucket, profile, destination, and route redaction.",
+    "Configure a guarded ACP agent for Zed or JetBrains.",
 )
 
 WIZARD_HOW_TO: tuple[str, ...] = (
@@ -260,6 +265,7 @@ WIZARD_HOW_TO: tuple[str, ...] = (
         "Runs: defenseclaw setup redaction. Quick actions are non-interactive; the guided workflow exposes every "
         "advanced bucket, profile, destination, and ordered-route setting."
     ),
+    "Runs: defenseclaw acp setup. Choose an editor client, ACP agent, profile, and observe or action mode.",
 )
 
 OBSERVABILITY_PRESETS: tuple[tuple[str, str], ...] = (
@@ -1775,6 +1781,57 @@ def _trusted_paths_wizard_fields() -> tuple[WizardFormField, ...]:
     )
 
 
+def _acp_wizard_fields() -> tuple[WizardFormField, ...]:
+    def managed(values: Mapping[str, str]) -> bool:
+        return values.get("managed_enrollment") == "yes"
+
+    return (
+        WizardFormField(
+            "Client", "choice", "--client", value="zed", default="zed", options=ACP_CLIENT_IDS, required=True
+        ),
+        WizardFormField(
+            "Agent",
+            "choice",
+            "--agent",
+            value="kiro",
+            default="kiro",
+            options=ACP_AGENT_IDS,
+            required=True,
+        ),
+        WizardFormField("Profile", "string", "--profile", value="default", default="default", required=True),
+        WizardFormField(
+            "Action Mode",
+            "bool",
+            "--activate",
+            value="no",
+            default="no",
+            hint="No observes only; yes blocks policy violations.",
+        ),
+        WizardFormField(
+            "Managed Enrollment",
+            "bool",
+            "--managed",
+            value="no",
+            default="no",
+            hint="Use centrally owned enterprise policy and a pre-provisioned per-binding token.",
+        ),
+        WizardFormField(
+            "Runtime Data Dir",
+            "string",
+            "--runtime-data-dir",
+            hint="Target user's private DefenseClaw data directory.",
+            visible_when=managed,
+        ),
+        WizardFormField(
+            "Token File",
+            "string",
+            "--token-file",
+            hint="Token path emitted by defenseclaw-gateway enterprise acp enroll.",
+            visible_when=managed,
+        ),
+    )
+
+
 def _guardrail_actions_wizard_fields(
     overrides: Mapping[str, str] | None = None,
     cfg: object | Mapping[str, Any] | None = None,
@@ -2630,6 +2687,7 @@ _WIZARD_FORM_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.TRUSTED_PATHS: lambda cfg=None: _trusted_paths_wizard_fields(),
     SetupWizard.GUARDRAIL_ACTIONS: lambda cfg=None: _guardrail_actions_wizard_fields(cfg=cfg),
     SetupWizard.REDACTION: lambda cfg=None: redaction_wizard_fields(cfg),
+    SetupWizard.ACP_GUARD: lambda cfg=None: _acp_wizard_fields(),
 }
 
 
@@ -3628,6 +3686,41 @@ def _redaction_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal
     )
 
 
+def _acp_goals(cfg: object | Mapping[str, Any] | None) -> tuple[WizardGoal, ...]:
+    del cfg
+    return (
+        WizardGoal(
+            "observe",
+            "Observe ACP traffic",
+            summary="Install the guard without blocking traffic.",
+            presets={"--activate": "no"},
+            fields=("Client", "Agent", "Profile", "Action Mode"),
+        ),
+        WizardGoal(
+            "action",
+            "Enforce ACP policy",
+            summary="Fail closed and block denied ACP operations.",
+            presets={"--activate": "yes"},
+            fields=("Client", "Agent", "Profile", "Action Mode"),
+        ),
+        WizardGoal(
+            "enterprise",
+            "Enroll managed enterprise ACP",
+            summary="Use centrally pinned policy and a guardian-provisioned per-binding token.",
+            presets={"--managed": "yes"},
+            fields=(
+                "Client",
+                "Agent",
+                "Profile",
+                "Action Mode",
+                "Managed Enrollment",
+                "Runtime Data Dir",
+                "Token File",
+            ),
+        ),
+    )
+
+
 # Per-wizard goal builders. Each returns the *contextual* goals (without the
 # trailing Advanced entry, which ``wizard_goals`` always appends). Lambdas keep
 # resolution lazy so builders can live anywhere in the module.
@@ -3653,6 +3746,7 @@ _WIZARD_GOAL_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.TRUSTED_PATHS: _trusted_paths_goals,
     SetupWizard.GUARDRAIL_ACTIONS: _guardrail_actions_goals,
     SetupWizard.REDACTION: _redaction_goals,
+    SetupWizard.ACP_GUARD: _acp_goals,
 }
 
 
@@ -4362,6 +4456,23 @@ def _build_notifications_routing_args(fields: Sequence[WizardFormField]) -> tupl
     return WIZARD_COMMANDS[SetupWizard.NOTIFICATIONS_ROUTING]
 
 
+def _build_acp_args(fields: Sequence[WizardFormField]) -> tuple[str, ...]:
+    args = ["acp", "setup"]
+    for label, flag in (("Client", "--client"), ("Agent", "--agent"), ("Profile", "--profile")):
+        value = wizard_field_value(fields, label).strip()
+        if value:
+            args.extend((flag, value))
+    if wizard_bool_value(fields, "Action Mode", "no") == "yes":
+        args.append("--activate")
+    if wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
+        args.append("--managed")
+        for label, flag in (("Runtime Data Dir", "--runtime-data-dir"), ("Token File", "--token-file")):
+            value = wizard_field_value(fields, label).strip()
+            if value:
+                args.extend((flag, value))
+    return tuple(args)
+
+
 # Guardrail judge flags whose CSV field value repeats once per item, matching
 # the CLI's ``multiple=True`` options (fallbacks + regional deployment aliases).
 _GUARDRAIL_REPEATABLE_FLAGS: frozenset[str] = frozenset(
@@ -4546,6 +4657,7 @@ _WIZARD_ARG_BUILDERS: dict[SetupWizard, Any] = {
     SetupWizard.TRUSTED_PATHS: lambda fields: _build_trusted_paths_args(fields),
     SetupWizard.GUARDRAIL_ACTIONS: lambda fields: _build_guardrail_actions_args(fields),
     SetupWizard.REDACTION: lambda fields: _build_redaction_args(fields),
+    SetupWizard.ACP_GUARD: lambda fields: _build_acp_args(fields),
 }
 
 
@@ -4569,6 +4681,10 @@ def missing_required_fields(wizard: SetupWizard | int, fields: Sequence[WizardFo
         action = wizard_field_value(fields, "Action")
         if action in {"add", "remove"} and not wizard_field_value(fields, "Directory"):
             missing.append("Directory")
+    if wizard == SetupWizard.ACP_GUARD and wizard_bool_value(fields, "Managed Enrollment", "no") == "yes":
+        for label in ("Runtime Data Dir", "Token File"):
+            if not wizard_field_value(fields, label):
+                missing.append(label)
     if wizard == SetupWizard.REDACTION:
         action = wizard_field_value(fields, "Action") or "status"
         if action in {"apply-all", "apply-defaults"} and not wizard_field_value(fields, "Profile"):

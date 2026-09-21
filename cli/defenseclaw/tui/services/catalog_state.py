@@ -1738,6 +1738,8 @@ def friendly_connector_name(connector: str) -> str:
             return "Amp"
         case "omnigent":
             return "OmniGent"
+        case "kiro":
+            return "Kiro"
         case value:
             return value[:1].upper() + value[1:] if value else "No connector"
 

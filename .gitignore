@@ -194,3 +194,7 @@ outputs/
 # Local AI planning artifacts
 /.superpowers/
 /docs/superpowers/
+
+# DefenseClaw-managed Kiro hook config. Written by `defenseclaw setup kiro`
+# with machine-absolute hook-script paths, so it is per-machine state.
+.kiro/hooks/defenseclaw.json

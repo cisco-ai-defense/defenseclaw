@@ -49,6 +49,17 @@ def test_ai_signature_catalog_contains_supported_and_shadow_agents():
         assert expected in ids
 
 
+def test_kiro_signature_covers_ide_and_cli_as_one_connector():
+    signatures = {sig.id: sig for sig in load_ai_signatures()}
+    kiro = signatures["kiro"]
+
+    assert kiro.name == "Kiro"
+    assert kiro.supported_connector == "kiro"
+    assert {"kiro", "kiro-cli"} <= set(kiro.binary_names)
+    assert {"Kiro.app", "Kiro CLI.app"} <= set(kiro.application_names)
+    assert ".kiro/hooks" in kiro.config_paths
+
+
 def test_devin_signature_tracks_canonical_connector_contract():
     signatures = {sig.id: sig for sig in load_ai_signatures()}
     devin = signatures["devin"]

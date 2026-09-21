@@ -541,13 +541,20 @@ def _write_tar_members(
 def _write_tar(path: Path, member_name: str, payload: bytes = b"fixture") -> None:
     info = tarfile.TarInfo(member_name)
     info.size = len(payload)
-    _write_tar_members(path, [(info, payload)])
+    members = [(info, payload)]
+    if member_name == "defenseclaw":
+        acp = tarfile.TarInfo("defenseclaw-acp")
+        acp.size = len(payload)
+        members.append((acp, payload))
+    _write_tar_members(path, members)
 
 
 def _write_zip(path: Path, member_name: str, payload: bytes = b"candidate gateway") -> None:
     archive_payload = io.BytesIO()
     with zipfile.ZipFile(archive_payload, mode="w") as archive:
         archive.writestr(member_name, payload)
+        if member_name == "defenseclaw.exe":
+            archive.writestr("defenseclaw-acp.exe", payload)
     _write_archive_payload(path, archive_payload.getvalue())
 
 
@@ -2626,12 +2633,67 @@ def test_exact_gateway_is_safely_extracted_from_runtime_candidate(
         assert output.stat().st_mode & 0o111
 
 
+def test_gateway_and_acp_guard_are_extracted_as_one_candidate_pair(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime_dir(tmp_path)
+    gateway_output = tmp_path / "extracted/defenseclaw"
+    acp_output = tmp_path / "extracted/defenseclaw-acp"
+
+    release_candidate.extract_gateway(
+        runtime,
+        gateway_output,
+        VERSION,
+        "darwin",
+        "arm64",
+        acp_output,
+    )
+
+    assert gateway_output.read_bytes() == _fake_gateway("darwin", "arm64")
+    assert acp_output.read_bytes() == _fake_gateway("darwin", "arm64")
+    if os.name == "posix":
+        assert acp_output.stat().st_mode & 0o111
+
+
 def test_gateway_archive_attestation_covers_all_six_platform_binaries(
     tmp_path: Path,
 ) -> None:
     runtime = _runtime_dir(tmp_path)
 
     release_candidate._validate_gateway_archives(runtime, VERSION, commit=COMMIT)
+
+
+def test_pre_acp_gateway_archives_do_not_require_guard_binary(tmp_path: Path) -> None:
+    runtime = _runtime_dir(tmp_path)
+    for os_name in ("darwin", "linux"):
+        for arch in ("amd64", "arm64"):
+            gateway = _fake_gateway(os_name, arch)
+            member = tarfile.TarInfo("defenseclaw")
+            member.size = len(gateway)
+            _write_tar_members(runtime / RELEASE_ARTIFACTS["gateways"][os_name][arch], [(member, gateway)])
+    for arch in ("amd64", "arm64"):
+        archive_payload = io.BytesIO()
+        with zipfile.ZipFile(archive_payload, mode="w") as archive:
+            archive.writestr("defenseclaw.exe", _fake_gateway("windows", arch))
+        _write_archive_payload(runtime / RELEASE_ARTIFACTS["gateways"]["windows"][arch], archive_payload.getvalue())
+
+    release_candidate._validate_gateway_archives(runtime, VERSION, commit=COMMIT)
+
+
+def test_acp_era_windows_gateway_archive_requires_guard_binary() -> None:
+    version = "0.8.11"
+    archive_payload = io.BytesIO()
+    with zipfile.ZipFile(archive_payload, mode="w") as archive:
+        archive.writestr("defenseclaw.exe", _fake_gateway("windows", "amd64", version=version))
+
+    with pytest.raises(release_candidate.CandidateError, match="defenseclaw-acp.exe"):
+        release_candidate._validate_windows_gateway_zip_payload(
+            archive_payload.getvalue(),
+            version=version,
+            arch="amd64",
+            commit=COMMIT,
+            archive_name="fixture.zip",
+        )
 
 
 def test_gateway_archive_attestation_accepts_safe_goreleaser_directory_members(
@@ -2646,12 +2708,15 @@ def test_gateway_archive_attestation_accepts_safe_goreleaser_directory_members(
     readme.size = len(b"release metadata")
     binary = tarfile.TarInfo("defenseclaw")
     binary.size = len(gateway)
+    acp_binary = tarfile.TarInfo("defenseclaw-acp")
+    acp_binary.size = len(gateway)
     _write_tar_members(
         archive_path,
         [
             (directory, None),
             (readme, b"release metadata"),
             (binary, gateway),
+            (acp_binary, gateway),
         ],
     )
 

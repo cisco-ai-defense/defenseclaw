@@ -132,7 +132,7 @@ def _load_contracts_from_manifest(
     for raw_name, raw_spec in connectors.items():
         name = normalize_connector(str(raw_name))
         spec = raw_spec if isinstance(raw_spec, dict) else {}
-        if spec.get("compatibility_gate") == STATUS_NOT_GATED or spec.get("kind") == "proxy":
+        if spec.get("kind") == "proxy":
             proxy_connectors.add(name)
 
         contracts: list[ConnectorContract] = []
@@ -332,6 +332,19 @@ def resolve_connector_contract(
         )
     contracts = hook_contracts.get(name, ())
     if not contracts:
+        spec = HOOK_CONTRACT_MANIFEST.get("connectors", {}).get(name, {})
+        if isinstance(spec, dict) and spec.get("compatibility_gate") in {
+            STATUS_NOT_GATED,
+            "acp-contract",
+        }:
+            return ConnectorCompatibility(
+                connector=name,
+                raw_version=raw,
+                normalized_version=normalize_agent_version(raw),
+                status=STATUS_NOT_GATED,
+                reason="connector has no hook contract gate",
+                contract=None,
+            )
         return ConnectorCompatibility(
             connector=name,
             raw_version=raw,
@@ -398,6 +411,12 @@ def connector_lock_contract_invariant(connector: str, entry: Any) -> str:
     else:
         raw_version = ""
     compatibility = resolve_connector_contract(name, raw_version)
+    if compatibility.status == STATUS_NOT_GATED:
+        if entry.get("compatibility_status") != STATUS_NOT_GATED:
+            return "contract"
+        if entry.get("hook_fail_mode") not in {"open", "closed"}:
+            return "fail-mode"
+        return ""
     contract = compatibility.contract
     if contract is None or not compatibility.supported:
         return "contract"

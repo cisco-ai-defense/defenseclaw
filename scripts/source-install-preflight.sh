@@ -10,13 +10,14 @@
 # `check` is read-only. `claim` first repeats the check, requires the installed
 # CLI to be the exact symlink for this checkout, then atomically records source
 # ownership so a later same-checkout rebuild stays idempotent. `ensure-dir`
-# reserves the source-owned install directory; `publish-cli` and
-# `publish-gateway` perform create-new publication under that claim.
+# reserves the source-owned install directory; `publish-cli`,
+# `publish-gateway`, and `publish-acp` perform create-new publication under
+# that claim.
 
 set -euo pipefail
 
 usage() {
-    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
+    echo "usage: $0 <check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp> REPO_ROOT INSTALL_DIR VENV_BIN CLI_NAME GATEWAY_NAME" >&2
     exit 64
 }
 
@@ -35,10 +36,10 @@ fi
 
 DEV_RECLAIM_SOURCE=0
 case "${REQUESTED_MODE}" in
-    check|claim|ensure-dir|publish-cli|publish-gateway)
+    check|claim|ensure-dir|publish-cli|publish-gateway|publish-acp)
         MODE="${REQUESTED_MODE}"
         ;;
-    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway)
+    dev-check|dev-claim|dev-ensure-dir|dev-publish-cli|dev-publish-gateway|dev-publish-acp)
         DEV_RECLAIM_SOURCE=1
         MODE="${REQUESTED_MODE#dev-}"
         ;;
@@ -108,12 +109,23 @@ readonly CLI_PATH="${INSTALL_DIR}/${CLI_NAME}"
 readonly EXPECTED_CLI="${REPO_ROOT}/${VENV_BIN}/${CLI_NAME}"
 readonly GATEWAY_PATH="${INSTALL_DIR}/${GATEWAY_NAME}"
 readonly EXPECTED_GATEWAY="${REPO_ROOT}/${GATEWAY_NAME}"
+# Keep the ACP guard name in lockstep with the gateway suffix (including
+# Windows `.exe`) without adding a seventh preflight argument.
+if [[ "${GATEWAY_NAME}" == *.exe ]]; then
+    ACP_NAME="${GATEWAY_NAME%-gateway.exe}-acp.exe"
+else
+    ACP_NAME="${GATEWAY_NAME%-gateway}-acp"
+fi
+readonly ACP_NAME
+readonly ACP_PATH="${INSTALL_DIR}/${ACP_NAME}"
+readonly EXPECTED_ACP="${REPO_ROOT}/${ACP_NAME}"
 readonly MANAGED_HOME="${DEFENSECLAW_HOME:-${HOME}/.defenseclaw}"
 readonly PATH_COMMAND="${CLI_NAME%.exe}"
 readonly PUBLISH_HELPER="${REPO_ROOT}/scripts/source-install-publish.py"
 readonly PUBLISH_MODULE="${REPO_ROOT}/cli/defenseclaw/install_publish.py"
 readonly SOURCE_IDENTITY_HELPER="${REPO_ROOT}/scripts/source_release_identity.py"
 VERIFIED_GATEWAY_DIGEST=""
+VERIFIED_ACP_DIGEST=""
 VERIFIED_MARKER_DIGEST=""
 SOURCE_RELEASE=""
 SOURCE_INSTALL_COMPATIBILITY_EPOCH=""
@@ -177,6 +189,15 @@ bind_dev_gateway() {
     fi
     [[ "${VERIFIED_GATEWAY_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
         || refuse "the developer-owned gateway returned an invalid digest"
+}
+
+bind_dev_acp() {
+    [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]] || return 0
+    if ! VERIFIED_ACP_DIGEST="$(sha256_regular "${ACP_PATH}" --require-executable)"; then
+        refuse "the developer-owned ACP guard is missing or no longer a regular executable"
+    fi
+    [[ "${VERIFIED_ACP_DIGEST}" =~ ^[0-9a-f]{64}$ ]] \
+        || refuse "the developer-owned ACP guard returned an invalid digest"
 }
 
 check_owner() {
@@ -266,6 +287,7 @@ check_owner() {
 
     if [[ "${marker_owned}" -eq 1 ]]; then
         check_recorded_gateway "${marker_gateway_digest}"
+        bind_dev_acp
     elif [[ "${cli_owned}" -eq 1 ]]; then
         # A markerless exact CLI can be a first-install crash. Direct install
         # targets still fail closed when managed state exists because the
@@ -276,20 +298,28 @@ check_owner() {
         if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 \
            && ( "${marker_reclaim}" -eq 1 || -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ) ]]; then
             bind_dev_gateway
+            bind_dev_acp
         elif [[ -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ]]; then
             refuse "managed state exists beside a markerless source CLI, so its original release identity is unknowable"
         elif [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
             check_gateway_claim
+            bind_dev_acp
+        else
+            bind_dev_acp
         fi
     elif [[ "${owned}" -ne 1 ]]; then
         if [[ -e "${GATEWAY_PATH}" || -L "${GATEWAY_PATH}" ]]; then
             refuse "an unowned gateway already exists at ${GATEWAY_PATH}"
         fi
+        if [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]]; then
+            refuse "an unowned ACP guard already exists at ${ACP_PATH}"
+        fi
         # `make all` is the explicit developer takeover surface. Existing
         # user state alone is not evidence of a conflicting executable and is
         # safe to reuse; the dev publication modes still refuse foreign CLI,
-        # gateway, and ownership-marker paths above. Direct source-install
-        # targets remain fail-closed for the same state-only layout.
+        # gateway, ACP guard, and ownership-marker paths above. Direct
+        # source-install targets remain fail-closed for the same state-only
+        # layout.
         if [[ -e "${MANAGED_HOME}" || -L "${MANAGED_HOME}" ]]; then
             if [[ "${DEV_RECLAIM_SOURCE}" -eq 1 \
                && -d "${MANAGED_HOME}" && ! -L "${MANAGED_HOME}" ]]; then
@@ -371,6 +401,25 @@ case "${MODE}" in
         fi
         python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
             || refuse "the source gateway destination changed after preflight"
+        ;;
+    publish-acp)
+        if ! SOURCE_ACP_DIGEST="$(sha256_regular "${EXPECTED_ACP}" --require-executable)"; then
+            refuse "this checkout's built ACP guard is unavailable for publication"
+        fi
+        readonly SOURCE_ACP_DIGEST
+        if [[ -e "${ACP_PATH}" || -L "${ACP_PATH}" ]]; then
+            [[ -n "${VERIFIED_ACP_DIGEST}" ]] \
+                || refuse "the installed ACP guard was not bound to the completed ownership check"
+        fi
+        publish_args=(
+            regular "${EXPECTED_ACP}" "${ACP_PATH}"
+            --expected-source-sha256 "${SOURCE_ACP_DIGEST}"
+        )
+        if [[ -n "${VERIFIED_ACP_DIGEST}" ]]; then
+            publish_args+=(--expected-current-sha256 "${VERIFIED_ACP_DIGEST}")
+        fi
+        python3 "${PUBLISH_HELPER}" "${publish_args[@]}" \
+            || refuse "the source ACP guard destination changed after preflight"
         ;;
     claim)
         if [[ "${IS_WINDOWS}" -eq 1 ]]; then

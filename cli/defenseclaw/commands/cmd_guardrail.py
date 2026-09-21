@@ -90,6 +90,7 @@ _CONNECTOR_LABELS = {
     "opencode": "OpenCode",
     "amp": "Amp",
     "omnigent": "OmniGent",
+    "kiro": "Kiro",
 }
 
 _RUNTIME_FAIL_MODE_CONNECTORS = frozenset({"amp", "claudecode", "codex", "opencode"})

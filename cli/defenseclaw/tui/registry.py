@@ -33,6 +33,7 @@ _SETUP_CONNECTOR_ALIASES: dict[str, str] = {
     "opencode": "opencode",
     "amp": "amp",
     "omnigent": "omnigent",
+    "kiro": "kiro",
 }
 
 

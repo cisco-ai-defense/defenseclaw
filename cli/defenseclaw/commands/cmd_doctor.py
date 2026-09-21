@@ -3837,6 +3837,10 @@ _HOOK_HEALTH_FALLBACK: dict[str, tuple[tuple[str, ...], tuple[str, ...]]] = {
         (os.path.join(".omnigent", "config.yaml"),),
         ("defenseclaw_omnigent_policy", "defenseclaw_guardrail"),
     ),
+    "kiro": (
+        (os.path.join(".kiro", "hooks", "defenseclaw.json"),),
+        ("defenseclaw-", "kiro-hook.sh", "hook --connector kiro"),
+    ),
 }
 
 _HOOK_HEALTH_LABELS = {
@@ -3847,6 +3851,7 @@ _HOOK_HEALTH_LABELS = {
     "opencode": "OpenCode hooks",
     "amp": "Amp policy plugin",
     "omnigent": "OmniGent policy",
+    "kiro": "Kiro hooks",
 }
 
 
@@ -5336,6 +5341,8 @@ def _check_connector_hooks(cfg, connector: str, r: _DoctorResult) -> None:
         _check_antigravity_hooks(cfg, r)
     elif connector == "omnigent":
         _check_omnigent_policy_health(cfg, r)
+    elif connector == "kiro":
+        _check_hook_health(cfg, connector, r)
     elif connector in _HOOK_HEALTH_FALLBACK:
         # Cursor / OpenCode use the lock-file-driven health row;
         # Windows-native connectors with richer contracts dispatch above.
@@ -5366,6 +5373,8 @@ _SETUP_READINESS_PRIMARY_LABELS = {
     "amp": "Amp policy plugin",
     "hermes": "Hermes hooks (fail-open)",
     "omnigent": "OmniGent policy",
+    "openhands": "OpenHands hooks",
+    "kiro": "Kiro hooks",
 }
 
 
@@ -5919,6 +5928,7 @@ _HOOK_ENFORCED_CONNECTORS = frozenset(
         "opencode",
         "amp",
         "omnigent",
+        "kiro",
     }
 )
 
@@ -9195,6 +9205,7 @@ _CONNECTOR_LABELS = {
     "opencode": "OpenCode",
     "amp": "Amp",
     "omnigent": "OmniGent",
+    "kiro": "Kiro",
 }
 
 
@@ -9377,6 +9388,25 @@ def _check_connector_inventory(
     workspace = _workspace_dir(cfg)
     if workspace:
         _emit("pass", "Connector scope", f"workspace ({workspace})", r=r)
+    elif connector == "kiro":
+        # Kiro discovers hooks ONLY from .kiro/hooks/*.json relative to the
+        # project root (kiro.dev/docs/hooks: "Location: .kiro/hooks/ in your
+        # project root"). There is no documented ~/.kiro/hooks. A global-only
+        # install therefore enforces nothing, and reporting it as a pass is
+        # how an operator ends up believing an unguarded Kiro is guarded.
+        _emit(
+            "fail",
+            "Connector scope",
+            "global user config only; Kiro loads hooks from the project root, "
+            "so the installed hooks never run",
+            r=r,
+            reason_code="kiro_hooks_not_workspace_scoped",
+            remediation=(
+                "Set claw.workspace_dir to the project root and re-run "
+                "`defenseclaw setup kiro`, which writes "
+                "<workspace>/.kiro/hooks/defenseclaw.json"
+            ),
+        )
     else:
         _emit("pass", "Connector scope", "global user config", r=r)
 
@@ -9516,6 +9546,14 @@ def _check_hook_contract_lock(
 ) -> None:
     if connector in {"openclaw", "zeptoclaw"}:
         _emit("skip", "Hook contract", f"{connector} uses proxy/chat surfaces", r=r)
+        return
+    if connector == "kiro":
+        _emit(
+            "pass",
+            "Hook contract",
+            "not-gated; native hooks install to .kiro/hooks and the defenseclaw CLI 2.x agent. ACP remains optional",
+            r=r,
+        )
         return
     data_dir = getattr(cfg, "data_dir", "") or ""
     lock_path = os.path.join(data_dir, "hook_contract_lock.json")

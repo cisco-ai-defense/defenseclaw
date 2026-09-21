@@ -1074,6 +1074,100 @@ def test_cursor_macos_app_metadata_parser_errors_are_reported(
     assert error == "application metadata probe failed: malformed metadata"
 
 
+def test_kiro_discovery_accepts_cli_or_app_as_one_connector():
+    spec = ad._SPECS["kiro"]
+
+    assert spec.binary_name == "kiro-cli"
+    assert spec.binary_names == ("kiro-cli", "kiro")
+    assert spec.windows_binary_names == ("kiro-cli", "kiro")
+    assert spec.macos_bundle_binaries == (
+        "Kiro.app/Contents/Resources/app/bin/kiro",
+        "Kiro CLI.app/Contents/MacOS/kiro-cli",
+    )
+
+
+def test_kiro_path_discovery_prefers_cli_then_app(monkeypatch):
+    candidates = {
+        "kiro-cli": "/usr/local/bin/kiro-cli",
+        "kiro": "/usr/local/bin/kiro",
+    }
+    monkeypatch.setattr(ad, "_which", lambda name: candidates.get(name, ""))
+    monkeypatch.setattr(ad, "_is_windows_host", lambda: False)
+    monkeypatch.setattr(ad, "_is_macos_host", lambda: False)
+
+    resolved = ad._binary_candidates_for_agent("kiro", ad._SPECS["kiro"])
+
+    assert tuple(map(ad._path_key, resolved)) == tuple(
+        map(ad._path_key, (candidates["kiro-cli"], candidates["kiro"]))
+    )
+
+
+def test_kiro_macos_app_fallback_reads_metadata_without_launch(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    applications = tmp_path / "Applications"
+    bundle = applications / "Kiro.app"
+    binary = bundle / "Contents" / "Resources" / "app" / "bin" / "kiro"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    binary.chmod(0o755)
+    info_path = bundle / "Contents" / "Info.plist"
+    with info_path.open("wb") as stream:
+        plistlib.dump(
+            {
+                "CFBundleName": "Kiro",
+                "CFBundleShortVersionString": "1.2.3",
+            },
+            stream,
+        )
+    monkeypatch.setattr(ad, "_macos_application_roots", lambda: (applications,))
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Kiro was launched")),
+    )
+
+    signal = ad._scan_agent("kiro", require_trusted_binary_paths=True)
+
+    assert signal.installed is True
+    assert signal.binary_path == str(binary)
+    assert signal.version == "1.2.3"
+    assert signal.error == ""
+
+
+def test_kiro_macos_cli_app_bundle_is_the_same_connector(
+    monkeypatch,
+    tmp_path,
+    macos_host_no_path,
+):
+    _pin_home(monkeypatch, tmp_path)
+    applications = tmp_path / "Applications"
+    bundle = applications / "Kiro CLI.app"
+    binary = bundle / "Contents" / "MacOS" / "kiro-cli"
+    binary.parent.mkdir(parents=True)
+    binary.write_bytes(b"test executable")
+    binary.chmod(0o755)
+    info_path = bundle / "Contents" / "Info.plist"
+    with info_path.open("wb") as stream:
+        plistlib.dump({"CFBundleShortVersionString": "2.22.0"}, stream)
+    monkeypatch.setattr(ad, "_macos_application_roots", lambda: (applications,))
+    monkeypatch.setattr(
+        ad.subprocess,
+        "run",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("Kiro CLI was launched")),
+    )
+
+    signal = ad._scan_agent("kiro", require_trusted_binary_paths=True)
+
+    assert signal.name == "kiro"
+    assert signal.installed is True
+    assert signal.binary_path == str(binary)
+    assert signal.version == "2.22.0"
+
+
 def test_cursor_standalone_agent_alias_is_detected(monkeypatch, tmp_path):
     _pin_home(monkeypatch, tmp_path)
     binary = tmp_path / "bin" / "cursor-agent"
