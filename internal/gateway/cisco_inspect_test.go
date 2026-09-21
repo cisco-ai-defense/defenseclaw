@@ -551,3 +551,59 @@ func TestCiscoInspectClient_ContentOnlyWireShapeUnchanged(t *testing.T) {
 		}
 	}
 }
+
+// The non-managed hook lane also sends the invocation as a tool call, so an AID
+// policy keyed on tool_calls works without managed_enterprise.
+func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
+	var gotBody []byte
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotBody, _ = io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(w, `{"is_safe":true,"action":"Allow","rules":[]}`)
+	}))
+	t.Cleanup(srv.Close)
+
+	api := testAPIServerWithConfig(t, "action")
+	client := newCiscoInspectTestClient(t, srv.URL, "TEST_NONMANAGED_TOOLCALL")
+	client.client = srv.Client()
+	api.SetCiscoInspector(client)
+
+	body := `{"tool":"Bash","args":{"command":"rm -rf / --no-preserve-root"},` +
+		`"direction":"tool_call","connector":"claudecode"}`
+	if rec, _ := postInspectForConnector(t, api, "claudecode", body); rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if len(gotBody) == 0 {
+		t.Fatal("AID was not called")
+	}
+	var payload struct {
+		Messages []struct {
+			Role      string `json:"role"`
+			ToolCalls []struct {
+				Function struct {
+					Name      string `json:"name"`
+					Arguments string `json:"arguments"`
+				} `json:"function"`
+			} `json:"tool_calls"`
+		} `json:"messages"`
+	}
+	if err := json.Unmarshal(gotBody, &payload); err != nil {
+		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
+	}
+	if len(payload.Messages) != 1 || len(payload.Messages[0].ToolCalls) != 1 {
+		t.Fatalf("want one message with one tool call; body = %s", gotBody)
+	}
+	msg := payload.Messages[0]
+	if msg.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", msg.Role)
+	}
+	var parsed struct {
+		Command string `json:"command"`
+	}
+	if err := json.Unmarshal([]byte(msg.ToolCalls[0].Function.Arguments), &parsed); err != nil {
+		t.Fatalf("arguments is not parseable JSON: %v", err)
+	}
+	if parsed.Command != "rm -rf / --no-preserve-root" {
+		t.Errorf("arguments.command = %q", parsed.Command)
+	}
+}

@@ -408,6 +408,23 @@ func (a *APIServer) hookAIDInspect(ctx context.Context, toolName string, content
 	return a.ciscoInspector.Inspect(ctx, []ChatMessage{{Role: "user", Content: body}})
 }
 
+// hookAIDInspectTool sends the invocation as a tool call, falling back to text
+// when there are no arguments to carry.
+func (a *APIServer) hookAIDInspectTool(
+	ctx context.Context,
+	req *ToolInspectRequest,
+	toolName, argsStr string,
+) *ScanVerdict {
+	if req != nil && len(req.Args) > 0 {
+		return a.hookAIDInspectToolCall(ctx, aidToolCall{
+			Name: toolName,
+			ID:   req.toolUseID,
+			Args: req.Args,
+		})
+	}
+	return a.hookAIDInspect(ctx, toolName, argsStr)
+}
+
 // hookAIDInspectToolCall sends a tool invocation in the chat schema's
 // tool-call shape: assistant role, arguments as a JSON string.
 func (a *APIServer) hookAIDInspectToolCall(ctx context.Context, call aidToolCall) *ScanVerdict {
@@ -769,7 +786,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// turn — operators with custom AID policies (e.g. block
 		// `createJiraIssue`, throttle `addComment`) want their rules to
 		// fire even when no DefenseClaw built-in pattern matched.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil && aid.Action != "allow" && aid.Action != "" {
 			verdict = mergeWithAIDVerdict(nil, aid)
 		}
 	} else {
@@ -820,7 +837,7 @@ func (a *APIServer) inspectTrustedToolPolicyCtx(
 		// AID's classifier reads free-text content; the rule names give it
 		// useful context. The lane is silent when no AID client is wired
 		// or when ScanHookSurface=false.
-		if aid := a.hookAIDInspect(ctx, toolName, argsStr); aid != nil {
+		if aid := a.hookAIDInspectTool(ctx, req, toolName, argsStr); aid != nil {
 			verdict = mergeWithAIDVerdict(verdict, aid)
 		}
 	}
