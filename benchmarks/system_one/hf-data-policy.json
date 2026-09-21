@@ -1,0 +1,10 @@
+{
+  "schema_version": "1",
+  "visibility": "private",
+  "disposition": "evaluation_only",
+  "training_eligible": false,
+  "prohibited_uses": ["training", "synthetic_seed", "teacher_context", "distillation", "public_redistribution"],
+  "allowed_artifacts": ["protocol", "source_references", "selection_manifests", "selected_ids", "value_free_predictions", "aggregate_metrics", "latency", "token_usage", "cost", "culling_decisions", "environments", "checksums"],
+  "forbidden_artifacts": ["credentials", "authorization_headers", "private_keys", "raw_secrets", "unredacted_identifiers", "free_form_provider_rationales", "restricted_source_payloads", "incomplete_live_outputs"],
+  "publication": {"immutable_run_ids": true, "compare_parent_revision": true, "verify_remote_checksums": true, "delete_or_rewrite": false}
+}
