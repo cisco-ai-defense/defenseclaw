@@ -191,7 +191,7 @@ def build_state(
         for index, event in enumerate(bounded_prior, 1):
             parts.append(
                 f'<RECENT_TOOL_CALL index={index} tool="{event["tool_name"]}">\n'
-                f'{event["bounded_arguments"]}\n</RECENT_TOOL_CALL>'
+                f"{event['bounded_arguments']}\n</RECENT_TOOL_CALL>"
             )
         parts.append(
             f'<CURRENT_TOOL_CALL tool="{current.get("tool_name") or "shell"}">\n{current_text}\n</CURRENT_TOOL_CALL>'
@@ -323,13 +323,21 @@ def derive_action(question_id: str, answers: dict[str, Any], probabilities: dict
 
 
 class Budget:
-    def __init__(self, calls: int, input_tokens: int, usd: float, rate: float):
+    def __init__(
+        self,
+        calls: int,
+        input_tokens: int,
+        usd: float,
+        rate: float,
+        starting_calls: int = 0,
+        starting_tokens: int = 0,
+    ):
         self.max_calls = calls
         self.max_tokens = input_tokens
         self.max_usd = usd
         self.rate = rate
-        self.calls = 0
-        self.tokens = 0
+        self.calls = starting_calls
+        self.tokens = starting_tokens
         self.lock = threading.Lock()
 
     def add(self, tokens: int) -> None:
@@ -478,6 +486,34 @@ def case_jobs(
         prior.append(current)
 
 
+def job_identity(case_id: str, job: tuple[Any, ...]) -> tuple[str, int, str, str, str]:
+    return case_id, int(job[0]), str(job[1]), str(job[2]), str(job[3])
+
+
+def record_identity(record: dict[str, Any]) -> tuple[str, int, str, str, str]:
+    return (
+        str(record.get("case_id", "")),
+        int(record.get("event_index", -1)),
+        str(record.get("context_variant", "")),
+        str(record.get("instruction_variant", "")),
+        str(record.get("question_variant", "")),
+    )
+
+
+def resume_prefix(path: Path, jobs: list[tuple[str, tuple[Any, ...]]], run_id: str, model: str) -> list[dict[str, Any]]:
+    if not path.exists():
+        return []
+    rows = list(read_jsonl(path))
+    if len(rows) > len(jobs):
+        raise ValueError("resume output has more rows than planned requests")
+    for index, row in enumerate(rows):
+        if row.get("run_id") != run_id or row.get("model") != model:
+            raise ValueError(f"resume row {index + 1} has a different run or model")
+        if record_identity(row) != job_identity(*jobs[index]):
+            raise ValueError(f"resume row {index + 1} does not match the request plan")
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=Path, required=True)
@@ -499,6 +535,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-input-tokens", type=int, default=200_000_000)
     parser.add_argument("--max-usd", type=float, default=5)
     parser.add_argument("--input-usd-per-million", type=float, default=0)
+    parser.add_argument("--resume", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -537,39 +574,60 @@ def main() -> int:
     api_key = os.environ.get(args.api_key_env, "")
     if args.endpoint.startswith("https://") and not api_key:
         raise ValueError(f"missing API key environment variable {args.api_key_env}")
-    budget = Budget(args.max_calls, args.max_input_tokens, args.max_usd, args.input_usd_per_million)
     args.output.parent.mkdir(parents=True, exist_ok=True)
-    indexed: dict[int, dict[str, Any]] = {}
-    with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
-        futures = {}
-        for index, (case_id, job) in enumerate(jobs):
-            event_index, context_id, instruction_id, question_id, state, state_meta, question_body = job
-            future = executor.submit(
-                evaluate,
-                args.endpoint,
-                api_key,
-                args.model,
-                args.model_revision,
-                args.run_id,
-                case_id,
-                event_index,
-                context_id,
-                instruction_id,
-                question_id,
-                state,
-                state_meta,
-                question_body,
-                args.timeout,
-                args.retries,
-                budget,
-            )
-            futures[future] = index
-        for future in as_completed(futures):
-            indexed[futures[future]] = future.result()
-    with args.output.open("w", encoding="utf-8") as handle:
+    prior = resume_prefix(args.output, jobs, args.run_id, args.model) if args.resume else []
+    prior_tokens = sum(int(row.get("input_tokens", 0)) for row in prior)
+    budget = Budget(
+        args.max_calls,
+        args.max_input_tokens,
+        args.max_usd,
+        args.input_usd_per_million,
+        starting_calls=len(prior),
+        starting_tokens=prior_tokens,
+    )
+    open_mode = "a" if prior else "w"
+    next_index = len(prior)
+    pending: dict[int, dict[str, Any]] = {}
+    with args.output.open(open_mode, encoding="utf-8") as handle:
         os.chmod(args.output, 0o600)
-        for index in range(len(jobs)):
-            handle.write(json.dumps(indexed[index], sort_keys=True, separators=(",", ":")) + "\n")
+        with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
+            futures = {}
+            for index in range(next_index, len(jobs)):
+                case_id, job = jobs[index]
+                event_index, context_id, instruction_id, question_id, state, state_meta, question_body = job
+                future = executor.submit(
+                    evaluate,
+                    args.endpoint,
+                    api_key,
+                    args.model,
+                    args.model_revision,
+                    args.run_id,
+                    case_id,
+                    event_index,
+                    context_id,
+                    instruction_id,
+                    question_id,
+                    state,
+                    state_meta,
+                    question_body,
+                    args.timeout,
+                    args.retries,
+                    budget,
+                )
+                futures[future] = index
+            for future in as_completed(futures):
+                pending[futures[future]] = future.result()
+                while next_index in pending:
+                    handle.write(json.dumps(pending.pop(next_index), sort_keys=True, separators=(",", ":")) + "\n")
+                    next_index += 1
+                    if next_index % 100 == 0:
+                        handle.flush()
+                    if next_index % 1000 == 0:
+                        print(json.dumps({"completed": next_index, "requests": len(jobs)}, sort_keys=True), flush=True)
+        handle.flush()
+        os.fsync(handle.fileno())
+    if next_index != len(jobs):
+        raise RuntimeError(f"completed {next_index} of {len(jobs)} requests")
     metadata = {
         "schema_version": "1",
         "run_id": args.run_id,

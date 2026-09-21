@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import tempfile
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from benchmarks.scripts import benchmark_run_system_one as runner
@@ -101,6 +103,25 @@ class RunnerTests(unittest.TestCase):
         self.assertNotIn("secret", json.dumps(record))
         self.assertNotIn("provided", json.dumps(record))
         self.assertEqual(post.call_count, 1)
+
+    def test_resume_prefix_validates_ordered_request_identity(self) -> None:
+        job = (0, "C0", "I0", "Q0", {}, {}, {})
+        record = {
+            "case_id": "case",
+            "event_index": 0,
+            "context_variant": "C0",
+            "instruction_variant": "I0",
+            "question_variant": "Q0",
+            "run_id": "run",
+            "model": "model",
+            "input_tokens": 2,
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "predictions.jsonl"
+            path.write_text(json.dumps(record) + "\n", encoding="utf-8")
+            self.assertEqual(runner.resume_prefix(path, [("case", job)], "run", "model"), [record])
+            with self.assertRaisesRegex(ValueError, "request plan"):
+                runner.resume_prefix(path, [("other", job)], "run", "model")
 
 
 if __name__ == "__main__":
