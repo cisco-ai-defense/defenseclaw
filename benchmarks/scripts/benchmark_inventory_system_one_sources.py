@@ -60,11 +60,17 @@ def truth_grade(row: dict[str, Any]) -> str:
     expected = truth.get("expected_disposition")
     confidence = truth.get("label_confidence")
     applicability = truth.get("applicability")
-    if applicability == "out_of_scope" or source_truth == "unknown" and not deterministic:
+    if applicability != "in_scope" or source_truth == "unknown" and not deterministic:
         return "E"
-    if deterministic == "deterministic_malicious" or "exact_proof" in categories or "closed_proof" in categories:
+    exact = deterministic == "deterministic_malicious" or bool({"exact_proof", "closed_proof"} & categories)
+    if exact and expected in {"detect_only", "block"} and confidence == "high":
         return "A"
-    if source_truth in {"malicious", "sensitive"} and row.get("surface") == "stateful" and confidence == "high":
+    if (
+        source_truth in {"malicious", "sensitive"}
+        and row.get("surface") == "stateful"
+        and expected in {"detect_only", "block"}
+        and confidence == "high"
+    ):
         return "B"
     if expected == "allow" and (source_truth == "benign" or deterministic == "benign"):
         return "D"
@@ -86,6 +92,7 @@ def inspect_cases(path: Path) -> dict[str, Any]:
             raise ValueError(f"{path}: case missing id")
         if case_id in ids:
             duplicates += 1
+            raise ValueError(f"{path}: duplicate case ID {case_id!r}")
         ids.add(case_id)
         source = row.get("source") if isinstance(row.get("source"), dict) else {}
         truth = row.get("truth") if isinstance(row.get("truth"), dict) else {}

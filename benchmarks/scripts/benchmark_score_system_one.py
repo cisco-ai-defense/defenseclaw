@@ -8,6 +8,8 @@ from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
+from jsonschema import Draft202012Validator
+
 try:
     from benchmark_inventory_system_one_sources import read_jsonl, sha256_file, truth_grade
 except ModuleNotFoundError:
@@ -159,19 +161,39 @@ def index_cases(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
 
 def aggregate_system(rows: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, Any]]]:
     grouped: dict[str, dict[str, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
+    seen: set[tuple[str, str, int, str, str, str]] = set()
+    candidate_runs: dict[str, set[str]] = defaultdict(set)
     for row in rows:
         key = "/".join(
             str(row.get(field, ""))
             for field in ("model_revision", "context_variant", "instruction_variant", "question_variant")
         )
+        identity = (
+            key,
+            str(row.get("case_id", "")),
+            int(row.get("event_index", -1)),
+            str(row.get("context_variant", "")),
+            str(row.get("instruction_variant", "")),
+            str(row.get("question_variant", "")),
+        )
+        if identity in seen:
+            raise ValueError(f"duplicate System One prediction identity {identity}")
+        seen.add(identity)
+        candidate_runs[key].add(str(row.get("run_id", "")))
         grouped[key][str(row.get("case_id", ""))].append(row)
+    mixed = [key for key, run_ids in candidate_runs.items() if len(run_ids) != 1 or "" in run_ids]
+    if mixed:
+        raise ValueError(f"candidates contain missing or mixed run IDs: {sorted(mixed)}")
     output: dict[str, dict[str, dict[str, Any]]] = {}
     for key, cases in grouped.items():
         output[key] = {}
         for case_id, events in cases.items():
-            action = max(
-                (str(event.get("action", "error")) for event in events), key=lambda value: ACTION_RANK.get(value, -1)
-            )
+            normal_actions = [
+                str(event.get("action", "error"))
+                for event in events
+                if not event.get("error_code") and str(event.get("action", "error")) != "error"
+            ]
+            action = max(normal_actions, key=lambda value: ACTION_RANK.get(value, -1)) if normal_actions else "error"
             risks = []
             for event in events:
                 probabilities = event.get("probabilities") if isinstance(event.get("probabilities"), dict) else {}
@@ -294,6 +316,13 @@ def score_candidate(
                 "binary": binary_metrics(labels2, [action != "allow" for action in cascade]),
                 "llm_invocation_rate": safe_div(llm_calls, len(cascade)),
             }
+    diagnostic_ids = [case_id for case_id, row in cases.items() if truth_grade(row) == "C"]
+    output["diagnostic_grade_c"] = {
+        "cases": len(diagnostic_ids),
+        "detected": sum(bool(predictions[case_id]["detected"]) for case_id in diagnostic_ids),
+        "actions": dict(sorted(Counter(normalized_action(predictions[case_id]) for case_id in diagnostic_ids).items())),
+        "errors": sum(int(predictions[case_id]["errors"]) for case_id in diagnostic_ids),
+    }
     return output
 
 
@@ -357,10 +386,26 @@ def culling_ledger(scores: list[dict[str, Any]], max_candidates: int) -> dict[st
     }
 
 
+def validate_predictions(path: Path, validator: Draft202012Validator) -> list[dict[str, Any]]:
+    rows = []
+    for index, row in enumerate(read_jsonl(path), 1):
+        error = next(validator.iter_errors(row), None)
+        if error is not None:
+            location = ".".join(str(part) for part in error.absolute_path) or "root"
+            raise ValueError(f"{path}:{index}: prediction schema violation at {location}: {error.validator}")
+        rows.append(row)
+    return rows
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=Path, required=True)
     parser.add_argument("--system-one-predictions", action="append", type=Path, required=True)
+    parser.add_argument(
+        "--prediction-schema",
+        type=Path,
+        default=Path("benchmarks/schema/system-one-prediction-v1.schema.json"),
+    )
     parser.add_argument("--deterministic-predictions", type=Path)
     parser.add_argument("--llm-predictions", type=Path)
     parser.add_argument("--output", type=Path, required=True)
@@ -375,9 +420,12 @@ def main() -> int:
     args = parse_args()
     cases = index_cases(list(read_jsonl(args.cases)))
     case_ids = set(cases)
+    schema = json.loads(args.prediction_schema.read_text(encoding="utf-8"))
+    Draft202012Validator.check_schema(schema)
+    validator = Draft202012Validator(schema)
     system_rows = []
     for path in args.system_one_predictions:
-        system_rows.extend(read_jsonl(path))
+        system_rows.extend(validate_predictions(path, validator))
     candidates = aggregate_system(system_rows)
     deterministic = (
         index_simple(list(read_jsonl(args.deterministic_predictions)), case_ids, True)

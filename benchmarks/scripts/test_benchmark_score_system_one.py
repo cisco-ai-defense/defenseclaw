@@ -18,6 +18,8 @@ class ScoreTests(unittest.TestCase):
         rows = [
             {
                 "case_id": "a",
+                "run_id": "run",
+                "event_index": 0,
                 "model_revision": "m",
                 "context_variant": "C1",
                 "instruction_variant": "I0",
@@ -30,6 +32,8 @@ class ScoreTests(unittest.TestCase):
             },
             {
                 "case_id": "a",
+                "run_id": "run",
+                "event_index": 1,
                 "model_revision": "m",
                 "context_variant": "C1",
                 "instruction_variant": "I0",
@@ -44,6 +48,8 @@ class ScoreTests(unittest.TestCase):
         aggregated = scorer.aggregate_system(rows)["m/C1/I0/Q0"]["a"]
         self.assertEqual(aggregated["action"], "block")
         self.assertEqual(aggregated["requests"], 2)
+        with self.assertRaisesRegex(ValueError, "duplicate System One prediction"):
+            scorer.aggregate_system([rows[0], rows[0]])
 
     def test_pareto_culling_records_reasons(self) -> None:
         def candidate(name: str, f1: float, fpr: float, latency: float, cost: float) -> dict[str, object]:

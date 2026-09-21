@@ -2,13 +2,14 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import html
 import json
 import math
 import os
 import re
 import threading
 import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -87,6 +88,12 @@ def neutralize(value: str) -> str:
     for token in ("SESSION_USER_INTENT", "RECENT_TOOL_CALL", "CURRENT_TOOL_CALL"):
         value = value.replace(f"<{token}", f"‹{token}").replace(f"</{token}>", f"‹/{token}›")
     return value
+
+
+def safe_tool_name(value: Any) -> str:
+    bounded = str(value or "shell")[:128]
+    sanitized = re.sub(r"[^A-Za-z0-9._:/-]", "_", bounded)
+    return html.escape(sanitized or "shell", quote=True)
 
 
 def bound_value(value: str, limit: int) -> tuple[str, bool]:
@@ -176,7 +183,7 @@ def build_state(
         text, changed = bound_value(event_text(event), int(bounds["prior_event_bytes"]))
         bounded_prior.append(
             {
-                "tool_name": str(event.get("tool_name") or "shell"),
+                "tool_name": safe_tool_name(event.get("tool_name")),
                 "bounded_arguments": text,
                 "outcome": event.get("outcome") or "unknown",
             }
@@ -184,19 +191,45 @@ def build_state(
         truncated = truncated or changed
     current_text, changed = bound_value(event_text(current), int(bounds["current_event_bytes"]))
     truncated = truncated or changed
+    max_bytes = int(config.get("common_max_bytes", 12288))
     if variant == "C7":
-        parts = []
-        if intent_value:
-            parts.append(f'<SESSION_USER_INTENT untrusted="true">\n{intent_value}\n</SESSION_USER_INTENT>')
-        for index, event in enumerate(bounded_prior, 1):
-            parts.append(
-                f'<RECENT_TOOL_CALL index={index} tool="{event["tool_name"]}">\n'
-                f"{event['bounded_arguments']}\n</RECENT_TOOL_CALL>"
+        current_tool = safe_tool_name(current.get("tool_name"))
+
+        def render_c7() -> str:
+            parts = []
+            if intent_value:
+                parts.append(f'<SESSION_USER_INTENT untrusted="true">\n{intent_value}\n</SESSION_USER_INTENT>')
+            for index, event in enumerate(bounded_prior, 1):
+                parts.append(
+                    f'<RECENT_TOOL_CALL index={index} tool="{event["tool_name"]}">\n'
+                    f"{event['bounded_arguments']}\n</RECENT_TOOL_CALL>"
+                )
+            parts.append(f'<CURRENT_TOOL_CALL tool="{current_tool}">\n{current_text}\n</CURRENT_TOOL_CALL>')
+            return "\n".join(parts)
+
+        state: Any = render_c7()
+        encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        while len(encoded.encode()) > max_bytes:
+            candidates = [("intent", len(intent_value.encode())), ("current", len(current_text.encode()))]
+            candidates.extend(
+                (str(index), len(event["bounded_arguments"].encode())) for index, event in enumerate(bounded_prior)
             )
-        parts.append(
-            f'<CURRENT_TOOL_CALL tool="{current.get("tool_name") or "shell"}">\n{current_text}\n</CURRENT_TOOL_CALL>'
-        )
-        state: Any = "\n".join(parts)
+            target, size = max(candidates, key=lambda item: item[1])
+            if size <= 64:
+                raise ValueError("C7 framing exceeds common context bound")
+            overage = len(encoded.encode()) - max_bytes
+            new_size = max(64, size - overage - 64)
+            if target == "intent":
+                intent_value = utf8_prefix(intent_value, new_size)
+            elif target == "current":
+                current_text = utf8_prefix(current_text, new_size)
+            else:
+                bounded_prior[int(target)]["bounded_arguments"] = utf8_prefix(
+                    bounded_prior[int(target)]["bounded_arguments"], new_size
+                )
+            truncated = True
+            state = render_c7()
+            encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
     elif variant == "CA":
         state = {
             "untrusted": True,
@@ -222,7 +255,6 @@ def build_state(
         if variant == "CD":
             state = minimize(state)
     encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
-    max_bytes = int(config.get("common_max_bytes", 12288))
     if len(encoded.encode()) > max_bytes:
         while (
             isinstance(state, dict)
@@ -232,9 +264,14 @@ def build_state(
             state["prior_tool_calls"].pop(0)
             truncated = True
         encoded = json.dumps(state, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+    if len(encoded.encode()) > max_bytes:
+        raise ValueError(f"context {variant} exceeds common context bound")
+    context_events = len(bounded_prior)
+    if isinstance(state, dict) and isinstance(state.get("prior_tool_calls"), list):
+        context_events = len(state["prior_tool_calls"])
     return state, {
         "bytes": len(encoded.encode()),
-        "events": len(bounded_prior),
+        "events": context_events,
         "truncated": truncated,
         "sha256": hashlib.sha256(encoded.encode()).hexdigest(),
     }
@@ -338,15 +375,22 @@ class Budget:
         self.rate = rate
         self.calls = starting_calls
         self.tokens = starting_tokens
+        self.actual_tokens = starting_tokens
         self.lock = threading.Lock()
 
-    def add(self, tokens: int) -> None:
+    def reserve(self, estimated_tokens: int) -> None:
         with self.lock:
-            self.calls += 1
-            self.tokens += tokens
-            cost = self.tokens * self.rate / 1_000_000
-            if self.calls > self.max_calls or self.tokens > self.max_tokens or cost > self.max_usd:
+            next_calls = self.calls + 1
+            next_tokens = self.tokens + estimated_tokens
+            next_cost = next_tokens * self.rate / 1_000_000
+            if next_calls > self.max_calls or next_tokens > self.max_tokens or next_cost > self.max_usd:
                 raise RuntimeError("provider budget exceeded")
+            self.calls = next_calls
+            self.tokens = next_tokens
+
+    def record_actual(self, tokens: int) -> None:
+        with self.lock:
+            self.actual_tokens += tokens
 
 
 def evaluate(
@@ -375,7 +419,13 @@ def evaluate(
     started = time.perf_counter()
     error_code = ""
     response_data: dict[str, Any] = {}
+    estimated_input_tokens = max(1, len(canonical.encode()) // 4)
     for attempt in range(retries + 1):
+        try:
+            budget.reserve(estimated_input_tokens)
+        except RuntimeError:
+            error_code = "provider_budget_exceeded"
+            break
         try:
             response = requests.post(endpoint, data=canonical.encode(), headers=headers, timeout=timeout)
             if response.status_code == 429 or response.status_code >= 500:
@@ -416,9 +466,9 @@ def evaluate(
                     flat_probabilities[f"{key}.{option}"] = probability
             action, confidence = derive_action(question_id, flat_answers, flat_probabilities)
             usage = response_data.get("usage") if isinstance(response_data.get("usage"), dict) else {}
-            input_tokens = int(usage.get("input_tokens", max(1, len(canonical.encode()) // 4)))
+            input_tokens = int(usage.get("input_tokens", estimated_input_tokens))
             output_tokens = int(usage.get("output_tokens", 0))
-            budget.add(input_tokens)
+            budget.record_actual(input_tokens)
             error_code = "" if action != "error" else "invalid_disposition"
         except (TypeError, ValueError, RuntimeError):
             action = "error"
@@ -514,6 +564,27 @@ def resume_prefix(path: Path, jobs: list[tuple[str, tuple[Any, ...]]], run_id: s
     return rows
 
 
+def write_rows_atomic(path: Path, rows: list[dict[str, Any]]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        os.chmod(temporary, 0o600)
+        for row in rows:
+            handle.write(json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
+def write_json_atomic(path: Path, value: dict[str, Any]) -> None:
+    temporary = path.with_suffix(path.suffix + ".tmp")
+    with temporary.open("w", encoding="utf-8") as handle:
+        json.dump(value, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.replace(temporary, path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser()
     parser.add_argument("--cases", type=Path, required=True)
@@ -536,6 +607,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-usd", type=float, default=5)
     parser.add_argument("--input-usd-per-million", type=float, default=0)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--resume-retry-errors", action="store_true")
     parser.add_argument("--dry-run", action="store_true")
     return parser.parse_args()
 
@@ -575,7 +647,36 @@ def main() -> int:
     if args.endpoint.startswith("https://") and not api_key:
         raise ValueError(f"missing API key environment variable {args.api_key_env}")
     args.output.parent.mkdir(parents=True, exist_ok=True)
+    plan_path = args.output.with_suffix(args.output.suffix + ".plan.json")
+    run_plan = {
+        "schema_version": "1",
+        "run_id": args.run_id,
+        "model": args.model,
+        "model_revision": args.model_revision,
+        "endpoint": args.endpoint,
+        "cases_sha256": sha256_file(args.cases),
+        "contexts_config_sha256": sha256_file(args.contexts_config),
+        "questions_config_sha256": sha256_file(args.questions_config),
+        "contexts": args.context,
+        "instructions": args.instruction,
+        "questions": args.question,
+        "requests": len(jobs),
+    }
+    if args.resume:
+        if not plan_path.exists() or load_json(plan_path) != run_plan:
+            raise ValueError("resume plan does not match current inputs and configuration")
+    else:
+        write_json_atomic(plan_path, run_plan)
     prior = resume_prefix(args.output, jobs, args.run_id, args.model) if args.resume else []
+    if args.resume_retry_errors:
+        successful = []
+        for row in prior:
+            if row.get("error_code"):
+                break
+            successful.append(row)
+        if len(successful) != len(prior):
+            write_rows_atomic(args.output, successful)
+            prior = successful
     prior_tokens = sum(int(row.get("input_tokens", 0)) for row in prior)
     budget = Budget(
         args.max_calls,
@@ -587,12 +688,14 @@ def main() -> int:
     )
     open_mode = "a" if prior else "w"
     next_index = len(prior)
+    next_submit = next_index
     pending: dict[int, dict[str, Any]] = {}
     with args.output.open(open_mode, encoding="utf-8") as handle:
         os.chmod(args.output, 0o600)
         with ThreadPoolExecutor(max_workers=args.concurrency) as executor:
             futures = {}
-            for index in range(next_index, len(jobs)):
+
+            def submit(index: int) -> None:
                 case_id, job = jobs[index]
                 event_index, context_id, instruction_id, question_id, state, state_meta, question_body = job
                 future = executor.submit(
@@ -615,8 +718,15 @@ def main() -> int:
                     budget,
                 )
                 futures[future] = index
-            for future in as_completed(futures):
-                pending[futures[future]] = future.result()
+
+            window = max(args.concurrency, args.concurrency * 2)
+            while next_submit < len(jobs) and len(futures) < window:
+                submit(next_submit)
+                next_submit += 1
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    pending[futures.pop(future)] = future.result()
                 while next_index in pending:
                     handle.write(json.dumps(pending.pop(next_index), sort_keys=True, separators=(",", ":")) + "\n")
                     next_index += 1
@@ -624,6 +734,9 @@ def main() -> int:
                         handle.flush()
                     if next_index % 1000 == 0:
                         print(json.dumps({"completed": next_index, "requests": len(jobs)}, sort_keys=True), flush=True)
+                while next_submit < len(jobs) and len(futures) < window:
+                    submit(next_submit)
+                    next_submit += 1
         handle.flush()
         os.fsync(handle.fileno())
     if next_index != len(jobs):
@@ -637,15 +750,17 @@ def main() -> int:
         "prediction_sha256": sha256_file(args.output),
         "cases": len(cases),
         "requests": len(jobs),
-        "input_tokens": budget.tokens,
-        "estimated_usd": round(budget.tokens * args.input_usd_per_million / 1_000_000, 8),
+        "attempted_provider_calls": budget.calls,
+        "reserved_input_tokens": budget.tokens,
+        "actual_input_tokens": budget.actual_tokens,
+        "estimated_usd": round(budget.actual_tokens * args.input_usd_per_million / 1_000_000, 8),
         "contexts": args.context,
         "instructions": args.instruction,
         "questions": args.question,
+        "run_plan_sha256": sha256_file(plan_path),
+        "complete": True,
     }
-    args.output.with_suffix(args.output.suffix + ".meta.json").write_text(
-        json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8"
-    )
+    write_json_atomic(args.output.with_suffix(args.output.suffix + ".meta.json"), metadata)
     print(json.dumps(metadata, sort_keys=True))
     return 0
 

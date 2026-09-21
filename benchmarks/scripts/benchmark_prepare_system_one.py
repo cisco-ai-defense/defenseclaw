@@ -138,7 +138,12 @@ def parse_args() -> argparse.Namespace:
 
 def main() -> int:
     args = parse_args()
-    quotas = dict(parse_quota(value) for value in args.quota)
+    parsed_quotas = [parse_quota(value) for value in args.quota]
+    quotas: dict[tuple[str, str, str], int] = {}
+    for key, count in parsed_quotas:
+        if key in quotas:
+            raise ValueError(f"duplicate quota {':'.join(key)}")
+        quotas[key] = count
     rows = load_rows(args.input)
     excluded_ids, excluded_families = load_exclusions(args.exclude)
     selected, available = select_rows(
