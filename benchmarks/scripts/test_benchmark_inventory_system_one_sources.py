@@ -77,6 +77,8 @@ class InventoryTests(unittest.TestCase):
             catalog = inventory.build_catalog([first, second], [])
             self.assertEqual(catalog["overlaps"]["cross_corpus_families"], 1)
             self.assertEqual(catalog["totals"]["grade:A"], 1)
+            self.assertEqual(catalog["totals"]["grade_split:A:development"], 1)
+            self.assertEqual(catalog["totals"]["grade_surface:D:action"], 1)
             self.assertNotIn("payload", json.dumps(catalog))
 
     def test_duplicate_json_keys_fail(self) -> None:

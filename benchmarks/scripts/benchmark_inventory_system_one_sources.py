@@ -94,10 +94,13 @@ def inspect_cases(path: Path) -> dict[str, Any]:
         datasets[dataset] += 1
         source_revisions[dataset].add(str(source.get("revision", "missing")))
         families.add(family_id(row))
+        grade = truth_grade(row)
+        split = str(row.get("split", "missing"))
+        surface = str(row.get("surface", "missing"))
         for key, value in {
-            "grade": truth_grade(row),
-            "split": row.get("split", "missing"),
-            "surface": row.get("surface", "missing"),
+            "grade": grade,
+            "split": split,
+            "surface": surface,
             "source_truth": truth.get("source_truth", "missing"),
             "deterministic_truth": truth.get("deterministic_truth", "missing"),
             "disposition": truth.get("expected_disposition", "missing"),
@@ -109,6 +112,8 @@ def inspect_cases(path: Path) -> dict[str, Any]:
             else False,
         }.items():
             counts[f"{key}:{value}"] += 1
+        counts[f"grade_split:{grade}:{split}"] += 1
+        counts[f"grade_surface:{grade}:{surface}"] += 1
     return {
         "path": str(path),
         "sha256": sha256_file(path),
