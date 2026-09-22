@@ -579,6 +579,7 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 	var payload struct {
 		Messages []struct {
 			Role      string `json:"role"`
+			Content   string `json:"content"`
 			ToolCalls []struct {
 				Function struct {
 					Name      string `json:"name"`
@@ -590,17 +591,23 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
 		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
 	}
-	if len(payload.Messages) != 1 || len(payload.Messages[0].ToolCalls) != 1 {
-		t.Fatalf("want one message with one tool call; body = %s", gotBody)
+	if len(payload.Messages) != 2 {
+		t.Fatalf("want the text form and the tool call; body = %s", gotBody)
 	}
-	msg := payload.Messages[0]
-	if msg.Role != "assistant" {
-		t.Errorf("role = %q, want assistant", msg.Role)
+	text, structured := payload.Messages[0], payload.Messages[1]
+	if text.Role != "user" || !strings.Contains(text.Content, "rm -rf / --no-preserve-root") {
+		t.Errorf("text form = %+v", text)
+	}
+	if structured.Role != "assistant" {
+		t.Errorf("role = %q, want assistant", structured.Role)
+	}
+	if len(structured.ToolCalls) != 1 {
+		t.Fatalf("tool_calls = %d, want 1", len(structured.ToolCalls))
 	}
 	var parsed struct {
 		Command string `json:"command"`
 	}
-	if err := json.Unmarshal([]byte(msg.ToolCalls[0].Function.Arguments), &parsed); err != nil {
+	if err := json.Unmarshal([]byte(structured.ToolCalls[0].Function.Arguments), &parsed); err != nil {
 		t.Fatalf("arguments is not parseable JSON: %v", err)
 	}
 	if parsed.Command != "rm -rf / --no-preserve-root" {
@@ -608,9 +615,9 @@ func TestCiscoInspectClient_NonManagedHookSendsToolCall(t *testing.T) {
 	}
 }
 
-// The connector's own tool id reaches the wire. Each hook sets toolUseID on the
-// request: claudecode and codex from tool_use_id, every other connector from
-// ToolInvocationID on the shared agent hook.
+// The agent's own tool id reaches the wire. Each hook sets toolUseID on the
+// request: claudecode and codex from tool_use_id, every other connector from the
+// reported ToolInvocationID on the shared agent hook.
 func TestCiscoInspectClient_ToolUseIDReachesWire(t *testing.T) {
 	var gotBody []byte
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -644,10 +651,10 @@ func TestCiscoInspectClient_ToolUseIDReachesWire(t *testing.T) {
 	if err := json.Unmarshal(gotBody, &payload); err != nil {
 		t.Fatalf("unmarshal: %v (body=%s)", err, gotBody)
 	}
-	if len(payload.Messages) != 1 || len(payload.Messages[0].ToolCalls) != 1 {
-		t.Fatalf("want one message with one tool call; body = %s", gotBody)
+	if len(payload.Messages) != 2 || len(payload.Messages[1].ToolCalls) != 1 {
+		t.Fatalf("want the text form and one tool call; body = %s", gotBody)
 	}
-	if got := payload.Messages[0].ToolCalls[0].ID; got != "call_from_connector_42" {
+	if got := payload.Messages[1].ToolCalls[0].ID; got != "call_from_connector_42" {
 		t.Errorf("tool call id = %q, want the connector's id", got)
 	}
 }
