@@ -338,6 +338,36 @@ def parse_answer(answer: dict[str, Any]) -> tuple[Any, dict[str, float], float]:
     return value, parsed, float(confidence)
 
 
+SEVERITY = {"allow": 0, "confirm": 1, "block": 2}
+# Two dispositions whose probabilities agree to within this margin are a genuine tie.
+DISPOSITION_TIE_EPSILON = 1e-9
+
+
+def _resolve_disposition_tie(action: str, probabilities: dict[str, float]) -> str:
+    """Break exact disposition ties deterministically, preferring the more conservative outcome.
+
+    The model reports a single winning `disposition`, and `disposition == argmax(probabilities)`
+    holds - but when two dispositions agree to ~1e-9 the winner is decided by whichever key the
+    provider happened to emit first. Measured on one 1,412-row arm: 14 rows (~1%) are exact ties
+    and 21-29% of them flipped under a numerically neutral change, while the non-tie flip rate
+    sat at the same-config floor. So the ties, not the arithmetic, were the instability.
+
+    Resolving toward the higher severity keeps the outcome reproducible and never downgrades a
+    finding, which the cascade's never-downgrade invariant already requires.
+    """
+    top = probabilities.get(f"disposition.{action}", 0)
+    best = action
+    for candidate, rank in SEVERITY.items():
+        if candidate == action:
+            continue
+        value = probabilities.get(f"disposition.{candidate}")
+        if value is None:
+            continue
+        if abs(value - top) <= DISPOSITION_TIE_EPSILON and rank > SEVERITY[best]:
+            best = candidate
+    return best
+
+
 def derive_action(question_id: str, answers: dict[str, Any], probabilities: dict[str, float]) -> tuple[str, float]:
     # Q4 also answers a disposition Choice (alongside intrinsic_danger and serves_intent),
     # so it routes through the disposition branch rather than the category-noul fallback.
@@ -345,7 +375,16 @@ def derive_action(question_id: str, answers: dict[str, Any], probabilities: dict
         action = str(answers.get("disposition", "error"))
         if action not in {"allow", "confirm", "block"}:
             return "error", 0
+        action = _resolve_disposition_tie(action, probabilities)
         return action, max(probabilities.get(f"disposition.{action}", 0), 0)
+    # Noul-scored questions read `<name>.true` probabilities. A provider that answers the same
+    # questions as a Choice over yes/no emits `<name>.yes` instead, so every lookup below would
+    # default to 0 and the branch would return ("allow", 1.0) - a confident allow, with no
+    # error_code, that also lands inside the cascade's trusted-allow band and so skips the LLM
+    # tier entirely. Requiring the namespace to be present turns that silent pass into a loud
+    # error. Q0/Q2/Q4 already have the equivalent guard via their disposition enum check.
+    if not any(key.endswith(".true") for key in probabilities):
+        return "error", 0
     if question_id == "Q1":
         high = max(
             probabilities.get("exfiltration.true", 0),

@@ -365,16 +365,23 @@ def score_candidate(
         if llm:
             llm_actions = [normalized_action(llm[case_id]) for case_id, _, _ in scorable]
             baseline = [max_action(det, llm_action) for det, llm_action in zip(det_actions, llm_actions, strict=True)]
+            # A deterministic `confirm` is advisory: it asks for review, it does not stop the
+            # action. Short-circuiting the cascade on it therefore caps cases that a later tier
+            # would have blocked - measured at -0.014 block F1 on the broad stage and -0.046 at
+            # production weighting, with 13/13 and 95/95 deterministic non-allow cases decided by
+            # the deterministic tier alone. Escalating instead, and joining the deterministic
+            # verdict back on with max_action, recovers all of it at zero false-positive cost and
+            # keeps the never-downgrade invariant true by construction.
             cascade = []
             llm_calls = 0
             for index, (det, system) in enumerate(zip(det_actions, system_actions, strict=True)):
-                if det != "allow":
+                if det == "block":
                     cascade.append(det)
                 elif predictions[scorable[index][0]]["errors"] or predictions[scorable[index][0]]["risk"] < threshold:
-                    cascade.append(llm_actions[index])
+                    cascade.append(max_action(det, llm_actions[index]))
                     llm_calls += 1
                 else:
-                    cascade.append(system)
+                    cascade.append(max_action(det, system))
             output["deterministic_then_llm"] = {
                 "three_way": multiclass_metrics(labels3, baseline),
                 "binary": binary_metrics(labels2, [action != "allow" for action in baseline]),
@@ -398,15 +405,15 @@ def score_candidate(
                 for index, (det, system) in enumerate(zip(det_actions, system_actions, strict=True)):
                     case_id = scorable[index][0]
                     risk = predictions[case_id]["risk"]
-                    if det != "allow":
+                    if det == "block":
                         two_sided.append(det)
                     elif predictions[case_id]["errors"]:
-                        two_sided.append(llm_actions[index])
+                        two_sided.append(max_action(det, llm_actions[index]))
                         two_sided_calls += 1
                     elif risk >= threshold or risk <= allow_threshold:
-                        two_sided.append(system)
+                        two_sided.append(max_action(det, system))
                     else:
-                        two_sided.append(llm_actions[index])
+                        two_sided.append(max_action(det, llm_actions[index]))
                         two_sided_calls += 1
                 key = f"deterministic_then_system_one_then_llm_two_sided_{allow_threshold:.2f}"
                 output[key] = {
