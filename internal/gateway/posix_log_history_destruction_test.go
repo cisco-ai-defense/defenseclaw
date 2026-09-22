@@ -23,6 +23,9 @@ func TestPOSIXLogAndShellHistoryDestructionPatternBoundaries(t *testing.T) {
 		"shred -u /var/log/auth.log /root/.bash_history",
 		"rm -rf /home/dev/.zsh_history /var/log/secure",
 		"truncate -s 0 /var/log/auth.log /home/dev/.bash_history",
+		"truncate -s0 /var/log/auth.log /home/dev/.bash_history",
+		"truncate --size=0 /var/log/auth.log /home/dev/.bash_history",
+		"truncate -s -4096 /var/log/auth.log /home/dev/.bash_history",
 		"rm -f /home/dev/.ksh_history /var/log/messages",
 	}
 	negative := []string{
@@ -50,6 +53,11 @@ func TestPOSIXLogAndShellHistoryDestructionPatternBoundaries(t *testing.T) {
 		"rm -f /var/log/auth.log /home/dev/.bash_history.old",
 		"shred -u /var/log/auth.log /home/dev/.bash_history.2026-01-01",
 		"rm /var/log/auth.log /home/dev/.bash_historyfile",
+		// Found in review: truncate can GROW a file. An extending size is not evidence
+		// destruction, so only an explicit zero or a shrinking delta may match.
+		"truncate -s +1 /var/log/auth.log /home/dev/.bash_history",
+		"truncate -s +4096 /var/log/auth.log /home/dev/.bash_history",
+		"truncate --size=+1 /var/log/auth.log /home/dev/.bash_history",
 	}
 	for _, profile := range alertFatigueProfiles {
 		t.Run(profile, func(t *testing.T) {
@@ -91,28 +99,39 @@ func TestPOSIXLogAndShellHistoryDestructionStaysNonBlocking(t *testing.T) {
 // unreachable the same way.
 func TestPOSIXLogAndShellHistoryDestructionIsReachableEndToEnd(t *testing.T) {
 	t.Parallel()
-	for _, command := range []string{
-		"rm -f /var/log/auth.log /home/dev/.bash_history",
-		"rm -f /var/log/app/x.log /var/log/auth.log /home/dev/.bash_history",
-		"shred -u /var/log/auth.log /root/.bash_history",
-	} {
-		raw, err := json.Marshal(map[string]string{"command": command})
-		if err != nil {
-			t.Fatal(err)
-		}
-		evaluation := EvaluateDeterministicAction(
-			t.Context(),
-			actionfacts.Input{Tool: "shell", Args: raw, DialectHint: actionfacts.DialectPOSIX},
-			string(raw),
-			"benchmark-default",
-			"default",
-		)
-		if !slices.Contains(evaluation.RuleIDs, posixLogHistoryDestructionRuleID) {
-			t.Errorf("command %q produced no %s finding: %+v",
-				command, posixLogHistoryDestructionRuleID, evaluation)
-		}
-		if evaluation.Action == guardrailActionBlock {
-			t.Errorf("command %q blocked; the rule is meant to alert only: %+v", command, evaluation)
-		}
+	// Every profile, not just default. strict maps HIGH to block, so without the
+	// per-profile sweep the non-blocking claim would be untested exactly where it is
+	// most likely to fail. It holds because the regex-only finding is detection-only
+	// and never contributes to the enforceable severity.
+	for _, profile := range alertFatigueProfiles {
+		t.Run(profile, func(t *testing.T) {
+			for _, command := range []string{
+				"rm -f /var/log/auth.log /home/dev/.bash_history",
+				"rm -f /var/log/app/x.log /var/log/auth.log /home/dev/.bash_history",
+				"shred -u /var/log/auth.log /root/.bash_history",
+				"truncate -s 0 /var/log/auth.log /home/dev/.bash_history",
+			} {
+				raw, err := json.Marshal(map[string]string{"command": command})
+				if err != nil {
+					t.Fatal(err)
+				}
+				evaluation := EvaluateDeterministicAction(
+					t.Context(),
+					actionfacts.Input{Tool: "shell", Args: raw, DialectHint: actionfacts.DialectPOSIX},
+					string(raw),
+					"benchmark-"+profile,
+					profile,
+				)
+				if !slices.Contains(evaluation.RuleIDs, posixLogHistoryDestructionRuleID) {
+					t.Errorf("command %q produced no %s finding: %+v",
+						command, posixLogHistoryDestructionRuleID, evaluation)
+				}
+				if evaluation.Action == guardrailActionBlock ||
+					evaluation.Action == guardrailActionConfirm {
+					t.Errorf("profile=%s command %q escaped the alert-only boundary: %+v",
+						profile, command, evaluation)
+				}
+			}
+		})
 	}
 }

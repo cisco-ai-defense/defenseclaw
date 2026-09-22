@@ -1785,7 +1785,7 @@
       "body": {
         "id": "tamper.posix_log_and_shell_history_destruction",
         "tool_call_only": true,
-        "pattern": "(?i)\\b(?:rm|shred|truncate)\\b[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
+        "pattern": "(?i)\\b(?:(?:rm|shred)\\b|truncate\\b[^;&|\\r\\n]{0,60}(?:-s\\s*|--size[= ])(?:0|-[0-9]))[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
         "title": "System log and shell history destroyed together",
         "severity": "HIGH",
         "confidence": 0.97,
