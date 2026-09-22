@@ -1396,6 +1396,36 @@
       ]
     },
     {
+      "id": "RECIPE-credential.directory_ticket_request",
+      "title": "Exact Kerberos ticket request",
+      "kind": "rule:command",
+      "body": {
+        "id": "credential.directory_ticket_request",
+        "tool_call_only": true,
+        "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+        "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
+        "title": "Exact Kerberos ticket request",
+        "severity": "HIGH",
+        "confidence": 0.99,
+        "tags": [
+          "credential",
+          "active-directory",
+          "kerberos",
+          "bounded-grammar"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "credential",
+        "active-directory",
+        "kerberos",
+        "bounded-grammar"
+      ]
+    },
+    {
       "id": "RECIPE-credential.pkcs12_private_key_extract",
       "title": "Extract an unencrypted private key from a PKCS#12 bundle",
       "kind": "rule:command",
@@ -1746,6 +1776,35 @@
         "tampering",
         "windows",
         "logs"
+      ]
+    },
+    {
+      "id": "RECIPE-tamper.posix_log_and_shell_history_destruction",
+      "title": "System log and shell history destroyed together",
+      "kind": "rule:command",
+      "body": {
+        "id": "tamper.posix_log_and_shell_history_destruction",
+        "tool_call_only": true,
+        "pattern": "(?i)\\b(?:rm|shred|truncate)\\b[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
+        "title": "System log and shell history destroyed together",
+        "severity": "HIGH",
+        "confidence": 0.97,
+        "tags": [
+          "defense-evasion",
+          "tampering",
+          "logs",
+          "anti-forensics"
+        ]
+      },
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "examples": [],
+      "counterexamples": [],
+      "source": "policies/guardrail/strict/rules/commands.yaml",
+      "tags": [
+        "defense-evasion",
+        "tampering",
+        "logs",
+        "anti-forensics"
       ]
     },
     {
@@ -4187,7 +4246,7 @@
         "tool_call_only": true,
         "pattern": "(?i)(?:>|>>|\\btee(?:\\s+-a)?)\\s*/etc/ld\\.so\\.preload\\b",
         "title": "Global dynamic-loader preload installation",
-        "severity": "HIGH",
+        "severity": "CRITICAL",
         "confidence": 0.99,
         "tags": [
           "persistence",
@@ -4195,7 +4254,7 @@
           "dynamic-loader"
         ]
       },
-      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity HIGH.",
+      "why": "Pattern shipped in the bundled strict rule pack (commands.yaml). Severity CRITICAL.",
       "examples": [],
       "counterexamples": [],
       "source": "policies/guardrail/strict/rules/commands.yaml",

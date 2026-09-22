@@ -21,7 +21,7 @@ explains which layer owns each decision. Benchmark scores for these layers are
 published in [Deterministic Detection Benchmarks](/docs/benchmarks).
 
 <Callout type="info" title="Repository snapshot">
-The balanced/default enabled rule catalog contains 237 local rules across seven
+The balanced/default enabled rule catalog contains 239 local rules across seven
 families. The repository also contains 26 fixed bounded chains, ten
 MCP-description YARA signatures, two post-event correlator patterns, five
 selectable high-assurance packs, and one staged SSH integrity policy contract.
@@ -63,9 +63,9 @@ rules and lexical fallback posture:
 
 | Profile | Declared rules | Enabled rules | CEL declarations | Tool-call-only | Never-match `a^` fallbacks |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Balanced/default | 241 | 237 | 133 | 120 | 65 |
-| Permissive | 241 | 233 | 133 | 120 | 65 |
-| Strict | 253 | 253 | 146 | 138 | 66 |
+| Balanced/default | 243 | 239 | 134 | 122 | 65 |
+| Permissive | 243 | 235 | 134 | 122 | 65 |
+| Strict | 255 | 255 | 147 | 140 | 66 |
 
 `a^` is an intentionally impossible RE2 pattern. It is used when a broad raw
 text fallback would add noise or could not safely prove the same semantic
@@ -73,12 +73,12 @@ effect. In balanced and permissive, ten CEL declarations are explicit `false`
 placeholders for rules that remain lexical-only in those profiles; strict
 enables tighter variants of those candidates.
 
-The 237 enabled balanced/default rules are generated from
+The 239 enabled balanced/default rules are generated from
 `policies/guardrail/default/rules/*.yaml`:
 
 | Family | Rules | What it detects |
 | --- | ---: | --- |
-| `command` | 126 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
+| `command` | 128 | Execution, reverse shells, destructive storage operations, persistence, privilege changes, credential access, security-control tampering, cloud, database, Kubernetes, and source-control effects |
 | `sensitive-path` | 26 | Reads or writes involving SSH, cloud, Kubernetes, container, package-manager, Git, environment, browser-session, workload-identity, history, shell-profile, hook, and runtime-socket paths |
 | `secret` | 23 | Provider credentials, API tokens, private keys, JWTs, authenticated connection strings, bearer tokens, and high-confidence secret assignments |
 | `trust-exploit` | 22 | Instruction override, authority impersonation, jailbreak, prompt extraction, persona manipulation, delimiter abuse, and obfuscation signals |
@@ -147,8 +147,8 @@ and enum reference.
 
 ## CEL selectors
 
-Balanced/default and permissive each declare 133 CEL expressions; strict
-declares 146. CEL is deliberately limited
+Balanced/default and permissive each declare 134 CEL expressions; strict
+declares 147. CEL is deliberately limited
 to Boolean logic, field access, fixed enum constants, membership, bounded
 `exists` comprehensions, and literal RE2 matching. It cannot perform arbitrary
 history scans, dynamic regex construction, reflection, network access, file

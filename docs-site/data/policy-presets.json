@@ -814,12 +814,27 @@
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-secretsdump', 'secretsdump.py', 'impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py', 'hashcat', 'hashcat.exe', 'john', 'john.exe', 'nxc', 'netexec', 'crackmapexec'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
                   "pattern": "(?i)\\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\\.py|hashcat(?:\\.exe)?|john(?:\\.exe)?\\b[^\\r\\n]*--format(?:=|\\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\\b[^\\r\\n]*(?:--ntds|-M\\s+ntdsutil))\\b",
                   "title": "Exact directory credential acquisition",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "credential",
                     "active-directory",
                     "credential-dumping",
+                    "bounded-grammar"
+                  ]
+                },
+                {
+                  "id": "credential.directory_ticket_request",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
+                  "title": "Exact Kerberos ticket request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "kerberos",
                     "bounded-grammar"
                   ]
                 },
@@ -999,12 +1014,26 @@
                   ]
                 },
                 {
+                  "id": "tamper.posix_log_and_shell_history_destruction",
+                  "tool_call_only": true,
+                  "pattern": "(?i)\\b(?:rm|shred|truncate)\\b[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
+                  "title": "System log and shell history destroyed together",
+                  "severity": "HIGH",
+                  "confidence": 0.97,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "logs",
+                    "anti-forensics"
+                  ]
+                },
+                {
                   "id": "tamper.windows_recursive_everyone_full_control",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.program == 'icacls')",
                   "pattern": "(?i)\\bicacls(?:\\.exe)?\\b",
                   "title": "Recursively grant Everyone inheritable full control on Windows",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "tampering",
@@ -1703,7 +1732,7 @@
                   "tool_call_only": true,
                   "pattern": "a^",
                   "title": "Install pam_permit authentication bypass",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "authentication",
@@ -1719,7 +1748,7 @@
                   "tool_call_only": true,
                   "pattern": "a^",
                   "title": "Configure Docker to trust an insecure HTTP registry",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "container",
@@ -2055,7 +2084,7 @@
                   "tool_call_only": true,
                   "pattern": "(?i)(?:>|>>|\\btee(?:\\s+-a)?)\\s*/etc/ld\\.so\\.preload\\b",
                   "title": "Global dynamic-loader preload installation",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "persistence",
@@ -4627,6 +4656,21 @@
                   ]
                 },
                 {
+                  "id": "credential.directory_ticket_request",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
+                  "title": "Exact Kerberos ticket request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "kerberos",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "credential.pkcs12_private_key_extract",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['openssl', 'openssl.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
@@ -4799,6 +4843,20 @@
                     "tampering",
                     "windows",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "tamper.posix_log_and_shell_history_destruction",
+                  "tool_call_only": true,
+                  "pattern": "(?i)\\b(?:rm|shred|truncate)\\b[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
+                  "title": "System log and shell history destroyed together",
+                  "severity": "HIGH",
+                  "confidence": 0.97,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "logs",
+                    "anti-forensics"
                   ]
                 },
                 {
@@ -6005,7 +6063,7 @@
                   "tool_call_only": true,
                   "pattern": "(?i)(?:>|>>|\\btee(?:\\s+-a)?)\\s*/etc/ld\\.so\\.preload\\b",
                   "title": "Global dynamic-loader preload installation",
-                  "severity": "HIGH",
+                  "severity": "CRITICAL",
                   "confidence": 0.99,
                   "tags": [
                     "persistence",
@@ -8526,6 +8584,21 @@
                   ]
                 },
                 {
+                  "id": "credential.directory_ticket_request",
+                  "tool_call_only": true,
+                  "expression": "f.commands.exists(c, c.argv_complete && c.program in ['impacket-getuserspns', 'getuserspns.py', 'impacket-getnpusers', 'getnpusers.py'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
+                  "pattern": "(?i)\\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\\.py)\\b",
+                  "title": "Exact Kerberos ticket request",
+                  "severity": "HIGH",
+                  "confidence": 0.99,
+                  "tags": [
+                    "credential",
+                    "active-directory",
+                    "kerberos",
+                    "bounded-grammar"
+                  ]
+                },
+                {
                   "id": "credential.pkcs12_private_key_extract",
                   "tool_call_only": true,
                   "expression": "f.commands.exists(c, c.argv_complete && c.program in ['openssl', 'openssl.exe'] && defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)",
@@ -8698,6 +8771,20 @@
                     "tampering",
                     "windows",
                     "logs"
+                  ]
+                },
+                {
+                  "id": "tamper.posix_log_and_shell_history_destruction",
+                  "tool_call_only": true,
+                  "pattern": "(?i)\\b(?:rm|shred|truncate)\\b[^;&|\\r\\n]{0,300}(?:/var/log/[^;&|\\r\\n]{0,300}(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)|(?:\\.(?:bash|zsh|ksh|sh)_history|\\bHISTFILE\\b)(?:[\\s;&|\\\"']|$)[^;&|\\r\\n]{0,300}/var/log/)",
+                  "title": "System log and shell history destroyed together",
+                  "severity": "HIGH",
+                  "confidence": 0.97,
+                  "tags": [
+                    "defense-evasion",
+                    "tampering",
+                    "logs",
+                    "anti-forensics"
                   ]
                 },
                 {
