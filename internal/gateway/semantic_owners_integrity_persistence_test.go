@@ -791,7 +791,7 @@ func TestGlobalLDPreloadProfileInstallEndToEnd(t *testing.T) {
 		},
 	}
 	for profile, wantAction := range map[string]string{
-		"default": "alert", "permissive": "alert", "strict": "block",
+		"default": "block", "permissive": "alert", "strict": "block",
 	} {
 		connector := "global-ld-preload-profile-" + profile
 		installToolCallCorpusProfileConnector(t, connector, profile)

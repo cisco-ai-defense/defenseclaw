@@ -275,9 +275,39 @@ rules:
       defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
     pattern: '(?i)\b(?:impacket-(?:secretsdump|getuserspns|getnpusers)|(?:secretsdump|getuserspns|getnpusers)\.py|hashcat(?:\.exe)?|john(?:\.exe)?\b[^\r\n]*--format(?:=|\s+)krb5(?:tgs|asrep)|(?:nxc|netexec|crackmapexec)\b[^\r\n]*(?:--ntds|-M\s+ntdsutil))\b'
     title: "Exact directory credential acquisition"
-    severity: HIGH
+    # Adopts the strict-profile posture in default, narrowed to the operations that
+    # ARE the compromise. The code-owned prerequisite now requires a directory
+    # secrets dump or an offline Kerberos hash crack; a bare ticket request is owned
+    # by credential.directory_ticket_request below and stays non-enforcing so its
+    # returned TGS can still be observed. A match here is not dual-use: there is no
+    # benign dumping of a directory credential store or cracking of its hashes.
+    severity: CRITICAL
     confidence: 0.99
     tags: [credential, active-directory, credential-dumping, bounded-grammar]
+  - id: credential.directory_ticket_request
+    tool_call_only: true
+    # The non-enforcing half of the directory credential vocabulary. The code-owned
+    # prerequisite accepts only Kerberos service-ticket (kerberoast) and AS-REP
+    # requests, and abstains as soon as the same action also proves a dump or an
+    # offline crack -- those belong to credential.directory_credential_acquisition
+    # above, which blocks.
+    #
+    # This half stays at HIGH (alert) on purpose, in every profile. A ticket request
+    # is the step whose RESULT credential.returned_kerberos_tgs exists to observe;
+    # blocking the request would prevent the returned TGS from ever being seen and
+    # would remove a shipped result-backed detection instead of adding one. Keeping
+    # it at HIGH is also exactly the pre-existing behaviour for these programs, so
+    # this rule is a no-op against main for the request class.
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-getuserspns', 'getuserspns.py',
+      'impacket-getnpusers', 'getnpusers.py'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: '(?i)\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\.py)\b'
+    title: "Exact Kerberos ticket request"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, kerberos, bounded-grammar]
   - id: credential.pkcs12_private_key_extract
     tool_call_only: true
     expression: >-
@@ -408,7 +438,9 @@ rules:
     # The lexical candidate cannot authorize a finding by itself.
     pattern: '(?i)\bicacls(?:\.exe)?\b'
     title: "Recursively grant Everyone inheritable full control on Windows"
-    severity: HIGH
+    # Adopts the strict-profile posture in default: an unconditional recursive
+    # Everyone:F grant destroys the ACL of an entire tree irreversibly.
+    severity: CRITICAL
     confidence: 0.99
     tags: [tampering, privilege, windows, access-control, recursive]
   - id: impact.windows_recovery_disable_pair
@@ -899,7 +931,9 @@ rules:
     # immediate /etc/pam.d service entry. The inert regex cannot match alone.
     pattern: 'a^'
     title: "Install pam_permit authentication bypass"
-    severity: HIGH
+    # Adopts the strict-profile posture in default: a closed-grammar pam_permit
+    # write disables authentication outright and has no benign form.
+    severity: CRITICAL
     confidence: 0.99
     tags: [authentication, privilege, linux, pam, tampering, exact-actionfacts]
   - id: tamper.docker_insecure_http_registry
@@ -908,7 +942,10 @@ rules:
     # whose sole setting names a literal, non-loopback HTTP registry.
     pattern: 'a^'
     title: "Configure Docker to trust an insecure HTTP registry"
-    severity: HIGH
+    # Adopts the strict-profile posture in default: the proof requires a full
+    # daemon.json write whose sole setting names a literal non-loopback HTTP
+    # registry, which opens the image supply chain to on-path substitution.
+    severity: CRITICAL
     confidence: 0.99
     tags: [container, supply-chain, docker, tampering, exact-actionfacts]
   - id: credential.pam_password_capture
@@ -1209,7 +1246,12 @@ rules:
     # /etc/profile.d/*.sh LD_PRELOAD assignment without relying on regex.
     pattern: '(?i)(?:>|>>|\btee(?:\s+-a)?)\s*/etc/ld\.so\.preload\b'
     title: "Global dynamic-loader preload installation"
-    severity: HIGH
+    # A global /etc/ld.so.preload install injects code into every dynamically
+    # linked process on the host. The proof is an authoritative exact write with
+    # literal shared-object content, so it is not a dual-use configuration edit.
+    # strict is raised to CRITICAL in the same change to keep the profile ladder
+    # permissive <= default <= strict monotone.
+    severity: CRITICAL
     confidence: 0.99
     tags: [persistence, execution, dynamic-loader]
   - id: exec.reverse_tunnel

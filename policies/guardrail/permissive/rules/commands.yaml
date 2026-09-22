@@ -268,6 +268,30 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [credential, active-directory, credential-dumping, bounded-grammar]
+  - id: credential.directory_ticket_request
+    tool_call_only: true
+    # The non-enforcing half of the directory credential vocabulary. The code-owned
+    # prerequisite accepts only Kerberos service-ticket (kerberoast) and AS-REP
+    # requests, and abstains as soon as the same action also proves a dump or an
+    # offline crack -- those belong to credential.directory_credential_acquisition
+    # above, which blocks.
+    #
+    # This half stays at HIGH (alert) on purpose, in every profile. A ticket request
+    # is the step whose RESULT credential.returned_kerberos_tgs exists to observe;
+    # blocking the request would prevent the returned TGS from ever being seen and
+    # would remove a shipped result-backed detection instead of adding one. Keeping
+    # it at HIGH is also exactly the pre-existing behaviour for these programs, so
+    # this rule is a no-op against main for the request class.
+    expression: >-
+      f.commands.exists(c, c.argv_complete &&
+      c.program in ['impacket-getuserspns', 'getuserspns.py',
+      'impacket-getnpusers', 'getnpusers.py'] &&
+      defenseclaw.guardrail.semantic.v1.OperationKind.OPERATION_KIND_CREDENTIAL_READ in c.operations)
+    pattern: '(?i)\b(?:impacket-(?:getuserspns|getnpusers)|(?:getuserspns|getnpusers)\.py)\b'
+    title: "Exact Kerberos ticket request"
+    severity: HIGH
+    confidence: 0.99
+    tags: [credential, active-directory, kerberos, bounded-grammar]
   - id: credential.pkcs12_private_key_extract
     tool_call_only: true
     expression: >-

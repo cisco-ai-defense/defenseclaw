@@ -11,8 +11,16 @@ import (
 	"github.com/defenseclaw/defenseclaw/internal/actionfacts"
 )
 
-const directoryCredentialAcquisitionRuleID = "credential.directory_credential_acquisition"
+const (
+	directoryCredentialAcquisitionRuleID = "credential.directory_credential_acquisition"
+	directoryTicketRequestRuleID         = "credential.directory_ticket_request"
+)
 
+// The directory credential vocabulary is split by operation class. A dump or an
+// offline crack IS the compromise and is owned by
+// credential.directory_credential_acquisition at CRITICAL; a bare Kerberos ticket
+// request is owned by credential.directory_ticket_request at HIGH, so the returned
+// TGS stays observable by credential.returned_kerberos_tgs.
 func TestDirectoryCredentialAcquisitionSemanticOwner(t *testing.T) {
 	t.Parallel()
 	owner := semanticOwners[directoryCredentialAcquisitionRuleID]
@@ -21,11 +29,11 @@ func TestDirectoryCredentialAcquisitionSemanticOwner(t *testing.T) {
 	}
 	input := actionfacts.Input{
 		Tool:    "execute_command",
-		Command: "impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user",
+		Command: "impacket-secretsdump -hashes aa:bb corp.example/admin@192.0.2.10",
 	}
 	facts := actionfacts.Analyze(input)
 	if !owner.eligible(facts) {
-		t.Fatalf("exact acquisition not owned: %+v", facts)
+		t.Fatalf("exact compromise not owned: %+v", facts)
 	}
 	raw, err := json.Marshal(map[string]string{"command": input.Command})
 	if err != nil {
@@ -33,8 +41,71 @@ func TestDirectoryCredentialAcquisitionSemanticOwner(t *testing.T) {
 	}
 	findings := scanTrustedToolArgs(t, "execute_command", string(raw))
 	matched := findingWithID(findings, directoryCredentialAcquisitionRuleID)
-	if matched == nil || matched.Severity != "HIGH" || matched.Evidence != "" {
+	if matched == nil || matched.Severity != "CRITICAL" || matched.Evidence != "" {
 		t.Fatalf("semantic finding = %+v; all = %v", matched, FindingStrings(findings))
+	}
+}
+
+// A bare ticket request must land on the non-enforcing half, at HIGH, and must not
+// be claimed by the CRITICAL compromise rule.
+func TestDirectoryTicketRequestStaysNonEnforcing(t *testing.T) {
+	t.Parallel()
+	owner := semanticOwners[directoryTicketRequestRuleID]
+	if owner.prerequisite == nil {
+		t.Fatalf("ticket-request owner posture = %+v", owner)
+	}
+	for _, command := range []string{
+		"impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user",
+		"impacket-GetNPUsers corp.example/ -usersfile users.txt -request",
+	} {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "execute_command", Command: command})
+		if !owner.eligible(facts) {
+			t.Fatalf("command=%q ticket request not owned: %+v", command, facts)
+		}
+		if semanticOwners[directoryCredentialAcquisitionRuleID].eligible(facts) {
+			t.Fatalf("command=%q was claimed by the CRITICAL compromise rule", command)
+		}
+		raw, err := json.Marshal(map[string]string{"command": command})
+		if err != nil {
+			t.Fatal(err)
+		}
+		findings := scanTrustedToolArgs(t, "execute_command", string(raw))
+		matched := findingWithID(findings, directoryTicketRequestRuleID)
+		if matched == nil || matched.Severity != "HIGH" {
+			t.Fatalf("command=%q ticket finding=%+v all=%v",
+				command, matched, FindingStrings(findings))
+		}
+		if findingWithID(findings, directoryCredentialAcquisitionRuleID) != nil {
+			t.Fatalf("command=%q also produced a CRITICAL compromise finding: %v",
+				command, FindingStrings(findings))
+		}
+	}
+}
+
+// The two halves must be total and mutually exclusive: an action that mixes a
+// request with a crack belongs to the enforcing half, because the crack is present.
+func TestDirectoryCredentialSplitIsTotalAndExclusive(t *testing.T) {
+	t.Parallel()
+	for command, wantCompromise := range map[string]bool{
+		"impacket-secretsdump -hashes aa:bb corp.example/admin@192.0.2.10":  true,
+		"hashcat -m 13100 tickets.hash wordlist.txt --format=krb5tgs":       true,
+		"nxc smb dc.example -u administrator -H aa:bb --ntds":               true,
+		"impacket-GetUserSPNs -dc-ip 192.0.2.10 -request corp.example/user": false,
+		"impacket-GetNPUsers corp.example/ -usersfile users.txt -request":   false,
+	} {
+		facts := actionfacts.Analyze(actionfacts.Input{Tool: "execute_command", Command: command})
+		if !actionfacts.ExactDirectoryCredentialAcquisition(facts) {
+			t.Fatalf("command=%q is not a proven acquisition at all: %+v", command, facts)
+		}
+		gotCompromise := actionfacts.ExactDirectoryCredentialCompromise(facts)
+		gotRequest := actionfacts.ExactDirectoryCredentialTicketRequest(facts)
+		if gotCompromise != wantCompromise {
+			t.Errorf("command=%q compromise=%v, want %v", command, gotCompromise, wantCompromise)
+		}
+		if gotCompromise == gotRequest {
+			t.Errorf("command=%q classified into both or neither half (compromise=%v request=%v)",
+				command, gotCompromise, gotRequest)
+		}
 	}
 }
 
@@ -50,7 +121,7 @@ func TestDirectoryCredentialAcquisitionBashLoginWrapperDetectionOnly(t *testing.
 			profile,
 		)
 		if len(evaluation.Findings) != 1 ||
-			evaluation.Findings[0].RuleID != directoryCredentialAcquisitionRuleID ||
+			evaluation.Findings[0].RuleID != directoryTicketRequestRuleID ||
 			evaluation.Findings[0].ContributesToEnforcement ||
 			evaluation.Route != "fallback" || evaluation.Authoritative ||
 			evaluation.EnforcementEligible || evaluation.Action == guardrailActionBlock ||
@@ -73,7 +144,7 @@ func TestDirectoryCredentialAcquisitionAdditionalExactGrammars(t *testing.T) {
 		}
 		findings := scanTrustedToolArgs(t, "execute_command", string(raw))
 		matched := findingWithID(findings, directoryCredentialAcquisitionRuleID)
-		if matched == nil || matched.Severity != "HIGH" || matched.Evidence != "" {
+		if matched == nil || matched.Severity != "CRITICAL" || matched.Evidence != "" {
 			t.Fatalf("command=%q semantic finding=%+v all=%v", command, matched, FindingStrings(findings))
 		}
 	}
