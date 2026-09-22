@@ -411,6 +411,25 @@ rules:
     severity: HIGH
     confidence: 0.99
     tags: [defense-evasion, tampering, windows, logs]
+  - id: tamper.posix_log_and_shell_history_destruction
+    tool_call_only: true
+    # POSIX counterpart to the Windows log-tampering family above. The
+    # discriminator is the CONJUNCTION: one destructive command that removes
+    # system logs under /var/log/ AND a shell history file. Either alone is
+    # routine -- log rotation cleans /var/log, and clearing shell history is a
+    # normal privacy action -- so neither half can authorize a finding. Together
+    # in a single command segment they are anti-forensic evidence destruction.
+    #
+    # The segment is bounded by ; & | and newline so a benign `rm /var/log/x.log`
+    # followed by an unrelated history edit cannot be stitched into a match.
+    pattern: '(?i)\b(?:rm|shred|truncate)\b[^;&|\r\n]{0,300}(?:/var/log/[^;&|\r\n]{0,300}(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|\"'']|$)|(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|\"'']|$)[^;&|\r\n]{0,300}/var/log/)'
+    title: "System log and shell history destroyed together"
+    # HIGH (alert), not CRITICAL. The conjunction is strong evidence but the
+    # engine cannot prove from one action that the operator is not an authorized
+    # administrator doing a sanctioned wipe. Block candidate pending review.
+    severity: HIGH
+    confidence: 0.97
+    tags: [defense-evasion, tampering, logs, anti-forensics]
   - id: tamper.windows_recursive_everyone_full_control
     tool_call_only: true
     expression: "f.commands.exists(c, c.program == 'icacls')"
