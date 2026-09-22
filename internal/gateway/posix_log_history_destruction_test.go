@@ -131,10 +131,61 @@ func TestPOSIXLogAndShellHistoryDestructionIsReachableEndToEnd(t *testing.T) {
 					t.Errorf("command %q produced no %s finding: %+v",
 						command, posixLogHistoryDestructionRuleID, evaluation)
 				}
-				if evaluation.Action == guardrailActionBlock ||
-					evaluation.Action == guardrailActionConfirm {
-					t.Errorf("profile=%s command %q escaped the alert-only boundary: %+v",
-						profile, command, evaluation)
+				// Review asked for `evaluation.Action != guardrailActionAlert`
+				// here. Measured, that assertion fails: this is a regex-only
+				// candidate with no semantic owner, so the finding is
+				// detection-only, never contributes to the enforceable severity,
+				// and the projected action is `allow` in every profile --
+				// including strict, which otherwise maps HIGH to block. So pin the
+				// measured disposition exactly. That is strictly stronger than
+				// rejecting only block and confirm, because it now also fails if
+				// the rule ever starts projecting an action of its own.
+				if evaluation.Action != guardrailActionAllow {
+					t.Errorf("profile=%s command %q projected %q, want the detection-only %q: %+v",
+						profile, command, evaluation.Action, guardrailActionAllow, evaluation)
+				}
+			}
+		})
+	}
+}
+
+// Review raised inert text -- `echo 'rm -f /var/log/auth.log ~/.bash_history'` -- as a
+// false-positive vector, reasoning that an unanchored regex would alert on a command
+// that removes nothing. The regex alone does match that text; the engine abstains
+// anyway, and this pins why so the claim is not taken on trust.
+//
+// filterTrustedLegacyActionContext keeps a raw-regex finding in category `command`
+// only if the same rule ID also matches a re-scan of the command text that
+// ActionFacts reconstructs from argv. trustedCommandLiteralCarrier classifies echo,
+// printf, grep, cat and friends as literal carriers, so their arguments are never
+// re-scanned, the rule ID never reaches commandMatches, and the finding is dropped
+// before disposition -- the rule is absent from RuleIDs entirely rather than merely
+// non-enforcing. Anchoring the pattern was therefore unnecessary: the structural
+// proof the review asked for already exists upstream of the pattern.
+func TestPOSIXLogAndShellHistoryDestructionIgnoresInertText(t *testing.T) {
+	t.Parallel()
+	for _, profile := range alertFatigueProfiles {
+		t.Run(profile, func(t *testing.T) {
+			for _, command := range []string{
+				"echo 'rm -f /var/log/auth.log /home/dev/.bash_history'",
+				`echo "rm -f /var/log/auth.log /home/dev/.bash_history"`,
+				"printf '%s\\n' 'rm -f /var/log/auth.log /home/dev/.bash_history'",
+				"grep -r 'rm -f /var/log/auth.log /home/dev/.bash_history' /tmp/notes",
+			} {
+				raw, err := json.Marshal(map[string]string{"command": command})
+				if err != nil {
+					t.Fatal(err)
+				}
+				evaluation := EvaluateDeterministicAction(
+					t.Context(),
+					actionfacts.Input{Tool: "shell", Args: raw, DialectHint: actionfacts.DialectPOSIX},
+					string(raw),
+					"benchmark-"+profile,
+					profile,
+				)
+				if slices.Contains(evaluation.RuleIDs, posixLogHistoryDestructionRuleID) {
+					t.Errorf("profile=%s inert command %q raised %s: %+v",
+						profile, command, posixLogHistoryDestructionRuleID, evaluation)
 				}
 			}
 		})
