@@ -441,11 +441,18 @@ rules:
     #
     # The segment is bounded by ; & | and newline so a benign `rm /var/log/x.log`
     # followed by an unrelated history edit cannot be stitched into a match.
-    pattern: '(?i)\b(?:(?:rm|shred)\b|truncate\b[^;&|\r\n]{0,60}(?:-s\s*|--size[= ])(?:0|-[0-9]))[^;&|\r\n]{0,300}(?:/var/log/[^;&|\r\n]{0,300}(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|\"'']|$)|(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|\"'']|$)[^;&|\r\n]{0,300}/var/log/)'
+    pattern: '(?i)\b(?:(?:rm|shred)\b|truncate\b[^;&|\r\n]{0,60}(?:-s\s*|--size[= ])(?:0|-[0-9]))[^;&|\r\n]{0,300}(?:/var/log/[^;&|\r\n]{0,300}(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|}\"'']|$)|(?:\.(?:bash|zsh|ksh|sh)_history|\bHISTFILE\b)(?:[\s;&|}\"'']|$)[^;&|\r\n]{0,300}/var/log/)'
     title: "System log and shell history destroyed together"
-    # HIGH (alert), not CRITICAL. The conjunction is strong evidence but the
-    # engine cannot prove from one action that the operator is not an authorized
-    # administrator doing a sanctioned wipe. Block candidate pending review.
+    # HIGH, not CRITICAL. The conjunction is strong evidence but the engine cannot
+    # prove from one action that the operator is not an authorized administrator
+    # doing a sanctioned wipe.
+    #
+    # Measured disposition: this is a regex-only candidate with no semantic owner, so
+    # the finding is detection-only, never contributes to the enforceable severity,
+    # and the projected action stays `allow` in every profile -- including strict,
+    # which otherwise maps HIGH to block. It is audit-visible rather than a
+    # user-facing prompt. Block candidate pending review, which would require an
+    # ActionFacts owner rather than a severity bump.
     severity: HIGH
     confidence: 0.97
     tags: [defense-evasion, tampering, logs, anti-forensics]

@@ -27,6 +27,11 @@ func TestPOSIXLogAndShellHistoryDestructionPatternBoundaries(t *testing.T) {
 		"truncate --size=0 /var/log/auth.log /home/dev/.bash_history",
 		"truncate -s -4096 /var/log/auth.log /home/dev/.bash_history",
 		"rm -f /home/dev/.ksh_history /var/log/messages",
+		// Found in review: the braced expansion ends in `}`, which had to join the
+		// trailing boundary class. The bare form already matched.
+		"rm -f /var/log/auth.log ${HISTFILE}",
+		"rm -f ${HISTFILE} /var/log/auth.log",
+		"rm -f /var/log/auth.log $HISTFILE",
 	}
 	negative := []string{
 		// log rotation and cleanup, without history destruction
