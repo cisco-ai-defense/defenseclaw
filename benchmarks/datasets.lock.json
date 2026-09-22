@@ -380,34 +380,34 @@
     },
     {
       "id": "msb",
-      "purpose": ["mcp-positive", "mcp-benign", "stateful"],
+      "purpose": ["mcp-positive", "mcp-benign", "stateful", "metadata-only"],
       "source_url": "https://huggingface.co/datasets/DongsenZhang/MSB",
       "revision": "66e968486b78b246f28e75e880a70aeec9f6c8bc",
       "fetch": "git",
-      "license": "review-required",
-      "license_status": "review_required",
+      "license": "MIT",
+      "license_status": "approved",
       "redistribution": "download-only",
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "mcptox",
-      "purpose": ["mcp-positive", "mcp-benign"],
-      "source_url": "https://arxiv.org/abs/2508.14925",
+      "purpose": ["mcp-positive", "mcp-benign", "stateful", "execution-backed", "real-tool-arguments"],
+      "source_url": "https://github.com/zhiqiangwang4/MCPTox-Benchmark",
       "revision": "paper-v1",
-      "fetch": "manual",
-      "license": "review-required",
-      "license_status": "review_required",
+      "fetch": "git",
+      "license": "other",
+      "license_status": "approved",
       "redistribution": "aggregate-only",
-      "enabled": false
+      "enabled": true
     },
     {
       "id": "assay",
-      "purpose": ["mcp-positive", "mcp-benign", "stateful"],
+      "purpose": ["metadata-only"],
       "source_url": "https://github.com/VatsSShah/assay.git",
       "revision": "675fae7d2d3c6ae9fb97ce3d761492dfb7e35a37",
       "fetch": "git",
-      "license": "review-required",
-      "license_status": "review_required",
+      "license": "MIT",
+      "license_status": "approved",
       "redistribution": "download-only",
       "enabled": false
     },
@@ -1266,9 +1266,9 @@
         "data/agenttrace.parquet"
       ],
       "license": "Apache-2.0",
-      "license_status": "review_required",
+      "license_status": "approved",
       "redistribution": "download-only",
-      "enabled": false
+      "enabled": true
     }
   ]
 }

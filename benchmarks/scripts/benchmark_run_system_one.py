@@ -339,7 +339,9 @@ def parse_answer(answer: dict[str, Any]) -> tuple[Any, dict[str, float], float]:
 
 
 def derive_action(question_id: str, answers: dict[str, Any], probabilities: dict[str, float]) -> tuple[str, float]:
-    if question_id in {"Q0", "Q2"}:
+    # Q4 also answers a disposition Choice (alongside intrinsic_danger and serves_intent),
+    # so it routes through the disposition branch rather than the category-noul fallback.
+    if question_id in {"Q0", "Q2", "Q4"}:
         action = str(answers.get("disposition", "error"))
         if action not in {"allow", "confirm", "block"}:
             return "error", 0

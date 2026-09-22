@@ -132,6 +132,24 @@ class AgentTraceNormalizerTest(unittest.TestCase):
         self.assertEqual([0, 56], [case["strata"]["sequence_index"] for case in cases])
         self.assertEqual(1, len({case["strata"]["split_group"] for case in cases}))
 
+    def test_carries_user_intent_into_payload_content(self) -> None:
+        prompt = "List files in the test fixture"
+        cases, counts = MODULE.normalize(
+            [
+                source_row(prompt=prompt),
+                source_row(trace_id="atomic-trace", task_id=11, prompt=prompt, spans=[span(0)]),
+            ]
+        )
+        self.assertEqual(["stateful", "action"], sorted({case["surface"] for case in cases}, reverse=True))
+        self.assertTrue(all(case["payload"]["content"] == prompt for case in cases))
+        self.assertEqual(len(cases), counts["intent_present"])
+
+    def test_rejects_a_case_whose_payload_lost_the_user_request(self) -> None:
+        cases, _ = MODULE.normalize([source_row()])
+        del cases[0]["payload"]["content"]
+        with self.assertRaisesRegex(ValueError, "payload.content must carry the user request"):
+            MODULE.validate_cases(cases, MODULE.DEFAULT_SCHEMA)
+
     def test_cases_validate_against_case_schema(self) -> None:
         cases, _ = MODULE.normalize(
             [source_row(), source_row(trace_id="mbpp-trace", dataset="mbpp", task_id=8, spans=[span(0)])]

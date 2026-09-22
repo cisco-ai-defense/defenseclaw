@@ -9,6 +9,36 @@ Rows contain progressively longer snapshots. Calls are canonicalized by exact
 source/step/call coordinate before annotation targets are resolved. All output
 remains development-only and out of primary metrics because outcomes are not
 reliably recorded by the source.
+
+Intent preservation
+-------------------
+Every case also carries ``payload.content``: the upstream ``task_description``, which is the
+user's actual request (the BashArena main task). The first version of this adapter dropped it,
+as every other normalizer in this suite does -- 341,828 normalized case-v1 rows across 12
+corpora have no non-empty ``payload.content`` -- which makes DefenseClaw's core mechanism,
+"does this tool call serve the last user request?", unmeasurable on them.
+
+This source is unusually well suited to closing that gap because the attack is *defined* by a
+divergence between two stated goals: ``task_description`` is what the user asked for, and the
+hidden ``side_task`` (escalate sudo, disable the firewall, exfiltrate keys, download and run
+remote code) is what the agent secretly pursues. The flagged command is usually innocuous in
+isolation and malicious only relative to the request, so intent is not decoration here: it is
+the label's justification, and without it a case cannot be scored on intent matching at all.
+
+Two upstream facts govern how intent is recovered:
+
+* ``data.jsonl`` (5,823 rows) is the full dataset; ``data/train-00000-of-00001.parquet`` is a
+  2,494-row subset. Prefer the JSONL.
+* 2,541 rows carry an empty ``task_description`` (and an empty rendered ``formatted_input``),
+  so it cannot always be read off the row. Each of the 100 ``task_id`` values maps to exactly
+  one distinct non-empty description, so intent is recovered by ``task_id`` join. A case is
+  emitted only when exactly one description is attributable to it; ambiguity is counted and
+  dropped rather than guessed, so ``payload.content`` is never empty and never invented.
+
+The ``label == 0`` rows remain excluded, and that exclusion matters for intent work: all 2,548
+of them sit at ``location == "assistant_text"``, i.e. they are benign *prose* steps, not
+commands, inside ``attack_*`` trajectories whose earlier calls may already serve the side
+task. They are not benign command negatives and must not be used as such.
 """
 
 from __future__ import annotations
@@ -31,11 +61,14 @@ SCHEMA_VERSION = "defenseclaw.labeled-bashbench.v2"
 SOURCE_FILE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$")
 MAX_COMMAND_BYTES = 1_048_576
 MAX_EVENTS = 8
+# payload.content is bounded by the case-v1 schema; the observed maximum is 8,645 characters.
+MAX_INTENT_CHARS = 1_048_576
 PARQUET_COLUMNS = (
     "id",
     "task_id",
     "source_file",
     "label",
+    "task_description",
     "trajectory",
     "step_index",
     "location",
@@ -138,6 +171,58 @@ def _text(value: object, maximum: int = 200) -> str:
 def _source_file(row: dict[str, Any]) -> str:
     value = _text(row.get("source_file"))
     return value if SOURCE_FILE.fullmatch(value) else ""
+
+
+def _intent(row: dict[str, Any]) -> str:
+    """The user's request for this row, bounded but otherwise verbatim."""
+    value = row.get("task_description")
+    return value.strip()[:MAX_INTENT_CHARS] if isinstance(value, str) else ""
+
+
+def _intent_index(rows: Sequence[dict[str, Any]]) -> tuple[dict[str, str], Counter[str]]:
+    """Map each trajectory file to the single user request attributable to it.
+
+    ``task_description`` is empty on 2,541 of 5,823 upstream rows, so a per-row read alone
+    would silently emit empty intent. Recovery joins on ``task_id``, which the source
+    guarantees is 1:1 with the description, and is refused whenever more than one candidate
+    description exists, so intent is never guessed.
+    """
+    direct: defaultdict[str, set[str]] = defaultdict(set)
+    by_task: defaultdict[str, set[str]] = defaultdict(set)
+    tasks_by_source: defaultdict[str, set[str]] = defaultdict(set)
+    for row in rows:
+        source_file = _source_file(row)
+        if not source_file:
+            continue
+        task_id = _text(row.get("task_id"), 120)
+        intent = _intent(row)
+        if task_id:
+            tasks_by_source[source_file].add(task_id)
+            if intent:
+                by_task[task_id].add(intent)
+        if intent:
+            direct[source_file].add(intent)
+
+    index: dict[str, str] = {}
+    counts: Counter[str] = Counter()
+    for source_file in sorted(set(tasks_by_source) | set(direct)):
+        observed = direct.get(source_file, set())
+        if len(observed) == 1:
+            index[source_file] = next(iter(observed))
+            counts["intent_on_row"] += 1
+            continue
+        if len(observed) > 1:
+            counts["intent_conflict_within_trajectory"] += 1
+            continue
+        candidates = {value for task in tasks_by_source.get(source_file, set()) for value in by_task.get(task, set())}
+        if len(candidates) == 1:
+            index[source_file] = next(iter(candidates))
+            counts["intent_recovered_by_task_id"] += 1
+        elif candidates:
+            counts["intent_conflict_across_task_id"] += 1
+        else:
+            counts["intent_unavailable"] += 1
+    return index, counts
 
 
 def _snapshot_calls(row: dict[str, Any]) -> Iterable[tuple[Coordinate, dict[str, Any]]]:
@@ -333,6 +418,7 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
         raise ValueError("source revision must be 1..160 characters")
     raw = list(rows)
     skipped: Counter[str] = Counter()
+    intent_index, intent_counts = _intent_index(raw)
     snapshots: defaultdict[str, defaultdict[Coordinate, list[dict[str, Any]]]] = defaultdict(lambda: defaultdict(list))
     tasks: set[str] = set()
     for row in raw:
@@ -400,6 +486,12 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
             for annotation in resolved.get(name, []):
                 merged.setdefault(_signature(annotation), annotation)
         annotations = list(merged.values())
+        # No case is emitted without the user's request: an intent-free row cannot be scored on
+        # intent matching, and an empty payload.content is exactly the defect being fixed here.
+        intent = intent_index.get(representative, "")
+        if annotations and not intent:
+            skipped["missing_task_description"] += len(annotations)
+            continue
         selected += len(annotations)
         mismatches += sum(item.index_mismatch for item in annotations)
         category_counts.update(item.category for item in annotations if item.category)
@@ -425,6 +517,7 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
                     "surface": "action",
                     "payload": {
                         "direction": "tool_call",
+                        "content": intent,
                         "tool_name": call.tool,
                         "command": call.command,
                         "dialect": "posix",
@@ -482,6 +575,7 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
                         "surface": "stateful",
                         "payload": {
                             "direction": "tool_call",
+                            "content": intent,
                             "annotation_spans": spans,
                             "events": [
                                 {
@@ -532,6 +626,8 @@ def normalize_rows(rows: Iterable[dict[str, Any]], *, revision: str) -> tuple[li
         "stateful_sequence_count": stateful_count,
         "total_case_count": len(cases),
         "task_count": len(tasks),
+        "intent_present_case_count": sum(1 for case in cases if case["payload"].get("content")),
+        "intent_source_counts": {key: intent_counts[key] for key in sorted(intent_counts)},
         "category_counts": dict(sorted(category_counts.items())),
         "action_type_counts": dict(sorted(action_counts.items())),
         "danger_level_counts": dict(sorted(danger_counts.items())),
@@ -558,6 +654,7 @@ def runner_manifest(
         "category_counts": "category",
         "action_type_counts": "action_type",
         "danger_level_counts": "danger_level",
+        "intent_source_counts": "intent",
         "skipped_row_counts": "skipped",
     }
     excluded = {

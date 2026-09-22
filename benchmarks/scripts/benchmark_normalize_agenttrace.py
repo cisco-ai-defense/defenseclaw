@@ -2,7 +2,30 @@
 # Copyright 2026 Cisco Systems, Inc. and its affiliates
 # SPDX-License-Identifier: Apache-2.0
 
-"""Normalize pinned AgentTrace executions as conservative benign FPR cases."""
+"""Normalize pinned AgentTrace executions as conservative benign FPR cases.
+
+Intent preservation
+-------------------
+Every case carries ``payload.content``: the trace's ``prompt``, which is the request the agent
+was actually given. This adapter already read that field -- ``english_task(row["prompt"])`` --
+but used it only as a language filter and then discarded it, which is the same omission found
+across the whole normalizer suite: 341,828 normalized case-v1 rows over 12 corpora have no
+non-empty ``payload.content``, so DefenseClaw's "does this call serve the user's request?"
+mechanism has never been measurable on any of them. The filter behaviour is unchanged; the
+value is simply no longer thrown away.
+
+This corpus is the calibration floor for that measurement. An intent-match score computed on
+unsafe corpora is unanchored without a matched benign population: you cannot distinguish "this
+call deviates from the request" from "this is what the judge outputs on everything". AgentTrace
+is the only benign source on hand where the request and the tool calls it produced were
+recorded together *and executed*, with real exit codes.
+
+The 400 ``nl2bash`` traces are the most directly relevant subset -- genuine
+natural-language-intent -> shell-command pairs, the exact shape judged in production -- and
+stay distinguishable through ``strata.domain == "nl2bash"`` (``mbpp`` is intent -> Python, a
+second dialect but a weaker analogue of the shell surface). No safety labels exist upstream and
+none are invented: truth stays benign / allow for every case.
+"""
 
 from __future__ import annotations
 
@@ -145,16 +168,22 @@ def english_task(value: object) -> bool:
     )
 
 
-def validate_provenance(row: Mapping[str, Any]) -> tuple[str, str, int]:
+def validate_provenance(row: Mapping[str, Any]) -> tuple[str, str, int, str]:
+    """Validate provenance and return (trace_id, dataset, task_id, user request).
+
+    The prompt is returned rather than discarded: it is the user intent that
+    ``payload.content`` carries. The filter applied to it is unchanged.
+    """
     trace_id = required_id(row.get("trace_id"), "invalid_trace_id")
     dataset = row.get("dataset_name")
     task_id = row.get("task_id")
     run_id = required_id(row.get("run_id"), "invalid_run_id")
+    prompt = row.get("prompt")
     if dataset not in SOURCE_DATASETS:
         raise ProjectionError("unsupported_source_dataset")
     if type(task_id) is not int or task_id < 0:
         raise ProjectionError("invalid_task_id")
-    if not english_task(row.get("prompt")):
+    if not english_task(prompt) or not isinstance(prompt, str):
         raise ProjectionError("non_english_or_invalid_task")
     metadata = decode_json(row.get("metadata_json"), "invalid_metadata_json")
     if not isinstance(metadata, dict):
@@ -174,7 +203,7 @@ def validate_provenance(row: Mapping[str, Any]) -> tuple[str, str, int]:
         raise ProjectionError("provenance_mismatch")
     if dataset == "nl2bash" and not re.fullmatch(r"[0-9a-f]{64}", str(metadata.get("fixture_version", ""))):
         raise ProjectionError("provenance_mismatch")
-    return trace_id, dataset, task_id
+    return trace_id, dataset, task_id, prompt
 
 
 def project_events(row: Mapping[str, Any]) -> tuple[list[dict[str, Any]], Counter[str]]:
@@ -269,7 +298,7 @@ def normalize(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], 
             counts["rejected_invalid_row"] += 1
             continue
         try:
-            trace_id, dataset, task_id = validate_provenance(row)
+            trace_id, dataset, task_id, intent = validate_provenance(row)
             if trace_id in seen_traces:
                 raise ProjectionError("duplicate_trace_id")
             events, event_counts = project_events(row)
@@ -289,12 +318,14 @@ def normalize(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], 
             stateful = len(chunk) > 1
             if stateful:
                 surface = "stateful"
-                payload: dict[str, Any] = {"direction": "tool_call", "events": chunk}
+                # content is the request every event in this chunk was taken in service of
+                payload: dict[str, Any] = {"direction": "tool_call", "content": intent, "events": chunk}
             else:
                 surface = "action"
                 event = chunk[0]
                 payload = {
                     "direction": "tool_call",
+                    "content": intent,
                     **{key: event[key] for key in ("tool_name", "command", "args", "dialect") if key in event},
                 }
             suffix = f"chunk-{chunk_number:03d}" if len(chunks) > 1 else "trajectory"
@@ -326,6 +357,7 @@ def normalize(rows: Iterable[Mapping[str, Any]]) -> tuple[list[dict[str, Any]], 
                 }
             )
             counts[f"cases_{surface}"] += 1
+            counts["intent_present"] += 1
             counts[split] += 1
         counts[f"accepted_trajectories_{dataset}"] += 1
         counts["accepted_trajectories"] += 1
@@ -368,6 +400,8 @@ def validate_cases(cases: Iterable[dict[str, Any]], schema_path: Path) -> None:
             raise ValueError(f"{case_id}:{location}: {errors[0].message}")
         if case["truth"]["deterministic_truth"] != "benign":
             raise ValueError(f"{case_id}: AgentTrace may only supply benign truth")
+        if not case["payload"].get("content"):
+            raise ValueError(f"{case_id}: payload.content must carry the user request")
         group = case["strata"]["split_group"]
         previous = group_splits.setdefault(group, case["split"])
         if previous != case["split"]:
